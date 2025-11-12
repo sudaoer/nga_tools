@@ -1,8 +1,6 @@
 import re
 
 
-
-
 # 将单个 BBCode 转换为 HTML，先不添加 CSS 样式
 def bbcode_to_html(text: str) -> str:
     # 定义 BBCode 转换规则

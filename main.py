@@ -78,6 +78,10 @@ def handle_thread_command(args: argparse.Namespace):
         print(f"未知操作{args.action}。")
 
 
+from bbcode_convert import bbcode_to_html
+import bs4
+
+
 def handle_backup_command(args: argparse.Namespace):
     assert args.command == "backup"
     thread_configs = NGAThreadConfigs()
@@ -100,11 +104,91 @@ def handle_backup_command(args: argparse.Namespace):
     if thread_tid is None:
         print("name或tid参数必须提供其一以指定要备份的帖子。")
         return
-    
+
     client = NGAClient.NGAClient()
 
     if args.action == "all":
-        utils.TODO("实现备份帖子的全部功能")
+        folder_json = utils.get_folder(thread_tid, thread_aid, "json")
+        for i in range(1, client.get_page_count(thread_tid, thread_aid) + 1):
+            print(f"正在获取第{i}页...")
+            page_data = client.get_page(thread_tid, thread_aid, i)
+            with open(f"{folder_json}/page_{i}.json", "w", encoding="utf-8") as f:
+                json.dump(page_data, f, ensure_ascii=False, indent=4)
+
+        print("开始处理")
+
+        folder_html = utils.get_folder(thread_tid, thread_aid, "html")
+        htmls = []
+
+        for i in range(1, client.get_page_count(thread_tid, thread_aid) + 1):
+            for post in client.get_page(thread_tid, thread_aid, i)["result"]:
+                post_html = bbcode_to_html(post["content"])
+                with open(
+                    f"{folder_html}/post_{post['lou']}.html", "w", encoding="utf-8"
+                ) as f:
+                    f.write(post_html)
+                htmls.append({"lou": post["lou"], "html": post_html})
+        # 按lou升序排序
+        htmls.sort(key=lambda x: x["lou"])
+        # 检查是否有缺失的楼层
+        expected_lou = 1
+        missing_lou = []
+        for item in htmls:
+            if item["lou"] != expected_lou:
+                for i in range(expected_lou, item["lou"]):
+                    print(f"警告：缺失楼层{i}！")
+                    missing_lou.append(i)
+                expected_lou = item["lou"]
+            expected_lou += 1
+
+        for i in missing_lou:
+            htmls.append({"lou": i, "html": "<p><em>本楼层内容缺失。</em></p>"})
+        # 重新按lou排序
+        htmls.sort(key=lambda x: x["lou"])
+
+        url_set = set()
+        files_to_download = []
+        # 从html中提取图片链接，准备下载
+        for item in htmls:
+            soup = bs4.BeautifulSoup(item["html"], "html.parser")
+            imgs = soup.find_all("img")
+            for idx, img in enumerate(imgs):
+                img_url = img.get("src")
+                if not img_url:
+                    continue
+                img_ext = img_url.split(".")[-1].split("?")[0]
+                img_filename = f"{img_url.split('/')[-1].split('?')[0]}"
+                # 修改html
+                img["src"] = f"../images/{img_filename}"
+
+                # 添加下载任务
+                if img_url not in url_set:
+                    url_set.add(img_url)
+                    save_path = (
+                        utils.get_folder(thread_tid, thread_aid, "images")
+                        + f"/{img_filename}"
+                    )
+                    files_to_download.append({"url": img_url, "save_path": save_path})
+            # 更新html
+            item["html"] = str(soup)
+
+        folder_html_modified = utils.get_folder(thread_tid, thread_aid, "html_modified")
+        for item in htmls:
+            with open(
+                f"{folder_html_modified}/post_{item['lou']}.html", "w", encoding="utf-8"
+            ) as f:
+                f.write(item["html"])
+
+        print(f"准备下载{len(files_to_download)}个图片文件...")
+        utils.get_folder(thread_tid, thread_aid, "images")
+        download_result = utils.download_files(files_to_download)
+        print("图片下载完成。")
+        print(
+            f"成功下载{len(download_result['succeeded'])}个文件，失败{len(download_result['failed'])}个文件。"
+        )
+        for failed in download_result["failed"]:
+            print(f"下载失败：{failed['url']}，保存为：{failed['save_path']}")
+
     elif args.action == "sub":
         utils.TODO("实现备份帖子本地没有部分的功能")
     else:
