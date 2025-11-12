@@ -1,6 +1,7 @@
 .vscode
 config.py
 output/
+output*
 __pycache__/
 *.xls
 *.xlsx
