@@ -1,6 +1,18 @@
 import config
 import os
 
+def sha256(filepath: str) -> str:
+    """
+    计算文件的SHA256哈希值
+    """
+    import hashlib
+
+    sha256_hash = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        # 逐块读取文件以节省内存
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
 
 def get_folder(tid: int | str, aid: int | str, subfolder: str | None = None) -> str:
 
