@@ -169,6 +169,17 @@ def TODO(message: str):
     print(f"TODO: {message}")
     sys.exit(1)
 
+def NGA_img_link_verify(url: str) -> bool:
+    """
+    验证NGA图片链接是否有效
+    """
+    #形如https://img.nga.178.com/attachments/mon_202601/07/lsQ0-e21K1sT3cSu3-g8.webp.medium.jpg
+    #需要验证中间的mon_yyyymm/dd部分，无需验证文件名和后缀
+    pattern = re.compile(
+        r"^https://img\.nga\.178\.com/attachments/mon_\d{6}/\d{2}/.+$"
+    )
+    return bool(pattern.match(url))
+
 
 if __name__ == "__main__":
     sample_text = "[b]Bold Text[/b] and [url=http://example.com]Example Link[/url]"

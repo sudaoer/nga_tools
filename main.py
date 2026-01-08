@@ -155,6 +155,11 @@ def handle_backup_command(args: argparse.Namespace):
                 # 修改html
                 img["src"] = f"../images/{img_filename}"
 
+                if not utils.NGA_img_link_verify(img_url):
+                    print(
+                        f"警告：第{item['lou']}楼的第{idx+1}张图片链接无效"
+                    )
+
                 # 添加下载任务
                 if img_url not in url_set:
                     url_set.add(img_url)
