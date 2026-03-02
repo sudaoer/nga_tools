@@ -31,16 +31,6 @@ class NGAClient:
         cache_key = self.page_cache_key(tid, aid, page)
         if cache_key in self.page_cache:
             return self.page_cache[cache_key]
-        """
-        go代码：
-        {
-                resp, err = Client.R().SetFormData(map[string]string{
-                        "page":     cast.ToString(page),
-                        "tid":      cast.ToString(tiezi.Tid),
-                        "authorid": cast.ToString(tiezi.AuthorId),
-                }).Post("app_api.php?__lib=post&__act=list")
-        }
-        """
         url = f"{self.base_url}/app_api.php?__lib=post&__act=list"
         data = {
             "page": str(page),
