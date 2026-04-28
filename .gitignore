@@ -5,4 +5,6 @@ output*
 __pycache__/
 *.xls
 *.xlsx
-*.json
+*.json# pixi environments
+.pixi/*
+!.pixi/config.toml
