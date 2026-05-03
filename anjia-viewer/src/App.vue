@@ -3,13 +3,14 @@ import { computed, onMounted, ref, watch } from 'vue';
 import {
   AlertTriangle,
   CheckCircle2,
+  ExternalLink,
   RefreshCcw,
   Search,
   ShieldAlert,
   Tags,
   UserRound,
 } from 'lucide-vue-next';
-import type { AnchorData, AnchorEntry, AnchorItem, AnchorPost, IgnoredItem, TopicInfo } from './types';
+import type { AnchorData, AnchorEntry, AnchorItem, AnchorPost, IgnoredItem, TopicInfo, WarningDetail } from './types';
 
 type TabKey = 'entries' | 'duplicates' | 'ignored' | 'rule' | 'warnings';
 
@@ -26,6 +27,7 @@ const topics = computed(() => data.value?.topics ?? topicsFromParsedRule(data.va
 const entries = computed(() => data.value?.entries ?? entriesFromAnchors(data.value?.anchors ?? []));
 const ignored = computed(() => data.value?.ignored ?? []);
 const warnings = computed(() => data.value?.warnings ?? []);
+const warningDetails = computed(() => data.value?.warning_details ?? warningDetailsFromStrings(warnings.value));
 const duplicateEntries = computed(() => entries.value.filter((entry) => entry.has_duplicate));
 
 const topicOptions = computed(() => {
@@ -74,7 +76,7 @@ const tabs = computed(() => [
   { key: 'duplicates' as const, label: '重复复核', count: duplicateEntries.value.length },
   { key: 'ignored' as const, label: '忽略楼层', count: ignored.value.length },
   { key: 'rule' as const, label: '规则解析', count: data.value?.parsed_rule ? 1 : 0 },
-  { key: 'warnings' as const, label: '告警', count: warnings.value.length },
+  { key: 'warnings' as const, label: '告警', count: warningDetails.value.length },
 ]);
 
 onMounted(() => {
@@ -139,6 +141,7 @@ function entriesFromAnchors(anchors: AnchorItem[]): AnchorEntry[] {
         author: anchor.author,
         lou: post.lou,
         postdate: post.postdate,
+        url: post.url ?? postUrl(post.pid),
         content: post.content,
         raw_clean_content: post.raw_clean_content,
         original_content: post.original_content,
@@ -149,7 +152,7 @@ function entriesFromAnchors(anchors: AnchorItem[]): AnchorEntry[] {
         has_duplicate: anchor.has_duplicate,
         duplicate_lous: anchor.duplicate_lous,
         source_lous: [post.lou],
-        source_posts: [{ ...post, author: anchor.author }],
+        source_posts: [{ ...post, author: anchor.author, url: post.url ?? postUrl(post.pid) }],
       });
     }
   }
@@ -176,7 +179,7 @@ function entrySearchText(entry: AnchorEntry) {
 }
 
 function ignoredSearchText(item: IgnoredItem) {
-  return [item.lou, item.source_lous?.join(','), item.topic_id, item.topic_name, item.author?.uid, item.author?.username, item.content, item.ignore_reason, item.stage]
+  return [item.lou, item.pid, item.url, item.source_lous?.join(','), item.topic_id, item.topic_name, item.author?.uid, item.author?.username, item.content, item.ignore_reason, item.stage]
     .join(' ')
     .toLowerCase();
 }
@@ -199,8 +202,23 @@ function prettyJson(value: unknown) {
   return JSON.stringify(value, null, 2);
 }
 
+function postUrl(pid?: number | string | null) {
+  if (pid === null || pid === undefined || String(pid).trim() === '') {
+    return null;
+  }
+  return `https://ngabbs.com/read.php?pid=${encodeURIComponent(String(pid))}&opt=128`;
+}
+
+function sourceUrl(post: { url?: string | null; pid?: number | string | null } | null | undefined) {
+  return post?.url || postUrl(post?.pid);
+}
+
 function louList(lous?: number[]) {
   return lous?.length ? lous.map((lou) => `#${lou}`).join(', ') : '';
+}
+
+function warningDetailsFromStrings(items: string[]): WarningDetail[] {
+  return items.map((message) => ({ type: 'runtime_warning', message, sources: [] }));
 }
 
 function sourceLouLabel(entry: AnchorEntry) {
@@ -215,11 +233,16 @@ function sourcePosts(entry: AnchorEntry): AnchorPost[] {
     lou: entry.lou,
     pid: entry.pid,
     postdate: entry.postdate,
+    url: entry.url ?? postUrl(entry.pid),
     author: entry.author,
     content: entry.raw_clean_content || entry.content,
     original_content: entry.original_content,
     attachments: entry.attachments,
   }];
+}
+
+function warningSourceRows(warning: WarningDetail) {
+  return warning.sources?.length ? warning.sources : [];
 }
 
 function fieldRows(entry: AnchorEntry) {
@@ -304,6 +327,10 @@ function topicClass(topicId: string) {
             <div><dt>作者</dt><dd>{{ data.rule_post?.author?.username || '未知' }}</dd></div>
             <div><dt>时间</dt><dd>{{ data.rule_post?.postdate || '未知' }}</dd></div>
           </dl>
+          <a v-if="sourceUrl(data.rule_post || {})" :href="sourceUrl(data.rule_post || {}) || '#'" target="_blank" rel="noopener noreferrer" class="single-source-link">
+            打开规则楼 #{{ data.rule_post?.lou ?? data.meta.rule_lou }}
+            <ExternalLink :size="13" />
+          </a>
           <p class="content-block">{{ data.rule_post?.content || '无规则正文' }}</p>
         </article>
         <article class="panel">
@@ -315,12 +342,29 @@ function topicClass(topicId: string) {
       <section v-else-if="activeTab === 'warnings'" class="panel single-panel">
         <h2>运行告警</h2>
         <ul class="warning-list">
-          <li v-for="warning in warnings" :key="warning">
+          <li v-for="warning in warningDetails" :key="`${warning.type}-${warning.entry_id ?? ''}-${warning.message}`">
             <AlertTriangle :size="16" />
-            <span>{{ warning }}</span>
+            <div class="warning-body">
+              <strong>{{ warning.message }}</strong>
+              <p v-if="warning.entry_id || warning.topic_name || warning.author" class="muted-line">
+                <span v-if="warning.entry_id">Entry {{ warning.entry_id }} · </span>
+                <span v-if="warning.topic_name">{{ warning.topic_name }} · </span>
+                <span v-if="warning.author">{{ warning.author.username || '未知作者' }}</span>
+              </p>
+              <div v-if="warningSourceRows(warning).length" class="link-row">
+                <a v-for="post in warningSourceRows(warning)" :key="`${warning.message}-${post.pid}-${post.lou}`" :href="sourceUrl(post) || '#'" target="_blank" rel="noopener noreferrer">
+                  #{{ post.lou }}
+                  <ExternalLink :size="13" />
+                </a>
+              </div>
+              <a v-else-if="sourceUrl(warning)" :href="sourceUrl(warning) || '#'" target="_blank" rel="noopener noreferrer" class="single-source-link">
+                #{{ warning.lou }}
+                <ExternalLink :size="13" />
+              </a>
+            </div>
           </li>
         </ul>
-        <p v-if="warnings.length === 0" class="muted-line">没有运行告警。</p>
+        <p v-if="warningDetails.length === 0" class="muted-line">没有运行告警。</p>
       </section>
 
       <section v-else-if="activeTab === 'ignored'" class="panel single-panel">
@@ -338,6 +382,10 @@ function topicClass(topicId: string) {
               <span v-if="item.source_lous?.length">来源 {{ louList(item.source_lous) }}</span>
               <span v-if="item.superseded_by_lou"> · 被 #{{ item.superseded_by_lou }} 覆盖</span>
             </p>
+            <a v-if="sourceUrl(item)" :href="sourceUrl(item) || '#'" target="_blank" rel="noopener noreferrer" class="single-source-link">
+              打开 #{{ item.lou ?? '未知' }}
+              <ExternalLink :size="13" />
+            </a>
             <p class="muted-line">{{ snippet(item.content, 220) }}</p>
           </article>
         </div>
@@ -404,7 +452,11 @@ function topicClass(topicId: string) {
 
           <article class="post-detail">
             <header>
-              <strong>#{{ selectedEntry.lou }}</strong>
+              <a v-if="sourceUrl(selectedEntry)" :href="sourceUrl(selectedEntry) || '#'" target="_blank" rel="noopener noreferrer" class="source-link">
+                #{{ selectedEntry.lou }}
+                <ExternalLink :size="13" />
+              </a>
+              <strong v-else>#{{ selectedEntry.lou }}</strong>
               <span>{{ selectedEntry.postdate || '未知时间' }}</span>
               <small>{{ selectedEntry.classification_source || 'source unknown' }}</small>
             </header>
@@ -420,7 +472,11 @@ function topicClass(topicId: string) {
             <h3>来源原文</h3>
             <article v-for="(post, index) in sourcePosts(selectedEntry)" :key="`${post.lou}-${post.pid ?? index}`" class="source-row">
               <header>
-                <strong>#{{ post.lou }}</strong>
+                <a v-if="sourceUrl(post)" :href="sourceUrl(post) || '#'" target="_blank" rel="noopener noreferrer" class="source-link">
+                  #{{ post.lou }}
+                  <ExternalLink :size="13" />
+                </a>
+                <strong v-else>#{{ post.lou }}</strong>
                 <span>{{ post.postdate || '未知时间' }}</span>
               </header>
               <p class="content-block compact">{{ post.content }}</p>
@@ -573,6 +629,18 @@ summary { cursor: pointer; color: #167a73; }
 pre { max-height: 560px; overflow: auto; margin: 14px 0 0; padding: 14px; border-radius: 8px; background: #202124; color: #f2f5f0; line-height: 1.5; }
 .warning-list { display: grid; gap: 10px; padding: 0; list-style: none; }
 .warning-list li { display: flex; align-items: flex-start; gap: 8px; padding: 10px; border: 1px solid #e4d488; border-radius: 8px; background: #fff9df; }
+.warning-body { display: grid; gap: 6px; min-width: 0; }
+.warning-body strong { font-weight: 650; }
+.link-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.link-row a, .single-source-link, .source-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #0f625c;
+  font-weight: 650;
+  text-decoration: none;
+}
+.link-row a:hover, .single-source-link:hover, .source-link:hover { text-decoration: underline; }
 .ignored-list { display: grid; gap: 10px; }
 .ignored-row { padding: 12px; border: 1px solid #edf0ec; border-radius: 8px; }
 .ignored-row p { margin: 8px 0 0; }

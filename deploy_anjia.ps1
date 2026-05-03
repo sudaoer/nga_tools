@@ -76,8 +76,9 @@ if (-not (Test-Path -LiteralPath $distDir)) {
     throw "Build output not found: $distDir"
 }
 
-$remotePrepare = "rm -rf '$remoteStage' && mkdir -p '$remoteStage' && sudo mkdir -p '$RemotePath'"
-$remotePublish = "sudo cp -R '$remoteStage'/.' '$RemotePath'/ && sudo chown -R '$RemoteOwner' '$RemotePath' && sudo chmod -R '$RemoteMode' '$RemotePath' && rm -rf '$remoteStage'"
+$remotePrepare = "rm -rf ""$remoteStage"" && mkdir -p ""$remoteStage"" && sudo mkdir -p ""$RemotePath"""
+$remotePublish = "sudo cp -R ""$remoteStage""/. ""$RemotePath""/ && sudo chown -R ""$RemoteOwner"" ""$RemotePath"" && sudo chmod -R ""$RemoteMode"" ""$RemotePath"" && rm -rf ""$remoteStage"""
+$remoteCleanup = "rm -rf ""$remoteStage"""
 
 Invoke-Step "Prepare remote staging on $RemoteHost" {
     Invoke-CheckedNative -FilePath "ssh" -ArgumentList @($RemoteHost, $remotePrepare) -WorkingDirectory $repoRoot
@@ -88,7 +89,14 @@ Invoke-Step "Upload dist by scp to ${RemoteHost}:$remoteStage" {
 }
 
 Invoke-Step "Fix remote owner and mode" {
-    Invoke-CheckedNative -FilePath "ssh" -ArgumentList @($RemoteHost, $remotePublish) -WorkingDirectory $repoRoot
+    try {
+        Invoke-CheckedNative -FilePath "ssh" -ArgumentList @($RemoteHost, $remotePublish) -WorkingDirectory $repoRoot
+    }
+    catch {
+        Write-Warning "Remote publish failed. Cleaning staging directory: $remoteStage"
+        & ssh $RemoteHost $remoteCleanup
+        throw
+    }
 }
 
 Write-Host ""

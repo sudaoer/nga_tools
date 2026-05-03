@@ -6,6 +6,7 @@ export interface AuthorInfo {
 export interface AnchorPost {
   lou: number;
   pid?: number | string | null;
+  url?: string | null;
   postdate?: string | null;
   author?: AuthorInfo;
   content: string;
@@ -50,6 +51,7 @@ export interface AnchorEntry {
   author: AuthorInfo;
   lou: number;
   pid?: number | string | null;
+  url?: string | null;
   postdate?: string | null;
   content: string;
   fields?: Record<string, unknown>;
@@ -71,6 +73,7 @@ export interface AnchorEntry {
 export interface IgnoredItem {
   lou?: number | null;
   pid?: number | string | null;
+  url?: string | null;
   postdate?: string | null;
   author?: AuthorInfo;
   content?: string;
@@ -82,6 +85,20 @@ export interface IgnoredItem {
   source_lous?: number[];
   superseded_by_lou?: number | null;
   confidence?: number | null;
+}
+
+export interface WarningDetail {
+  type: string;
+  message: string;
+  entry_id?: number | null;
+  topic_id?: string | null;
+  topic_name?: string | null;
+  author?: AuthorInfo;
+  lou?: number | null;
+  pid?: number | string | null;
+  url?: string | null;
+  source_lous?: number[];
+  sources?: AnchorPost[];
 }
 
 export interface AnchorMeta {
@@ -112,6 +129,7 @@ export interface AnchorMeta {
 export interface RulePost {
   lou?: number | null;
   pid?: number | string | null;
+  url?: string | null;
   postdate?: string | null;
   author?: AuthorInfo;
   content?: string;
@@ -128,5 +146,6 @@ export interface AnchorData {
   anchors: AnchorItem[];
   ignored: IgnoredItem[];
   warnings: string[];
+  warning_details?: WarningDetail[];
   raw_stats: Record<string, unknown>;
 }

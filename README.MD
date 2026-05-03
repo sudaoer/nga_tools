@@ -17,6 +17,8 @@ pixi run python AnchorCounter.py --output anjia-viewer/public/data/anchors_43877
 
 统计器会把同一观众的所有未忽略楼一次性发给模型判断；同一普通主题多次提交时取最新楼，不同主题允许散放在多个回复中。送模型前会剥离 NGA 回复自带的 `Reply Post by ...` 引用块，避免把被回复者的安价算到回复者名下。DeepSeek 接口默认启用 thinking mode 和 JSON Output，可用 `--reasoning-effort high|max` 调整思考强度。
 
+默认会以 `--llm-workers 32` 并发请求模型；如果触发限流或想方便排查，可以改成 `--llm-workers 1` 串行运行。
+
 只检查抓取和确定性过滤时可以跳过模型：
 
 ```powershell

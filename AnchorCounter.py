@@ -4,6 +4,8 @@ import argparse
 import json
 import re
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
@@ -22,6 +24,8 @@ POSTS_PER_PAGE = 20
 SCHEMA_VERSION = 3
 DEFAULT_POST_CHAR_LIMIT = 7000
 DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_LLM_WORKERS = 32
+NGA_POST_URL_TEMPLATE = "https://ngabbs.com/read.php?pid={pid}&opt=128"
 
 DEFAULT_TOPICS: list[dict[str, Any]] = [
     {
@@ -239,6 +243,13 @@ def truncate_text(text: str, limit: int) -> str:
     return text[:limit] + "\n...[已截断]"
 
 
+def post_url(pid: Any) -> str | None:
+    parsed_pid = to_int(pid)
+    if parsed_pid is None:
+        return None
+    return NGA_POST_URL_TEMPLATE.format(pid=parsed_pid)
+
+
 def read_json_file(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as file_obj:
         data = json.load(file_obj)
@@ -363,10 +374,12 @@ def post_record(post: dict[str, Any]) -> dict[str, Any]:
     content = clean_post_text(original_content)
     removed_reply_quotes = count_reply_quote_blocks(original_content)
     lou = to_int(post.get("lou"))
+    pid = post.get("pid")
     author = get_author(post)
     return {
         "lou": lou,
-        "pid": post.get("pid"),
+        "pid": pid,
+        "url": post_url(pid),
         "postdate": post.get("postdate"),
         "author": author,
         "author_key": author_key(author, lou),
@@ -701,9 +714,11 @@ def build_author_prompt(parsed_rule: dict[str, Any], author_pack: dict[str, Any]
 
 
 def post_source_payload(post: dict[str, Any]) -> dict[str, Any]:
+    pid = post.get("pid")
     return {
         "lou": post.get("lou"),
-        "pid": post.get("pid"),
+        "pid": pid,
+        "url": post_url(pid),
         "postdate": post.get("postdate"),
         "author": post.get("author"),
         "content": post.get("content", ""),
@@ -905,30 +920,47 @@ def classify_author_packs_with_llm(
     candidates: list[dict[str, Any]],
     post_char_limit: int,
     max_retries: int,
+    llm_workers: int,
     warnings: list[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     candidates_by_lou = {int(candidate["lou"]): candidate for candidate in candidates if to_int(candidate.get("lou")) is not None}
     author_packs = build_author_packs(candidates, post_char_limit)
     proposals: list[dict[str, Any]] = []
     ignored: list[dict[str, Any]] = []
+    total = len(author_packs)
 
-    for index, pack in enumerate(author_packs, start=1):
-        batch_lous = [
+    def pack_lous(pack: dict[str, Any]) -> list[int]:
+        return [
             int(post["lou"])
             for post in pack.get("posts", [])
             if to_int(post.get("lou")) is not None
         ]
+
+    def pack_label(index: int, pack: dict[str, Any]) -> str:
+        lous = pack_lous(pack)
         author = pack.get("author", {})
         username = author.get("username") if isinstance(author, dict) else None
         uid = author.get("uid") if isinstance(author, dict) else None
-        print(
-            f"正在判定作者 {index}/{len(author_packs)}，"
+        return (
+            f"作者 {index}/{total}，"
             f"{username or '未知作者'}({uid if uid is not None else 'unknown'})，"
-            f"楼层 {', '.join(str(lou) for lou in batch_lous)}..."
+            f"楼层 {', '.join(str(lou) for lou in lous)}"
         )
+
+    def fallback_result(index: int, pack: dict[str, Any], reason: str) -> dict[str, Any]:
+        return {
+            "index": index,
+            "proposals": manual_review_for_pack(pack, candidates_by_lou, reason),
+            "ignored": [],
+            "warnings": [f"{reason}；作者={pack.get('author_key')}"],
+            "failed": True,
+        }
+
+    def classify_one(index: int, pack: dict[str, Any], worker_agent: Any) -> dict[str, Any]:
         prompt = build_author_prompt(parsed_rule, pack)
+        local_warnings: list[str] = []
         try:
-            response_json = ask_agent_for_json(agent, prompt, max_retries)
+            response_json = ask_agent_for_json(worker_agent, prompt, max_retries)
             raw_author = response_json
             legacy_authors = response_json.get("authors")
             if isinstance(legacy_authors, list) and legacy_authors and isinstance(legacy_authors[0], dict):
@@ -938,14 +970,67 @@ def classify_author_packs_with_llm(
                 pack,
                 candidates_by_lou,
                 parsed_rule,
-                warnings,
+                local_warnings,
             )
-            proposals.extend(normalized_proposals)
-            ignored.extend(normalized_ignored)
+            return {
+                "index": index,
+                "proposals": normalized_proposals,
+                "ignored": normalized_ignored,
+                "warnings": local_warnings,
+                "failed": False,
+            }
         except Exception as exc:
             reason = f"模型判定作者批次失败：{exc}"
-            warnings.append(f"{reason}；作者={pack.get('author_key')}")
-            proposals.extend(manual_review_for_pack(pack, candidates_by_lou, reason))
+            return fallback_result(index, pack, reason)
+
+    def merge_results(results: list[dict[str, Any]]) -> None:
+        for result in sorted(results, key=lambda item: int(item["index"])):
+            proposals.extend(result["proposals"])
+            ignored.extend(result["ignored"])
+            warnings.extend(result["warnings"])
+
+    if llm_workers <= 1 or total <= 1:
+        results: list[dict[str, Any]] = []
+        for index, pack in enumerate(author_packs, start=1):
+            print(f"正在判定{pack_label(index, pack)}...")
+            results.append(classify_one(index, pack, agent))
+        merge_results(results)
+        return proposals, ignored
+
+    worker_count = min(max(1, llm_workers), total)
+    print(f"使用 {worker_count} 个并发请求判定 {total} 个作者包。")
+    thread_state = threading.local()
+
+    def thread_agent() -> Any:
+        worker_agent = getattr(thread_state, "agent", None)
+        if worker_agent is None:
+            worker_agent = DirectChatAgent(agent.model_name, agent.reasoning_effort)
+            thread_state.agent = worker_agent
+        return worker_agent
+
+    def classify_one_threaded(index: int, pack: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return classify_one(index, pack, thread_agent())
+        except Exception as exc:
+            reason = f"模型判定作者批次失败：{exc}"
+            return fallback_result(index, pack, reason)
+
+    results_by_index: dict[int, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_pack = {
+            executor.submit(classify_one_threaded, index, pack): (index, pack)
+            for index, pack in enumerate(author_packs, start=1)
+        }
+        completed = 0
+        for future in as_completed(future_to_pack):
+            index, pack = future_to_pack[future]
+            result = future.result()
+            completed += 1
+            status = "失败，已标记复核" if result.get("failed") else "完成"
+            print(f"{status} {completed}/{total}：{pack_label(index, pack)}")
+            results_by_index[index] = result
+
+    merge_results([results_by_index[index] for index in sorted(results_by_index)])
     return proposals, ignored
 
 
@@ -1043,6 +1128,7 @@ def finalize_entries(proposals: list[dict[str, Any]], parsed_rule: dict[str, Any
                 "author_key": proposal.get("author_key"),
                 "lou": chosen_lou,
                 "pid": chosen_post.get("pid"),
+                "url": post_url(chosen_post.get("pid")),
                 "postdate": chosen_post.get("postdate"),
                 "content": proposal.get("normalized_anchor_text") or chosen_post.get("content", ""),
                 "fields": proposal.get("fields", {}),
@@ -1124,6 +1210,56 @@ def build_anchors(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return anchors
 
 
+def warning_source_from_post(post: dict[str, Any]) -> dict[str, Any]:
+    pid = post.get("pid")
+    return {
+        "lou": post.get("lou"),
+        "pid": pid,
+        "url": post.get("url") or post_url(pid),
+        "postdate": post.get("postdate"),
+        "author": post.get("author"),
+        "content": post.get("content", ""),
+    }
+
+
+def build_warning_details(entries: list[dict[str, Any]], warnings: list[str]) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    for entry in entries:
+        if not entry.get("needs_manual_review") and not entry.get("has_duplicate"):
+            continue
+        note = entry.get("classification_note")
+        reason = note if isinstance(note, str) and note.strip() else "需要人工复核"
+        source_posts = entry.get("source_posts")
+        if not isinstance(source_posts, list):
+            source_posts = []
+        details.append(
+            {
+                "type": "entry_review",
+                "message": reason,
+                "entry_id": entry.get("id"),
+                "topic_id": entry.get("topic_id"),
+                "topic_name": entry.get("topic_name"),
+                "author": entry.get("author"),
+                "lou": entry.get("lou"),
+                "pid": entry.get("pid"),
+                "url": entry.get("url") or post_url(entry.get("pid")),
+                "source_lous": entry.get("source_lous", []),
+                "sources": [warning_source_from_post(post) for post in source_posts],
+            }
+        )
+    for warning in warnings:
+        if not str(warning).strip():
+            continue
+        details.append(
+            {
+                "type": "runtime_warning",
+                "message": str(warning),
+                "sources": [],
+            }
+        )
+    return details
+
+
 def compress_int_ranges(values: list[int]) -> list[dict[str, int]]:
     if not values:
         return []
@@ -1179,6 +1315,7 @@ def failure_payload(args: argparse.Namespace, message: str, warnings: list[str])
         "anchors": [],
         "ignored": [],
         "warnings": [*warnings, message],
+        "warning_details": [{"type": "runtime_warning", "message": warning, "sources": []} for warning in [*warnings, message]],
         "raw_stats": {},
     }
 
@@ -1226,6 +1363,7 @@ def run_counter(args: argparse.Namespace) -> dict[str, Any]:
             candidates,
             args.post_char_limit,
             args.max_retries,
+            args.llm_workers,
             warnings,
         )
     ignored.extend(model_ignored)
@@ -1234,6 +1372,7 @@ def run_counter(args: argparse.Namespace) -> dict[str, Any]:
     ignored.extend(superseded_ignored)
     entries = finalize_entries(kept_proposals, parsed_rule)
     anchors = build_anchors(entries)
+    warning_details = build_warning_details(entries, warnings)
     raw_stats = build_raw_stats(posts, parsed_rule)
 
     topic_counts: dict[str, int] = {}
@@ -1279,6 +1418,7 @@ def run_counter(args: argparse.Namespace) -> dict[str, Any]:
         "anchors": anchors,
         "ignored": ignored,
         "warnings": warnings,
+        "warning_details": warning_details,
         "raw_stats": raw_stats,
     }
     write_json_file(Path(args.output), payload)
@@ -1296,6 +1436,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-llm", action="store_true", help="不调用模型，仅输出候选楼并标记人工复核。")
     parser.add_argument("--max-retries", type=int, default=2, help="模型 JSON 解析失败时的重试次数。")
     parser.add_argument("--reasoning-effort", default=DEFAULT_REASONING_EFFORT, choices=["high", "max"], help="DeepSeek 思考强度，默认 high。")
+    parser.add_argument("--llm-workers", type=int, default=DEFAULT_LLM_WORKERS, help="并发请求 LLM 的作者包数量，默认 32；设为 1 表示串行。")
     parser.add_argument("--post-char-limit", type=int, default=DEFAULT_POST_CHAR_LIMIT, help="单楼发送给模型的正文字符上限；0 表示不截断。")
     parser.add_argument("--start-lou", type=int, default=None, help="手动覆盖起始楼层。")
     parser.add_argument("--end-lou", type=int, default=None, help="手动覆盖截止楼层。")
