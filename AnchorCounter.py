@@ -45,6 +45,10 @@ QA_EXPLICIT_MARKERS = (
 )
 WEIGHT_TARGET_PREFIX_RE = re.compile(r"^加权(?:[：: ]+)?(?P<target>.+)$", flags=re.IGNORECASE)
 WEIGHT_ONLY_RE = re.compile(r"^(?:安价[：: ]*)?加权(?:一下|1下)?[。！!？?~…]*$", flags=re.IGNORECASE)
+CARRIAGE_NAME_LABEL_RE = re.compile(
+    r"^(?P<label>(?:马车名字安价|马车名称安价|安价名字|马车的名字|马车名字|马车名称|名字|名称|安价))\s*[：:]\s*(?P<name>.+)$",
+    flags=re.IGNORECASE,
+)
 
 DEFAULT_TOPICS: list[dict[str, Any]] = [
     {
@@ -343,10 +347,41 @@ def extract_weight_target_hint(text: Any) -> str | None:
 def clean_carriage_name(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    cleaned = compact_text(value)
-    if "\n" in cleaned or "\r" in cleaned or "<br" in cleaned.casefold():
+    cleaned = compact_text(clean_post_text(value))
+    if "\n" in cleaned or "\r" in cleaned:
         return None
-    cleaned = re.sub(r"^[\"'“”‘’「」『』【】（）()]+|[\"'“”‘’「」『』【】（）()]+$", "", cleaned).strip()
+    while True:
+        label_match = CARRIAGE_NAME_LABEL_RE.match(cleaned)
+        if label_match is None:
+            break
+        cleaned = compact_text(label_match.group("name"))
+    normalized = normalize_keyword_text(cleaned)
+    if normalized in {
+        "主题4",
+        "主题四",
+        "theme4",
+        "q&a",
+        "qa",
+    }:
+        return None
+    if cleaned.endswith((":", "：")):
+        return None
+    if (":" in cleaned or "：" in cleaned) and any(
+        marker in normalized
+        for marker in [
+            "主题4",
+            "主题四",
+            "theme4",
+            "马车名字安价",
+            "马车名称安价",
+            "马车的名字",
+            "马车名字",
+            "马车名称",
+            "安价名字",
+        ]
+    ):
+        return None
+    cleaned = re.sub(r"^[\"'“”‘’「」『』【】]+|[\"'“”‘’「」『』【】]+$", "", cleaned).strip()
     cleaned = cleaned.rstrip("。；;，,、/ ")
     if not cleaned or "请输入文本" in cleaned:
         return None
@@ -366,6 +401,25 @@ def merge_unique_texts(values: list[str]) -> list[str]:
     return merged
 
 
+def filter_redundant_carriage_names(values: list[str]) -> list[str]:
+    filtered: list[str] = []
+    for value in values:
+        normalized_value = normalize_match_text(value)
+        redundant = False
+        for other in values:
+            if other == value:
+                continue
+            normalized_other = normalize_match_text(other)
+            if not normalized_value or normalized_value == normalized_other:
+                continue
+            if other.startswith(value) and len(other) > len(value) and other[len(value)] in {"(", "（"}:
+                redundant = True
+                break
+        if not redundant:
+            filtered.append(value)
+    return filtered
+
+
 def field_text_values(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value]
@@ -374,19 +428,46 @@ def field_text_values(value: Any) -> list[str]:
     return []
 
 
-def inline_carriage_names(value: Any) -> list[str]:
-    cleaned = clean_carriage_name(value)
-    if cleaned is None:
+def split_carriage_names(value: Any) -> list[str]:
+    if not isinstance(value, str):
         return []
-    if any(separator in cleaned for separator in ["、", "，", ","]):
-        return merge_unique_texts(
-            [
-                candidate
-                for part in re.split(r"[、，,]+", cleaned)
-                if (candidate := clean_carriage_name(part)) is not None
-            ]
-        )
-    return [cleaned]
+
+    cleaned = clean_post_text(value)
+    if not cleaned.strip():
+        return []
+
+    return merge_unique_texts(
+        [
+            candidate
+            for part in re.split(r"[、，,\n]+", cleaned)
+            if (candidate := clean_carriage_name(part)) is not None
+        ]
+    )
+
+
+def is_carriage_prefix(text: str) -> bool:
+    prefix = normalize_keyword_text(text)
+    return any(
+        marker in prefix
+        for marker in [
+            "马车名字安价",
+            "马车名称安价",
+            "安价名字",
+            "马车名字",
+            "马车名称",
+            "马车的名字",
+            "再安价一个",
+            "再来一个",
+        ]
+    )
+
+
+def inline_carriage_names(value: Any) -> list[str]:
+    split_names = split_carriage_names(value)
+    if split_names:
+        return split_names
+    cleaned = clean_carriage_name(value)
+    return [cleaned] if cleaned is not None else []
 
 
 def extract_carriage_names(text: Any) -> list[str]:
@@ -394,32 +475,37 @@ def extract_carriage_names(text: Any) -> list[str]:
         return []
 
     names: list[str] = []
-    normalized_text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    normalized_text = clean_post_text(text)
+    capture_following = False
     for raw_line in compact_text(normalized_text).splitlines():
         line = raw_line.strip()
         if not line:
+            capture_following = False
             continue
-        match = re.search(r"[：:](?P<name>.+)$", line)
-        if match is None:
+
+        match = re.search(r"[：:](?P<name>.*)$", line)
+        if match is not None and is_carriage_prefix(line[: match.start()]):
+            extracted_names = split_carriage_names(match.group("name"))
+            if extracted_names:
+                names.extend(extracted_names)
+                capture_following = False
+            else:
+                capture_following = True
             continue
-        prefix = normalize_keyword_text(line[: match.start()])
-        if not any(
-            marker in prefix
-            for marker in [
-                "马车名字安价",
-                "马车名称安价",
-                "安价名字",
-                "马车名字",
-                "马车名称",
-                "马车的名字",
-                "再安价一个",
-                "再来一个",
-            ]
-        ):
+
+        if not capture_following:
             continue
-        extracted = clean_carriage_name(match.group("name"))
-        if extracted is not None:
-            names.append(extracted)
+
+        if re.search(r"[：:]", line) and not is_carriage_prefix(line.split(":", 1)[0].split("：", 1)[0]):
+            capture_following = False
+            continue
+
+        extracted_names = split_carriage_names(line)
+        if extracted_names:
+            names.extend(extracted_names)
+            continue
+
+        capture_following = False
     return merge_unique_texts(names)
 
 
@@ -455,7 +541,7 @@ def enrich_theme4_proposal(proposal: dict[str, Any]) -> int:
         for key in ["content", "original_content"]:
             collected.extend(extract_carriage_names(source_post.get(key)))
 
-    names = merge_unique_texts(collected)
+    names = filter_redundant_carriage_names(merge_unique_texts(collected))
     if not names:
         return 0
 
