@@ -5,7 +5,15 @@ output*
 __pycache__/
 *.xls
 *.xlsx
-*.json# pixi environments
+*.json
+# pixi environments
 .pixi/*
 !.pixi/config.toml
 config.json
+anjia-viewer/node_modules/
+anjia-viewer/dist/
+anjia-viewer/public/data/*.json
+!anjia-viewer/package.json
+!anjia-viewer/package-lock.json
+!anjia-viewer/tsconfig.json
+!anjia-viewer/tsconfig.node.json
