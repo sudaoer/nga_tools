@@ -42,6 +42,16 @@ export interface TopicInfo {
   description?: string;
 }
 
+export interface WeightedTargetInfo {
+  topic_id: string;
+  topic_name: string;
+  entry_id: number;
+  author: AuthorInfo;
+  content: string;
+  lou: number;
+  pid?: number | string | null;
+}
+
 export interface AnchorEntry {
   id: number;
   topic_id: string;
@@ -65,6 +75,10 @@ export interface AnchorEntry {
   needs_manual_review?: boolean;
   classification_source?: string | null;
   classification_note?: string | null;
+  proxy_submission?: boolean;
+  proxy_reason?: string | null;
+  weight_target_hint?: string | null;
+  weighted_target?: WeightedTargetInfo | null;
   has_duplicate?: boolean;
   duplicate_lous?: number[];
   duplicate_entry_ids?: number[];

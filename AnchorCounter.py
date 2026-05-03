@@ -21,7 +21,7 @@ DEFAULT_THREAD_AUTHOR_UID = 62668270
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_OUTPUT = Path("anjia-viewer") / "public" / "data" / "anchors_43877379.json"
 POSTS_PER_PAGE = 20
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_POST_CHAR_LIMIT = 7000
 DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_LLM_WORKERS = 64
@@ -43,6 +43,7 @@ QA_EXPLICIT_MARKERS = (
     "mrhtheefghh",
     "🐖",
 )
+WEIGHT_TARGET_PREFIX_RE = re.compile(r"^加权(?:[：: ]+)?(?P<target>.+)$", flags=re.IGNORECASE)
 
 DEFAULT_TOPICS: list[dict[str, Any]] = [
     {
@@ -305,6 +306,286 @@ def normalize_keyword_text(text: Any) -> str:
     return re.sub(r"\s+", "", text).casefold()
 
 
+def normalize_match_text(text: Any) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", normalize_keyword_text(text))
+
+
+def explicit_proxy_reason(text: Any) -> str | None:
+    normalized = normalize_keyword_text(text)
+    if not normalized:
+        return None
+    if "群友的安价代发" in normalized:
+        return "文本包含“群友的安价代发”"
+    if "帮别人安价" in normalized or "帮人安价" in normalized:
+        return "文本包含“帮别人安价”"
+    if "代发" in normalized and "安价" in normalized:
+        return "文本包含“代发安价”"
+    return None
+
+
+def extract_weight_target_hint(text: Any) -> str | None:
+    if not isinstance(text, str):
+        return None
+    for raw_line in compact_text(text).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = WEIGHT_TARGET_PREFIX_RE.match(line)
+        if match is None:
+            return None
+        target = compact_text(match.group("target"))
+        target = re.sub(r"^[\"'“”‘’「」『』【】（）()]+|[\"'“”‘’「」『』【】（）()]+$", "", target).strip()
+        return target or None
+    return None
+
+
+def clean_carriage_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = compact_text(value)
+    if "\n" in cleaned or "\r" in cleaned or "<br" in cleaned.casefold():
+        return None
+    cleaned = re.sub(r"^[\"'“”‘’「」『』【】（）()]+|[\"'“”‘’「」『』【】（）()]+$", "", cleaned).strip()
+    cleaned = cleaned.rstrip("。；;，,、/ ")
+    if not cleaned or "请输入文本" in cleaned:
+        return None
+    return cleaned
+
+
+def merge_unique_texts(values: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = compact_text(value)
+        normalized = normalize_match_text(cleaned)
+        if not cleaned or not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(cleaned)
+    return merged
+
+
+def field_text_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def inline_carriage_names(value: Any) -> list[str]:
+    cleaned = clean_carriage_name(value)
+    if cleaned is None:
+        return []
+    if any(separator in cleaned for separator in ["、", "，", ","]):
+        return merge_unique_texts(
+            [
+                candidate
+                for part in re.split(r"[、，,]+", cleaned)
+                if (candidate := clean_carriage_name(part)) is not None
+            ]
+        )
+    return [cleaned]
+
+
+def extract_carriage_names(text: Any) -> list[str]:
+    if not isinstance(text, str):
+        return []
+
+    names: list[str] = []
+    normalized_text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    for raw_line in compact_text(normalized_text).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.search(r"[：:](?P<name>.+)$", line)
+        if match is None:
+            continue
+        prefix = normalize_keyword_text(line[: match.start()])
+        if not any(
+            marker in prefix
+            for marker in [
+                "马车名字安价",
+                "马车名称安价",
+                "安价名字",
+                "马车名字",
+                "马车名称",
+                "马车的名字",
+                "再安价一个",
+                "再来一个",
+            ]
+        ):
+            continue
+        extracted = clean_carriage_name(match.group("name"))
+        if extracted is not None:
+            names.append(extracted)
+    return merge_unique_texts(names)
+
+
+def enrich_theme4_proposal(proposal: dict[str, Any]) -> int:
+    if proposal.get("topic_id") != "theme4_carriage_name":
+        return 0
+
+    fields = proposal.get("fields")
+    if not isinstance(fields, dict):
+        fields = {}
+        proposal["fields"] = fields
+
+    collected: list[str] = []
+    for key in ["名字", "马车名字", "马车名称", "name"]:
+        for value in field_text_values(fields.get(key)):
+            extracted = extract_carriage_names(value)
+            if extracted:
+                collected.extend(extracted)
+                continue
+            collected.extend(inline_carriage_names(value))
+
+    normalized_text = proposal.get("normalized_anchor_text")
+    if isinstance(normalized_text, str) and normalized_text.strip():
+        extracted = extract_carriage_names(normalized_text)
+        if extracted:
+            collected.extend(extracted)
+        else:
+            collected.extend(inline_carriage_names(normalized_text))
+
+    for source_post in proposal.get("source_posts", []):
+        if not isinstance(source_post, dict):
+            continue
+        for key in ["content", "original_content"]:
+            collected.extend(extract_carriage_names(source_post.get(key)))
+
+    names = merge_unique_texts(collected)
+    if not names:
+        return 0
+
+    joined_names = "、".join(names)
+    fields["名字"] = joined_names
+    proposal["normalized_anchor_text"] = joined_names
+    return len(names)
+
+
+def recover_proxy_superseded_proposals(
+    proposals: list[dict[str, Any]],
+    ignored: list[dict[str, Any]],
+    post_by_lou: dict[int, dict[str, Any]],
+    author_key_value: str,
+    author_value: dict[str, Any],
+    parsed_rule: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    kept_ignored: list[dict[str, Any]] = []
+    existing_pairs = {
+        (to_int(proposal.get("chosen_lou")), str(proposal.get("topic_id")))
+        for proposal in proposals
+        if to_int(proposal.get("chosen_lou")) is not None and isinstance(proposal.get("topic_id"), str)
+    }
+
+    for item in ignored:
+        ignored_lou = to_int(item.get("lou"))
+        topic_id = normalize_topic_id(item.get("topic_id")) if item.get("topic_id") else None
+        superseded_by_lou = to_int(item.get("superseded_by_lou"))
+        if (
+            ignored_lou is None
+            or ignored_lou not in post_by_lou
+            or not isinstance(topic_id, str)
+            or not topic_id
+            or superseded_by_lou is None
+            or superseded_by_lou not in post_by_lou
+        ):
+            kept_ignored.append(item)
+            continue
+
+        superseding_post = post_by_lou[superseded_by_lou]
+        proxy_reason = next(
+            (
+                reason
+                for fragment in [superseding_post.get("content"), superseding_post.get("original_content")]
+                if (reason := explicit_proxy_reason(fragment)) is not None
+            ),
+            None,
+        )
+        if proxy_reason is None:
+            kept_ignored.append(item)
+            continue
+
+        if (ignored_lou, topic_id) in existing_pairs:
+            continue
+
+        recovered_post = post_by_lou[ignored_lou]
+        topic_name, topic_short_name = topic_names(topic_id, parsed_rule)
+        recovered = {
+            "author_key": author_key_value,
+            "author": recovered_post.get("author", author_value),
+            "topic_id": topic_id,
+            "topic_name": topic_name,
+            "topic_short_name": topic_short_name,
+            "subtopic_name": None,
+            "chosen_lou": ignored_lou,
+            "source_lous": sorted(set(parse_lou_list(item.get("source_lous")) or [ignored_lou])),
+            "source_posts": [post_source_payload(recovered_post)],
+            "normalized_anchor_text": compact_text(recovered_post.get("content", "")),
+            "fields": {},
+            "confidence": item.get("confidence"),
+            "needs_manual_review": False,
+            "classification_source": "proxy_recovery",
+            "classification_note": f"较新楼 #{superseded_by_lou} 为代发，不覆盖该楼原安价",
+        }
+        enrich_theme4_proposal(recovered)
+        proposals.append(recovered)
+        existing_pairs.add((ignored_lou, topic_id))
+
+    return proposals, kept_ignored
+
+
+def filter_obsolete_carriage_warnings(raw_warnings: Any, resolved_lous: set[int]) -> list[str]:
+    if not isinstance(raw_warnings, list):
+        return []
+
+    filtered: list[str] = []
+    for warning in raw_warnings:
+        text = str(warning).strip()
+        if not text:
+            continue
+        lou_match = re.search(r"候选楼(?P<lou>\d+)包含两个马车名字安价，按规则只保留第一个；第二个未计入。", text)
+        if lou_match is not None and int(lou_match.group("lou")) in resolved_lous:
+            continue
+        if resolved_lous and "一楼内出现两个名字，只保留第一个" in text and "第二个" in text:
+            continue
+        filtered.append(text)
+    return filtered
+
+
+def proposal_text_fragments(proposal: dict[str, Any]) -> list[str]:
+    fragments: list[str] = []
+    for value in [proposal.get("normalized_anchor_text"), proposal.get("classification_note")]:
+        if isinstance(value, str) and value.strip():
+            fragments.append(value)
+    for source_post in proposal.get("source_posts", []):
+        if not isinstance(source_post, dict):
+            continue
+        for key in ["content", "original_content"]:
+            value = source_post.get(key)
+            if isinstance(value, str) and value.strip():
+                fragments.append(value)
+    return fragments
+
+
+def annotate_special_proposals(proposals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for proposal in proposals:
+        fragments = proposal_text_fragments(proposal)
+        proxy_reason = next((reason for fragment in fragments if (reason := explicit_proxy_reason(fragment))), None)
+        if proxy_reason is not None:
+            proposal["proxy_submission"] = True
+            proposal["proxy_reason"] = proxy_reason
+
+        weight_hint = None
+        for fragment in fragments:
+            weight_hint = extract_weight_target_hint(fragment)
+            if weight_hint is not None:
+                proposal["weight_target_hint"] = weight_hint
+                break
+    return proposals
+
+
 def has_explicit_qa_context(text: Any) -> bool:
     normalized = normalize_keyword_text(text)
     if not normalized:
@@ -521,9 +802,11 @@ def known_rule(rule_lou: int, rule_post: dict[str, Any]) -> dict[str, Any]:
         "classification_rules": [
             "一条回复可以同时包含多个主题安价，必须拆成多个 entries。",
             "观众可以只安价部分主题，缺失主题不是错误。",
-            "每个作者每个普通主题最终只保留 1 个；如果同作者同主题多次提交，按最新楼层作为最终提交。",
+            "同一作者自己重复提交同一普通主题时，最终只保留最新楼层作为最终提交。",
+            "如果较新的同主题楼明确是代发/帮别人安价/群友安价代发，则它不覆盖作者自己原本的安价，两条都应保留。",
             "同作者不同主题可以散落在多个回复中，不能只看单楼。",
             "主题2的修行之道和难缠之客视为两个独立普通主题。",
+            "主题4如果同一楼写了多个马车名字，只记为 1 条 theme4_carriage_name，但要把所有名字都保留下来。",
             "Q&A 特别环节允许同一作者提交多个问题，每个问题拆成一个 qa entry。",
             "不要把普通安价事件中的疑问句误判为 Q&A；只有明显向神奇小猪、作者或 Q&A 环节提问的内容才归为 qa。",
         ],
@@ -747,7 +1030,7 @@ def build_author_prompt(parsed_rule: dict[str, Any], author_pack: dict[str, Any]
             {
                 "topic_id": "theme1_travel | theme2_training | theme2_guest | theme3_engagement | theme4_carriage_name | qa | unclassified",
                 "normalized_anchor_text": "只属于这个条目的安价正文，不要混入其他主题",
-                "fields": {"人物/地点/事件/老师/属性/客人/名字/问题": "按主题提取；没有则省略"},
+                "fields": {"人物/地点/事件/老师/属性/客人/名字/问题": "按主题提取；没有则省略；theme4 若同条含多个名字，用顿号合并到‘名字’"},
                 "source_lous": [21555],
                 "chosen_lou": 21555,
                 "confidence": 0.0,
@@ -775,8 +1058,10 @@ def build_author_prompt(parsed_rule: dict[str, Any], author_pack: dict[str, Any]
 - 观众可能只安价部分主题；没有安价的主题不要补，不要猜。
 - 不同主题可以分散在多个回复中，应该分别保留。
 - posts[*].reply_context.has_reply_quote=true 表示这楼是在带 Reply 引用回复别人；reply_to_author 和 quoted_preview 用来说明它在接谁、接什么话。
-- 普通主题包括 theme1_travel、theme2_training、theme2_guest、theme3_engagement、theme4_carriage_name；每个普通主题最终只保留 1 条。
-- 如果同一普通主题多次提交，只在 items 中返回楼层号最新的那条；旧楼写入 ignored_posts，原因说明被哪个楼覆盖。
+- 普通主题包括 theme1_travel、theme2_training、theme2_guest、theme3_engagement、theme4_carriage_name；只有同一作者自己重复提交同一普通主题时，才最终只保留 1 条。
+- 如果同一普通主题多次提交，且较新的楼明确是代发/帮别人安价/群友安价代发，则它不覆盖作者自己原来的安价；原安价和代发安价都要保留在 items 中，不要把原安价写进 ignored_posts。
+- 只有“同一作者自己重复提交同一普通主题”时，才把旧楼写入 ignored_posts，并说明被哪个楼覆盖。
+- theme4_carriage_name 如果同一楼里写了多个马车名字，不要拆成多个 items，也不要丢掉后面的名字；保留成 1 条，并把所有名字用顿号合并到 normalized_anchor_text 和 fields.名字。
 - qa 是特别 Q&A，可以有多个问题，不按“每主题 1 条”去重。
 - 不要把普通安价事件里的疑问句当成 qa。只有明显是在 Q&A/提问上下文，或向神奇小猪/作者/猪导提问，才归为 qa。
 - 如果某楼带有 Reply 引用，而且正文只是接被引用楼层聊天、追问、吐槽，不能因为它是问句就归为 qa；这类一般写入 ignored_posts。
@@ -994,6 +1279,7 @@ def normalize_author_result(
     warnings: list[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     key = str(author_pack["author_key"])
+    author_value = author_pack.get("author", {})
     pack_lous = [int(post["lou"]) for post in author_pack["posts"] if to_int(post.get("lou")) is not None]
     post_by_lou = {lou: candidates_by_lou[lou] for lou in pack_lous if lou in candidates_by_lou}
     proposals: list[dict[str, Any]] = []
@@ -1097,13 +1383,19 @@ def normalize_author_result(
 
     ignored.extend(placeholder_ignored_items(post_by_lou, proposals, ignored, parsed_rule))
 
+    proposals, ignored = recover_proxy_superseded_proposals(proposals, ignored, post_by_lou, key, author_value, parsed_rule)
+
+    resolved_multi_carriage_lous: set[int] = set()
+    for proposal in proposals:
+        if enrich_theme4_proposal(proposal) > 1:
+            resolved_multi_carriage_lous.update(parse_lou_list(proposal.get("source_lous")))
+
     used_lous = {lou for proposal in proposals for lou in proposal.get("source_lous", [])}
     for lou in sorted(set(pack_lous) - used_lous - seen_ignored_lous):
         ignored.append(ignored_from_post(post_by_lou[lou], "模型未将该楼归入任何有效条目", "llm_author_pack"))
 
     raw_warnings = raw_author.get("warnings", [])
-    if isinstance(raw_warnings, list):
-        warnings.extend(str(warning) for warning in raw_warnings if str(warning).strip())
+    warnings.extend(filter_obsolete_carriage_warnings(raw_warnings, resolved_multi_carriage_lous))
     return proposals, ignored
 
 
@@ -1306,7 +1598,7 @@ def enforce_latest_policy(
     keep_direct: list[dict[str, Any]] = []
     for proposal in proposals:
         topic_id = str(proposal.get("topic_id", "unclassified"))
-        if is_topic_multi_allowed(topic_id, parsed_rule):
+        if is_topic_multi_allowed(topic_id, parsed_rule) or bool(proposal.get("proxy_submission")):
             keep_direct.append(proposal)
             continue
         key = (str(proposal.get("author_key")), topic_id)
@@ -1365,6 +1657,10 @@ def finalize_entries(proposals: list[dict[str, Any]], parsed_rule: dict[str, Any
                 "needs_manual_review": bool(proposal.get("needs_manual_review", False)),
                 "classification_source": proposal.get("classification_source"),
                 "classification_note": proposal.get("classification_note"),
+                "proxy_submission": bool(proposal.get("proxy_submission", False)),
+                "proxy_reason": proposal.get("proxy_reason") if isinstance(proposal.get("proxy_reason"), str) else None,
+                "weight_target_hint": proposal.get("weight_target_hint") if isinstance(proposal.get("weight_target_hint"), str) else None,
+                "weighted_target": None,
                 "has_duplicate": False,
                 "duplicate_lous": [],
                 "duplicate_entry_ids": [],
@@ -1374,6 +1670,125 @@ def finalize_entries(proposals: list[dict[str, Any]], parsed_rule: dict[str, Any
     entries.sort(key=lambda entry: (order.get(str(entry.get("topic_id")), 999), int(entry.get("lou") or 0), str(entry.get("author_key"))))
     for index, entry in enumerate(entries, start=1):
         entry["id"] = index
+    return entries
+
+
+def append_entry_note(entry: dict[str, Any], extra_note: str) -> None:
+    current = entry.get("classification_note")
+    if isinstance(current, str) and current.strip():
+        entry["classification_note"] = f"{current}；{extra_note}"
+    else:
+        entry["classification_note"] = extra_note
+
+
+def entry_match_texts(entry: dict[str, Any]) -> list[str]:
+    texts: list[str] = []
+    for key in ["content", "raw_clean_content", "original_content"]:
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            texts.append(value)
+    fields = entry.get("fields")
+    if isinstance(fields, dict):
+        for value in fields.values():
+            if isinstance(value, str) and value.strip():
+                texts.append(value)
+    return texts
+
+
+def weight_target_score(candidate: dict[str, Any], hint_text: str) -> int:
+    normalized_hint = normalize_match_text(hint_text)
+    if not normalized_hint:
+        return 0
+    best_score = 0
+
+    fields = candidate.get("fields")
+    if isinstance(fields, dict):
+        for value in fields.values():
+            normalized_text = normalize_match_text(value)
+            if not normalized_text:
+                continue
+            if normalized_text == normalized_hint:
+                return 400
+            if normalized_hint in normalized_text:
+                best_score = max(best_score, 320)
+
+    prioritized_sources = [
+        (candidate.get("content"), 300, 240),
+        (candidate.get("raw_clean_content"), 240, 180),
+        (candidate.get("original_content"), 220, 160),
+    ]
+    for text, exact_score, contains_score in prioritized_sources:
+        normalized_text = normalize_match_text(text)
+        if not normalized_text:
+            continue
+        if normalized_text == normalized_hint:
+            return exact_score
+        if normalized_hint in normalized_text:
+            best_score = max(best_score, contains_score)
+        elif len(normalized_text) >= 4 and normalized_text in normalized_hint:
+            best_score = max(best_score, 120)
+    return best_score
+
+
+def build_weighted_target_payload(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "topic_id": entry.get("topic_id"),
+        "topic_name": entry.get("topic_name"),
+        "entry_id": entry.get("id"),
+        "author": entry.get("author"),
+        "content": entry.get("content"),
+        "lou": entry.get("lou"),
+        "pid": entry.get("pid"),
+    }
+
+
+def resolve_weighted_target_entry(entry: dict[str, Any], topic_entries: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str | None]:
+    hint_text = entry.get("weight_target_hint")
+    if not isinstance(hint_text, str) or not hint_text.strip():
+        return None, None
+
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for candidate in topic_entries:
+        if candidate.get("id") == entry.get("id"):
+            continue
+        if candidate.get("weight_target_hint"):
+            continue
+        score = weight_target_score(candidate, hint_text)
+        if score > 0:
+            scored.append((score, candidate))
+
+    if not scored:
+        return None, "未找到同主题可匹配条目"
+
+    scored.sort(key=lambda item: (-item[0], int(item[1].get("id") or 0)))
+    best_score = scored[0][0]
+    best_candidates = [candidate for score, candidate in scored if score == best_score]
+    if len(best_candidates) != 1:
+        return None, f"同主题存在 {len(best_candidates)} 个同分候选"
+    return best_candidates[0], None
+
+
+def attach_weighted_target_metadata(entries: list[dict[str, Any]], warnings: list[str]) -> list[dict[str, Any]]:
+    entries_by_topic: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        topic_id = str(entry.get("topic_id", "unclassified"))
+        entries_by_topic.setdefault(topic_id, []).append(entry)
+
+    for entry in entries:
+        hint_text = entry.get("weight_target_hint")
+        if not isinstance(hint_text, str) or not hint_text.strip():
+            continue
+        topic_id = str(entry.get("topic_id", "unclassified"))
+        target_entry, reason = resolve_weighted_target_entry(entry, entries_by_topic.get(topic_id, []))
+        if target_entry is None:
+            entry["needs_manual_review"] = True
+            extra_note = f"显式加权目标未能唯一匹配：{hint_text}"
+            if reason:
+                extra_note = f"{extra_note}（{reason}）"
+            append_entry_note(entry, extra_note)
+            warnings.append(f"楼层 {entry.get('lou')} 的加权目标未能唯一匹配：{hint_text}{f'（{reason}）' if reason else ''}")
+            continue
+        entry["weighted_target"] = build_weighted_target_payload(target_entry)
     return entries
 
 
@@ -1591,9 +2006,11 @@ def run_counter(args: argparse.Namespace) -> dict[str, Any]:
         )
     ignored.extend(model_ignored)
 
-    kept_proposals, superseded_ignored = enforce_latest_policy(proposals, parsed_rule)
+    annotated_proposals = annotate_special_proposals(proposals)
+    kept_proposals, superseded_ignored = enforce_latest_policy(annotated_proposals, parsed_rule)
     ignored.extend(superseded_ignored)
     entries = finalize_entries(kept_proposals, parsed_rule)
+    entries = attach_weighted_target_metadata(entries, warnings)
     anchors = build_anchors(entries)
     warning_details = build_warning_details(entries, warnings)
     raw_stats = build_raw_stats(posts, parsed_rule)

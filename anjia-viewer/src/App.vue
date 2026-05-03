@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   ExternalLink,
-  RefreshCcw,
   Search,
   ShieldAlert,
   Tags,
@@ -431,10 +430,6 @@ function topicClass(topicId: string) {
       <div class="header-actions">
         <button v-if="canExportBbcode" class="icon-button" type="button" title="复制当前筛选结果的 BBCODE 文本" @click="copyBbcode">
           <span>{{ copyButtonLabel }}</span>
-        </button>
-        <button class="icon-button strong" type="button" title="重新获取网站上的统计 JSON" @click="loadDefaultData">
-          <RefreshCcw :size="18" />
-          <span>刷新数据</span>
         </button>
       </div>
     </header>
