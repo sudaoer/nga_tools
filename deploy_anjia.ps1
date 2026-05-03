@@ -6,7 +6,8 @@ param(
     [string]$Python = "python",
     [switch]$SkipCounter,
     [switch]$SkipBuild,
-    [switch]$ForceRefresh
+    [switch]$ForceRefresh,
+    [switch]$UseCache
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,9 +57,13 @@ if (-not (Test-Path -LiteralPath $viewerDir)) {
     throw "Viewer directory not found: $viewerDir"
 }
 
+if ($ForceRefresh -and $UseCache) {
+    throw "-ForceRefresh and -UseCache cannot be used together."
+}
+
 if (-not $SkipCounter) {
     $counterArgs = @("AnchorCounter.py", "--output", $dataPath)
-    if ($ForceRefresh) {
+    if ($ForceRefresh -or -not $UseCache) {
         $counterArgs += "--force-refresh"
     }
     Invoke-Step "Run anchor counter" {
