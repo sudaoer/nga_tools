@@ -9,7 +9,7 @@ import {
   Tags,
   UserRound,
 } from 'lucide-vue-next';
-import type { AnchorData, AnchorEntry, AnchorItem, IgnoredItem, TopicInfo } from './types';
+import type { AnchorData, AnchorEntry, AnchorItem, AnchorPost, IgnoredItem, TopicInfo } from './types';
 
 type TabKey = 'entries' | 'duplicates' | 'ignored' | 'rule' | 'warnings';
 
@@ -148,6 +148,8 @@ function entriesFromAnchors(anchors: AnchorItem[]): AnchorEntry[] {
         classification_note: post.classification_note,
         has_duplicate: anchor.has_duplicate,
         duplicate_lous: anchor.duplicate_lous,
+        source_lous: [post.lou],
+        source_posts: [{ ...post, author: anchor.author }],
       });
     }
   }
@@ -165,6 +167,8 @@ function entrySearchText(entry: AnchorEntry) {
     entry.lou,
     entry.content,
     entry.raw_clean_content,
+    entry.source_lous?.join(','),
+    entry.source_posts?.map((post) => `${post.lou} ${post.content}`).join(' '),
     JSON.stringify(entry.fields ?? {}),
   ]
     .join(' ')
@@ -172,7 +176,7 @@ function entrySearchText(entry: AnchorEntry) {
 }
 
 function ignoredSearchText(item: IgnoredItem) {
-  return [item.lou, item.author?.uid, item.author?.username, item.content, item.ignore_reason, item.stage]
+  return [item.lou, item.source_lous?.join(','), item.topic_id, item.topic_name, item.author?.uid, item.author?.username, item.content, item.ignore_reason, item.stage]
     .join(' ')
     .toLowerCase();
 }
@@ -193,6 +197,29 @@ function snippet(text?: string, limit = 160) {
 
 function prettyJson(value: unknown) {
   return JSON.stringify(value, null, 2);
+}
+
+function louList(lous?: number[]) {
+  return lous?.length ? lous.map((lou) => `#${lou}`).join(', ') : '';
+}
+
+function sourceLouLabel(entry: AnchorEntry) {
+  return louList(entry.source_lous?.length ? entry.source_lous : [entry.lou]);
+}
+
+function sourcePosts(entry: AnchorEntry): AnchorPost[] {
+  if (entry.source_posts?.length) {
+    return entry.source_posts;
+  }
+  return [{
+    lou: entry.lou,
+    pid: entry.pid,
+    postdate: entry.postdate,
+    author: entry.author,
+    content: entry.raw_clean_content || entry.content,
+    original_content: entry.original_content,
+    attachments: entry.attachments,
+  }];
 }
 
 function fieldRows(entry: AnchorEntry) {
@@ -304,8 +331,13 @@ function topicClass(topicId: string) {
               <strong>#{{ item.lou ?? '未知' }}</strong>
               <span>{{ item.author?.username || '未知作者' }}</span>
               <small>{{ item.stage || 'unknown' }}</small>
+              <small v-if="item.topic_id">{{ item.topic_name || item.topic_id }}</small>
             </div>
             <p>{{ item.ignore_reason || '未提供忽略原因' }}</p>
+            <p v-if="item.source_lous?.length || item.superseded_by_lou" class="muted-line">
+              <span v-if="item.source_lous?.length">来源 {{ louList(item.source_lous) }}</span>
+              <span v-if="item.superseded_by_lou"> · 被 #{{ item.superseded_by_lou }} 覆盖</span>
+            </p>
             <p class="muted-line">{{ snippet(item.content, 220) }}</p>
           </article>
         </div>
@@ -364,6 +396,12 @@ function topicClass(topicId: string) {
             </div>
           </dl>
 
+          <div class="source-strip">
+            <span>来源楼层</span>
+            <strong>{{ sourceLouLabel(selectedEntry) }}</strong>
+            <em v-if="selectedEntry.superseded_lous?.length">已覆盖 {{ louList(selectedEntry.superseded_lous) }}</em>
+          </div>
+
           <article class="post-detail">
             <header>
               <strong>#{{ selectedEntry.lou }}</strong>
@@ -377,6 +415,17 @@ function topicClass(topicId: string) {
             </details>
             <p v-if="selectedEntry.classification_note" class="muted-line">{{ selectedEntry.classification_note }}</p>
           </article>
+
+          <section class="source-list">
+            <h3>来源原文</h3>
+            <article v-for="(post, index) in sourcePosts(selectedEntry)" :key="`${post.lou}-${post.pid ?? index}`" class="source-row">
+              <header>
+                <strong>#{{ post.lou }}</strong>
+                <span>{{ post.postdate || '未知时间' }}</span>
+              </header>
+              <p class="content-block compact">{{ post.content }}</p>
+            </article>
+          </section>
         </aside>
       </section>
     </main>
@@ -403,7 +452,7 @@ button, input { font: inherit; }
   border-bottom: 1px solid #d9ddd7;
   background: #fbfbfa;
 }
-.title-block h1, .detail-head h2, .panel h2 { margin: 0; line-height: 1.2; }
+.title-block h1, .detail-head h2, .panel h2, .source-list h3 { margin: 0; line-height: 1.2; }
 .title-block h1 { font-size: 24px; }
 .eyebrow { margin: 0 0 6px; color: #64706a; font-size: 12px; }
 .icon-button, .tab-button, .topic-button {
@@ -492,12 +541,31 @@ main { width: min(1480px, 100%); margin: 0 auto; padding: 24px 32px 40px; }
 .field-grid div, .meta-list div { padding: 10px; border: 1px solid #edf0ec; border-radius: 8px; }
 .field-grid dt, .meta-list dt { color: #64706a; font-size: 12px; }
 .field-grid dd, .meta-list dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+.source-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid #d9ddd7;
+  border-radius: 8px;
+  background: #f8faf8;
+}
+.source-strip span { color: #64706a; font-size: 12px; }
+.source-strip strong { color: #202124; }
+.source-strip em { color: #795c18; font-size: 12px; font-style: normal; }
 .post-detail { padding: 14px 0; border-top: 1px solid #edf0ec; }
 .post-detail header { justify-content: flex-start; margin-bottom: 10px; }
 .content-block { margin: 0; white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
 .content-block.compact { margin-top: 8px; color: #4f5b56; }
 details { margin-top: 10px; }
 summary { cursor: pointer; color: #167a73; }
+.source-list { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid #edf0ec; }
+.source-list h3 { font-size: 15px; }
+.source-row { padding: 12px; border: 1px solid #edf0ec; border-radius: 8px; background: #ffffff; }
+.source-row header { display: flex; align-items: center; gap: 10px; color: #64706a; font-size: 13px; }
+.source-row header strong { color: #202124; }
 .rule-layout { display: grid; grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr); gap: 16px; }
 .panel, .empty-panel { padding: 18px; }
 .single-panel { min-height: 420px; }

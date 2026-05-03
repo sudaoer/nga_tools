@@ -7,6 +7,7 @@ export interface AnchorPost {
   lou: number;
   pid?: number | string | null;
   postdate?: string | null;
+  author?: AuthorInfo;
   content: string;
   raw_clean_content?: string;
   original_content?: string;
@@ -55,6 +56,9 @@ export interface AnchorEntry {
   raw_clean_content?: string;
   original_content?: string;
   attachments?: Array<Record<string, unknown>>;
+  source_lous?: number[];
+  source_posts?: AnchorPost[];
+  superseded_lous?: number[];
   confidence?: number | null;
   needs_manual_review?: boolean;
   classification_source?: string | null;
@@ -73,6 +77,10 @@ export interface IgnoredItem {
   original_content?: string;
   ignore_reason?: string;
   stage?: string;
+  topic_id?: string | null;
+  topic_name?: string | null;
+  source_lous?: number[];
+  superseded_by_lou?: number | null;
   confidence?: number | null;
 }
 
@@ -93,6 +101,7 @@ export interface AnchorMeta {
   ignored_count?: number;
   duplicate_entry_count?: number;
   duplicate_author_count?: number;
+  superseded_count?: number;
   topic_counts?: Record<string, number>;
   source_page_range?: {
     start: number;
