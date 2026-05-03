@@ -26,6 +26,7 @@ const selectedEntryId = ref<number | null>(null);
 const topics = computed(() => data.value?.topics ?? topicsFromParsedRule(data.value?.parsed_rule));
 const entries = computed(() => data.value?.entries ?? entriesFromAnchors(data.value?.anchors ?? []));
 const ignored = computed(() => data.value?.ignored ?? []);
+const visibleIgnored = computed(() => ignored.value.filter((item) => !isStartFloorIgnored(item)));
 const warnings = computed(() => data.value?.warnings ?? []);
 const warningDetails = computed(() => data.value?.warning_details ?? warningDetailsFromStrings(warnings.value));
 const duplicateEntries = computed(() => entries.value.filter((entry) => entry.has_duplicate));
@@ -61,7 +62,7 @@ const filteredEntries = computed(() => {
 
 const filteredIgnored = computed(() => {
   const term = query.value.trim().toLowerCase();
-  return ignored.value.filter((item) => !term || ignoredSearchText(item).includes(term));
+  return visibleIgnored.value.filter((item) => !term || ignoredSearchText(item).includes(term));
 });
 
 const selectedEntry = computed(() => {
@@ -74,7 +75,7 @@ const selectedEntry = computed(() => {
 const tabs = computed(() => [
   { key: 'entries' as const, label: '主题安价', count: entries.value.length },
   { key: 'duplicates' as const, label: '重复复核', count: duplicateEntries.value.length },
-  { key: 'ignored' as const, label: '忽略楼层', count: ignored.value.length },
+  { key: 'ignored' as const, label: '忽略楼层', count: visibleIgnored.value.length },
   { key: 'rule' as const, label: '规则解析', count: data.value?.parsed_rule ? 1 : 0 },
   { key: 'warnings' as const, label: '告警', count: warningDetails.value.length },
 ]);
@@ -184,6 +185,10 @@ function ignoredSearchText(item: IgnoredItem) {
     .toLowerCase();
 }
 
+function isStartFloorIgnored(item: IgnoredItem) {
+  return /小于等于起始楼层/.test(item.ignore_reason ?? '');
+}
+
 function formatPercent(value?: number | null) {
   if (typeof value !== 'number') {
     return '待复核';
@@ -277,7 +282,7 @@ function topicClass(topicId: string) {
         <div class="stat-cell"><span>主题安价</span><strong>{{ data.meta.entry_count ?? entries.length }}</strong></div>
         <div class="stat-cell"><span>参与作者</span><strong>{{ data.meta.author_count ?? data.anchors.length }}</strong></div>
         <div class="stat-cell"><span>重复复核</span><strong>{{ data.meta.duplicate_entry_count ?? duplicateEntries.length }}</strong></div>
-        <div class="stat-cell"><span>忽略楼层</span><strong>{{ data.meta.ignored_count ?? ignored.length }}</strong></div>
+        <div class="stat-cell"><span>忽略楼层</span><strong>{{ visibleIgnored.length }}</strong></div>
         <div class="stat-cell wide"><span>规则楼</span><strong>#{{ data.meta.rule_lou }}</strong></div>
         <div class="stat-cell wide"><span>生成时间</span><strong>{{ data.meta.generated_at }}</strong></div>
       </section>
