@@ -12,7 +12,7 @@ __pycache__/
 config.json
 anjia-viewer/node_modules/
 anjia-viewer/dist/
-anjia-viewer/public/data/*.json
+!anjia-viewer/public/data/*.json
 !anjia-viewer/package.json
 !anjia-viewer/package-lock.json
 !anjia-viewer/tsconfig.json

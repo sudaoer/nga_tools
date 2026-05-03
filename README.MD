@@ -21,7 +21,7 @@ pixi run python AnchorCounter.py --output anjia-viewer/public/data/anchors_43877
 pixi run python AnchorCounter.py --no-llm --output output/43877379_all/anchor_counter/test.json
 ```
 
-Vue 查看器在 `anjia-viewer/`，默认读取 `public/data/anchors_43877379.json`。
+Vue 查看器在 `anjia-viewer/`，页面会从网站路径 `/data/anchors_43877379.json` 获取统计结果。部署前先把统计 JSON 输出到 `anjia-viewer/public/data/anchors_43877379.json`，再构建前端。
 
 ## TODO（永远不会做（不是）的功能）
 - 添加config里写配置的功能，省的每次复制粘贴tid aid

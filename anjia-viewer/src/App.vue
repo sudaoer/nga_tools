@@ -3,57 +3,75 @@ import { computed, onMounted, ref, watch } from 'vue';
 import {
   AlertTriangle,
   CheckCircle2,
-  FileUp,
   RefreshCcw,
   Search,
   ShieldAlert,
+  Tags,
   UserRound,
 } from 'lucide-vue-next';
-import type { AnchorData, AnchorItem, IgnoredItem } from './types';
+import type { AnchorData, AnchorEntry, AnchorItem, IgnoredItem, TopicInfo } from './types';
 
-type TabKey = 'anchors' | 'duplicates' | 'ignored' | 'rule' | 'warnings';
+type TabKey = 'entries' | 'duplicates' | 'ignored' | 'rule' | 'warnings';
 
 const defaultDataUrl = '/data/anchors_43877379.json';
 const data = ref<AnchorData | null>(null);
 const loading = ref(false);
 const error = ref<string | null>(null);
 const query = ref('');
-const activeTab = ref<TabKey>('anchors');
-const selectedAnchorId = ref<number | null>(null);
-const fileInput = ref<HTMLInputElement | null>(null);
+const activeTab = ref<TabKey>('entries');
+const selectedTopic = ref('all');
+const selectedEntryId = ref<number | null>(null);
 
-const anchors = computed(() => data.value?.anchors ?? []);
+const topics = computed(() => data.value?.topics ?? topicsFromParsedRule(data.value?.parsed_rule));
+const entries = computed(() => data.value?.entries ?? entriesFromAnchors(data.value?.anchors ?? []));
 const ignored = computed(() => data.value?.ignored ?? []);
 const warnings = computed(() => data.value?.warnings ?? []);
-const duplicateAnchors = computed(() => anchors.value.filter((anchor) => anchor.has_duplicate));
+const duplicateEntries = computed(() => entries.value.filter((entry) => entry.has_duplicate));
 
-const filteredAnchors = computed(() => {
-  const term = query.value.trim().toLowerCase();
-  const source = activeTab.value === 'duplicates' ? duplicateAnchors.value : anchors.value;
-  if (!term) {
-    return source;
+const topicOptions = computed(() => {
+  const counts = new Map<string, number>();
+  for (const entry of entries.value) {
+    counts.set(entry.topic_id, (counts.get(entry.topic_id) ?? 0) + 1);
   }
-  return source.filter((anchor) => anchorSearchText(anchor).includes(term));
+  const options = topics.value.map((topic) => ({
+    id: topic.id,
+    label: topic.short_name || topic.name,
+    count: counts.get(topic.id) ?? 0,
+  }));
+  const knownIds = new Set(options.map((option) => option.id));
+  for (const [topicId, count] of counts) {
+    if (!knownIds.has(topicId)) {
+      options.push({ id: topicId, label: topicId, count });
+    }
+  }
+  return [{ id: 'all', label: '全部主题', count: entries.value.length }, ...options];
+});
+
+const filteredEntries = computed(() => {
+  const term = query.value.trim().toLowerCase();
+  const source = activeTab.value === 'duplicates' ? duplicateEntries.value : entries.value;
+  return source.filter((entry) => {
+    const topicMatched = selectedTopic.value === 'all' || entry.topic_id === selectedTopic.value;
+    const queryMatched = !term || entrySearchText(entry).includes(term);
+    return topicMatched && queryMatched;
+  });
 });
 
 const filteredIgnored = computed(() => {
   const term = query.value.trim().toLowerCase();
-  if (!term) {
-    return ignored.value;
-  }
-  return ignored.value.filter((item) => ignoredSearchText(item).includes(term));
+  return ignored.value.filter((item) => !term || ignoredSearchText(item).includes(term));
 });
 
-const selectedAnchor = computed(() => {
-  if (selectedAnchorId.value === null) {
-    return filteredAnchors.value[0] ?? null;
+const selectedEntry = computed(() => {
+  if (selectedEntryId.value === null) {
+    return filteredEntries.value[0] ?? null;
   }
-  return filteredAnchors.value.find((anchor) => anchor.id === selectedAnchorId.value) ?? filteredAnchors.value[0] ?? null;
+  return filteredEntries.value.find((entry) => entry.id === selectedEntryId.value) ?? filteredEntries.value[0] ?? null;
 });
 
 const tabs = computed(() => [
-  { key: 'anchors' as const, label: '有效安价', count: anchors.value.length },
-  { key: 'duplicates' as const, label: '重复作者', count: duplicateAnchors.value.length },
+  { key: 'entries' as const, label: '主题安价', count: entries.value.length },
+  { key: 'duplicates' as const, label: '重复复核', count: duplicateEntries.value.length },
   { key: 'ignored' as const, label: '忽略楼层', count: ignored.value.length },
   { key: 'rule' as const, label: '规则解析', count: data.value?.parsed_rule ? 1 : 0 },
   { key: 'warnings' as const, label: '告警', count: warnings.value.length },
@@ -63,12 +81,12 @@ onMounted(() => {
   void loadDefaultData();
 });
 
-watch(filteredAnchors, (nextAnchors) => {
-  if (activeTab.value !== 'anchors' && activeTab.value !== 'duplicates') {
+watch(filteredEntries, (nextEntries) => {
+  if (activeTab.value !== 'entries' && activeTab.value !== 'duplicates') {
     return;
   }
-  if (!nextAnchors.some((anchor) => anchor.id === selectedAnchorId.value)) {
-    selectedAnchorId.value = nextAnchors[0]?.id ?? null;
+  if (!nextEntries.some((entry) => entry.id === selectedEntryId.value)) {
+    selectedEntryId.value = nextEntries[0]?.id ?? null;
   }
 });
 
@@ -78,14 +96,17 @@ async function loadDefaultData() {
   try {
     const response = await fetch(defaultDataUrl, { cache: 'no-store' });
     if (!response.ok) {
-      throw new Error(`默认数据未就绪：HTTP ${response.status}`);
+      throw new Error(`统计数据未就绪：HTTP ${response.status}`);
     }
     const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
     if (!contentType.includes('application/json')) {
-      throw new Error('默认数据未生成或不是 JSON。');
+      throw new Error('统计数据未生成或不是 JSON。');
     }
     const payload = (await response.json()) as AnchorData;
-    setData(payload);
+    data.value = payload;
+    activeTab.value = 'entries';
+    selectedTopic.value = 'all';
+    selectedEntryId.value = (payload.entries ?? [])[0]?.id ?? null;
   } catch (caughtError) {
     error.value = caughtError instanceof Error ? caughtError.message : String(caughtError);
   } finally {
@@ -93,46 +114,58 @@ async function loadDefaultData() {
   }
 }
 
-function chooseFile() {
-  fileInput.value?.click();
+function selectEntry(entry: AnchorEntry) {
+  selectedEntryId.value = entry.id;
 }
 
-async function onFilePicked(event: Event) {
-  const target = event.target as HTMLInputElement;
-  const file = target.files?.[0];
-  if (!file) {
-    return;
+function topicsFromParsedRule(parsedRule: Record<string, unknown> | null | undefined): TopicInfo[] {
+  const rawTopics = parsedRule?.topics;
+  return Array.isArray(rawTopics) ? (rawTopics as TopicInfo[]) : [];
+}
+
+function entriesFromAnchors(anchors: AnchorItem[]): AnchorEntry[] {
+  const rebuilt: AnchorEntry[] = [];
+  for (const anchor of anchors) {
+    if (anchor.entries?.length) {
+      rebuilt.push(...anchor.entries);
+      continue;
+    }
+    for (const post of anchor.posts) {
+      rebuilt.push({
+        id: rebuilt.length + 1,
+        topic_id: 'unclassified',
+        topic_name: '未分类',
+        topic_short_name: '未分类',
+        author: anchor.author,
+        lou: post.lou,
+        postdate: post.postdate,
+        content: post.content,
+        raw_clean_content: post.raw_clean_content,
+        original_content: post.original_content,
+        confidence: post.confidence,
+        needs_manual_review: post.needs_manual_review,
+        classification_source: post.classification_source,
+        classification_note: post.classification_note,
+        has_duplicate: anchor.has_duplicate,
+        duplicate_lous: anchor.duplicate_lous,
+      });
+    }
   }
-  loading.value = true;
-  error.value = null;
-  try {
-    const payload = JSON.parse(await file.text()) as AnchorData;
-    setData(payload);
-  } catch (caughtError) {
-    error.value = caughtError instanceof Error ? caughtError.message : String(caughtError);
-  } finally {
-    loading.value = false;
-    target.value = '';
-  }
+  return rebuilt;
 }
 
-function setData(payload: AnchorData) {
-  data.value = payload;
-  activeTab.value = 'anchors';
-  selectedAnchorId.value = payload.anchors[0]?.id ?? null;
-}
-
-function selectAnchor(anchor: AnchorItem) {
-  selectedAnchorId.value = anchor.id;
-}
-
-function anchorSearchText(anchor: AnchorItem) {
+function entrySearchText(entry: AnchorEntry) {
   return [
-    anchor.id,
-    anchor.author.uid,
-    anchor.author.username,
-    anchor.first_lou,
-    anchor.posts.map((post) => `${post.lou} ${post.content} ${post.raw_clean_content ?? ''}`).join(' '),
+    entry.id,
+    entry.topic_id,
+    entry.topic_name,
+    entry.topic_short_name,
+    entry.author.uid,
+    entry.author.username,
+    entry.lou,
+    entry.content,
+    entry.raw_clean_content,
+    JSON.stringify(entry.fields ?? {}),
   ]
     .join(' ')
     .toLowerCase();
@@ -151,7 +184,7 @@ function formatPercent(value?: number | null) {
   return `${Math.round(value * 100)}%`;
 }
 
-function snippet(text?: string, limit = 180) {
+function snippet(text?: string, limit = 160) {
   if (!text) {
     return '';
   }
@@ -162,8 +195,17 @@ function prettyJson(value: unknown) {
   return JSON.stringify(value, null, 2);
 }
 
+function fieldRows(entry: AnchorEntry) {
+  const fields = entry.fields ?? {};
+  return Object.entries(fields).filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '');
+}
+
 function tabClass(key: TabKey) {
   return ['tab-button', { active: activeTab.value === key }];
+}
+
+function topicClass(topicId: string) {
+  return ['topic-button', { active: selectedTopic.value === topicId }];
 }
 </script>
 
@@ -172,47 +214,22 @@ function tabClass(key: TabKey) {
     <header class="topbar">
       <div class="title-block">
         <p class="eyebrow">NGA Anchor Counter</p>
-        <h1>安价统计查看器</h1>
+        <h1>安价核对页</h1>
       </div>
-      <div class="toolbar">
-        <button class="icon-button" type="button" title="重新载入默认 JSON" @click="loadDefaultData">
-          <RefreshCcw :size="18" />
-          <span>刷新</span>
-        </button>
-        <button class="icon-button strong" type="button" title="打开本地 JSON" @click="chooseFile">
-          <FileUp :size="18" />
-          <span>打开 JSON</span>
-        </button>
-        <input ref="fileInput" class="hidden-input" type="file" accept="application/json,.json" @change="onFilePicked" />
-      </div>
+      <button class="icon-button strong" type="button" title="重新获取网站上的统计 JSON" @click="loadDefaultData">
+        <RefreshCcw :size="18" />
+        <span>刷新数据</span>
+      </button>
     </header>
 
     <main>
       <section v-if="data" class="summary-band" aria-label="统计摘要">
-        <div class="stat-cell">
-          <span>有效安价</span>
-          <strong>{{ data.meta.anchor_count ?? anchors.length }}</strong>
-        </div>
-        <div class="stat-cell">
-          <span>重复作者</span>
-          <strong>{{ data.meta.duplicate_author_count ?? duplicateAnchors.length }}</strong>
-        </div>
-        <div class="stat-cell">
-          <span>候选楼层</span>
-          <strong>{{ data.meta.candidate_count ?? 0 }}</strong>
-        </div>
-        <div class="stat-cell">
-          <span>忽略楼层</span>
-          <strong>{{ data.meta.ignored_count ?? ignored.length }}</strong>
-        </div>
-        <div class="stat-cell wide">
-          <span>规则楼</span>
-          <strong>#{{ data.meta.rule_lou }}</strong>
-        </div>
-        <div class="stat-cell wide">
-          <span>生成时间</span>
-          <strong>{{ data.meta.generated_at }}</strong>
-        </div>
+        <div class="stat-cell"><span>主题安价</span><strong>{{ data.meta.entry_count ?? entries.length }}</strong></div>
+        <div class="stat-cell"><span>参与作者</span><strong>{{ data.meta.author_count ?? data.anchors.length }}</strong></div>
+        <div class="stat-cell"><span>重复复核</span><strong>{{ data.meta.duplicate_entry_count ?? duplicateEntries.length }}</strong></div>
+        <div class="stat-cell"><span>忽略楼层</span><strong>{{ data.meta.ignored_count ?? ignored.length }}</strong></div>
+        <div class="stat-cell wide"><span>规则楼</span><strong>#{{ data.meta.rule_lou }}</strong></div>
+        <div class="stat-cell wide"><span>生成时间</span><strong>{{ data.meta.generated_at }}</strong></div>
       </section>
 
       <section v-if="error" class="notice error-notice">
@@ -222,13 +239,13 @@ function tabClass(key: TabKey) {
 
       <section v-if="data?.meta.manual_review_required || warnings.length" class="notice review-notice">
         <ShieldAlert :size="18" />
-        <span>存在需要复核的统计项或运行告警。</span>
+        <span>存在需要复核的主题安价、重复项或运行告警。</span>
       </section>
 
       <section class="control-row">
         <label class="search-box">
           <Search :size="18" />
-          <input v-model="query" type="search" placeholder="搜索作者、楼层或内容" />
+          <input v-model="query" type="search" placeholder="搜索主题、作者、楼层、内容" />
         </label>
         <nav class="tabs" aria-label="数据视图">
           <button v-for="tab in tabs" :key="tab.key" type="button" :class="tabClass(tab.key)" @click="activeTab = tab.key">
@@ -238,10 +255,18 @@ function tabClass(key: TabKey) {
         </nav>
       </section>
 
+      <section v-if="data && (activeTab === 'entries' || activeTab === 'duplicates')" class="topic-strip" aria-label="主题筛选">
+        <Tags :size="18" />
+        <button v-for="topic in topicOptions" :key="topic.id" type="button" :class="topicClass(topic.id)" @click="selectedTopic = topic.id">
+          <span>{{ topic.label }}</span>
+          <b>{{ topic.count }}</b>
+        </button>
+      </section>
+
       <section v-if="loading" class="empty-panel">加载中...</section>
 
       <section v-else-if="!data" class="empty-panel">
-        <p>尚未加载统计 JSON。</p>
+        <p>尚未加载网站统计数据。</p>
       </section>
 
       <section v-else-if="activeTab === 'rule'" class="rule-layout">
@@ -290,60 +315,67 @@ function tabClass(key: TabKey) {
       <section v-else class="workspace">
         <div class="list-pane">
           <button
-            v-for="anchor in filteredAnchors"
-            :key="anchor.id"
+            v-for="entry in filteredEntries"
+            :key="entry.id"
             type="button"
-            :class="['anchor-row', { selected: selectedAnchor?.id === anchor.id }]"
-            @click="selectAnchor(anchor)"
+            :class="['entry-row', { selected: selectedEntry?.id === entry.id }]"
+            @click="selectEntry(entry)"
           >
-            <span class="anchor-index">{{ anchor.id }}</span>
-            <span class="anchor-main">
-              <b>{{ anchor.author.username || '未知作者' }}</b>
-              <small>uid {{ anchor.author.uid ?? '未知' }} · #{{ anchor.first_lou }}</small>
-              <em>{{ snippet(anchor.posts[0]?.content, 120) }}</em>
+            <span class="entry-index">{{ entry.id }}</span>
+            <span class="entry-main">
+              <b>{{ entry.topic_short_name || entry.topic_name }}</b>
+              <small>{{ entry.author.username || '未知作者' }} · uid {{ entry.author.uid ?? '未知' }} · #{{ entry.lou }}</small>
+              <em>{{ snippet(entry.content) }}</em>
             </span>
-            <span class="anchor-flags">
-              <i v-if="anchor.has_duplicate">重复</i>
-              <i v-if="anchor.needs_manual_review" class="review">复核</i>
-              <b>{{ formatPercent(anchor.confidence) }}</b>
+            <span class="entry-flags">
+              <i v-if="entry.has_duplicate">重复</i>
+              <i v-if="entry.needs_manual_review" class="review">复核</i>
+              <b>{{ formatPercent(entry.confidence) }}</b>
             </span>
           </button>
-          <p v-if="filteredAnchors.length === 0" class="muted-line">没有匹配的安价。</p>
+          <p v-if="filteredEntries.length === 0" class="muted-line list-empty">没有匹配的主题安价。</p>
         </div>
 
-        <aside v-if="selectedAnchor" class="detail-pane">
+        <aside v-if="selectedEntry" class="detail-pane">
           <div class="detail-head">
             <div>
-              <p class="eyebrow">#{{ selectedAnchor.first_lou }}</p>
-              <h2>{{ selectedAnchor.author.username || '未知作者' }}</h2>
+              <p class="eyebrow">#{{ selectedEntry.lou }} · {{ selectedEntry.topic_id }}</p>
+              <h2>{{ selectedEntry.topic_name }}</h2>
             </div>
             <div class="author-chip">
               <UserRound :size="16" />
-              <span>{{ selectedAnchor.author.uid ?? '未知' }}</span>
+              <span>{{ selectedEntry.author.username || '未知作者' }} / {{ selectedEntry.author.uid ?? '未知' }}</span>
             </div>
           </div>
 
           <div class="status-line">
-            <span v-if="selectedAnchor.has_duplicate" class="badge duplicate">重复楼层 {{ selectedAnchor.duplicate_lous.join(', ') }}</span>
-            <span v-if="selectedAnchor.needs_manual_review" class="badge review">需要复核</span>
-            <span v-if="!selectedAnchor.has_duplicate && !selectedAnchor.needs_manual_review" class="badge ok">
+            <span v-if="selectedEntry.has_duplicate" class="badge duplicate">重复楼层 {{ selectedEntry.duplicate_lous?.join(', ') }}</span>
+            <span v-if="selectedEntry.needs_manual_review" class="badge review">需要复核</span>
+            <span v-if="!selectedEntry.has_duplicate && !selectedEntry.needs_manual_review" class="badge ok">
               <CheckCircle2 :size="14" />
               已判定
             </span>
           </div>
 
-          <article v-for="post in selectedAnchor.posts" :key="post.lou" class="post-detail">
+          <dl v-if="fieldRows(selectedEntry).length" class="field-grid">
+            <div v-for="[key, value] in fieldRows(selectedEntry)" :key="key">
+              <dt>{{ key }}</dt>
+              <dd>{{ value }}</dd>
+            </div>
+          </dl>
+
+          <article class="post-detail">
             <header>
-              <strong>#{{ post.lou }}</strong>
-              <span>{{ post.postdate || '未知时间' }}</span>
-              <small>{{ post.classification_source || 'source unknown' }}</small>
+              <strong>#{{ selectedEntry.lou }}</strong>
+              <span>{{ selectedEntry.postdate || '未知时间' }}</span>
+              <small>{{ selectedEntry.classification_source || 'source unknown' }}</small>
             </header>
-            <p class="content-block">{{ post.content }}</p>
-            <details v-if="post.raw_clean_content && post.raw_clean_content !== post.content">
-              <summary>清洗原文</summary>
-              <p class="content-block compact">{{ post.raw_clean_content }}</p>
+            <p class="content-block">{{ selectedEntry.content }}</p>
+            <details v-if="selectedEntry.raw_clean_content && selectedEntry.raw_clean_content !== selectedEntry.content">
+              <summary>完整清洗原文</summary>
+              <p class="content-block compact">{{ selectedEntry.raw_clean_content }}</p>
             </details>
-            <p v-if="post.classification_note" class="muted-line">{{ post.classification_note }}</p>
+            <p v-if="selectedEntry.classification_note" class="muted-line">{{ selectedEntry.classification_note }}</p>
           </article>
         </aside>
       </section>
@@ -352,10 +384,7 @@ function tabClass(key: TabKey) {
 </template>
 
 <style scoped>
-:global(*) {
-  box-sizing: border-box;
-}
-
+:global(*) { box-sizing: border-box; }
 :global(body) {
   margin: 0;
   min-width: 320px;
@@ -363,16 +392,8 @@ function tabClass(key: TabKey) {
   color: #202124;
   font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
 }
-
-button,
-input {
-  font: inherit;
-}
-
-.shell {
-  min-height: 100vh;
-}
-
+button, input { font: inherit; }
+.shell { min-height: 100vh; }
 .topbar {
   display: flex;
   align-items: center;
@@ -382,34 +403,10 @@ input {
   border-bottom: 1px solid #d9ddd7;
   background: #fbfbfa;
 }
-
-.title-block h1,
-.detail-head h2,
-.panel h2 {
-  margin: 0;
-  line-height: 1.2;
-}
-
-.title-block h1 {
-  font-size: 24px;
-}
-
-.eyebrow {
-  margin: 0 0 6px;
-  color: #64706a;
-  font-size: 12px;
-}
-
-.toolbar,
-.tabs,
-.control-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.icon-button,
-.tab-button {
+.title-block h1, .detail-head h2, .panel h2 { margin: 0; line-height: 1.2; }
+.title-block h1 { font-size: 24px; }
+.eyebrow { margin: 0 0 6px; color: #64706a; font-size: 12px; }
+.icon-button, .tab-button, .topic-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -421,27 +418,9 @@ input {
   color: #202124;
   cursor: pointer;
 }
-
-.icon-button {
-  padding: 0 14px;
-}
-
-.icon-button.strong {
-  border-color: #167a73;
-  background: #167a73;
-  color: #ffffff;
-}
-
-.hidden-input {
-  display: none;
-}
-
-main {
-  width: min(1480px, 100%);
-  margin: 0 auto;
-  padding: 24px 32px 40px;
-}
-
+.icon-button { padding: 0 14px; }
+.icon-button.strong { border-color: #167a73; background: #167a73; color: #ffffff; }
+main { width: min(1480px, 100%); margin: 0 auto; padding: 24px 32px 40px; }
 .summary-band {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr)) repeat(2, minmax(180px, 1.35fr));
@@ -451,126 +430,41 @@ main {
   border-radius: 8px;
   background: #d9ddd7;
 }
-
-.stat-cell {
-  min-height: 82px;
-  padding: 14px 16px;
-  background: #ffffff;
-}
-
-.stat-cell span {
-  display: block;
-  margin-bottom: 10px;
-  color: #64706a;
-  font-size: 13px;
-}
-
-.stat-cell strong {
-  font-size: 24px;
-}
-
-.stat-cell.wide strong {
-  display: block;
-  overflow: hidden;
-  font-size: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.notice {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 40px;
-  margin-top: 14px;
-  padding: 10px 12px;
-  border-radius: 8px;
-}
-
-.error-notice {
-  border: 1px solid #e4b3a3;
-  background: #fff3ee;
-  color: #8f3218;
-}
-
-.review-notice {
-  border: 1px solid #d8c56c;
-  background: #fff9d8;
-  color: #6d5600;
-}
-
-.control-row {
-  justify-content: space-between;
-  margin: 18px 0;
-}
-
+.stat-cell { min-height: 82px; padding: 14px 16px; background: #ffffff; }
+.stat-cell span { display: block; margin-bottom: 10px; color: #64706a; font-size: 13px; }
+.stat-cell strong { font-size: 24px; }
+.stat-cell.wide strong { display: block; overflow: hidden; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
+.notice { display: flex; align-items: center; gap: 10px; min-height: 40px; margin-top: 14px; padding: 10px 12px; border-radius: 8px; }
+.error-notice { border: 1px solid #e4b3a3; background: #fff3ee; color: #8f3218; }
+.review-notice { border: 1px solid #d8c56c; background: #fff9d8; color: #6d5600; }
+.control-row, .tabs, .topic-strip { display: flex; align-items: center; gap: 10px; }
+.control-row { justify-content: space-between; margin: 18px 0; }
 .search-box {
   display: flex;
   align-items: center;
   gap: 10px;
-  width: min(420px, 100%);
+  width: min(440px, 100%);
   min-height: 42px;
   padding: 0 12px;
   border: 1px solid #c8d0ca;
   border-radius: 8px;
   background: #ffffff;
 }
-
-.search-box input {
-  width: 100%;
-  min-width: 0;
-  border: 0;
-  outline: 0;
-}
-
-.tabs {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.tab-button {
-  padding: 0 10px;
-}
-
-.tab-button b {
-  min-width: 22px;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: #eef1ee;
-  font-size: 12px;
-}
-
-.tab-button.active {
-  border-color: #167a73;
-  color: #0f625c;
-}
-
-.workspace {
-  display: grid;
-  grid-template-columns: minmax(360px, 0.95fr) minmax(0, 1.35fr);
-  gap: 16px;
-}
-
-.list-pane,
-.detail-pane,
-.panel,
-.empty-panel {
-  border: 1px solid #d9ddd7;
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.list-pane {
-  min-height: 520px;
-  overflow: hidden;
-}
-
-.anchor-row {
+.search-box input { width: 100%; min-width: 0; border: 0; outline: 0; }
+.tabs, .topic-strip { flex-wrap: wrap; justify-content: flex-end; }
+.tab-button, .topic-button { padding: 0 10px; }
+.tab-button b, .topic-button b { min-width: 22px; padding: 2px 6px; border-radius: 999px; background: #eef1ee; font-size: 12px; }
+.tab-button.active, .topic-button.active { border-color: #167a73; color: #0f625c; }
+.topic-strip { justify-content: flex-start; margin: -4px 0 18px; padding: 10px; border: 1px solid #d9ddd7; border-radius: 8px; background: #ffffff; }
+.workspace { display: grid; grid-template-columns: minmax(390px, 0.95fr) minmax(0, 1.35fr); gap: 16px; }
+.list-pane, .detail-pane, .panel, .empty-panel { border: 1px solid #d9ddd7; border-radius: 8px; background: #ffffff; }
+.list-pane { min-height: 520px; overflow: hidden; }
+.entry-row {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr) auto;
   gap: 12px;
   width: 100%;
-  min-height: 92px;
+  min-height: 96px;
   padding: 12px 14px;
   border: 0;
   border-bottom: 1px solid #edf0ec;
@@ -579,302 +473,56 @@ main {
   text-align: left;
   cursor: pointer;
 }
-
-.anchor-row:hover,
-.anchor-row.selected {
-  background: #eef7f5;
-}
-
-.anchor-index {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 8px;
-  background: #27312f;
-  color: #ffffff;
-  font-weight: 700;
-}
-
-.anchor-main,
-.anchor-flags,
-.row-main {
-  display: flex;
-  min-width: 0;
-}
-
-.anchor-main {
-  flex-direction: column;
-  gap: 4px;
-}
-
-.anchor-main small,
-.muted-line,
-.post-detail header span,
-.post-detail header small {
-  color: #64706a;
-}
-
-.anchor-main em {
-  overflow: hidden;
-  color: #333837;
-  font-style: normal;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.anchor-flags {
-  align-items: flex-start;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-width: 118px;
-}
-
-.anchor-flags i,
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 24px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #f2efe7;
-  color: #795c18;
-  font-size: 12px;
-  font-style: normal;
-}
-
-.anchor-flags .review,
-.badge.review {
-  background: #fff0e5;
-  color: #9a3f16;
-}
-
-.badge.duplicate {
-  background: #eef0fb;
-  color: #394d8f;
-}
-
-.badge.ok {
-  background: #e7f5ed;
-  color: #14633a;
-}
-
-.detail-pane {
-  min-height: 520px;
-  padding: 18px;
-}
-
-.detail-head,
-.status-line,
-.post-detail header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.author-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 0 10px;
-  border: 1px solid #d9ddd7;
-  border-radius: 8px;
-  color: #4f5b56;
-}
-
-.status-line {
-  justify-content: flex-start;
-  flex-wrap: wrap;
-  margin: 14px 0;
-}
-
-.post-detail {
-  padding: 14px 0;
-  border-top: 1px solid #edf0ec;
-}
-
-.post-detail header {
-  justify-content: flex-start;
-  margin-bottom: 10px;
-}
-
-.content-block {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: 1.7;
-}
-
-.content-block.compact {
-  margin-top: 8px;
-  color: #4f5b56;
-}
-
-details {
-  margin-top: 10px;
-}
-
-summary {
-  cursor: pointer;
-  color: #167a73;
-}
-
-.rule-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
-  gap: 16px;
-}
-
-.panel,
-.empty-panel {
-  padding: 18px;
-}
-
-.single-panel {
-  min-height: 420px;
-}
-
-.meta-list {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  margin: 16px 0;
-}
-
-.meta-list div {
-  padding: 10px;
-  border: 1px solid #edf0ec;
-  border-radius: 8px;
-}
-
-.meta-list dt {
-  color: #64706a;
-  font-size: 12px;
-}
-
-.meta-list dd {
-  margin: 4px 0 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-pre {
-  max-height: 560px;
-  overflow: auto;
-  margin: 14px 0 0;
-  padding: 14px;
-  border-radius: 8px;
-  background: #202124;
-  color: #f2f5f0;
-  line-height: 1.5;
-}
-
-.warning-list {
-  display: grid;
-  gap: 10px;
-  padding: 0;
-  list-style: none;
-}
-
-.warning-list li {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid #e4d488;
-  border-radius: 8px;
-  background: #fff9df;
-}
-
-.ignored-list {
-  display: grid;
-  gap: 10px;
-}
-
-.ignored-row {
-  padding: 12px;
-  border: 1px solid #edf0ec;
-  border-radius: 8px;
-}
-
-.ignored-row p {
-  margin: 8px 0 0;
-}
-
-.row-main {
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.row-main small {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #eef1ee;
-  color: #4f5b56;
-}
-
-.empty-panel {
-  display: grid;
-  min-height: 260px;
-  place-items: center;
-  color: #64706a;
-}
-
+.entry-row:hover, .entry-row.selected { background: #eef7f5; }
+.entry-index { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 8px; background: #27312f; color: #ffffff; font-weight: 700; }
+.entry-main, .entry-flags, .row-main { display: flex; min-width: 0; }
+.entry-main { flex-direction: column; gap: 4px; }
+.entry-main small, .muted-line, .post-detail header span, .post-detail header small { color: #64706a; }
+.entry-main em { overflow: hidden; color: #333837; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.entry-flags { align-items: flex-start; justify-content: flex-end; flex-wrap: wrap; gap: 6px; max-width: 118px; }
+.entry-flags i, .badge { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 2px 8px; border-radius: 999px; background: #f2efe7; color: #795c18; font-size: 12px; font-style: normal; }
+.entry-flags .review, .badge.review { background: #fff0e5; color: #9a3f16; }
+.badge.duplicate { background: #eef0fb; color: #394d8f; }
+.badge.ok { background: #e7f5ed; color: #14633a; }
+.detail-pane { min-height: 520px; padding: 18px; }
+.detail-head, .status-line, .post-detail header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.author-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 10px; border: 1px solid #d9ddd7; border-radius: 8px; color: #4f5b56; }
+.status-line { justify-content: flex-start; flex-wrap: wrap; margin: 14px 0; }
+.field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+.field-grid div, .meta-list div { padding: 10px; border: 1px solid #edf0ec; border-radius: 8px; }
+.field-grid dt, .meta-list dt { color: #64706a; font-size: 12px; }
+.field-grid dd, .meta-list dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+.post-detail { padding: 14px 0; border-top: 1px solid #edf0ec; }
+.post-detail header { justify-content: flex-start; margin-bottom: 10px; }
+.content-block { margin: 0; white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
+.content-block.compact { margin-top: 8px; color: #4f5b56; }
+details { margin-top: 10px; }
+summary { cursor: pointer; color: #167a73; }
+.rule-layout { display: grid; grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr); gap: 16px; }
+.panel, .empty-panel { padding: 18px; }
+.single-panel { min-height: 420px; }
+.meta-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }
+pre { max-height: 560px; overflow: auto; margin: 14px 0 0; padding: 14px; border-radius: 8px; background: #202124; color: #f2f5f0; line-height: 1.5; }
+.warning-list { display: grid; gap: 10px; padding: 0; list-style: none; }
+.warning-list li { display: flex; align-items: flex-start; gap: 8px; padding: 10px; border: 1px solid #e4d488; border-radius: 8px; background: #fff9df; }
+.ignored-list { display: grid; gap: 10px; }
+.ignored-row { padding: 12px; border: 1px solid #edf0ec; border-radius: 8px; }
+.ignored-row p { margin: 8px 0 0; }
+.row-main { align-items: center; gap: 10px; flex-wrap: wrap; }
+.row-main small { padding: 2px 8px; border-radius: 999px; background: #eef1ee; color: #4f5b56; }
+.empty-panel { display: grid; min-height: 260px; place-items: center; color: #64706a; }
+.list-empty { padding: 16px; }
 @media (max-width: 1100px) {
-  .summary-band {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .workspace,
-  .rule-layout {
-    grid-template-columns: 1fr;
-  }
+  .summary-band { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .workspace, .rule-layout { grid-template-columns: 1fr; }
 }
-
 @media (max-width: 760px) {
-  .topbar,
-  .control-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  main,
-  .topbar {
-    padding-left: 16px;
-    padding-right: 16px;
-  }
-
-  .toolbar,
-  .tabs {
-    justify-content: flex-start;
-    overflow-x: auto;
-  }
-
-  .summary-band,
-  .meta-list {
-    grid-template-columns: 1fr;
-  }
-
-  .anchor-row {
-    grid-template-columns: 38px minmax(0, 1fr);
-  }
-
-  .anchor-flags {
-    grid-column: 2;
-    justify-content: flex-start;
-    max-width: none;
-  }
-
-  .detail-head,
-  .post-detail header {
-    align-items: flex-start;
-    flex-direction: column;
-  }
+  .topbar, .control-row { align-items: stretch; flex-direction: column; }
+  main, .topbar { padding-left: 16px; padding-right: 16px; }
+  .tabs, .topic-strip { justify-content: flex-start; overflow-x: auto; }
+  .summary-band, .meta-list, .field-grid { grid-template-columns: 1fr; }
+  .entry-row { grid-template-columns: 38px minmax(0, 1fr); }
+  .entry-flags { grid-column: 2; justify-content: flex-start; max-width: none; }
+  .detail-head, .post-detail header { align-items: flex-start; flex-direction: column; }
 }
 </style>

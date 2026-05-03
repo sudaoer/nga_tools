@@ -21,12 +21,47 @@ export interface AnchorItem {
   id: number;
   author: AuthorInfo;
   posts: AnchorPost[];
+  entries?: AnchorEntry[];
   first_lou: number;
   first_postdate?: string | null;
   has_duplicate: boolean;
   duplicate_lous: number[];
+  topic_ids?: string[];
   confidence?: number | null;
   needs_manual_review?: boolean;
+}
+
+export interface TopicInfo {
+  id: string;
+  name: string;
+  short_name?: string;
+  allow_multiple_per_author?: boolean;
+  end_time?: string | null;
+  description?: string;
+}
+
+export interface AnchorEntry {
+  id: number;
+  topic_id: string;
+  topic_name: string;
+  topic_short_name?: string;
+  subtopic_name?: string | null;
+  author: AuthorInfo;
+  lou: number;
+  pid?: number | string | null;
+  postdate?: string | null;
+  content: string;
+  fields?: Record<string, unknown>;
+  raw_clean_content?: string;
+  original_content?: string;
+  attachments?: Array<Record<string, unknown>>;
+  confidence?: number | null;
+  needs_manual_review?: boolean;
+  classification_source?: string | null;
+  classification_note?: string | null;
+  has_duplicate?: boolean;
+  duplicate_lous?: number[];
+  duplicate_entry_ids?: number[];
 }
 
 export interface IgnoredItem {
@@ -52,9 +87,13 @@ export interface AnchorMeta {
   cache_dir?: string;
   total_pages?: number;
   candidate_count?: number;
+  entry_count?: number;
   anchor_count?: number;
+  author_count?: number;
   ignored_count?: number;
+  duplicate_entry_count?: number;
   duplicate_author_count?: number;
+  topic_counts?: Record<string, number>;
   source_page_range?: {
     start: number;
     end: number;
@@ -75,6 +114,8 @@ export interface AnchorData {
   meta: AnchorMeta;
   rule_post: RulePost | null;
   parsed_rule: Record<string, unknown> | null;
+  topics?: TopicInfo[];
+  entries?: AnchorEntry[];
   anchors: AnchorItem[];
   ignored: IgnoredItem[];
   warnings: string[];
