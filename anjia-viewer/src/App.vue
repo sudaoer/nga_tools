@@ -80,6 +80,18 @@ const selectedEntry = computed(() => {
   return filteredEntries.value.find((entry) => entry.id === selectedEntryId.value) ?? filteredEntries.value[0] ?? null;
 });
 
+const topicEntryNumbers = computed(() => {
+  const counters = new Map<string, number>();
+  const numbers = new Map<number, number>();
+  for (const entry of entries.value) {
+    const topicId = entry.topic_id || 'unclassified';
+    const nextNumber = (counters.get(topicId) ?? 0) + 1;
+    counters.set(topicId, nextNumber);
+    numbers.set(entry.id, nextNumber);
+  }
+  return numbers;
+});
+
 const tabs = computed(() => [
   { key: 'entries' as const, label: '主题安价', count: entries.value.length },
   { key: 'duplicates' as const, label: '重复复核', count: duplicateEntries.value.length },
@@ -386,6 +398,10 @@ function sourceLouLabel(entry: AnchorEntry) {
   return louList(entry.source_lous?.length ? entry.source_lous : [entry.lou]);
 }
 
+function topicEntryNumber(entry: AnchorEntry) {
+  return topicEntryNumbers.value.get(entry.id) ?? entry.id;
+}
+
 function sourcePosts(entry: AnchorEntry): AnchorPost[] {
   if (entry.source_posts?.length) {
     return entry.source_posts;
@@ -563,7 +579,7 @@ function topicClass(topicId: string) {
             :class="['entry-row', { selected: selectedEntry?.id === entry.id }]"
             @click="selectEntry(entry)"
           >
-            <span class="entry-index">{{ entry.id }}</span>
+            <span class="entry-index">{{ topicEntryNumber(entry) }}</span>
             <span class="entry-main">
               <b>{{ entry.topic_short_name || entry.topic_name }}</b>
               <small>{{ entry.author.username || '未知作者' }} · uid {{ entry.author.uid ?? '未知' }} · #{{ entry.lou }}</small>
@@ -581,7 +597,7 @@ function topicClass(topicId: string) {
         <aside v-if="selectedEntry" class="detail-pane">
           <div class="detail-head">
             <div>
-              <p class="eyebrow">#{{ selectedEntry.lou }} · {{ selectedEntry.topic_id }}</p>
+              <p class="eyebrow">主题内编号 {{ topicEntryNumber(selectedEntry) }} · #{{ selectedEntry.lou }} · {{ selectedEntry.topic_id }}</p>
               <h2>{{ selectedEntry.topic_name }}</h2>
             </div>
             <div class="author-chip">
@@ -693,7 +709,12 @@ button, input { font: inherit; }
 }
 .icon-button { padding: 0 14px; }
 .icon-button.strong { border-color: #167a73; background: #167a73; color: #ffffff; }
-main { width: min(1480px, 100%); margin: 0 auto; padding: 24px 32px 40px; }
+main {
+  width: min(1480px, 100%);
+  margin: 0 auto;
+  padding: 24px 32px 40px;
+  --workspace-pane-max-height: clamp(520px, calc(100vh - 320px), 960px);
+}
 .summary-band {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr)) repeat(2, minmax(180px, 1.35fr));
@@ -729,9 +750,16 @@ main { width: min(1480px, 100%); margin: 0 auto; padding: 24px 32px 40px; }
 .tab-button b, .topic-button b { min-width: 22px; padding: 2px 6px; border-radius: 999px; background: #eef1ee; font-size: 12px; }
 .tab-button.active, .topic-button.active { border-color: #167a73; color: #0f625c; }
 .topic-strip { justify-content: flex-start; margin: -4px 0 18px; padding: 10px; border: 1px solid #d9ddd7; border-radius: 8px; background: #ffffff; }
-.workspace { display: grid; grid-template-columns: minmax(390px, 0.95fr) minmax(0, 1.35fr); gap: 16px; }
+.workspace { display: grid; grid-template-columns: minmax(390px, 0.95fr) minmax(0, 1.35fr); gap: 16px; align-items: start; }
 .list-pane, .detail-pane, .panel, .empty-panel { border: 1px solid #d9ddd7; border-radius: 8px; background: #ffffff; }
-.list-pane { min-height: 520px; overflow: hidden; }
+.list-pane,
+.detail-pane {
+  min-height: 520px;
+  max-height: var(--workspace-pane-max-height);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
 .entry-row {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr) auto;
@@ -757,7 +785,7 @@ main { width: min(1480px, 100%); margin: 0 auto; padding: 24px 32px 40px; }
 .entry-flags .review, .badge.review { background: #fff0e5; color: #9a3f16; }
 .badge.duplicate { background: #eef0fb; color: #394d8f; }
 .badge.ok { background: #e7f5ed; color: #14633a; }
-.detail-pane { min-height: 520px; padding: 18px; }
+.detail-pane { padding: 18px; }
 .detail-head, .status-line, .post-detail header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .author-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 10px; border: 1px solid #d9ddd7; border-radius: 8px; color: #4f5b56; }
 .status-line { justify-content: flex-start; flex-wrap: wrap; margin: 14px 0; }
@@ -819,6 +847,10 @@ pre { max-height: 560px; overflow: auto; margin: 14px 0 0; padding: 14px; border
 @media (max-width: 1100px) {
   .summary-band { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .workspace, .rule-layout { grid-template-columns: 1fr; }
+  .list-pane, .detail-pane {
+    max-height: none;
+    overflow: visible;
+  }
 }
 @media (max-width: 760px) {
   .topbar, .control-row { align-items: stretch; flex-direction: column; }

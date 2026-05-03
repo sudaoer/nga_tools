@@ -44,6 +44,7 @@ QA_EXPLICIT_MARKERS = (
     "🐖",
 )
 WEIGHT_TARGET_PREFIX_RE = re.compile(r"^加权(?:[：: ]+)?(?P<target>.+)$", flags=re.IGNORECASE)
+WEIGHT_ONLY_RE = re.compile(r"^(?:安价[：: ]*)?加权(?:一下|1下)?[。！!？?~…]*$", flags=re.IGNORECASE)
 
 DEFAULT_TOPICS: list[dict[str, Any]] = [
     {
@@ -584,6 +585,234 @@ def annotate_special_proposals(proposals: list[dict[str, Any]]) -> list[dict[str
                 proposal["weight_target_hint"] = weight_hint
                 break
     return proposals
+
+
+def is_weight_only_text(text: Any) -> bool:
+    if not isinstance(text, str):
+        return False
+    return WEIGHT_ONLY_RE.fullmatch(compact_text(text)) is not None
+
+
+def proposal_source_pids(proposal: dict[str, Any]) -> list[int]:
+    result: list[int] = []
+    for source_post in proposal.get("source_posts", []):
+        if not isinstance(source_post, dict):
+            continue
+        pid = to_int(source_post.get("pid"))
+        if pid is not None:
+            result.append(pid)
+    return sorted(set(result))
+
+
+def reply_weight_match_texts(item: dict[str, Any]) -> list[str]:
+    texts: list[str] = []
+    content = item.get("content")
+    explicit_hint = extract_weight_target_hint(content)
+    if explicit_hint is not None:
+        texts.append(explicit_hint)
+
+    reply_context = item.get("reply_context")
+    if isinstance(reply_context, dict):
+        quoted_preview = reply_context.get("quoted_preview")
+        if isinstance(quoted_preview, str) and quoted_preview.strip():
+            texts.append(quoted_preview)
+
+    return merge_unique_texts(texts)
+
+
+def resolve_reply_weight_target_proposal(
+    item: dict[str, Any],
+    proposals_by_pid: dict[int, list[dict[str, Any]]],
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    reply_context = item.get("reply_context")
+    if not isinstance(reply_context, dict):
+        return None, None, "缺少 Reply 上下文"
+
+    reply_pid = to_int(reply_context.get("reply_to_pid"))
+    if reply_pid is None:
+        return None, None, "Reply 引用里没有 pid"
+
+    candidates = [proposal for proposal in proposals_by_pid.get(reply_pid, []) if not proposal.get("weight_target_hint")]
+    if not candidates:
+        return None, None, f"reply pid={reply_pid} 没有对应候选条目"
+
+    match_texts = reply_weight_match_texts(item)
+    if len(candidates) == 1 and not match_texts:
+        return candidates[0], None, None
+
+    scored: list[tuple[int, dict[str, Any], str | None]] = []
+    for candidate in candidates:
+        best_score = 0
+        best_text: str | None = None
+        for match_text in match_texts:
+            score = weight_target_score(candidate, match_text)
+            if score > best_score:
+                best_score = score
+                best_text = match_text
+        if best_score > 0:
+            scored.append((best_score, candidate, best_text))
+
+    if not scored:
+        if len(candidates) == 1:
+            return candidates[0], None, None
+        return None, None, f"reply pid={reply_pid} 对应 {len(candidates)} 个候选，且引用内容不足以区分"
+
+    scored.sort(key=lambda item: (-item[0], int(item[1].get("chosen_lou") or 0), str(item[1].get("topic_id") or "")))
+    best_score = scored[0][0]
+    best_candidates = [item for item in scored if item[0] == best_score]
+    if len(best_candidates) != 1:
+        return None, None, f"reply pid={reply_pid} 存在 {len(best_candidates)} 个同分候选"
+
+    _, candidate, match_text = best_candidates[0]
+    return candidate, match_text, None
+
+
+def preferred_reply_weight_hint(target_proposal: dict[str, Any], match_text: str | None) -> str | None:
+    if target_proposal.get("topic_id") == "theme4_carriage_name":
+        fields = target_proposal.get("fields")
+        if isinstance(fields, dict):
+            for value in field_text_values(fields.get("名字")):
+                extracted = extract_carriage_names(value)
+                if extracted:
+                    return "、".join(extracted)
+                inline = inline_carriage_names(value)
+                if inline:
+                    return "、".join(inline)
+        if isinstance(match_text, str) and match_text.strip():
+            extracted = extract_carriage_names(match_text)
+            if extracted:
+                return "、".join(extracted)
+
+    if isinstance(match_text, str) and match_text.strip():
+        return compact_text(match_text)
+
+    content = target_proposal.get("normalized_anchor_text") or target_proposal.get("content")
+    if isinstance(content, str) and content.strip():
+        return compact_text(content)
+    return None
+
+
+def format_weight_entry_text(hint_text: str | None, fallback_text: Any) -> str:
+    if isinstance(hint_text, str) and hint_text.strip():
+        compacted = compact_text(hint_text).replace("\n", " ")
+        compacted = re.sub(r"\s{2,}", " ", compacted).strip()
+        if compacted:
+            return f"加权：{compacted}"
+
+    if isinstance(fallback_text, str) and fallback_text.strip():
+        return compact_text(fallback_text)
+    return "加权"
+
+
+def recover_reply_weight_proposals(
+    proposals: list[dict[str, Any]],
+    ignored: list[dict[str, Any]],
+    parsed_rule: dict[str, Any],
+    warnings: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    proposals_by_pid: dict[int, list[dict[str, Any]]] = {}
+    for proposal in proposals:
+        for pid in proposal_source_pids(proposal):
+            proposals_by_pid.setdefault(pid, []).append(proposal)
+
+    for proposal in proposals:
+        if proposal.get("weight_target_hint"):
+            continue
+        if str(proposal.get("topic_id", "unclassified")) != "unclassified":
+            continue
+
+        source_posts = proposal.get("source_posts")
+        if not isinstance(source_posts, list) or not source_posts:
+            continue
+        source_post = source_posts[0]
+        if not isinstance(source_post, dict):
+            continue
+
+        proposal_text = proposal.get("normalized_anchor_text") or source_post.get("content")
+        if not is_weight_only_text(proposal_text):
+            continue
+
+        target_proposal, match_text, reason = resolve_reply_weight_target_proposal(source_post, proposals_by_pid)
+        if target_proposal is None:
+            if reason:
+                warnings.append(f"楼层 {proposal.get('chosen_lou')} 的 Reply 加权未能从未分类条目恢复：{reason}")
+            continue
+
+        topic_id = str(target_proposal.get("topic_id", "unclassified"))
+        topic_name, topic_short_name = topic_names(topic_id, parsed_rule)
+        hint_text = preferred_reply_weight_hint(target_proposal, match_text)
+        reply_context = source_post.get("reply_context")
+        reply_pid = to_int(reply_context.get("reply_to_pid")) if isinstance(reply_context, dict) else None
+
+        proposal["topic_id"] = topic_id
+        proposal["topic_name"] = topic_name
+        proposal["topic_short_name"] = topic_short_name
+        proposal["subtopic_name"] = None
+        proposal["normalized_anchor_text"] = format_weight_entry_text(hint_text, proposal_text)
+        proposal["needs_manual_review"] = False
+        proposal["classification_source"] = "reply_weight_recovery"
+        proposal["classification_note"] = f"Reply 引用 pid={reply_pid}，按加权处理" if reply_pid is not None else "Reply 引用按加权处理"
+        proposal["weight_target_hint"] = hint_text
+
+    existing_pairs = {
+        (to_int(proposal.get("chosen_lou")), str(proposal.get("topic_id")))
+        for proposal in proposals
+        if to_int(proposal.get("chosen_lou")) is not None and isinstance(proposal.get("topic_id"), str)
+    }
+    recovered: list[dict[str, Any]] = []
+    kept_ignored: list[dict[str, Any]] = []
+
+    for item in ignored:
+        content = item.get("content")
+        if not is_weight_only_text(content):
+            kept_ignored.append(item)
+            continue
+
+        target_proposal, match_text, reason = resolve_reply_weight_target_proposal(item, proposals_by_pid)
+        if target_proposal is None:
+            kept_ignored.append(item)
+            if reason:
+                warnings.append(f"楼层 {item.get('lou')} 的 Reply 加权未能恢复：{reason}")
+            continue
+
+        chosen_lou = to_int(item.get("lou"))
+        topic_id = str(target_proposal.get("topic_id", "unclassified"))
+        if chosen_lou is None or (chosen_lou, topic_id) in existing_pairs:
+            kept_ignored.append(item)
+            continue
+
+        hint_text = preferred_reply_weight_hint(target_proposal, match_text)
+        topic_name, topic_short_name = topic_names(topic_id, parsed_rule)
+        source_lous = parse_lou_list(item.get("source_lous"))
+        source_lous.append(chosen_lou)
+        reply_context = item.get("reply_context")
+        reply_pid = to_int(reply_context.get("reply_to_pid")) if isinstance(reply_context, dict) else None
+
+        recovered.append(
+            {
+                "author_key": item.get("author_key"),
+                "author": item.get("author", {}),
+                "topic_id": topic_id,
+                "topic_name": topic_name,
+                "topic_short_name": topic_short_name,
+                "subtopic_name": None,
+                "chosen_lou": chosen_lou,
+                "source_lous": sorted(set(source_lous)),
+                "source_posts": [post_source_payload(item)],
+                "normalized_anchor_text": format_weight_entry_text(hint_text, content),
+                "fields": {},
+                "confidence": item.get("confidence"),
+                "needs_manual_review": False,
+                "classification_source": "reply_weight_recovery",
+                "classification_note": f"Reply 引用 pid={reply_pid}，按加权处理" if reply_pid is not None else "Reply 引用按加权处理",
+                "weight_target_hint": hint_text,
+            }
+        )
+        existing_pairs.add((chosen_lou, topic_id))
+
+    if recovered:
+        proposals.extend(recovered)
+    return proposals, kept_ignored
 
 
 def has_explicit_qa_context(text: Any) -> bool:
@@ -1711,8 +1940,11 @@ def weight_target_score(candidate: dict[str, Any], hint_text: str) -> int:
                 return 400
             if normalized_hint in normalized_text:
                 best_score = max(best_score, 320)
+            elif len(normalized_text) >= 4 and normalized_text in normalized_hint:
+                best_score = max(best_score, 260)
 
     prioritized_sources = [
+        (candidate.get("normalized_anchor_text"), 320, 260),
         (candidate.get("content"), 300, 240),
         (candidate.get("raw_clean_content"), 240, 180),
         (candidate.get("original_content"), 220, 160),
@@ -2007,6 +2239,7 @@ def run_counter(args: argparse.Namespace) -> dict[str, Any]:
     ignored.extend(model_ignored)
 
     annotated_proposals = annotate_special_proposals(proposals)
+    annotated_proposals, ignored = recover_reply_weight_proposals(annotated_proposals, ignored, parsed_rule, warnings)
     kept_proposals, superseded_ignored = enforce_latest_policy(annotated_proposals, parsed_rule)
     ignored.extend(superseded_ignored)
     entries = finalize_entries(kept_proposals, parsed_rule)
