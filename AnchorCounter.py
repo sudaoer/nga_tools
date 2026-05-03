@@ -24,8 +24,25 @@ POSTS_PER_PAGE = 20
 SCHEMA_VERSION = 3
 DEFAULT_POST_CHAR_LIMIT = 7000
 DEFAULT_REASONING_EFFORT = "high"
-DEFAULT_LLM_WORKERS = 32
+DEFAULT_LLM_WORKERS = 64
 NGA_POST_URL_TEMPLATE = "https://ngabbs.com/read.php?pid={pid}&opt=128"
+REPLY_QUOTE_BLOCK_RE = re.compile(
+    r"\[quote\]\s*\[pid=(?P<pid>\d+)(?:,(?P<tid>\d+),(?P<page>\d+))?\]Reply\[/pid\](?P<body>.*?)\[/quote\]",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+QA_EXPLICIT_MARKERS = (
+    "提问",
+    "q&a",
+    "qa",
+    "问答",
+    "神奇小猪",
+    "小猪",
+    "猪导",
+    "楼主",
+    "作者",
+    "mrhtheefghh",
+    "🐖",
+)
 
 DEFAULT_TOPICS: list[dict[str, Any]] = [
     {
@@ -210,25 +227,64 @@ def clean_post_text(text: Any) -> str:
     return cleaned.strip()
 
 
-def strip_reply_quote_blocks(text: str) -> str:
-    return re.sub(
-        r"\[quote\]\s*\[pid=[^\]]+\]Reply\[/pid\].*?\[/quote\]",
+def default_reply_context() -> dict[str, Any]:
+    return {
+        "has_reply_quote": False,
+        "reply_quote_count": 0,
+        "reply_to_pid": None,
+        "reply_to_tid": None,
+        "reply_to_page": None,
+        "reply_to_author": None,
+        "quoted_preview": None,
+    }
+
+
+def summarize_reply_context(text: Any) -> dict[str, Any]:
+    context = default_reply_context()
+    if not isinstance(text, str):
+        return context
+
+    matches = list(REPLY_QUOTE_BLOCK_RE.finditer(text))
+    if not matches:
+        return context
+
+    first_match = matches[0]
+    context["has_reply_quote"] = True
+    context["reply_quote_count"] = len(matches)
+    context["reply_to_pid"] = to_int(first_match.group("pid"))
+    context["reply_to_tid"] = to_int(first_match.group("tid"))
+    context["reply_to_page"] = to_int(first_match.group("page"))
+
+    quoted_body = first_match.group("body") or ""
+    author_match = re.search(
+        r"Post by \[uid=\d+\](?P<author>[^\[]+)\[/uid\]",
+        quoted_body,
+        flags=re.IGNORECASE,
+    )
+    if author_match is not None:
+        context["reply_to_author"] = author_match.group("author").strip()
+
+    quoted_body = re.sub(
+        r"^\s*<b>Post by .*?</b>\s*(?:<br\s*/?>\s*)*",
         "",
-        text,
+        quoted_body,
+        count=1,
         flags=re.DOTALL | re.IGNORECASE,
     )
+    quoted_preview = compact_text(clean_post_text(quoted_body))
+    if quoted_preview:
+        context["quoted_preview"] = truncate_text(quoted_preview, 160)
+    return context
+
+
+def strip_reply_quote_blocks(text: str) -> str:
+    return REPLY_QUOTE_BLOCK_RE.sub("", text)
 
 
 def count_reply_quote_blocks(text: Any) -> int:
     if not isinstance(text, str):
         return 0
-    return len(
-        re.findall(
-            r"\[quote\]\s*\[pid=[^\]]+\]Reply\[/pid\].*?\[/quote\]",
-            text,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-    )
+    return len(REPLY_QUOTE_BLOCK_RE.findall(text))
 
 
 def compact_text(text: str) -> str:
@@ -241,6 +297,19 @@ def truncate_text(text: str, limit: int) -> str:
     if limit <= 0 or len(text) <= limit:
         return text
     return text[:limit] + "\n...[已截断]"
+
+
+def normalize_keyword_text(text: Any) -> str:
+    if not isinstance(text, str):
+        return ""
+    return re.sub(r"\s+", "", text).casefold()
+
+
+def has_explicit_qa_context(text: Any) -> bool:
+    normalized = normalize_keyword_text(text)
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in QA_EXPLICIT_MARKERS)
 
 
 def post_url(pid: Any) -> str | None:
@@ -372,7 +441,7 @@ def get_attachment_summary(post: dict[str, Any]) -> list[dict[str, Any]]:
 def post_record(post: dict[str, Any]) -> dict[str, Any]:
     original_content = post.get("content", "")
     content = clean_post_text(original_content)
-    removed_reply_quotes = count_reply_quote_blocks(original_content)
+    reply_context = summarize_reply_context(original_content)
     lou = to_int(post.get("lou"))
     pid = post.get("pid")
     author = get_author(post)
@@ -385,7 +454,8 @@ def post_record(post: dict[str, Any]) -> dict[str, Any]:
         "author_key": author_key(author, lou),
         "content": content,
         "original_content": original_content if isinstance(original_content, str) else "",
-        "removed_reply_quotes": removed_reply_quotes,
+        "removed_reply_quotes": int(reply_context["reply_quote_count"]),
+        "reply_context": reply_context,
         "attachments": get_attachment_summary(post),
     }
 
@@ -551,6 +621,9 @@ def build_author_packs(candidates: list[dict[str, Any]], post_char_limit: int) -
             }
             order.append(key)
         content = str(candidate.get("content", ""))
+        reply_context = candidate.get("reply_context")
+        if not isinstance(reply_context, dict):
+            reply_context = default_reply_context()
         grouped[key]["posts"].append(
             {
                 "lou": candidate.get("lou"),
@@ -558,6 +631,13 @@ def build_author_packs(candidates: list[dict[str, Any]], post_char_limit: int) -
                 "postdate": candidate.get("postdate"),
                 "content": truncate_text(content, post_char_limit),
                 "content_truncated": post_char_limit > 0 and len(content) > post_char_limit,
+                "reply_context": {
+                    "has_reply_quote": bool(reply_context.get("has_reply_quote", False)),
+                    "reply_quote_count": int(reply_context.get("reply_quote_count") or 0),
+                    "reply_to_author": reply_context.get("reply_to_author"),
+                    "reply_to_pid": reply_context.get("reply_to_pid"),
+                    "quoted_preview": reply_context.get("quoted_preview"),
+                },
             }
         )
 
@@ -694,10 +774,12 @@ def build_author_prompt(parsed_rule: dict[str, Any], author_pack: dict[str, Any]
 - 这个观众的所有未忽略候选楼已经一次性给出，必须整体判断。
 - 观众可能只安价部分主题；没有安价的主题不要补，不要猜。
 - 不同主题可以分散在多个回复中，应该分别保留。
+- posts[*].reply_context.has_reply_quote=true 表示这楼是在带 Reply 引用回复别人；reply_to_author 和 quoted_preview 用来说明它在接谁、接什么话。
 - 普通主题包括 theme1_travel、theme2_training、theme2_guest、theme3_engagement、theme4_carriage_name；每个普通主题最终只保留 1 条。
 - 如果同一普通主题多次提交，只在 items 中返回楼层号最新的那条；旧楼写入 ignored_posts，原因说明被哪个楼覆盖。
 - qa 是特别 Q&A，可以有多个问题，不按“每主题 1 条”去重。
 - 不要把普通安价事件里的疑问句当成 qa。只有明显是在 Q&A/提问上下文，或向神奇小猪/作者/猪导提问，才归为 qa。
+- 如果某楼带有 Reply 引用，而且正文只是接被引用楼层聊天、追问、吐槽，不能因为它是问句就归为 qa；这类一般写入 ignored_posts。
 - 如果某楼只是聊天、顶帖、修改说明、无效内容，写入 ignored_posts。
 - 如果确实像安价但主题或字段无法确定，使用 topic_id="unclassified"，并设置 needs_manual_review=true。
 - 不要返回作者 uid、作者名、author_key 或其他作者标识；脚本会在本地关联来源。
@@ -724,6 +806,7 @@ def post_source_payload(post: dict[str, Any]) -> dict[str, Any]:
         "content": post.get("content", ""),
         "original_content": post.get("original_content", ""),
         "removed_reply_quotes": post.get("removed_reply_quotes", 0),
+        "reply_context": post.get("reply_context", default_reply_context()),
         "attachments": post.get("attachments", []),
     }
 
@@ -755,10 +838,119 @@ def ignored_from_post(post: dict[str, Any], reason: str, stage: str, extra: dict
     return payload
 
 
+def strip_topic_prefix_from_reason(reason_text: str, topic_id: str, parsed_rule: dict[str, Any]) -> str:
+    topic_name, topic_short_name = topic_names(topic_id, parsed_rule)
+    prefixes = [topic_name, topic_short_name]
+
+    theme_match = re.match(r"theme(?P<num>[1-4])_", topic_id)
+    if theme_match is not None:
+        theme_number = theme_match.group("num")
+        chinese_numbers = {"1": "一", "2": "二", "3": "三", "4": "四"}
+        prefixes.extend([f"主题{theme_number}", f"主题{chinese_numbers[theme_number]}"])
+    elif topic_id == "qa":
+        prefixes.extend(["特别环节", "Q&A", "qa", "问答"])
+
+    stripped = reason_text.strip()
+    for prefix in prefixes:
+        normalized_prefix = compact_text(prefix)
+        if normalized_prefix and stripped.startswith(normalized_prefix):
+            candidate = stripped[len(normalized_prefix) :].lstrip("：:，,、 ")
+            if candidate:
+                return candidate
+    return stripped
+
+
+def topic_scoped_ignore_reason(reason_text: str, topic_id: str | None, parsed_rule: dict[str, Any]) -> str:
+    base_reason = compact_text(reason_text) or "模型判定该主题无效"
+    if not topic_id or base_reason.startswith("仅忽略"):
+        return base_reason
+
+    topic_name, _ = topic_names(topic_id, parsed_rule)
+    normalized_reason = strip_topic_prefix_from_reason(base_reason, topic_id, parsed_rule)
+    return f"仅忽略{topic_name}，{normalized_reason}"
+
+
+def detect_placeholder_topics(text: Any) -> list[str]:
+    if not isinstance(text, str) or "请输入文本" not in text:
+        return []
+
+    topic_number_map = {
+        "1": "theme1_travel",
+        "一": "theme1_travel",
+        "2": "theme2_training",
+        "二": "theme2_training",
+        "3": "theme3_engagement",
+        "三": "theme3_engagement",
+        "4": "theme4_carriage_name",
+        "四": "theme4_carriage_name",
+    }
+    detected = [
+        topic_number_map[match.group("number")]
+        for match in re.finditer(
+            r"主题(?P<number>[一二三四1234])\s*[:：]\s*[（(]?\s*请输入文本\s*[)）]?",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match.group("number") in topic_number_map
+    ]
+
+    if re.search(r"(?:马车名字|安价名字)\s*[:：]\s*[（(]?\s*请输入文本\s*[)）]?", text, flags=re.IGNORECASE):
+        detected.append("theme4_carriage_name")
+    if re.search(r"(?:特别环节|Q&A|qa|问答)\s*[:：]\s*[（(]?\s*请输入文本\s*[)）]?", text, flags=re.IGNORECASE):
+        detected.append("qa")
+
+    return sorted(set(detected))
+
+
+def placeholder_ignored_items(
+    post_by_lou: dict[int, dict[str, Any]],
+    proposals: list[dict[str, Any]],
+    ignored: list[dict[str, Any]],
+    parsed_rule: dict[str, Any],
+) -> list[dict[str, Any]]:
+    captured_topic_pairs: set[tuple[int, str]] = set()
+    for proposal in proposals:
+        topic_id = proposal.get("topic_id")
+        if not isinstance(topic_id, str) or not topic_id:
+            continue
+        for lou in parse_lou_list(proposal.get("source_lous")):
+            captured_topic_pairs.add((lou, topic_id))
+
+    for ignored_item in ignored:
+        ignored_lou = to_int(ignored_item.get("lou"))
+        topic_id = ignored_item.get("topic_id")
+        if ignored_lou is None or not isinstance(topic_id, str) or not topic_id:
+            continue
+        captured_topic_pairs.add((ignored_lou, topic_id))
+
+    result: list[dict[str, Any]] = []
+    for lou, post in post_by_lou.items():
+        for topic_id in detect_placeholder_topics(post.get("content", "")):
+            pair = (lou, topic_id)
+            if pair in captured_topic_pairs:
+                continue
+            topic_name, _ = topic_names(topic_id, parsed_rule)
+            result.append(
+                ignored_from_post(
+                    post,
+                    topic_scoped_ignore_reason("无有效安价内容，仅为占位符", topic_id, parsed_rule),
+                    "placeholder_topic_filter",
+                    {
+                        "topic_id": topic_id,
+                        "topic_name": topic_name,
+                        "source_lous": [lou],
+                    },
+                )
+            )
+            captured_topic_pairs.add(pair)
+    return result
+
+
 def normalize_llm_ignored_item(
     item: dict[str, Any],
     post_by_lou: dict[int, dict[str, Any]],
     author_key_value: str,
+    parsed_rule: dict[str, Any],
 ) -> list[dict[str, Any]]:
     lous = parse_lou_list(item.get("source_lous"))
     item_lou = to_int(item.get("lou"))
@@ -767,8 +959,14 @@ def normalize_llm_ignored_item(
     lous = sorted(set(lou for lou in lous if lou in post_by_lou))
     reason = item.get("ignore_reason")
     reason_text = reason if isinstance(reason, str) and reason.strip() else "模型判定不是有效安价"
+    topic_id = normalize_topic_id(item.get("topic_id")) if item.get("topic_id") else None
+    topic_name = None
+    if topic_id is not None:
+        topic_name, _ = topic_names(topic_id, parsed_rule)
+        reason_text = topic_scoped_ignore_reason(reason_text, topic_id, parsed_rule)
     extra = {
-        "topic_id": normalize_topic_id(item.get("topic_id")) if item.get("topic_id") else None,
+        "topic_id": topic_id,
+        "topic_name": topic_name,
         "source_lous": lous,
         "superseded_by_lou": to_int(item.get("superseded_by_lou")),
     }
@@ -837,6 +1035,29 @@ def normalize_author_result(
         normalized_text = raw_item.get("normalized_anchor_text") or raw_item.get("content") or raw_item.get("text")
         if not isinstance(normalized_text, str) or not normalized_text.strip():
             normalized_text = chosen_post.get("content", "")
+        normalized_text = compact_text(normalized_text)
+
+        reply_context = chosen_post.get("reply_context")
+        if (
+            topic_id == "qa"
+            and isinstance(reply_context, dict)
+            and reply_context.get("has_reply_quote")
+            and not has_explicit_qa_context(normalized_text)
+            and not has_explicit_qa_context(chosen_post.get("content", ""))
+        ):
+            ignored.append(
+                ignored_from_post(
+                    chosen_post,
+                    "带 Reply 引用且正文缺少明确 Q&A 标记，按聊天处理",
+                    "reply_quote_filter",
+                    {
+                        "topic_id": topic_id,
+                        "source_lous": source_lous,
+                    },
+                )
+            )
+            continue
+
         topic_name, topic_short_name = topic_names(topic_id, parsed_rule)
 
         proposals.append(
@@ -850,7 +1071,7 @@ def normalize_author_result(
                 "chosen_lou": chosen_lou,
                 "source_lous": source_lous,
                 "source_posts": [post_source_payload(post_by_lou[lou]) for lou in source_lous],
-                "normalized_anchor_text": compact_text(normalized_text),
+                "normalized_anchor_text": normalized_text,
                 "fields": fields,
                 "confidence": clamp_confidence(raw_item.get("confidence")),
                 "needs_manual_review": bool(raw_item.get("needs_manual_review", False) or topic_id == "unclassified"),
@@ -867,12 +1088,14 @@ def normalize_author_result(
     for raw_item in raw_ignored:
         if not isinstance(raw_item, dict):
             continue
-        normalized_ignored = normalize_llm_ignored_item(raw_item, post_by_lou, key)
+        normalized_ignored = normalize_llm_ignored_item(raw_item, post_by_lou, key, parsed_rule)
         ignored.extend(normalized_ignored)
         for ignored_item in normalized_ignored:
             ignored_lou = to_int(ignored_item.get("lou"))
             if ignored_lou is not None:
                 seen_ignored_lous.add(ignored_lou)
+
+    ignored.extend(placeholder_ignored_items(post_by_lou, proposals, ignored, parsed_rule))
 
     used_lous = {lou for proposal in proposals for lou in proposal.get("source_lous", [])}
     for lou in sorted(set(pack_lous) - used_lous - seen_ignored_lous):
@@ -1436,7 +1659,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-llm", action="store_true", help="不调用模型，仅输出候选楼并标记人工复核。")
     parser.add_argument("--max-retries", type=int, default=2, help="模型 JSON 解析失败时的重试次数。")
     parser.add_argument("--reasoning-effort", default=DEFAULT_REASONING_EFFORT, choices=["high", "max"], help="DeepSeek 思考强度，默认 high。")
-    parser.add_argument("--llm-workers", type=int, default=DEFAULT_LLM_WORKERS, help="并发请求 LLM 的作者包数量，默认 32；设为 1 表示串行。")
+    parser.add_argument("--llm-workers", type=int, default=DEFAULT_LLM_WORKERS, help="并发请求 LLM 的作者包数量，默认 64；设为 1 表示串行。")
     parser.add_argument("--post-char-limit", type=int, default=DEFAULT_POST_CHAR_LIMIT, help="单楼发送给模型的正文字符上限；0 表示不截断。")
     parser.add_argument("--start-lou", type=int, default=None, help="手动覆盖起始楼层。")
     parser.add_argument("--end-lou", type=int, default=None, help="手动覆盖截止楼层。")
