@@ -13,6 +13,12 @@ import {
 import type { AnchorData, AnchorEntry, AnchorItem, AnchorPost, IgnoredItem, TopicInfo, WarningDetail } from './types';
 
 type TabKey = 'entries' | 'duplicates' | 'ignored' | 'rule' | 'warnings';
+type ExportTopicGroup = {
+  topicId: string;
+  topicTitle: string;
+  topicLabel: string;
+  entries: AnchorEntry[];
+};
 
 const defaultDataUrl = '/data/anchors_43877379.json';
 const data = ref<AnchorData | null>(null);
@@ -22,6 +28,8 @@ const query = ref('');
 const activeTab = ref<TabKey>('entries');
 const selectedTopic = ref('all');
 const selectedEntryId = ref<number | null>(null);
+const copyState = ref<'idle' | 'success' | 'error'>('idle');
+let copyStateResetTimer: number | null = null;
 
 const topics = computed(() => data.value?.topics ?? topicsFromParsedRule(data.value?.parsed_rule));
 const entries = computed(() => data.value?.entries ?? entriesFromAnchors(data.value?.anchors ?? []));
@@ -30,6 +38,7 @@ const visibleIgnored = computed(() => ignored.value.filter((item) => !isStartFlo
 const warnings = computed(() => data.value?.warnings ?? []);
 const warningDetails = computed(() => data.value?.warning_details ?? warningDetailsFromStrings(warnings.value));
 const duplicateEntries = computed(() => entries.value.filter((entry) => entry.has_duplicate));
+const canExportBbcode = computed(() => !!data.value && (activeTab.value === 'entries' || activeTab.value === 'duplicates') && filteredEntries.value.length > 0);
 
 const topicOptions = computed(() => {
   const counts = new Map<string, number>();
@@ -80,6 +89,19 @@ const tabs = computed(() => [
   { key: 'warnings' as const, label: '告警', count: warningDetails.value.length },
 ]);
 
+const bbcodeExportGeneratedAt = computed(() => formatGeneratedAtLabel(data.value?.meta.generated_at));
+
+const bbcodeExportText = computed(() => buildBbcodeExport(filteredEntries.value, bbcodeExportGeneratedAt.value));
+const copyButtonLabel = computed(() => {
+  if (copyState.value === 'success') {
+    return '已复制';
+  }
+  if (copyState.value === 'error') {
+    return '复制失败';
+  }
+  return '复制 BBCODE';
+});
+
 onMounted(() => {
   void loadDefaultData();
 });
@@ -114,6 +136,18 @@ async function loadDefaultData() {
     error.value = caughtError instanceof Error ? caughtError.message : String(caughtError);
   } finally {
     loading.value = false;
+  }
+}
+
+async function copyBbcode() {
+  if (!canExportBbcode.value || !bbcodeExportText.value) {
+    return;
+  }
+  try {
+    await copyTextToClipboard(bbcodeExportText.value);
+    setCopyState('success');
+  } catch {
+    setCopyState('error');
   }
 }
 
@@ -226,6 +260,129 @@ function warningDetailsFromStrings(items: string[]): WarningDetail[] {
   return items.map((message) => ({ type: 'runtime_warning', message, sources: [] }));
 }
 
+function buildBbcodeExport(exportEntries: AnchorEntry[], generatedAtLabel: string) {
+  if (!exportEntries.length) {
+    return '';
+  }
+  const groups = groupEntriesByTopic(exportEntries);
+  const topicBlocks = groups.map((group) => formatBbcodeTopicBlock(group)).join('\n\n');
+  return `${topicBlocks}\n\n项目地址：[url]${currentSiteUrl()}[/url]\n统计生成时间：${generatedAtLabel}`;
+}
+
+function groupEntriesByTopic(exportEntries: AnchorEntry[]): ExportTopicGroup[] {
+  const groups = new Map<string, ExportTopicGroup>();
+  for (const entry of exportEntries) {
+    const topicId = entry.topic_id;
+    const topicTitle = sanitizeCollapseTopicTitle(entry.topic_short_name || entry.topic_name || entry.topic_id);
+    const topicLabel = entry.topic_name || entry.topic_short_name || entry.topic_id;
+    if (!groups.has(topicId)) {
+      groups.set(topicId, { topicId, topicTitle, topicLabel, entries: [] });
+    }
+    groups.get(topicId)?.entries.push(entry);
+  }
+  return Array.from(groups.values());
+}
+
+function formatBbcodeTopicBlock(group: ExportTopicGroup) {
+  const entryBlocks = group.entries.map((entry, entryIndex) => formatBbcodeEntryBlock(entry, entryIndex + 1)).join('\n\n');
+  return `[collapse=${group.topicTitle}]\n共${group.entries.length}条\n\n${entryBlocks}\n[/collapse]`;
+}
+
+function formatBbcodeEntryBlock(entry: AnchorEntry, entryIndex: number) {
+  const content = (entry.content || entry.raw_clean_content || '').trim();
+  const sourceLabel = sourceLouLabel(entry) || `#${entry.lou}`;
+  const pidLabel = formatEntryPidLabel(entry);
+  return `[quote]\n${entryIndex}. 作者：${formatEntryAuthor(entry)}｜源楼层：${sourceLabel}${pidLabel}\n内容：\n${content}\n[/quote]`;
+}
+
+function formatEntryAuthor(entry: AnchorEntry) {
+  const username = entry.author.username || '未知作者';
+  if (entry.author.uid === null || entry.author.uid === undefined || String(entry.author.uid).trim() === '') {
+    return username;
+  }
+  return `${username} (uid ${entry.author.uid})`;
+}
+
+function sanitizeCollapseTopicTitle(title: string) {
+  const cleaned = title.replace(/[^A-Za-z0-9\u4e00-\u9fff]/g, '').trim();
+  return cleaned || '主题';
+}
+
+function formatGeneratedAtLabel(value?: string | null) {
+  if (!value) {
+    return '未知';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
+
+function formatEntryPidLabel(entry: AnchorEntry) {
+  const pid = entry.pid ?? entry.source_posts?.find((post) => post.pid !== null && post.pid !== undefined && String(post.pid).trim() !== '')?.pid;
+  if (pid === null || pid === undefined || String(pid).trim() === '') {
+    return '';
+  }
+  return `｜回复ID：[pid]${String(pid).trim()}[/pid]`;
+}
+
+function currentSiteUrl() {
+  if (typeof window === 'undefined') {
+    return 'https://260502.anchor.gmgo.sudoer.cn/';
+  }
+  return new URL('/', window.location.href).toString();
+}
+
+function sanitizeFilename(filename: string) {
+  return filename.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_');
+}
+
+function setCopyState(nextState: 'idle' | 'success' | 'error') {
+  copyState.value = nextState;
+  if (copyStateResetTimer !== null) {
+    window.clearTimeout(copyStateResetTimer);
+    copyStateResetTimer = null;
+  }
+  if (nextState !== 'idle') {
+    copyStateResetTimer = window.setTimeout(() => {
+      copyState.value = 'idle';
+      copyStateResetTimer = null;
+    }, 1800);
+  }
+}
+
+async function copyTextToClipboard(content: string) {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(content);
+    return;
+  }
+
+  const textArea = document.createElement('textarea');
+  textArea.value = content;
+  textArea.setAttribute('readonly', 'true');
+  textArea.style.position = 'fixed';
+  textArea.style.top = '0';
+  textArea.style.left = '0';
+  textArea.style.opacity = '0';
+  document.body.append(textArea);
+  textArea.focus();
+  textArea.select();
+  textArea.setSelectionRange(0, textArea.value.length);
+
+  const copied = document.execCommand('copy');
+  textArea.remove();
+  if (!copied) {
+    throw new Error('Copy failed');
+  }
+}
+
 function sourceLouLabel(entry: AnchorEntry) {
   return louList(entry.source_lous?.length ? entry.source_lous : [entry.lou]);
 }
@@ -271,10 +428,15 @@ function topicClass(topicId: string) {
         <p class="eyebrow">NGA Anchor Counter</p>
         <h1>安价核对页</h1>
       </div>
-      <button class="icon-button strong" type="button" title="重新获取网站上的统计 JSON" @click="loadDefaultData">
-        <RefreshCcw :size="18" />
-        <span>刷新数据</span>
-      </button>
+      <div class="header-actions">
+        <button v-if="canExportBbcode" class="icon-button" type="button" title="复制当前筛选结果的 BBCODE 文本" @click="copyBbcode">
+          <span>{{ copyButtonLabel }}</span>
+        </button>
+        <button class="icon-button strong" type="button" title="重新获取网站上的统计 JSON" @click="loadDefaultData">
+          <RefreshCcw :size="18" />
+          <span>刷新数据</span>
+        </button>
+      </div>
     </header>
 
     <main>
@@ -504,6 +666,12 @@ function topicClass(topicId: string) {
 }
 button, input { font: inherit; }
 .shell { min-height: 100vh; }
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 .topbar {
   display: flex;
   align-items: center;
