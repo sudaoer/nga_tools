@@ -9,9 +9,9 @@ import {
   Tags,
   UserRound,
 } from 'lucide-vue-next';
-import type { AnchorData, AnchorEntry, AnchorItem, AnchorPost, IgnoredItem, TopicInfo, WarningDetail } from './types';
+import type { AnchorData, AnchorEntry, AnchorItem, AnchorPost, AuthorInfo, IgnoredItem, TopicInfo, WarningDetail } from './types';
 
-type TabKey = 'entries' | 'duplicates' | 'ignored' | 'rule' | 'warnings';
+type TabKey = 'entries' | 'duplicates' | 'review' | 'ignored' | 'rule' | 'warnings';
 type ExportTopicGroup = {
   topicId: string;
   topicTitle: string;
@@ -24,6 +24,35 @@ type ExportIgnoredItem = {
   reason: string;
 };
 
+type ReviewTopicHit = {
+  key: string;
+  entryId: number;
+  topicId: string;
+  topicLabel: string;
+  chosenLou: number;
+  needsManualReview: boolean;
+  confidence?: number | null;
+};
+
+type ReviewIgnoreHit = {
+  key: string;
+  reason: string;
+  stage?: string;
+  topicLabel?: string | null;
+  supersededByLou?: number | null;
+};
+
+type ReviewRow = {
+  lou: number;
+  pid?: number | string | null;
+  url?: string | null;
+  postdate?: string | null;
+  author?: AuthorInfo;
+  content?: string;
+  topicHits: ReviewTopicHit[];
+  ignoreHits: ReviewIgnoreHit[];
+};
+
 const defaultDataUrl = '/data/anchors_43877379.json';
 const data = ref<AnchorData | null>(null);
 const loading = ref(false);
@@ -32,13 +61,15 @@ const query = ref('');
 const activeTab = ref<TabKey>('entries');
 const selectedTopic = ref('all');
 const selectedEntryId = ref<number | null>(null);
+const selectedReviewLou = ref<number | null>(null);
 const copyState = ref<'idle' | 'success' | 'error'>('idle');
 let copyStateResetTimer: number | null = null;
 
 const topics = computed(() => data.value?.topics ?? topicsFromParsedRule(data.value?.parsed_rule));
 const entries = computed(() => data.value?.entries ?? entriesFromAnchors(data.value?.anchors ?? []));
 const ignored = computed(() => data.value?.ignored ?? []);
-const visibleIgnored = computed(() => ignored.value.filter((item) => !isStartFloorIgnored(item)));
+const visibleIgnored = computed(() => ignored.value.filter((item) => !isStartFloorIgnored(item)).slice().sort(compareIgnoredItems));
+const reviewRows = computed(() => buildReviewRows(entries.value, ignored.value));
 const warnings = computed(() => data.value?.warnings ?? []);
 const warningDetails = computed(() => data.value?.warning_details ?? warningDetailsFromStrings(warnings.value));
 const duplicateEntries = computed(() => entries.value.filter((entry) => entry.has_duplicate));
@@ -78,6 +109,11 @@ const filteredIgnored = computed(() => {
   return visibleIgnored.value.filter((item) => !term || ignoredSearchText(item).includes(term));
 });
 
+const filteredReviewRows = computed(() => {
+  const term = query.value.trim().toLowerCase();
+  return reviewRows.value.filter((row) => !term || reviewSearchText(row).includes(term));
+});
+
 const exportIgnored = computed<ExportIgnoredItem[]>(() => {
   if (activeTab.value !== 'entries' || selectedTopic.value !== 'all') {
     return [];
@@ -97,6 +133,13 @@ const selectedEntry = computed(() => {
   return filteredEntries.value.find((entry) => entry.id === selectedEntryId.value) ?? filteredEntries.value[0] ?? null;
 });
 
+const selectedReviewRow = computed(() => {
+  if (selectedReviewLou.value === null) {
+    return filteredReviewRows.value[0] ?? null;
+  }
+  return filteredReviewRows.value.find((row) => row.lou === selectedReviewLou.value) ?? filteredReviewRows.value[0] ?? null;
+});
+
 const topicEntryNumbers = computed(() => {
   const counters = new Map<string, number>();
   const numbers = new Map<number, number>();
@@ -112,6 +155,7 @@ const topicEntryNumbers = computed(() => {
 const tabs = computed(() => [
   { key: 'entries' as const, label: '主题安价', count: entries.value.length },
   { key: 'duplicates' as const, label: '重复复核', count: duplicateEntries.value.length },
+  { key: 'review' as const, label: '逐楼核对', count: reviewRows.value.length },
   { key: 'ignored' as const, label: '忽略楼层', count: visibleIgnored.value.length },
   { key: 'rule' as const, label: '规则解析', count: data.value?.parsed_rule ? 1 : 0 },
   { key: 'warnings' as const, label: '告警', count: warningDetails.value.length },
@@ -183,6 +227,10 @@ function selectEntry(entry: AnchorEntry) {
   selectedEntryId.value = entry.id;
 }
 
+function selectReviewRow(row: ReviewRow) {
+  selectedReviewLou.value = row.lou;
+}
+
 function topicsFromParsedRule(parsedRule: Record<string, unknown> | null | undefined): TopicInfo[] {
   const rawTopics = parsedRule?.topics;
   return Array.isArray(rawTopics) ? (rawTopics as TopicInfo[]) : [];
@@ -245,6 +293,165 @@ function ignoredSearchText(item: IgnoredItem) {
   return [item.lou, item.pid, item.url, item.source_lous?.join(','), item.topic_id, item.topic_name, item.author?.uid, item.author?.username, item.content, item.ignore_reason, item.stage]
     .join(' ')
     .toLowerCase();
+}
+
+function reviewSearchText(row: ReviewRow) {
+  return [
+    row.lou,
+    row.pid,
+    row.url,
+    row.postdate,
+    row.author?.uid,
+    row.author?.username,
+    row.content,
+    row.topicHits.map((hit) => `${hit.topicId} ${hit.topicLabel} ${hit.chosenLou}`).join(' '),
+    row.ignoreHits.map((hit) => `${hit.reason} ${hit.stage || ''} ${hit.topicLabel || ''} ${hit.supersededByLou ?? ''}`).join(' '),
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
+function compareIgnoredItems(left: IgnoredItem, right: IgnoredItem) {
+  const leftLou = typeof left.lou === 'number' ? left.lou : Number.POSITIVE_INFINITY;
+  const rightLou = typeof right.lou === 'number' ? right.lou : Number.POSITIVE_INFINITY;
+  if (leftLou !== rightLou) {
+    return leftLou - rightLou;
+  }
+
+  const leftPid = left.pid === null || left.pid === undefined || String(left.pid).trim() === '' ? '' : String(left.pid);
+  const rightPid = right.pid === null || right.pid === undefined || String(right.pid).trim() === '' ? '' : String(right.pid);
+  if (leftPid !== rightPid) {
+    return leftPid.localeCompare(rightPid, 'zh-CN', { numeric: true });
+  }
+
+  return (left.stage || '').localeCompare(right.stage || '', 'zh-CN', { numeric: true });
+}
+
+function compareReviewRows(left: ReviewRow, right: ReviewRow) {
+  return left.lou - right.lou;
+}
+
+function compareReviewTopicHits(left: ReviewTopicHit, right: ReviewTopicHit) {
+  if (left.chosenLou !== right.chosenLou) {
+    return left.chosenLou - right.chosenLou;
+  }
+  return left.topicLabel.localeCompare(right.topicLabel, 'zh-CN', { numeric: true });
+}
+
+function compareReviewIgnoreHits(left: ReviewIgnoreHit, right: ReviewIgnoreHit) {
+  return left.reason.localeCompare(right.reason, 'zh-CN', { numeric: true });
+}
+
+function ensureReviewRow(
+  rowsByLou: Map<number, ReviewRow>,
+  source: Omit<ReviewRow, 'topicHits' | 'ignoreHits'> & { lou: number },
+) {
+  const existing = rowsByLou.get(source.lou);
+  if (existing) {
+    if ((existing.pid === null || existing.pid === undefined || String(existing.pid).trim() === '') && source.pid !== undefined) {
+      existing.pid = source.pid;
+    }
+    if (!existing.url && source.url) {
+      existing.url = source.url;
+    }
+    if (!existing.postdate && source.postdate) {
+      existing.postdate = source.postdate;
+    }
+    if ((!existing.author || !existing.author.username) && source.author) {
+      existing.author = source.author;
+    }
+    if ((!existing.content || !existing.content.trim()) && source.content) {
+      existing.content = source.content;
+    }
+    return existing;
+  }
+
+  const created: ReviewRow = {
+    ...source,
+    topicHits: [],
+    ignoreHits: [],
+  };
+  rowsByLou.set(source.lou, created);
+  return created;
+}
+
+function reviewLousFromIgnoredItem(item: IgnoredItem) {
+  const lous = new Set<number>();
+  if (typeof item.lou === 'number') {
+    lous.add(item.lou);
+  }
+  for (const lou of item.source_lous ?? []) {
+    if (typeof lou === 'number') {
+      lous.add(lou);
+    }
+  }
+  return Array.from(lous).sort((left, right) => left - right);
+}
+
+function buildReviewRows(entryItems: AnchorEntry[], ignoredItems: IgnoredItem[]) {
+  const rowsByLou = new Map<number, ReviewRow>();
+
+  for (const entry of entryItems) {
+    for (const post of sourcePosts(entry)) {
+      if (typeof post.lou !== 'number') {
+        continue;
+      }
+      const row = ensureReviewRow(rowsByLou, {
+        lou: post.lou,
+        pid: post.pid,
+        url: post.url ?? postUrl(post.pid),
+        postdate: post.postdate ?? entry.postdate,
+        author: post.author ?? entry.author,
+        content: post.content || post.original_content || entry.content,
+      });
+      const topicKey = `entry:${entry.id}`;
+      if (!row.topicHits.some((hit) => hit.key === topicKey)) {
+        row.topicHits.push({
+          key: topicKey,
+          entryId: entry.id,
+          topicId: entry.topic_id,
+          topicLabel: entry.topic_short_name || entry.topic_name || entry.topic_id,
+          chosenLou: entry.lou,
+          needsManualReview: Boolean(entry.needs_manual_review),
+          confidence: entry.confidence,
+        });
+      }
+    }
+  }
+
+  for (const item of ignoredItems) {
+    const reason = item.ignore_reason?.trim();
+    if (!reason) {
+      continue;
+    }
+    for (const lou of reviewLousFromIgnoredItem(item)) {
+      const row = ensureReviewRow(rowsByLou, {
+        lou,
+        pid: item.pid,
+        url: item.url ?? postUrl(item.pid),
+        postdate: item.postdate,
+        author: item.author,
+        content: item.content || item.original_content,
+      });
+      const ignoreKey = `ignored:${lou}:${item.stage || ''}:${item.topic_id || ''}:${item.superseded_by_lou ?? ''}:${reason}`;
+      if (!row.ignoreHits.some((hit) => hit.key === ignoreKey)) {
+        row.ignoreHits.push({
+          key: ignoreKey,
+          reason,
+          stage: item.stage,
+          topicLabel: item.topic_name || item.topic_id,
+          supersededByLou: item.superseded_by_lou,
+        });
+      }
+    }
+  }
+
+  const rows = Array.from(rowsByLou.values()).sort(compareReviewRows);
+  for (const row of rows) {
+    row.topicHits.sort(compareReviewTopicHits);
+    row.ignoreHits.sort(compareReviewIgnoreHits);
+  }
+  return rows;
 }
 
 function isStartFloorIgnored(item: IgnoredItem) {
@@ -542,7 +749,7 @@ function topicClass(topicId: string) {
       <section class="control-row">
         <label class="search-box">
           <Search :size="18" />
-          <input v-model="query" type="search" placeholder="搜索主题、作者、楼层、内容" />
+          <input v-model="query" type="search" placeholder="搜索主题、作者、楼层、内容、忽略原因" />
         </label>
         <nav class="tabs" aria-label="数据视图">
           <button v-for="tab in tabs" :key="tab.key" type="button" :class="tabClass(tab.key)" @click="activeTab = tab.key">
@@ -612,6 +819,93 @@ function topicClass(topicId: string) {
           </li>
         </ul>
         <p v-if="warningDetails.length === 0" class="muted-line">没有运行告警。</p>
+      </section>
+
+      <section v-else-if="activeTab === 'review'" class="workspace">
+        <div class="list-pane">
+          <button
+            v-for="row in filteredReviewRows"
+            :key="row.lou"
+            type="button"
+            :class="['entry-row', 'review-list-row', { selected: selectedReviewRow?.lou === row.lou }]"
+            @click="selectReviewRow(row)"
+          >
+            <span class="review-list-index">#{{ row.lou }}</span>
+            <span class="entry-main">
+              <b>{{ row.author?.username || '未知作者' }}</b>
+              <small>{{ row.postdate || '未知时间' }}</small>
+              <em>{{ snippet(row.content) || '（无正文）' }}</em>
+            </span>
+            <span class="entry-flags">
+              <i v-if="row.topicHits.length">{{ row.topicHits.length }} 安价</i>
+              <i v-if="row.ignoreHits.length" class="review">{{ row.ignoreHits.length }} 忽略</i>
+            </span>
+          </button>
+          <p v-if="filteredReviewRows.length === 0" class="muted-line list-empty">没有匹配的楼层核对结果。</p>
+        </div>
+
+        <aside v-if="selectedReviewRow" class="detail-pane">
+          <div class="detail-head">
+            <div>
+              <p class="eyebrow">逐楼核对 · #{{ selectedReviewRow.lou }}</p>
+              <h2>{{ selectedReviewRow.author?.username || '未知作者' }}</h2>
+            </div>
+            <div class="author-chip">
+              <UserRound :size="16" />
+              <span>{{ selectedReviewRow.author?.uid ?? '未知' }}</span>
+            </div>
+          </div>
+
+          <div class="status-line">
+            <span v-if="selectedReviewRow.topicHits.length" class="badge ok">{{ selectedReviewRow.topicHits.length }} 条安价</span>
+            <span v-if="selectedReviewRow.ignoreHits.length" class="badge review">{{ selectedReviewRow.ignoreHits.length }} 条忽略</span>
+          </div>
+
+          <article class="post-detail review-detail-block">
+            <header>
+              <a v-if="sourceUrl(selectedReviewRow)" :href="sourceUrl(selectedReviewRow) || '#'" target="_blank" rel="noopener noreferrer" class="source-link">
+                #{{ selectedReviewRow.lou }}
+                <ExternalLink :size="13" />
+              </a>
+              <strong v-else>#{{ selectedReviewRow.lou }}</strong>
+              <span>{{ selectedReviewRow.postdate || '未知时间' }}</span>
+              <small>逐楼汇总</small>
+            </header>
+            <p class="content-block">{{ selectedReviewRow.content || '（无正文）' }}</p>
+          </article>
+
+          <section v-if="selectedReviewRow.topicHits.length" class="source-list review-detail-block">
+            <h3>安价结果</h3>
+            <article v-for="hit in selectedReviewRow.topicHits" :key="hit.key" class="source-row">
+              <header>
+                <strong>{{ hit.topicLabel }}</strong>
+                <span>Entry {{ hit.entryId }}</span>
+                <small>#{{ hit.chosenLou }}</small>
+              </header>
+              <p class="content-block compact">
+                <template v-if="typeof hit.confidence === 'number'">置信度 {{ formatPercent(hit.confidence) }}</template>
+                <template v-if="hit.needsManualReview">
+                  <template v-if="typeof hit.confidence === 'number'"> · </template>需要复核
+                </template>
+              </p>
+            </article>
+          </section>
+
+          <section v-if="selectedReviewRow.ignoreHits.length" class="source-list review-detail-block">
+            <h3>忽略原因</h3>
+            <article v-for="hit in selectedReviewRow.ignoreHits" :key="hit.key" class="source-row">
+              <header>
+                <strong>{{ hit.reason }}</strong>
+                <span>{{ hit.topicLabel || '未限定主题' }}</span>
+                <small>{{ hit.stage || 'unknown' }}</small>
+              </header>
+              <p class="content-block compact">
+                <template v-if="hit.supersededByLou">被 #{{ hit.supersededByLou }} 覆盖</template>
+                <template v-else>无附加覆盖信息</template>
+              </p>
+            </article>
+          </section>
+        </aside>
       </section>
 
       <section v-else-if="activeTab === 'ignored'" class="panel single-panel">
@@ -906,6 +1200,20 @@ pre { max-height: 560px; overflow: auto; margin: 14px 0 0; padding: 14px; border
   text-decoration: none;
 }
 .link-row a:hover, .single-source-link:hover, .source-link:hover { text-decoration: underline; }
+.review-list-row { grid-template-columns: 72px minmax(0, 1fr) auto; }
+.review-list-index {
+  display: grid;
+  place-items: center;
+  min-width: 58px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: #27312f;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.review-detail-block:first-of-type { border-top: 0; padding-top: 0; }
 .ignored-list { display: grid; gap: 10px; }
 .ignored-row { padding: 12px; border: 1px solid #edf0ec; border-radius: 8px; }
 .ignored-row p { margin: 8px 0 0; }
@@ -928,6 +1236,8 @@ pre { max-height: 560px; overflow: auto; margin: 14px 0 0; padding: 14px; border
   .summary-band, .meta-list, .field-grid { grid-template-columns: 1fr; }
   .entry-row { grid-template-columns: 38px minmax(0, 1fr); }
   .entry-flags { grid-column: 2; justify-content: flex-start; max-width: none; }
+  .review-list-row { grid-template-columns: minmax(0, 1fr); }
+  .review-list-index { width: fit-content; }
   .detail-head, .post-detail header { align-items: flex-start; flex-direction: column; }
 }
 </style>
