@@ -53,6 +53,9 @@ type ReviewRow = {
   ignoreHits: ReviewIgnoreHit[];
 };
 
+const DETAIL_SNIPPET_LIMIT = 320;
+const BBCODE_ENTRY_SNIPPET_LIMIT = 120;
+
 const defaultDataUrl = '/data/anchors_43877379.json';
 const data = ref<AnchorData | null>(null);
 const loading = ref(false);
@@ -532,7 +535,7 @@ function formatBbcodeTopicBlock(group: ExportTopicGroup) {
 }
 
 function formatBbcodeEntryBlock(entry: AnchorEntry, entryIndex: number) {
-  const content = (entry.content || entry.raw_clean_content || '').trim();
+  const content = snippet((entry.content || entry.raw_clean_content || '').trim(), BBCODE_ENTRY_SNIPPET_LIMIT) || '（空）';
   const sourceLabel = sourceLouLabel(entry) || `#${entry.lou}`;
   const pidLabel = formatEntryPidLabel(entry);
   return `[quote]\n${entryIndex}. ${formatEntryAuthor(entry)}｜${sourceLabel}${pidLabel}\n${content}\n[/quote]`;
@@ -871,7 +874,11 @@ function topicClass(topicId: string) {
               <span>{{ selectedReviewRow.postdate || '未知时间' }}</span>
               <small>逐楼汇总</small>
             </header>
-            <p class="content-block">{{ selectedReviewRow.content || '（无正文）' }}</p>
+            <p class="content-block">{{ snippet(selectedReviewRow.content, DETAIL_SNIPPET_LIMIT) || '（无正文）' }}</p>
+            <details v-if="selectedReviewRow.content && selectedReviewRow.content.length > DETAIL_SNIPPET_LIMIT">
+              <summary>完整楼层正文</summary>
+              <p class="content-block compact">{{ selectedReviewRow.content }}</p>
+            </details>
           </article>
 
           <section v-if="selectedReviewRow.topicHits.length" class="source-list review-detail-block">

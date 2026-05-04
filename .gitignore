@@ -17,3 +17,4 @@ anjia-viewer/dist/
 !anjia-viewer/package-lock.json
 !anjia-viewer/tsconfig.json
 !anjia-viewer/tsconfig.node.json
+*.txt
