@@ -2402,7 +2402,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end-time", default=None, help="手动覆盖截止时间，格式 YYYY-MM-DD HH:MM。")
     parser.add_argument("--keyword", default=None, help="手动覆盖关键词过滤。")
     parser.add_argument("--ignore-user", action="append", default=[], help="额外忽略 uid，可重复或逗号分隔。")
-    parser.add_argument("--ignore-lou", action="append", default=[], help="额外忽略楼层，可重复或逗号分隔。")
+    parser.add_argument("--ignore-lou", action="append", default=["21643"], help="额外忽略楼层，可重复或逗号分隔。")
     return parser
 
 
