@@ -223,7 +223,7 @@ def clean_post_text(text: Any) -> str:
     cleaned = re.sub(r"\[img\].*?\[/img\]", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
     cleaned = re.sub(r"<[^>]+>", "", cleaned)
     cleaned = re.sub(r"\[/?(?:quote|b|i|u|s|del|color|size|align|url|collapse|fold|pid|tid)[^\]]*\]", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\[[^\]]+\]", "", cleaned)
+    cleaned = re.sub(r"\[(?:/?[A-Za-z*][^\]]*|s:[^\]]+)\]", "", cleaned, flags=re.IGNORECASE)
     for _ in range(2):
         cleaned = unescape(cleaned)
     cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")

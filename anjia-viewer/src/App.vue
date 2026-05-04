@@ -19,6 +19,11 @@ type ExportTopicGroup = {
   entries: AnchorEntry[];
 };
 
+type ExportIgnoredItem = {
+  item: IgnoredItem;
+  reason: string;
+};
+
 const defaultDataUrl = '/data/anchors_43877379.json';
 const data = ref<AnchorData | null>(null);
 const loading = ref(false);
@@ -73,6 +78,18 @@ const filteredIgnored = computed(() => {
   return visibleIgnored.value.filter((item) => !term || ignoredSearchText(item).includes(term));
 });
 
+const exportIgnored = computed<ExportIgnoredItem[]>(() => {
+  if (activeTab.value !== 'entries' || selectedTopic.value !== 'all') {
+    return [];
+  }
+  return filteredIgnored.value
+    .map((item) => {
+      const reason = sanitizeExportIgnoreReason(item.ignore_reason);
+      return reason ? { item, reason } : null;
+    })
+    .filter((item): item is ExportIgnoredItem => item !== null);
+});
+
 const selectedEntry = computed(() => {
   if (selectedEntryId.value === null) {
     return filteredEntries.value[0] ?? null;
@@ -102,7 +119,7 @@ const tabs = computed(() => [
 
 const bbcodeExportGeneratedAt = computed(() => formatGeneratedAtLabel(data.value?.meta.generated_at));
 
-const bbcodeExportText = computed(() => buildBbcodeExport(filteredEntries.value, bbcodeExportGeneratedAt.value));
+const bbcodeExportText = computed(() => buildBbcodeExport(filteredEntries.value, exportIgnored.value, bbcodeExportGeneratedAt.value));
 const copyButtonLabel = computed(() => {
   if (copyState.value === 'success') {
     return '已复制';
@@ -271,13 +288,21 @@ function warningDetailsFromStrings(items: string[]): WarningDetail[] {
   return items.map((message) => ({ type: 'runtime_warning', message, sources: [] }));
 }
 
-function buildBbcodeExport(exportEntries: AnchorEntry[], generatedAtLabel: string) {
-  if (!exportEntries.length) {
+function buildBbcodeExport(exportEntries: AnchorEntry[], exportIgnoredItems: ExportIgnoredItem[], generatedAtLabel: string) {
+  if (!exportEntries.length && !exportIgnoredItems.length) {
     return '';
   }
-  const groups = groupEntriesByTopic(exportEntries);
-  const topicBlocks = groups.map((group) => formatBbcodeTopicBlock(group)).join('\n\n');
-  return `${topicBlocks}\n\n项目地址：[url]${currentSiteUrl()}[/url]\n统计生成时间：${generatedAtLabel}`;
+  const sections: string[] = [];
+  if (exportEntries.length) {
+    const groups = groupEntriesByTopic(exportEntries);
+    sections.push(groups.map((group) => formatBbcodeTopicBlock(group)).join('\n\n'));
+  }
+  if (exportIgnoredItems.length) {
+    sections.push(formatBbcodeIgnoredBlock(exportIgnoredItems));
+  }
+  sections.push(`项目地址：[url]${currentSiteUrl()}[/url]`);
+  sections.push(`统计生成时间：${generatedAtLabel}`);
+  return sections.join('\n\n');
 }
 
 function groupEntriesByTopic(exportEntries: AnchorEntry[]): ExportTopicGroup[] {
@@ -303,7 +328,21 @@ function formatBbcodeEntryBlock(entry: AnchorEntry, entryIndex: number) {
   const content = (entry.content || entry.raw_clean_content || '').trim();
   const sourceLabel = sourceLouLabel(entry) || `#${entry.lou}`;
   const pidLabel = formatEntryPidLabel(entry);
-  return `[quote]\n${entryIndex}. 作者：${formatEntryAuthor(entry)}｜源楼层：${sourceLabel}${pidLabel}\n内容：\n${content}\n[/quote]`;
+  return `[quote]\n${entryIndex}. ${formatEntryAuthor(entry)}｜${sourceLabel}${pidLabel}\n内容：\n${content}\n[/quote]`;
+}
+
+function formatBbcodeIgnoredBlock(exportIgnoredItems: ExportIgnoredItem[]) {
+  const ignoredBlocks = exportIgnoredItems
+    .map(({ item, reason }, itemIndex) => formatBbcodeIgnoredItemBlock(item, reason, itemIndex + 1))
+    .join('\n\n');
+  return `[collapse=忽略楼层]\n共${exportIgnoredItems.length}条\n\n${ignoredBlocks}\n[/collapse]`;
+}
+
+function formatBbcodeIgnoredItemBlock(item: IgnoredItem, reason: string, itemIndex: number) {
+  const content = snippet((item.content || item.original_content || '').trim(), 50) || '（空）';
+  const sourceLabel = formatIgnoredLouLabel(item);
+  const pidLabel = formatIgnoredPidLabel(item);
+  return `[quote]\n${itemIndex}. ${formatIgnoredAuthor(item)}｜${sourceLabel}${pidLabel}\n忽略原因：${reason}\n内容：\n${content}\n[/quote]`;
 }
 
 function formatEntryAuthor(entry: AnchorEntry) {
@@ -312,6 +351,39 @@ function formatEntryAuthor(entry: AnchorEntry) {
     return username;
   }
   return `${username} (uid ${entry.author.uid})`;
+}
+
+function formatIgnoredAuthor(item: IgnoredItem) {
+  const username = item.author?.username || '未知作者';
+  if (item.author?.uid === null || item.author?.uid === undefined || String(item.author.uid).trim() === '') {
+    return username;
+  }
+  return `${username} (uid ${item.author.uid})`;
+}
+
+function formatIgnoredLouLabel(item: IgnoredItem) {
+  if (typeof item.lou === 'number') {
+    return `#${item.lou}`;
+  }
+  return louList(item.source_lous) || '未知';
+}
+
+function formatIgnoredPidLabel(item: IgnoredItem) {
+  if (item.pid === null || item.pid === undefined || String(item.pid).trim() === '') {
+    return '';
+  }
+  return `｜[pid]${String(item.pid).trim()}[/pid]`;
+}
+
+function sanitizeExportIgnoreReason(reason?: string) {
+  if (!reason) {
+    return '';
+  }
+  return reason
+    .split(/[；;]/)
+    .map((part) => part.trim())
+    .filter((part) => part && !/^作者 uid=\d+ 在忽略名单中$/.test(part) && !/^楼层 \d+ 在忽略楼层名单中$/.test(part))
+    .join('；');
 }
 
 function sanitizeCollapseTopicTitle(title: string) {
@@ -341,7 +413,7 @@ function formatEntryPidLabel(entry: AnchorEntry) {
   if (pid === null || pid === undefined || String(pid).trim() === '') {
     return '';
   }
-  return `｜回复ID：[pid]${String(pid).trim()}[/pid]`;
+  return `｜[pid]${String(pid).trim()}[/pid]`;
 }
 
 function currentSiteUrl() {
@@ -351,9 +423,6 @@ function currentSiteUrl() {
   return new URL('/', window.location.href).toString();
 }
 
-function sanitizeFilename(filename: string) {
-  return filename.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_');
-}
 
 function setCopyState(nextState: 'idle' | 'success' | 'error') {
   copyState.value = nextState;
