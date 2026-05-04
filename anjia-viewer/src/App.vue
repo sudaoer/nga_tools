@@ -328,7 +328,7 @@ function formatBbcodeEntryBlock(entry: AnchorEntry, entryIndex: number) {
   const content = (entry.content || entry.raw_clean_content || '').trim();
   const sourceLabel = sourceLouLabel(entry) || `#${entry.lou}`;
   const pidLabel = formatEntryPidLabel(entry);
-  return `[quote]\n${entryIndex}. ${formatEntryAuthor(entry)}｜${sourceLabel}${pidLabel}\n内容：\n${content}\n[/quote]`;
+  return `[quote]\n${entryIndex}. ${formatEntryAuthor(entry)}｜${sourceLabel}${pidLabel}\n${content}\n[/quote]`;
 }
 
 function formatBbcodeIgnoredBlock(exportIgnoredItems: ExportIgnoredItem[]) {
@@ -342,7 +342,7 @@ function formatBbcodeIgnoredItemBlock(item: IgnoredItem, reason: string, itemInd
   const content = snippet((item.content || item.original_content || '').trim(), 50) || '（空）';
   const sourceLabel = formatIgnoredLouLabel(item);
   const pidLabel = formatIgnoredPidLabel(item);
-  return `[quote]\n${itemIndex}. ${formatIgnoredAuthor(item)}｜${sourceLabel}${pidLabel}\n忽略原因：${reason}\n内容：\n${content}\n[/quote]`;
+  return `[quote]\n${itemIndex}. ${formatIgnoredAuthor(item)}｜${sourceLabel}${pidLabel}\n忽略原因：${reason}\n${content}\n[/quote]`;
 }
 
 function formatEntryAuthor(entry: AnchorEntry) {
