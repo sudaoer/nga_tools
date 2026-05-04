@@ -1339,6 +1339,28 @@ def ask_agent_for_json(agent: Any, prompt: str, max_retries: int) -> dict[str, A
     raise CounterFailure(f"模型连续返回不可解析 JSON：{last_error}")
 
 
+SPECIAL_LOU_PROMPTS: dict[int, str] = {
+    21650: "21650 楼虽然带有明确要求语气，但这里应视为催剧情/长篇设想描述，不属于有效安价，也不是 qa；如果当前包里有这楼，必须把它写入 ignored_posts。",
+    21651: "21651 楼是承接 21650 的补充聊天，不属于有效安价，也不是 qa；如果当前包里有这楼，必须把它写入 ignored_posts。",
+}
+
+
+def build_special_lou_prompt(author_pack: dict[str, Any]) -> str:
+    pack_lous = {
+        lou
+        for lou in (to_int(post.get("lou")) for post in author_pack.get("posts", []))
+        if lou is not None
+    }
+    special_rules = [
+        f"- {rule_text}"
+        for lou, rule_text in SPECIAL_LOU_PROMPTS.items()
+        if lou in pack_lous
+    ]
+    if not special_rules:
+        return ""
+    return "特判楼层：\n" + "\n".join(special_rules)
+
+
 def build_author_prompt(parsed_rule: dict[str, Any], author_pack: dict[str, Any]) -> str:
     prompt_schema = {
         "items": [
@@ -1365,6 +1387,7 @@ def build_author_prompt(parsed_rule: dict[str, Any], author_pack: dict[str, Any]
         "warnings": ["可选"],
     }
     model_payload = {"posts": author_pack.get("posts", [])}
+    special_lou_prompt = build_special_lou_prompt(author_pack)
     return f"""
 你是 NGA 安价统计员。请按 21552 楼规则判断这个观众的候选楼。
 
@@ -1383,6 +1406,8 @@ def build_author_prompt(parsed_rule: dict[str, Any], author_pack: dict[str, Any]
 - 如果某楼只是聊天、顶帖、修改说明、无效内容，写入 ignored_posts。
 - 如果确实像安价但主题或字段无法确定，使用 topic_id="unclassified"，并设置 needs_manual_review=true。
 - 不要返回作者 uid、作者名、author_key 或其他作者标识；脚本会在本地关联来源。
+
+{special_lou_prompt}
 
 主题定义：
 {json.dumps(parsed_rule.get("topics", default_topics()), ensure_ascii=False)}
