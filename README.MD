@@ -19,6 +19,14 @@ pixi run python AnchorCounter.py --output anjia-viewer/public/data/anchors_43877
 
 默认会以 `--llm-workers 32` 并发请求模型；如果触发限流或想方便排查，可以改成 `--llm-workers 1` 串行运行。
 
+导出统计 XLSX：
+
+```powershell
+pixi run python ExportAnchorsXlsx.py --input anjia-viewer/public/data/anchors_43877379.json --output output/43877379_all/anchor_counter/anchors_43877379.xlsx
+```
+
+如果不传 `--output`，脚本会默认在输入 JSON 同目录下生成一个同名 `.xlsx` 文件。工作簿会按主题拆成多个工作表，每个工作表只保留该主题的最终统计结果，并带上楼层、作者、结构化字段、加权目标、复核标记和链接这些便于核对的列。
+
 只检查抓取和确定性过滤时可以跳过模型：
 
 ```powershell
