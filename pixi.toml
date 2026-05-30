@@ -1,8 +1,8 @@
 [workspace]
-authors = ["R9950X_Sudoer <hhj@sudoer.cn>"]
+authors = ["Sudoer <hhj@sudoer.cn>"]
 channels = ["conda-forge"]
 name = "nga_backupper"
-platforms = ["win-64"]
+platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
 version = "0.1.0"
 
 [tasks]
@@ -15,3 +15,6 @@ bs4 = ">=4.14.3,<5"
 pillow = ">=12.2.0,<13"
 openai = ">=2.33.0,<3"
 openpyxl = ">=3.1.5,<4"
+
+[target.linux.dependencies]
+weasyprint = "*"
