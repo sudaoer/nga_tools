@@ -1,4 +1,3 @@
-import NGAClient
 import json
 import argparse
 import os
@@ -10,6 +9,7 @@ from typing import Any
 
 import config
 import utils
+from nga_tools.ngaclient import NGAClient
 
 CommandArgs = dict[str, Any]
 CommandHandler = Callable[[CommandArgs], None]
@@ -340,7 +340,7 @@ from PIL import Image
 def backup_all(args: CommandArgs) -> None:
     thread_tid, thread_aid = get_tidaid(args)
 
-    client = NGAClient.NGAClient()
+    client = NGAClient()
 
     folder_json = utils.get_folder(thread_tid, thread_aid, "json")
     for i in range(1, client.get_page_count(thread_tid, thread_aid) + 1):
