@@ -4,7 +4,12 @@ import argparse
 import sys
 from typing import NotRequired, Optional, TypedDict, cast
 
-from nga_tools.commands.backup import backup_all, backup_sub, pdf_generate
+from nga_tools.commands.backup import (
+    backup_all,
+    backup_floors,
+    backup_sub,
+    pdf_generate,
+)
 from nga_tools.commands.image import image_verify
 from nga_tools.commands.thread import handle_thread_add, handle_thread_list
 from nga_tools.commands.types import CommandArgs, CommandHandler
@@ -117,6 +122,21 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "args": ["name", "tid", "aid"],
             "required_any": ["name", "tid"],
         },
+        "floors": {
+            "handler": backup_floors,
+            "summary": "根据已有备份生成只看作者楼层到原帖楼层的映射",
+            "usage": f"{PROGRAM_USAGE} backup floors (--name NAME | --tid TID) [--aid AID]",
+            "examples": [
+                f"{PROGRAM_USAGE} backup floors --name 帖子名",
+                f"{PROGRAM_USAGE} backup floors --tid 12345678 --aid 987654",
+            ],
+            "notes": [
+                "此命令会读取已有json备份并联网扫描原帖，生成floor_map.json。",
+                "author-only备份生成PDF前必须先有floor_map.json。",
+            ],
+            "args": ["name", "tid", "aid"],
+            "required_any": ["name", "tid"],
+        },
         "pdf": {
             "handler": pdf_generate,
             "summary": "根据已备份的HTML和图片生成PDF",
@@ -129,6 +149,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} backup pdf --name 帖子名 --lou_per_pdf 100 --pdf_workers 2",
             ],
             "notes": [
+                "author-only备份会读取floor_map.json，同时显示只看作者楼层和原帖楼层。",
+                f"如缺少floor_map.json，先运行 {PROGRAM_USAGE} backup floors --name 帖子名。",
                 "Overlay：创建 <output_dir>/<tid>_<aid>/overlay/post_<楼层>.html "
                 "可在生成PDF时覆盖对应楼层。",
                 "Overlay只影响PDF生成，不会改写json、html或html_modified备份内容。",

@@ -53,7 +53,7 @@ class NGAClient:
         if aid:
             data["authorid"] = str(aid)
 
-        response = self.session.post(url, data=data)
+        response = self.session.post(url, data=data, timeout=30)
         response.raise_for_status()
 
         json_data = response.json()

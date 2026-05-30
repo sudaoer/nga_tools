@@ -13,6 +13,11 @@ from bs4.element import NavigableString
 from PIL import Image
 
 from nga_tools import utils
+from nga_tools.backup.floor_map import (
+    FloorLabels,
+    load_floor_labels,
+    validate_floor_labels,
+)
 from nga_tools.backup.overlay import load_post_overlays
 from nga_tools.config import get_config
 
@@ -201,6 +206,7 @@ def _build_render_tasks(
     html_content_by_lou: dict[int, str],
     folder_pdf: str,
     lou_per_pdf: int,
+    floor_labels: FloorLabels,
 ) -> list[PdfRenderTask]:
     app_config = get_config()
     render_tasks: list[PdfRenderTask] = []
@@ -220,7 +226,7 @@ def _build_render_tasks(
             file.write(app_config.html_pre)
             for lou in range(start_lou, end_lou + 1):
                 if lou in html_content_by_lou:
-                    file.write(f"<h2>第{lou}楼</h2>\n")
+                    file.write(f"<h2>{floor_labels.label(lou)}</h2>\n")
                     file.write(html_content_by_lou[lou])
                     file.write("<hr/>\n")
             file.write(app_config.html_post)
@@ -234,7 +240,7 @@ def _build_render_tasks(
 def _read_pdf_html(
     tid: int,
     aid: Optional[int],
-) -> tuple[dict[int, str], str]:
+) -> tuple[dict[int, str], str, FloorLabels]:
     folder_images = utils.get_folder(tid, aid, "images")
     filename_hash: dict[str, str] = {}
     hash_filename: dict[str, str] = {}
@@ -259,7 +265,15 @@ def _read_pdf_html(
         with open(html_path, "r", encoding="utf-8") as file:
             html_sources_by_lou[lou] = file.read()
 
-    overlays_by_lou = load_post_overlays(tid, aid, set(html_sources_by_lou))
+    floor_labels = load_floor_labels(tid, aid)
+    validate_floor_labels(floor_labels, html_sources_by_lou)
+
+    overlays_by_lou = load_post_overlays(
+        tid,
+        aid,
+        set(html_sources_by_lou),
+        floor_labels,
+    )
     if overlays_by_lou:
         print(f"应用{len(overlays_by_lou)}个post overlay。")
         html_sources_by_lou.update(overlays_by_lou)
@@ -274,6 +288,7 @@ def _read_pdf_html(
             if lou in overlays_by_lou
             else f"html_modified/post_{lou}.html"
         )
+        source_desc = f"{source_name}（{floor_labels.label(lou)}）"
         soup = BeautifulSoup(html_content, "html.parser")
 
         images = cast(list[Tag], soup.find_all("img"))
@@ -285,7 +300,7 @@ def _read_pdf_html(
             image_filename = image_src.split("/")[-1]
             if image_filename not in filename_hash:
                 raise RuntimeError(
-                    f"HTML文件{source_name}中引用了不存在的图片文件{image_filename}！"
+                    f"HTML文件{source_desc}中引用了不存在的图片文件{image_filename}！"
                 )
 
             image_hash = filename_hash[image_filename]
@@ -297,7 +312,10 @@ def _read_pdf_html(
             try:
                 width, height = _get_image_size(canonical_path, image_size_cache)
             except OSError as error:
-                print(f"警告：跳过无法识别尺寸的图片 {canonical_filename}: {error}")
+                print(
+                    f"警告：{floor_labels.label(lou)}跳过无法识别尺寸的图片 "
+                    f"{canonical_filename}: {error}"
+                )
                 continue
 
             if _is_long_image(width, height):
@@ -319,7 +337,7 @@ def _read_pdf_html(
 
         html_content_by_lou[lou] = str(soup).replace("&amp;#", "&#")
 
-    return html_content_by_lou, folder_pdf
+    return html_content_by_lou, folder_pdf, floor_labels
 
 
 def generate_pdf(
@@ -333,8 +351,13 @@ def generate_pdf(
     if pdf_workers is not None and pdf_workers <= 0:
         raise ValueError("--pdf_workers必须大于0。")
 
-    html_content_by_lou, folder_pdf = _read_pdf_html(tid, aid)
-    render_tasks = _build_render_tasks(html_content_by_lou, folder_pdf, lou_per_pdf)
+    html_content_by_lou, folder_pdf, floor_labels = _read_pdf_html(tid, aid)
+    render_tasks = _build_render_tasks(
+        html_content_by_lou,
+        folder_pdf,
+        lou_per_pdf,
+        floor_labels,
+    )
 
     worker_desc = pdf_workers if pdf_workers is not None else "默认"
     print(f"开始生成{len(render_tasks)}个PDF，worker数量：{worker_desc}")

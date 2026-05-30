@@ -6,6 +6,12 @@ from typing import Optional, TypedDict, cast
 from bs4 import BeautifulSoup, Tag
 
 from nga_tools import utils
+from nga_tools.backup.floor_map import (
+    MISSING_POST_HTML,
+    AuthorPostRef,
+    FloorLabels,
+    build_and_save_floor_map,
+)
 from nga_tools.bbcode_convert import bbcode_to_html
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
@@ -13,11 +19,13 @@ from nga_tools.ngaclient.client import PageData
 
 class PostData(TypedDict):
     lou: int
+    pid: int
     content: str
 
 
 class PostHtml(TypedDict):
     lou: int
+    pid: Optional[int]
     html: str
 
 
@@ -32,10 +40,11 @@ def _page_posts(page_data: PageData) -> list[PostData]:
             raise ValueError(f"NGA响应中的帖子不是对象：{raw_post!r}")
         post = cast(dict[str, object], raw_post)
         lou = post.get("lou")
+        pid = post.get("pid")
         content = post.get("content")
-        if type(lou) is not int or not isinstance(content, str):
+        if type(lou) is not int or type(pid) is not int or not isinstance(content, str):
             raise ValueError(f"NGA响应中的帖子字段无效：{raw_post!r}")
-        posts.append({"lou": lou, "content": content})
+        posts.append({"lou": lou, "pid": pid, "content": content})
 
     return posts
 
@@ -88,12 +97,14 @@ def _write_post_htmls(
                 encoding="utf-8",
             ) as file:
                 file.write(post_html)
-            htmls.append({"lou": post["lou"], "html": post_html})
+            htmls.append(
+                {"lou": post["lou"], "pid": post["pid"], "html": post_html}
+            )
 
     return htmls
 
 
-def _fill_missing_lou(htmls: list[PostHtml]) -> None:
+def _fill_missing_lou(htmls: list[PostHtml], floor_labels: FloorLabels) -> None:
     htmls.sort(key=lambda item: item["lou"])
 
     expected_lou = 1
@@ -101,13 +112,13 @@ def _fill_missing_lou(htmls: list[PostHtml]) -> None:
     for item in htmls:
         if item["lou"] != expected_lou:
             for lou in range(expected_lou, item["lou"]):
-                print(f"警告：缺失楼层{lou}！")
+                print(f"警告：缺失{floor_labels.label(lou)}！")
                 missing_lou.append(lou)
             expected_lou = item["lou"]
         expected_lou += 1
 
     for lou in missing_lou:
-        htmls.append({"lou": lou, "html": "<p><em>本楼层内容缺失。</em></p>"})
+        htmls.append({"lou": lou, "pid": None, "html": MISSING_POST_HTML})
 
     htmls.sort(key=lambda item: item["lou"])
 
@@ -116,6 +127,7 @@ def _rewrite_image_links(
     htmls: list[PostHtml],
     tid: int,
     aid: Optional[int],
+    floor_labels: FloorLabels,
 ) -> list[utils.DownloadTask]:
     seen_urls: set[str] = set()
     files_to_download: list[utils.DownloadTask] = []
@@ -132,7 +144,10 @@ def _rewrite_image_links(
             image["src"] = f"../images/{image_filename}"
 
             if not utils.NGA_img_link_verify(image_url):
-                print(f"警告：第{item['lou']}楼的第{index + 1}张图片链接无效")
+                print(
+                    f"警告：{floor_labels.label(item['lou'])}的"
+                    f"第{index + 1}张图片链接无效"
+                )
 
             if image_url not in seen_urls:
                 seen_urls.add(image_url)
@@ -157,6 +172,16 @@ def _write_modified_htmls(htmls: list[PostHtml], tid: int, aid: Optional[int]) -
             file.write(item["html"])
 
 
+def _post_refs_from_htmls(htmls: list[PostHtml]) -> list[AuthorPostRef]:
+    post_refs: list[AuthorPostRef] = []
+    for item in htmls:
+        pid = item["pid"]
+        if pid is None:
+            continue
+        post_refs.append({"pid": pid, "author_lou": item["lou"]})
+    return post_refs
+
+
 def backup_thread(tid: int, aid: Optional[int]) -> None:
     client = NGAClient()
     page_count = client.get_page_count(tid, aid)
@@ -166,8 +191,17 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
     print("开始处理")
 
     htmls = _write_post_htmls(client, tid, aid, page_count)
-    _fill_missing_lou(htmls)
-    files_to_download = _rewrite_image_links(htmls, tid, aid)
+    floor_labels = FloorLabels.plain()
+    if aid is not None:
+        floor_labels = build_and_save_floor_map(
+            client,
+            tid,
+            aid,
+            _post_refs_from_htmls(htmls),
+        )
+
+    _fill_missing_lou(htmls, floor_labels)
+    files_to_download = _rewrite_image_links(htmls, tid, aid, floor_labels)
     _write_modified_htmls(htmls, tid, aid)
 
     print(f"准备下载{len(files_to_download)}个图片文件...")
