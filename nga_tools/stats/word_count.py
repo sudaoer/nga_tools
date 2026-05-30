@@ -47,8 +47,8 @@ WHITESPACE_RE = re.compile(r"[ \t\r\f\v]+")
 BLANK_LINES_RE = re.compile(r"\n{3,}")
 
 CHINESE_PUNCTUATION = frozenset(
-    "，。！？；：、、“”‘’（）《》〈〉【】「」『』〔〕［］｛｝"
-    "—…～·￥"
+    "，。！？；：、、“”‘’（）《》〈〉【】「」『』〔〕〖〗〘〙〚〛［］｛｝"
+    "〃〄〝〞〟〰〽—…〜～·￥"
 )
 
 
@@ -87,7 +87,7 @@ def _is_cjk_char(char: str) -> bool:
 
 
 def _is_chinese_punctuation(char: str) -> bool:
-    return char in CHINESE_PUNCTUATION or 0x3001 <= ord(char) <= 0x303F
+    return char in CHINESE_PUNCTUATION
 
 
 def count_chinese_text(text: str) -> TextWordCount:

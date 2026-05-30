@@ -16,7 +16,7 @@ from nga_tools.stats.word_count import (
 
 class WordCountCleaningTest(unittest.TestCase):
     def test_count_chinese_and_chinese_punctuation_separately(self) -> None:
-        count = count_chinese_text("中文，test123。全角Ａ１！")
+        count = count_chinese_text("中文，test123。全角Ａ１！々")
 
         self.assertEqual(count.chinese_chars, 4)
         self.assertEqual(count.chinese_with_punctuation, 7)
