@@ -20,3 +20,5 @@ pyright = ">=1.1.409,<2"
 
 [target.linux.dependencies]
 weasyprint = "*"
+font-ttf-noto-cjk = "*"
+poppler = "*"

@@ -214,7 +214,7 @@ def _build_render_tasks(
         pdf_html_path = f"{folder_pdf}/part_{start_lou}_{end_lou}.html"
         pdf_output_path = f"{folder_pdf}/part_{start_lou}_{end_lou}.pdf"
         with open(pdf_html_path, "w", encoding="utf-8") as file:
-            file.write("<html>\n<head>\n<meta charset=\"utf-8\"/>\n")
+            file.write("<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\"/>\n")
             file.write(app_config.html_style)
             file.write("\n</head>\n<body>\n")
             file.write(app_config.html_pre)
