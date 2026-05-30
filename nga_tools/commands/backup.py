@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from nga_tools import utils
-from nga_tools.backup.archive import backup_thread
+from nga_tools.backup.archive import backup_thread, backup_thread_sub
 from nga_tools.backup.floor_map import generate_floor_map_from_backup
 from nga_tools.backup.pdf import generate_pdf
 from nga_tools.commands.resolve import resolve_command_thread_target
@@ -14,8 +13,8 @@ def backup_all(args: CommandArgs) -> None:
 
 
 def backup_sub(args: CommandArgs) -> None:
-    resolve_command_thread_target(args)
-    utils.TODO("实现备份帖子本地没有部分的功能")
+    thread_tid, thread_aid = resolve_command_thread_target(args)
+    backup_thread_sub(thread_tid, thread_aid)
 
 
 def backup_floors(args: CommandArgs) -> None:

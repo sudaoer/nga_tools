@@ -116,9 +116,17 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
         },
         "sub": {
             "handler": backup_sub,
-            "summary": "补充备份本地缺失内容（暂未实现）",
+            "summary": "增量补充本地缺失内容和远端新增内容",
             "usage": f"{PROGRAM_USAGE} backup sub (--name NAME | --tid TID) [--aid AID]",
-            "examples": [f"{PROGRAM_USAGE} backup sub --name 帖子名"],
+            "examples": [
+                f"{PROGRAM_USAGE} backup sub --name 帖子名",
+                f"{PROGRAM_USAGE} backup sub --tid 12345678 --aid 987654",
+            ],
+            "notes": [
+                "此命令会补抓缺失JSON页，并刷新本地尾页到远端最后一页。",
+                "随后会补齐缺失或新增的HTML、html_modified和图片文件。",
+                "author-only备份会增量刷新floor_map.json。",
+            ],
             "args": ["name", "tid", "aid"],
             "required_any": ["name", "tid"],
         },
@@ -131,8 +139,9 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} backup floors --tid 12345678 --aid 987654",
             ],
             "notes": [
-                "此命令会读取已有json备份并联网扫描原帖，生成floor_map.json。",
+                "此命令会读取已有json备份并联网扫描原帖，增量刷新floor_map.json。",
                 "author-only备份生成PDF前必须先有floor_map.json。",
+                "缺失楼无法唯一确定原楼层时，会在floor_map.json中记录候选原楼层。",
             ],
             "args": ["name", "tid", "aid"],
             "required_any": ["name", "tid"],

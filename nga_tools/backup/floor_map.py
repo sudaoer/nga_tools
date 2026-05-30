@@ -5,7 +5,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, TypedDict, cast
+from typing import NotRequired, Optional, TypedDict, cast
 
 from nga_tools import utils
 from nga_tools.ngaclient import NGAClient
@@ -14,6 +14,7 @@ from nga_tools.ngaclient.client import PageData
 FLOOR_MAP_FILENAME = "floor_map.json"
 PAGE_JSON_RE = re.compile(r"^page_(\d+)\.json$")
 MISSING_POST_HTML = "<p><em>本楼层内容缺失。</em></p>"
+ORIGINAL_POSTS_PER_PAGE = 20
 
 
 class AuthorPostRef(TypedDict):
@@ -24,17 +25,23 @@ class AuthorPostRef(TypedDict):
 class FloorMapEntry(TypedDict):
     pid: Optional[int]
     author_lou: int
-    original_lou: int
+    original_lou: Optional[int]
+    candidate_original_lous: NotRequired[list[int]]
 
 
 @dataclass(frozen=True)
 class FloorLabels:
     original_lou_by_author_lou: dict[int, int]
+    candidate_original_lous_by_author_lou: dict[int, list[int]]
     show_original: bool
 
     @classmethod
     def plain(cls) -> "FloorLabels":
-        return cls(original_lou_by_author_lou={}, show_original=False)
+        return cls(
+            original_lou_by_author_lou={},
+            candidate_original_lous_by_author_lou={},
+            show_original=False,
+        )
 
     def label(self, author_lou: int) -> str:
         if not self.show_original:
@@ -42,9 +49,21 @@ class FloorLabels:
 
         original_lou = self.original_lou_by_author_lou.get(author_lou)
         if original_lou is None:
+            candidates = self.candidate_original_lous_by_author_lou.get(author_lou)
+            if candidates:
+                candidate_text = _format_candidate_lous(candidates)
+                return f"第{author_lou}楼（原楼层候选：{candidate_text}）"
             return f"第{author_lou}楼（原楼层未知）"
 
         return f"第{author_lou}楼（原{original_lou}楼）"
+
+
+def _format_candidate_lous(candidates: Sequence[int]) -> str:
+    if len(candidates) <= 5:
+        return ", ".join(str(lou) for lou in candidates)
+
+    preview = ", ".join(str(lou) for lou in candidates[:5])
+    return f"{preview} 等{len(candidates)}个"
 
 
 def get_floor_map_path(tid: int, aid: int) -> Path:
@@ -87,6 +106,25 @@ def _optional_int(data: dict[str, object], key: str, source: Path) -> Optional[i
     if type(value) is int:
         return value
     raise ValueError(f"{source} 字段必须是整数或null：{key}")
+
+
+def _optional_int_list(
+    data: dict[str, object],
+    key: str,
+    source: Path,
+) -> list[int]:
+    value = data.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{source} 字段必须是整数列表：{key}")
+
+    result: list[int] = []
+    for item in cast(list[object], value):
+        if type(item) is not int:
+            raise ValueError(f"{source} 字段必须是整数列表：{key}")
+        result.append(item)
+    return result
 
 
 def _page_post_refs(page_data: PageData, source: str) -> list[tuple[int, int]]:
@@ -181,13 +219,17 @@ def _load_floor_map_entries(path: Path) -> list[FloorMapEntry]:
         if not isinstance(raw_entry, dict):
             raise ValueError(f"{path} 中的楼层映射项不是对象：{raw_entry!r}")
         entry = cast(dict[str, object], raw_entry)
-        entries.append(
-            {
-                "pid": _optional_int(entry, "pid", path),
-                "author_lou": _required_int(entry, "author_lou", path),
-                "original_lou": _required_int(entry, "original_lou", path),
-            }
+        floor_map_entry: FloorMapEntry = {
+            "pid": _optional_int(entry, "pid", path),
+            "author_lou": _required_int(entry, "author_lou", path),
+            "original_lou": _optional_int(entry, "original_lou", path),
+        }
+        candidate_original_lous = _optional_int_list(
+            entry, "candidate_original_lous", path
         )
+        if candidate_original_lous:
+            floor_map_entry["candidate_original_lous"] = candidate_original_lous
+        entries.append(floor_map_entry)
 
     return entries
 
@@ -203,11 +245,22 @@ def load_floor_labels(tid: int, aid: Optional[int]) -> FloorLabels:
         )
 
     original_lou_by_author_lou: dict[int, int] = {}
+    candidate_original_lous_by_author_lou: dict[int, list[int]] = {}
     for entry in _load_floor_map_entries(path):
-        original_lou_by_author_lou[entry["author_lou"]] = entry["original_lou"]
+        original_lou = entry["original_lou"]
+        if original_lou is not None:
+            original_lou_by_author_lou[entry["author_lou"]] = original_lou
+            continue
+
+        candidate_original_lous = entry.get("candidate_original_lous")
+        if candidate_original_lous:
+            candidate_original_lous_by_author_lou[entry["author_lou"]] = (
+                candidate_original_lous
+            )
 
     return FloorLabels(
         original_lou_by_author_lou=original_lou_by_author_lou,
+        candidate_original_lous_by_author_lou=candidate_original_lous_by_author_lou,
         show_original=True,
     )
 
@@ -257,36 +310,60 @@ def build_and_save_floor_map(
         pid_to_author_lous.setdefault(pid, []).append(author_lou)
         author_lou_to_pid[author_lou] = pid
 
-    found_original_by_author_lou: dict[int, int] = {}
-    seen_original_lous: set[int] = set()
-    page_count = client.get_page_count(tid, None)
-    print(
-        f"开始生成楼层映射：只看作者{len(author_posts)}楼，"
-        f"扫描原帖{page_count}页。",
-        flush=True,
+    found_original_by_author_lou, existing_missing_originals, existing_candidates = (
+        _load_reusable_floor_map(
+            tid,
+            aid,
+            author_lou_to_pid,
+            set(missing_author_lous),
+        )
     )
+    original_lou_by_author_lou = {
+        **found_original_by_author_lou,
+        **existing_missing_originals,
+    }
+    seen_original_lous: set[int] = set(found_original_by_author_lou.values())
+    scanned_pages: set[int] = set()
 
-    for page_number in range(1, page_count + 1):
-        if page_number == 1 or page_number % 50 == 0:
-            print(
-                f"正在扫描原帖第{page_number}/{page_count}页，"
-                f"已匹配{len(found_original_by_author_lou)}/{len(author_posts)}楼...",
-                flush=True,
-            )
-
-        page_data = client.get_page(tid, None, page_number)
-        for pid, original_lou in _page_post_refs(page_data, f"原帖第{page_number}页"):
-            seen_original_lous.add(original_lou)
-            for author_lou in pid_to_author_lous.get(pid, []):
-                found_original_by_author_lou[author_lou] = original_lou
-
-        if len(found_original_by_author_lou) == len(author_posts):
-            break
+    pending_author_lous = sorted(
+        author_lou
+        for author_lou in author_lou_to_pid
+        if author_lou not in found_original_by_author_lou
+    )
+    if pending_author_lous:
+        page_count = client.get_page_count(tid, None)
+        pages_to_scan = _pages_for_pending_author_lous(
+            pending_author_lous,
+            original_lou_by_author_lou,
+            page_count,
+        )
+        print(
+            f"增量扫描原帖{len(pages_to_scan)}页，"
+            f"匹配{len(pending_author_lous)}个未映射楼层。",
+            flush=True,
+        )
+        _scan_original_pages(
+            client,
+            tid,
+            pages_to_scan,
+            scanned_pages,
+            seen_original_lous,
+            pid_to_author_lous,
+            original_lou_by_author_lou,
+            len(author_posts),
+        )
+        found_original_by_author_lou = {
+            author_lou: original_lou_by_author_lou[author_lou]
+            for author_lou in author_lou_to_pid
+            if author_lou in original_lou_by_author_lou
+        }
+    else:
+        print("已有楼层映射覆盖所有非缺失楼层。", flush=True)
 
     unmapped_author_lous = sorted(
         author_lou
         for author_lou in author_lou_to_pid
-        if author_lou not in found_original_by_author_lou
+        if author_lou not in original_lou_by_author_lou
     )
     if unmapped_author_lous:
         preview = ", ".join(str(lou) for lou in unmapped_author_lous[:10])
@@ -296,20 +373,36 @@ def build_and_save_floor_map(
             f"有{len(unmapped_author_lous)}个只看作者楼层未找到原帖楼层：{preview}。"
         )
 
-    inferred_missing_originals = _infer_missing_original_lous(
-        found_original_by_author_lou,
+    missing_inference = _infer_missing_original_lous(
+        client,
+        tid,
+        original_lou_by_author_lou,
         seen_original_lous,
+        scanned_pages,
         missing_author_lous,
+        existing_candidates,
     )
+    inferred_missing_originals = missing_inference.exact_original_by_author_lou
+    candidate_missing_originals = missing_inference.candidate_originals_by_author_lou
     if inferred_missing_originals:
         print(
             f"已补全{len(inferred_missing_originals)}个缺失楼的原帖楼层。",
             flush=True,
         )
+    if candidate_missing_originals:
+        print(
+            f"已记录{len(candidate_missing_originals)}个缺失楼的候选原帖楼层。",
+            flush=True,
+        )
 
     all_original_by_author_lou = {
-        **found_original_by_author_lou,
+        **original_lou_by_author_lou,
         **inferred_missing_originals,
+    }
+    final_candidate_missing_originals = {
+        author_lou: candidate_lous
+        for author_lou, candidate_lous in candidate_missing_originals.items()
+        if author_lou not in all_original_by_author_lou
     }
 
     entries: list[FloorMapEntry] = []
@@ -318,15 +411,32 @@ def build_and_save_floor_map(
             {
                 "pid": author_lou_to_pid[author_lou],
                 "author_lou": author_lou,
-                "original_lou": found_original_by_author_lou[author_lou],
+                "original_lou": original_lou_by_author_lou[author_lou],
             }
         )
-    for author_lou in sorted(inferred_missing_originals):
+    exact_missing_originals = {
+        author_lou: all_original_by_author_lou[author_lou]
+        for author_lou in missing_author_lous
+        if author_lou not in author_lou_to_pid
+        and author_lou in all_original_by_author_lou
+    }
+    for author_lou in sorted(exact_missing_originals):
         entries.append(
             {
                 "pid": None,
                 "author_lou": author_lou,
-                "original_lou": inferred_missing_originals[author_lou],
+                "original_lou": exact_missing_originals[author_lou],
+            }
+        )
+    for author_lou in sorted(final_candidate_missing_originals):
+        entries.append(
+            {
+                "pid": None,
+                "author_lou": author_lou,
+                "original_lou": None,
+                "candidate_original_lous": final_candidate_missing_originals[
+                    author_lou
+                ],
             }
         )
     entries.sort(key=lambda entry: entry["author_lou"])
@@ -334,31 +444,205 @@ def build_and_save_floor_map(
     _write_floor_map(tid, aid, entries)
     return FloorLabels(
         original_lou_by_author_lou=all_original_by_author_lou,
+        candidate_original_lous_by_author_lou=final_candidate_missing_originals,
         show_original=True,
     )
 
 
+def _load_reusable_floor_map(
+    tid: int,
+    aid: int,
+    author_lou_to_pid: dict[int, int],
+    missing_author_lous: set[int],
+) -> tuple[dict[int, int], dict[int, int], dict[int, list[int]]]:
+    path = get_floor_map_path(tid, aid)
+    if not path.exists():
+        return {}, {}, {}
+
+    original_lou_by_author_lou: dict[int, int] = {}
+    missing_original_lou_by_author_lou: dict[int, int] = {}
+    candidate_originals_by_author_lou: dict[int, list[int]] = {}
+    for entry in _load_floor_map_entries(path):
+        author_lou = entry["author_lou"]
+        entry_pid = entry["pid"]
+        original_lou = entry["original_lou"]
+
+        if author_lou in author_lou_to_pid:
+            if entry_pid != author_lou_to_pid[author_lou]:
+                continue
+            if original_lou is not None:
+                original_lou_by_author_lou[author_lou] = original_lou
+            continue
+
+        if author_lou not in missing_author_lous or entry_pid is not None:
+            continue
+        if original_lou is not None:
+            missing_original_lou_by_author_lou[author_lou] = original_lou
+            continue
+
+        candidate_original_lous = entry.get("candidate_original_lous")
+        if candidate_original_lous:
+            candidate_originals_by_author_lou[author_lou] = candidate_original_lous
+
+    if (
+        original_lou_by_author_lou
+        or missing_original_lou_by_author_lou
+        or candidate_originals_by_author_lou
+    ):
+        print(
+            f"复用已有楼层映射：确定{len(original_lou_by_author_lou)}楼，"
+            f"缺失确定{len(missing_original_lou_by_author_lou)}楼，"
+            f"候选{len(candidate_originals_by_author_lou)}楼。",
+            flush=True,
+        )
+    return (
+        original_lou_by_author_lou,
+        missing_original_lou_by_author_lou,
+        candidate_originals_by_author_lou,
+    )
+
+
+def _original_page_for_lou(lou: int) -> int:
+    return max(1, lou // ORIGINAL_POSTS_PER_PAGE + 1)
+
+
+def _pages_for_original_interval(start_lou: int, end_lou: int) -> list[int]:
+    start_page = _original_page_for_lou(start_lou)
+    end_page = _original_page_for_lou(end_lou)
+    return list(range(start_page, end_page + 1))
+
+
+def _pages_for_pending_author_lous(
+    pending_author_lous: Sequence[int],
+    original_lou_by_author_lou: dict[int, int],
+    page_count: int,
+) -> list[int]:
+    if not pending_author_lous:
+        return []
+    if not original_lou_by_author_lou:
+        return list(range(1, page_count + 1))
+
+    mapped_author_lous = sorted(original_lou_by_author_lou)
+    pages: set[int] = set()
+    chunk_start = pending_author_lous[0]
+    previous_lou = chunk_start
+    for pending_lou in list(pending_author_lous[1:]) + [-1]:
+        if pending_lou != previous_lou + 1:
+            chunk_end = previous_lou
+            prev_candidates = [lou for lou in mapped_author_lous if lou < chunk_start]
+            next_candidates = [lou for lou in mapped_author_lous if lou > chunk_end]
+            if prev_candidates:
+                start_page = _original_page_for_lou(
+                    original_lou_by_author_lou[prev_candidates[-1]]
+                )
+            else:
+                start_page = 1
+            if next_candidates:
+                end_page = _original_page_for_lou(
+                    original_lou_by_author_lou[next_candidates[0]]
+                )
+            else:
+                end_page = page_count
+            pages.update(range(start_page, end_page + 1))
+            chunk_start = pending_lou
+        previous_lou = pending_lou
+
+    return sorted(page for page in pages if 1 <= page <= page_count)
+
+
+def _scan_original_pages(
+    client: NGAClient,
+    tid: int,
+    page_numbers: Sequence[int],
+    scanned_pages: set[int],
+    seen_original_lous: set[int],
+    pid_to_author_lous: dict[int, list[int]],
+    original_lou_by_author_lou: dict[int, int],
+    author_post_count: int,
+) -> None:
+    target_author_lous = {
+        author_lou
+        for author_lous in pid_to_author_lous.values()
+        for author_lou in author_lous
+    }
+    for index, page_number in enumerate(page_numbers, start=1):
+        if page_number in scanned_pages:
+            continue
+        if index == 1 or index % 50 == 0 or index == len(page_numbers):
+            if target_author_lous:
+                matched_count = sum(
+                    1
+                    for author_lou in target_author_lous
+                    if author_lou in original_lou_by_author_lou
+                )
+                progress_text = f"已匹配{matched_count}/{author_post_count}楼..."
+            else:
+                progress_text = "正在收集原帖楼层信息..."
+            print(
+                f"正在扫描原帖第{page_number}页，"
+                f"进度{index}/{len(page_numbers)}，"
+                f"{progress_text}",
+                flush=True,
+            )
+
+        page_data = client.get_page(tid, None, page_number)
+        scanned_pages.add(page_number)
+        for pid, original_lou in _page_post_refs(page_data, f"原帖第{page_number}页"):
+            seen_original_lous.add(original_lou)
+            for author_lou in pid_to_author_lous.get(pid, []):
+                original_lou_by_author_lou[author_lou] = original_lou
+
+
+@dataclass(frozen=True)
+class MissingOriginalInference:
+    exact_original_by_author_lou: dict[int, int]
+    candidate_originals_by_author_lou: dict[int, list[int]]
+
+
+def _possible_candidates_by_position(
+    author_gap_lous: Sequence[int],
+    original_gap_lous: Sequence[int],
+) -> dict[int, list[int]]:
+    candidates_by_author_lou: dict[int, list[int]] = {}
+    author_count = len(author_gap_lous)
+    original_count = len(original_gap_lous)
+    for index, author_lou in enumerate(author_gap_lous):
+        start = index
+        end = original_count - (author_count - index) + 1
+        candidates_by_author_lou[author_lou] = list(original_gap_lous[start:end])
+    return candidates_by_author_lou
+
+
 def _infer_missing_original_lous(
+    client: NGAClient,
+    tid: int,
     original_lou_by_author_lou: dict[int, int],
     seen_original_lous: set[int],
+    scanned_pages: set[int],
     missing_author_lous: Sequence[int],
-) -> dict[int, int]:
+    existing_candidates: dict[int, list[int]],
+) -> MissingOriginalInference:
     inferred: dict[int, int] = {}
+    candidates: dict[int, list[int]] = {}
+    processed_missing_lous: set[int] = set()
     if not missing_author_lous:
-        return inferred
+        return MissingOriginalInference(inferred, existing_candidates)
 
     mapped_author_lous = sorted(original_lou_by_author_lou)
     if not mapped_author_lous:
-        return inferred
+        return MissingOriginalInference(inferred, existing_candidates)
 
     missing_lous = sorted(set(missing_author_lous))
     for missing_lou in missing_lous:
-        if missing_lou in inferred:
+        if missing_lou in original_lou_by_author_lou or missing_lou in inferred:
             continue
 
         prev_candidates = [lou for lou in mapped_author_lous if lou < missing_lou]
         next_candidates = [lou for lou in mapped_author_lous if lou > missing_lou]
         if not prev_candidates or not next_candidates:
+            existing_candidate_lous = existing_candidates.get(missing_lou)
+            if existing_candidate_lous:
+                candidates[missing_lou] = existing_candidate_lous
             print(f"警告：无法推断第{missing_lou}楼的原帖楼层。")
             continue
 
@@ -366,9 +650,32 @@ def _infer_missing_original_lous(
         next_author_lou = next_candidates[0]
         author_gap_lous = [
             lou for lou in missing_lous if prev_author_lou < lou < next_author_lou
+            and lou not in original_lou_by_author_lou
+            and lou not in inferred
         ]
+        if not author_gap_lous:
+            continue
+        processed_missing_lous.update(author_gap_lous)
+
         prev_original_lou = original_lou_by_author_lou[prev_author_lou]
         next_original_lou = original_lou_by_author_lou[next_author_lou]
+        pages_to_scan = [
+            page
+            for page in _pages_for_original_interval(prev_original_lou, next_original_lou)
+            if page not in scanned_pages
+        ]
+        if pages_to_scan:
+            _scan_original_pages(
+                client,
+                tid,
+                pages_to_scan,
+                scanned_pages,
+                seen_original_lous,
+                {},
+                original_lou_by_author_lou,
+                len(original_lou_by_author_lou),
+            )
+
         original_gap_lous = [
             lou
             for lou in range(prev_original_lou + 1, next_original_lou)
@@ -376,17 +683,33 @@ def _infer_missing_original_lous(
         ]
 
         if len(author_gap_lous) != len(original_gap_lous):
+            possible_candidates = _possible_candidates_by_position(
+                author_gap_lous,
+                original_gap_lous,
+            )
             print(
                 f"警告：无法唯一推断第{missing_lou}楼的原帖楼层，"
                 f"只看作者缺失{len(author_gap_lous)}楼，"
                 f"原帖区间缺失{len(original_gap_lous)}楼。"
             )
+            for author_lou, candidate_lous in possible_candidates.items():
+                if candidate_lous:
+                    candidates[author_lou] = candidate_lous
             continue
 
         for author_lou, original_lou in zip(author_gap_lous, original_gap_lous):
             inferred[author_lou] = original_lou
 
-    return inferred
+    for author_lou, candidate_lous in existing_candidates.items():
+        if (
+            author_lou not in original_lou_by_author_lou
+            and author_lou not in inferred
+            and author_lou not in candidates
+            and author_lou not in processed_missing_lous
+        ):
+            candidates[author_lou] = candidate_lous
+
+    return MissingOriginalInference(inferred, candidates)
 
 
 def generate_floor_map_from_backup(tid: int, aid: Optional[int]) -> None:
