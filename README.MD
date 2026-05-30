@@ -92,6 +92,18 @@ pixi run python main.py backup floors --name 帖子名
 pixi run python main.py image verify --name 帖子名
 ```
 
+统计已有备份中的正文中文字数：
+
+```powershell
+pixi run python main.py stats words --name 帖子名
+```
+
+统计命令只读取本地 `json/page_*.json`，不联网、不生成统计文件。默认会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子标记，并只纳入清洗后 `中文+中文标点数` 不低于 120 的正文楼层。阈值可以通过 `--min_body_chars` 调整：
+
+```powershell
+pixi run python main.py stats words --name 帖子名 --min_body_chars 80
+```
+
 ## 生成 PDF
 
 先运行 `backup all` 生成 HTML 和图片，再生成 PDF：

@@ -47,7 +47,11 @@ def sha256(filepath: str) -> str:
 
 
 def get_folder(
-    tid: int | str, aid: Optional[int | str], subfolder: Optional[str] = None
+    tid: int | str,
+    aid: Optional[int | str],
+    subfolder: Optional[str] = None,
+    *,
+    create: bool = True,
 ) -> str:
     if type(tid) is int:
         tid_part = str(tid)
@@ -68,7 +72,7 @@ def get_folder(
     if subfolder:
         folder += "/" + subfolder
 
-    if folder not in _CREATED_FOLDERS:
+    if create and folder not in _CREATED_FOLDERS:
         _CREATED_FOLDERS.add(folder)
         os.makedirs(folder, exist_ok=True)
 

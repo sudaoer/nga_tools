@@ -11,6 +11,7 @@ from nga_tools.commands.backup import (
     pdf_generate,
 )
 from nga_tools.commands.image import image_verify
+from nga_tools.commands.stats import stats_words
 from nga_tools.commands.thread import handle_thread_add, handle_thread_list
 from nga_tools.commands.types import CommandArgs, CommandHandler
 
@@ -74,6 +75,12 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": int,
         "metavar": "N",
         "help": "生成PDF时并行运行weasyprint的worker数量（仅pdf命令有效）",
+    },
+    "min_body_chars": {
+        "flags": ("--min_body_chars",),
+        "type": int,
+        "metavar": "N",
+        "help": "正文楼层判定阈值（中文+中文标点数）",
     },
 }
 
@@ -178,6 +185,30 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "examples": [f"{PROGRAM_USAGE} image verify --name 帖子名"],
             "args": ["name", "tid", "aid"],
             "required_any": ["name", "tid"],
+        },
+    },
+    "stats": {
+        "words": {
+            "handler": stats_words,
+            "summary": "统计已有备份的正文中文字数",
+            "usage": (
+                f"{PROGRAM_USAGE} stats words (--name NAME | --tid TID) [--aid AID] "
+                "[--min_body_chars N]"
+            ),
+            "examples": [
+                f"{PROGRAM_USAGE} stats words --name 帖子名",
+                f"{PROGRAM_USAGE} stats words --tid 12345678 --aid 987654",
+                f"{PROGRAM_USAGE} stats words --name 帖子名 --min_body_chars 80",
+            ],
+            "notes": [
+                "此命令只读取本地json备份，不联网、不生成统计文件。",
+                "会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子标记。",
+                "默认只纳入清洗后中文+中文标点数达到120的正文楼层。",
+            ],
+            "args": ["name", "tid", "aid", "min_body_chars"],
+            "required_any": ["name", "tid"],
+            "defaults": {"min_body_chars": 120},
+            "positive": ["min_body_chars"],
         },
     },
 }
@@ -286,6 +317,7 @@ def format_global_help() -> str:
             f"  {PROGRAM_USAGE} thread list",
             f"  {PROGRAM_USAGE} backup all --name 帖子名",
             f"  {PROGRAM_USAGE} backup pdf --name 帖子名 --pdf_workers 2",
+            f"  {PROGRAM_USAGE} stats words --name 帖子名",
         ]
     )
     return "\n".join(lines)
