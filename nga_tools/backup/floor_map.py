@@ -22,7 +22,7 @@ class AuthorPostRef(TypedDict):
 
 
 class FloorMapEntry(TypedDict):
-    pid: int
+    pid: Optional[int]
     author_lou: int
     original_lou: int
 
@@ -80,6 +80,15 @@ def _required_int(data: dict[str, object], key: str, source: Path) -> int:
     raise ValueError(f"{source} 缺少整数字段：{key}")
 
 
+def _optional_int(data: dict[str, object], key: str, source: Path) -> Optional[int]:
+    value = data.get(key)
+    if value is None:
+        return None
+    if type(value) is int:
+        return value
+    raise ValueError(f"{source} 字段必须是整数或null：{key}")
+
+
 def _page_post_refs(page_data: PageData, source: str) -> list[tuple[int, int]]:
     raw_posts = page_data.get("result")
     if not isinstance(raw_posts, list):
@@ -130,6 +139,22 @@ def read_author_posts_from_json(tid: int, aid: int) -> list[AuthorPostRef]:
     return author_posts
 
 
+def read_missing_author_lous_from_html_modified(tid: int, aid: int) -> list[int]:
+    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+    missing_lous: list[int] = []
+    for path in sorted(folder_html_modified.glob("post_*.html")):
+        if not path.is_file():
+            continue
+        try:
+            lou = int(path.stem.split("_", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        if is_missing_post_html(path.read_text(encoding="utf-8")):
+            missing_lous.append(lou)
+
+    return missing_lous
+
+
 def _write_floor_map(
     tid: int,
     aid: int,
@@ -158,7 +183,7 @@ def _load_floor_map_entries(path: Path) -> list[FloorMapEntry]:
         entry = cast(dict[str, object], raw_entry)
         entries.append(
             {
-                "pid": _required_int(entry, "pid", path),
+                "pid": _optional_int(entry, "pid", path),
                 "author_lou": _required_int(entry, "author_lou", path),
                 "original_lou": _required_int(entry, "original_lou", path),
             }
@@ -217,6 +242,7 @@ def build_and_save_floor_map(
     tid: int,
     aid: int,
     author_posts: Sequence[AuthorPostRef],
+    missing_author_lous: Sequence[int],
 ) -> FloorLabels:
     if not author_posts:
         raise RuntimeError("没有可用于生成楼层映射的只看作者帖子。")
@@ -232,6 +258,7 @@ def build_and_save_floor_map(
         author_lou_to_pid[author_lou] = pid
 
     found_original_by_author_lou: dict[int, int] = {}
+    seen_original_lous: set[int] = set()
     page_count = client.get_page_count(tid, None)
     print(
         f"开始生成楼层映射：只看作者{len(author_posts)}楼，"
@@ -249,24 +276,41 @@ def build_and_save_floor_map(
 
         page_data = client.get_page(tid, None, page_number)
         for pid, original_lou in _page_post_refs(page_data, f"原帖第{page_number}页"):
+            seen_original_lous.add(original_lou)
             for author_lou in pid_to_author_lous.get(pid, []):
                 found_original_by_author_lou[author_lou] = original_lou
 
         if len(found_original_by_author_lou) == len(author_posts):
             break
 
-    missing_author_lous = sorted(
+    unmapped_author_lous = sorted(
         author_lou
         for author_lou in author_lou_to_pid
         if author_lou not in found_original_by_author_lou
     )
-    if missing_author_lous:
-        preview = ", ".join(str(lou) for lou in missing_author_lous[:10])
-        if len(missing_author_lous) > 10:
+    if unmapped_author_lous:
+        preview = ", ".join(str(lou) for lou in unmapped_author_lous[:10])
+        if len(unmapped_author_lous) > 10:
             preview += ", ..."
         raise RuntimeError(
-            f"有{len(missing_author_lous)}个只看作者楼层未找到原帖楼层：{preview}。"
+            f"有{len(unmapped_author_lous)}个只看作者楼层未找到原帖楼层：{preview}。"
         )
+
+    inferred_missing_originals = _infer_missing_original_lous(
+        found_original_by_author_lou,
+        seen_original_lous,
+        missing_author_lous,
+    )
+    if inferred_missing_originals:
+        print(
+            f"已补全{len(inferred_missing_originals)}个缺失楼的原帖楼层。",
+            flush=True,
+        )
+
+    all_original_by_author_lou = {
+        **found_original_by_author_lou,
+        **inferred_missing_originals,
+    }
 
     entries: list[FloorMapEntry] = []
     for author_lou in sorted(author_lou_to_pid):
@@ -277,12 +321,72 @@ def build_and_save_floor_map(
                 "original_lou": found_original_by_author_lou[author_lou],
             }
         )
+    for author_lou in sorted(inferred_missing_originals):
+        entries.append(
+            {
+                "pid": None,
+                "author_lou": author_lou,
+                "original_lou": inferred_missing_originals[author_lou],
+            }
+        )
+    entries.sort(key=lambda entry: entry["author_lou"])
 
     _write_floor_map(tid, aid, entries)
     return FloorLabels(
-        original_lou_by_author_lou=found_original_by_author_lou,
+        original_lou_by_author_lou=all_original_by_author_lou,
         show_original=True,
     )
+
+
+def _infer_missing_original_lous(
+    original_lou_by_author_lou: dict[int, int],
+    seen_original_lous: set[int],
+    missing_author_lous: Sequence[int],
+) -> dict[int, int]:
+    inferred: dict[int, int] = {}
+    if not missing_author_lous:
+        return inferred
+
+    mapped_author_lous = sorted(original_lou_by_author_lou)
+    if not mapped_author_lous:
+        return inferred
+
+    missing_lous = sorted(set(missing_author_lous))
+    for missing_lou in missing_lous:
+        if missing_lou in inferred:
+            continue
+
+        prev_candidates = [lou for lou in mapped_author_lous if lou < missing_lou]
+        next_candidates = [lou for lou in mapped_author_lous if lou > missing_lou]
+        if not prev_candidates or not next_candidates:
+            print(f"警告：无法推断第{missing_lou}楼的原帖楼层。")
+            continue
+
+        prev_author_lou = prev_candidates[-1]
+        next_author_lou = next_candidates[0]
+        author_gap_lous = [
+            lou for lou in missing_lous if prev_author_lou < lou < next_author_lou
+        ]
+        prev_original_lou = original_lou_by_author_lou[prev_author_lou]
+        next_original_lou = original_lou_by_author_lou[next_author_lou]
+        original_gap_lous = [
+            lou
+            for lou in range(prev_original_lou + 1, next_original_lou)
+            if lou not in seen_original_lous
+        ]
+
+        if len(author_gap_lous) != len(original_gap_lous):
+            print(
+                f"警告：无法唯一推断第{missing_lou}楼的原帖楼层，"
+                f"只看作者缺失{len(author_gap_lous)}楼，"
+                f"原帖区间缺失{len(original_gap_lous)}楼。"
+            )
+            continue
+
+        for author_lou, original_lou in zip(author_gap_lous, original_gap_lous):
+            inferred[author_lou] = original_lou
+
+    return inferred
 
 
 def generate_floor_map_from_backup(tid: int, aid: Optional[int]) -> None:
@@ -291,4 +395,5 @@ def generate_floor_map_from_backup(tid: int, aid: Optional[int]) -> None:
         return
 
     author_posts = read_author_posts_from_json(tid, aid)
-    build_and_save_floor_map(NGAClient(), tid, aid, author_posts)
+    missing_author_lous = read_missing_author_lous_from_html_modified(tid, aid)
+    build_and_save_floor_map(NGAClient(), tid, aid, author_posts, missing_author_lous)

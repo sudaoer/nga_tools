@@ -104,7 +104,7 @@ def _write_post_htmls(
     return htmls
 
 
-def _fill_missing_lou(htmls: list[PostHtml], floor_labels: FloorLabels) -> None:
+def _find_missing_lou(htmls: list[PostHtml]) -> list[int]:
     htmls.sort(key=lambda item: item["lou"])
 
     expected_lou = 1
@@ -112,10 +112,20 @@ def _fill_missing_lou(htmls: list[PostHtml], floor_labels: FloorLabels) -> None:
     for item in htmls:
         if item["lou"] != expected_lou:
             for lou in range(expected_lou, item["lou"]):
-                print(f"警告：缺失{floor_labels.label(lou)}！")
                 missing_lou.append(lou)
             expected_lou = item["lou"]
         expected_lou += 1
+
+    return missing_lou
+
+
+def _fill_missing_lou(
+    htmls: list[PostHtml],
+    missing_lou: list[int],
+    floor_labels: FloorLabels,
+) -> None:
+    for lou in missing_lou:
+        print(f"警告：缺失{floor_labels.label(lou)}！")
 
     for lou in missing_lou:
         htmls.append({"lou": lou, "pid": None, "html": MISSING_POST_HTML})
@@ -191,6 +201,7 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
     print("开始处理")
 
     htmls = _write_post_htmls(client, tid, aid, page_count)
+    missing_lou = _find_missing_lou(htmls)
     floor_labels = FloorLabels.plain()
     if aid is not None:
         floor_labels = build_and_save_floor_map(
@@ -198,9 +209,10 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
             tid,
             aid,
             _post_refs_from_htmls(htmls),
+            missing_lou,
         )
 
-    _fill_missing_lou(htmls, floor_labels)
+    _fill_missing_lou(htmls, missing_lou, floor_labels)
     files_to_download = _rewrite_image_links(htmls, tid, aid, floor_labels)
     _write_modified_htmls(htmls, tid, aid)
 
