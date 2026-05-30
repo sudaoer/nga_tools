@@ -6,6 +6,7 @@ platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
 version = "0.1.0"
 
 [tasks]
+typecheck = "pyright -p pyrightconfig.strict.json"
 
 [dependencies]
 python = ">=3.14.4,<3.15"

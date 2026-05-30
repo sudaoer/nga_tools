@@ -1,9 +1,15 @@
+from typing import Any, TypeAlias, cast
+
 import config
 import requests
 
+Tid: TypeAlias = int | str
+Aid: TypeAlias = int | str | None
+PageData: TypeAlias = dict[str, Any]
+
 
 class NGAClient:
-    def __init__(self):
+    def __init__(self) -> None:
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -15,16 +21,19 @@ class NGAClient:
             }
         )
         self.base_url = config.BASE_URL
-        self.page_cache = {}
+        self.page_cache: dict[str, PageData] = {}
 
-    def page_cache_key(self, tid, aid, page):
+    def page_cache_key(self, tid: Tid, aid: Aid, page: int) -> str:
         return f"{tid}_{aid if aid else 'all'}_page_{page}"
 
-    def get_page_count(self, tid, aid):
+    def get_page_count(self, tid: Tid, aid: Aid) -> int:
         first_page_data = self.get_page(tid, aid, 1)
-        return first_page_data.get("totalPage", 1)
+        total_pages = first_page_data.get("totalPage", 1)
+        if not isinstance(total_pages, int):
+            raise ValueError(f"Invalid totalPage value: {total_pages!r}")
+        return total_pages
 
-    def get_page(self, tid, aid, page):
+    def get_page(self, tid: Tid, aid: Aid, page: int) -> PageData:
         if not tid and not page:
             raise ValueError("Either tid or page must be provided.")
         if page < 1:
@@ -46,10 +55,14 @@ class NGAClient:
         response.raise_for_status()
 
         json_data = response.json()
-        if json_data.get("code") != 0:
+        if not isinstance(json_data, dict):
+            raise ValueError("NGA response is not a JSON object.")
+
+        page_data = cast(PageData, json_data)
+        if page_data.get("code") != 0:
             raise Exception(
-                f"Error fetching page: {json_data.get('msg', 'Unknown error')}"
+                f"Error fetching page: {page_data.get('msg', 'Unknown error')}"
             )
 
-        self.page_cache[cache_key] = json_data
-        return json_data
+        self.page_cache[cache_key] = page_data
+        return page_data

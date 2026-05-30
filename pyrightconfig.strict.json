@@ -1,0 +1,18 @@
+{
+  "include": [
+    "nga_tools",
+    "config.pyi"
+  ],
+  "exclude": [
+    ".git",
+    ".pixi",
+    "__pycache__",
+    "output",
+    "output*"
+  ],
+  "pythonVersion": "3.14",
+  "venvPath": ".pixi/envs",
+  "venv": "default",
+  "typeCheckingMode": "strict",
+  "reportMissingTypeStubs": "none"
+}

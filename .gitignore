@@ -6,6 +6,7 @@ __pycache__/
 *.xls
 *.xlsx
 *.json
+!pyrightconfig.strict.json
 # pixi environments
 .pixi/*
 !.pixi/config.toml
