@@ -93,3 +93,21 @@ class NGAThreadConfigs:
 
     def get_thread_configs(self) -> list[ThreadConfig]:
         return self.ThreadList
+
+
+def resolve_thread_target(
+    name: str | None,
+    tid: int | None,
+    aid: int | None,
+) -> tuple[int, int | None]:
+    if name:
+        for thread in NGAThreadConfigs().get_thread_configs():
+            if thread["thread_name"] == name:
+                return thread["tid"], thread.get("aid")
+        print(f"未找到名称为{name}的帖子配置。")
+        raise ValueError(f"未找到名称为{name}的帖子配置。")
+
+    if tid is not None:
+        return tid, aid
+
+    raise ValueError("name或tid参数必须提供其一以指定要备份的帖子。")
