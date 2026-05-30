@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import TypeAlias, cast
+from typing import Optional, TypeAlias, cast
 
 JsonObject: TypeAlias = dict[str, object]
 PathValue: TypeAlias = str | Path
@@ -182,15 +182,15 @@ def _required_float(data: JsonObject, key: str, source: Path) -> float:
     raise ValueError(f"{source} 缺少数字配置项：{key}")
 
 
-def _path_or_default(path: PathValue | None, default_path: Path) -> Path:
+def _path_or_default(path: Optional[PathValue], default_path: Path) -> Path:
     if path is None:
         return default_path
     return Path(path)
 
 
 def load_config(
-    config_path: PathValue | None = None,
-    secrets_path: PathValue | None = None,
+    config_path: Optional[PathValue] = None,
+    secrets_path: Optional[PathValue] = None,
 ) -> AppConfig:
     resolved_config_path = _path_or_default(config_path, DEFAULT_CONFIG_PATH)
     resolved_secrets_path = _path_or_default(secrets_path, DEFAULT_SECRETS_PATH)

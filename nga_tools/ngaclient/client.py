@@ -1,11 +1,11 @@
-from typing import Any, TypeAlias, cast
+from typing import Any, Optional, TypeAlias, cast
 
 import requests
 
 from nga_tools.config import get_config
 
 Tid: TypeAlias = int | str
-Aid: TypeAlias = int | str | None
+Aid: TypeAlias = Optional[int | str]
 PageData: TypeAlias = dict[str, Any]
 
 

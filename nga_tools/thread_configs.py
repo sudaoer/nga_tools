@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import TypedDict, cast
+from typing import Optional, TypedDict, cast
 
 from nga_tools.config import get_config
 
@@ -9,11 +9,11 @@ from nga_tools.config import get_config
 class ThreadConfig(TypedDict):
     thread_name: str
     tid: int
-    aid: int | None
+    aid: Optional[int]
     description: str
 
 
-def _parse_thread_config(item: object) -> ThreadConfig | None:
+def _parse_thread_config(item: object) -> Optional[ThreadConfig]:
     if not isinstance(item, dict):
         return None
 
@@ -72,7 +72,7 @@ class NGAThreadConfigs:
         ]
 
     def add_thread(
-        self, thread_name: str, tid: int, aid: int | None = None, description: str = ""
+        self, thread_name: str, tid: int, aid: Optional[int] = None, description: str = ""
     ) -> None:
         thread_config: ThreadConfig = {
             "thread_name": thread_name,
@@ -96,10 +96,10 @@ class NGAThreadConfigs:
 
 
 def resolve_thread_target(
-    name: str | None,
-    tid: int | None,
-    aid: int | None,
-) -> tuple[int, int | None]:
+    name: Optional[str],
+    tid: Optional[int],
+    aid: Optional[int],
+) -> tuple[int, Optional[int]]:
     if name:
         for thread in NGAThreadConfigs().get_thread_configs():
             if thread["thread_name"] == name:

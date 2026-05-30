@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import NotRequired, TypedDict, cast
+from typing import NotRequired, Optional, TypedDict, cast
 
 from nga_tools.commands.backup import backup_all, backup_sub, pdf_generate
 from nga_tools.commands.image import image_verify
@@ -167,7 +167,7 @@ def _provided_arg_names(argv: list[str]) -> set[str]:
     return provided_args
 
 
-def _has_arg_value(value: object | None) -> bool:
+def _has_arg_value(value: Optional[object]) -> bool:
     return value is not None and value != ""
 
 
@@ -379,7 +379,7 @@ def _validate_args(
             parser.error(f"--{arg_name}必须大于0。")
 
 
-def args_parse(argv: list[str] | None = None) -> CommandArgs:
+def args_parse(argv: Optional[list[str]] = None) -> CommandArgs:
     parser = argparse.ArgumentParser(description="NGA帖子备份器", add_help=False)
     raw_args = sys.argv[1:] if argv is None else argv
     _print_help_and_exit(raw_args)

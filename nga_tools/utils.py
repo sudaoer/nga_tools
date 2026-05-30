@@ -7,7 +7,7 @@ import re
 import sys
 import traceback
 from collections.abc import Awaitable
-from typing import NoReturn, NotRequired, TypedDict
+from typing import NoReturn, NotRequired, Optional, TypedDict
 
 import aiohttp
 
@@ -46,7 +46,9 @@ def sha256(filepath: str) -> str:
     return sha256_hash.hexdigest()
 
 
-def get_folder(tid: int | str, aid: int | str | None, subfolder: str | None = None) -> str:
+def get_folder(
+    tid: int | str, aid: Optional[int | str], subfolder: Optional[str] = None
+) -> str:
     if type(tid) is int:
         tid_part = str(tid)
     elif isinstance(tid, str):
@@ -111,7 +113,7 @@ def download_files(
         semaphore: asyncio.Semaphore,
     ) -> DownloadFileResult:
         attempt = 0
-        last_exc: BaseException | None = None
+        last_exc: Optional[BaseException] = None
         while attempt <= retries:
             try:
                 # only hold the semaphore during the actual network+write operation

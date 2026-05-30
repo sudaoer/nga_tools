@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TypeAlias
+from typing import Optional, TypeAlias
 
 CommandArgs: TypeAlias = dict[str, object]
 CommandHandler: TypeAlias = Callable[[CommandArgs], None]
@@ -14,7 +14,7 @@ def required_str(args: CommandArgs, key: str) -> str:
     raise ValueError(f"缺少字符串参数：--{key}")
 
 
-def optional_str(args: CommandArgs, key: str) -> str | None:
+def optional_str(args: CommandArgs, key: str) -> Optional[str]:
     value = args.get(key)
     if value is None:
         return None
@@ -30,7 +30,7 @@ def required_int(args: CommandArgs, key: str) -> int:
     raise ValueError(f"缺少整数参数：--{key}")
 
 
-def optional_int(args: CommandArgs, key: str) -> int | None:
+def optional_int(args: CommandArgs, key: str) -> Optional[int]:
     value = args.get(key)
     if value is None:
         return None

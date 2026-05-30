@@ -6,7 +6,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Optional, cast
 
 from bs4 import BeautifulSoup, Tag
 from bs4.element import NavigableString
@@ -24,7 +24,7 @@ class PdfRenderTask:
     output_path: str
 
 
-def _tag_attr_str(tag: Tag, attr_name: str) -> str | None:
+def _tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
     value = tag.get(attr_name)
     if isinstance(value, str):
         return value
@@ -232,7 +232,7 @@ def _build_render_tasks(
 
 def _read_pdf_html(
     tid: int,
-    aid: int | None,
+    aid: Optional[int],
 ) -> tuple[dict[int, str], str]:
     folder_images = utils.get_folder(tid, aid, "images")
     filename_hash: dict[str, str] = {}
@@ -310,9 +310,9 @@ def _read_pdf_html(
 
 def generate_pdf(
     tid: int,
-    aid: int | None,
+    aid: Optional[int],
     lou_per_pdf: int,
-    pdf_workers: int | None,
+    pdf_workers: Optional[int],
 ) -> None:
     if lou_per_pdf <= 0:
         raise ValueError("--lou_per_pdf必须大于0。")

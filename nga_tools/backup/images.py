@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
+from typing import Optional
 
 from PIL import Image
 
 from nga_tools import utils
 
 
-def verify_downloaded_images(tid: int, aid: int | None) -> None:
+def verify_downloaded_images(tid: int, aid: Optional[int]) -> None:
     folder_images = utils.get_folder(tid, aid, "images")
     image_files = utils.list_files_in_folder(folder_images)
     print(f"已下载图片文件数：{len(image_files)}")

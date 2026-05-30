@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import TypedDict, cast
+from typing import Optional, TypedDict, cast
 
 from bs4 import BeautifulSoup, Tag
 
@@ -40,7 +40,7 @@ def _page_posts(page_data: PageData) -> list[PostData]:
     return posts
 
 
-def _tag_attr_str(tag: Tag, attr_name: str) -> str | None:
+def _tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
     value = tag.get(attr_name)
     if isinstance(value, str):
         return value
@@ -54,7 +54,7 @@ def _image_filename_from_url(image_url: str) -> str:
 def _write_pages_json(
     client: NGAClient,
     tid: int,
-    aid: int | None,
+    aid: Optional[int],
     page_count: int,
 ) -> None:
     folder_json = utils.get_folder(tid, aid, "json")
@@ -72,7 +72,7 @@ def _write_pages_json(
 def _write_post_htmls(
     client: NGAClient,
     tid: int,
-    aid: int | None,
+    aid: Optional[int],
     page_count: int,
 ) -> list[PostHtml]:
     folder_html = utils.get_folder(tid, aid, "html")
@@ -115,7 +115,7 @@ def _fill_missing_lou(htmls: list[PostHtml]) -> None:
 def _rewrite_image_links(
     htmls: list[PostHtml],
     tid: int,
-    aid: int | None,
+    aid: Optional[int],
 ) -> list[utils.DownloadTask]:
     seen_urls: set[str] = set()
     files_to_download: list[utils.DownloadTask] = []
@@ -146,7 +146,7 @@ def _rewrite_image_links(
     return files_to_download
 
 
-def _write_modified_htmls(htmls: list[PostHtml], tid: int, aid: int | None) -> None:
+def _write_modified_htmls(htmls: list[PostHtml], tid: int, aid: Optional[int]) -> None:
     folder_html_modified = utils.get_folder(tid, aid, "html_modified")
     for item in htmls:
         with open(
@@ -157,7 +157,7 @@ def _write_modified_htmls(htmls: list[PostHtml], tid: int, aid: int | None) -> N
             file.write(item["html"])
 
 
-def backup_thread(tid: int, aid: int | None) -> None:
+def backup_thread(tid: int, aid: Optional[int]) -> None:
     client = NGAClient()
     page_count = client.get_page_count(tid, aid)
 
