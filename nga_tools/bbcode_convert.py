@@ -3,8 +3,7 @@ import re
 
 # 将单个 BBCode 转换为 HTML，先不添加 CSS 样式
 def bbcode_to_html(text: str) -> str:
-    # 定义 BBCode 转换规则
-    rules = [
+    rules: list[tuple[str, str]] = [
         (r"\[b\](.*?)\[/b\]", r"<strong>\1</strong>"),
         (r"\[i\](.*?)\[/i\]", r"<em>\1</em>"),
         (r"\[u\](.*?)\[/u\]", r"<u>\1</u>"),
@@ -18,11 +17,8 @@ def bbcode_to_html(text: str) -> str:
     ]
 
     # 逐个应用规则，为应对标签嵌套，多次应用规则
-    for pattern, repl in rules:
-        text = re.sub(pattern, repl, text, flags=re.DOTALL | re.IGNORECASE)
-    for pattern, repl in rules:
-        text = re.sub(pattern, repl, text, flags=re.DOTALL | re.IGNORECASE)
-    for pattern, repl in rules:
-        text = re.sub(pattern, repl, text, flags=re.DOTALL | re.IGNORECASE)
+    for _ in range(3):
+        for pattern, repl in rules:
+            text = re.sub(pattern, repl, text, flags=re.DOTALL | re.IGNORECASE)
 
     return text

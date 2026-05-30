@@ -7,9 +7,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import utils
+from nga_tools import utils
+from nga_tools.bbcode_convert import bbcode_to_html
 from nga_tools.config import get_config
 from nga_tools.ngaclient import NGAClient
+from nga_tools.thread_configs import NGAThreadConfigs
 
 CommandArgs = dict[str, Any]
 CommandHandler = Callable[[CommandArgs], None]
@@ -302,9 +304,6 @@ def main():
     dispatch_command(args)
 
 
-from NGAThreadConfigs import NGAThreadConfigs
-
-
 def handle_thread_add(args: CommandArgs) -> None:
     thread_configs = NGAThreadConfigs()
     thread_configs.add_thread(
@@ -332,7 +331,6 @@ def handle_thread_list(args: CommandArgs) -> None:
         )
 
 
-from bbcode_convert import bbcode_to_html
 import bs4
 from PIL import Image
 
