@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 
 import config
-import NGAClient
 import utils
 
 # 解析命令行
@@ -43,6 +42,12 @@ def args_parse():
         type=int,
         default=200,
         help="每个PDF包含的楼层数（仅pdf命令有效）",
+    )
+    parser.add_argument(
+        "--pdf_workers",
+        type=int,
+        default=None,
+        help="生成PDF时并行运行weasyprint的worker数量（仅pdf命令有效）",
     )
 
     args = parser.parse_args()
@@ -438,6 +443,9 @@ def pdf_generate(args: argparse.Namespace):
     # 每pdf包含args.lou_per_pdf楼层
     lou_per_pdf = args.lou_per_pdf
     assert lou_per_pdf > 0
+    pdf_workers = args.pdf_workers
+    if pdf_workers is not None and pdf_workers <= 0:
+        raise ValueError("--pdf_workers必须大于0。")
 
     command_list = []
 
@@ -463,11 +471,16 @@ def pdf_generate(args: argparse.Namespace):
         # 调用weasyprint生成pdf
         command_list.append(f'weasyprint "{pdf_html_path}" "{pdf_output_path}"')
 
-    # 多线程调用weasyprint生成pdf
+    # 按指定worker数量并行调用weasyprint生成pdf
     import concurrent.futures
 
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        executor.map(os.system, command_list)
+    worker_desc = pdf_workers if pdf_workers is not None else "默认"
+    print(f"开始生成{len(command_list)}个PDF，worker数量：{worker_desc}")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=pdf_workers) as executor:
+        exit_codes = list(executor.map(os.system, command_list))
+    failed_count = sum(exit_code != 0 for exit_code in exit_codes)
+    if failed_count:
+        raise RuntimeError(f"{failed_count}个PDF生成任务失败。")
     print("PDF生成完成。")
 
 

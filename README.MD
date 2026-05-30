@@ -82,6 +82,12 @@ pixi run python main.py backup pdf --name 帖子名
 pixi run python main.py backup pdf --name 帖子名 --lou_per_pdf 100
 ```
 
+可以通过 `--pdf_workers` 指定同时运行的 PDF 生成任务数：
+
+```powershell
+pixi run python main.py backup pdf --name 帖子名 --pdf_workers 2
+```
+
 PDF 生成功能会调用系统中的 `weasyprint` 命令，需要先确保它可以在命令行中直接运行。
 
 ## 输出目录
