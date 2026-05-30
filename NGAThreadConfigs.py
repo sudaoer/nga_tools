@@ -1,12 +1,12 @@
 import json
 
-import config
+from nga_tools.config import get_config
 
 
 class NGAThreadConfigs:
     def __init__(self):
         self.ThreadList = []
-        self.config_file_path = config.THREAD_CONFIG_FILE
+        self.config_file_path = get_config().thread_config_file
         self.load_configs()
 
     def load_configs(self):

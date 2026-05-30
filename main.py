@@ -7,8 +7,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import config
 import utils
+from nga_tools.config import get_config
 from nga_tools.ngaclient import NGAClient
 
 CommandArgs = dict[str, Any]
@@ -500,8 +500,9 @@ def _looks_like_speaker_name(speaker_name: str) -> bool:
 
 
 def _is_speaker_portrait(img: bs4.Tag, width: int, height: int) -> bool:
-    max_dimension = int(getattr(config, "PDF_SPEAKER_PORTRAIT_MAX_DIMENSION", 420))
-    max_aspect_ratio = float(getattr(config, "PDF_SPEAKER_PORTRAIT_MAX_RATIO", 3.0))
+    app_config = get_config()
+    max_dimension = app_config.pdf_speaker_portrait_max_dimension
+    max_aspect_ratio = app_config.pdf_speaker_portrait_max_ratio
     aspect_ratio = height / max(width, 1)
     if max(width, height) > max_dimension or not 0.45 <= aspect_ratio <= max_aspect_ratio:
         return False
@@ -515,8 +516,9 @@ def _is_speaker_portrait(img: bs4.Tag, width: int, height: int) -> bool:
 
 
 def _is_long_image(width: int, height: int) -> bool:
-    min_width = int(getattr(config, "PDF_LONG_IMAGE_MIN_WIDTH", 800))
-    min_ratio = float(getattr(config, "PDF_LONG_IMAGE_MIN_RATIO", 4.0))
+    app_config = get_config()
+    min_width = app_config.pdf_long_image_min_width
+    min_ratio = app_config.pdf_long_image_min_ratio
     return width >= min_width and (height / max(width, 1)) >= min_ratio
 
 
@@ -536,7 +538,7 @@ def _slice_long_image_for_pdf(
     if image_path in slice_cache:
         return slice_cache[image_path]
 
-    max_slice_ratio = float(getattr(config, "PDF_LONG_IMAGE_SLICE_RATIO", 1.35))
+    max_slice_ratio = get_config().pdf_long_image_slice_ratio
     safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(image_path).stem)
     slice_paths: list[str] = []
 
@@ -587,6 +589,7 @@ def _replace_long_image_with_slices(
 
 # 调用外部weasyprint生成PDF
 def pdf_generate(args: CommandArgs) -> None:
+    app_config = get_config()
     thread_tid, thread_aid = get_tidaid(args)
 
     # 首先对图片去重，让html中同一图片指向同一文件
@@ -683,15 +686,15 @@ def pdf_generate(args: CommandArgs) -> None:
         pdf_output_path = f"{folder_pdf}/part_{start_lou}_{end_lou}.pdf"
         with open(pdf_html_path, "w", encoding="utf-8") as f:
             f.write("<html>\n<head>\n<meta charset=\"utf-8\"/>\n")
-            f.write(config.HTML_STYLE)
+            f.write(app_config.html_style)
             f.write("\n</head>\n<body>\n")
-            f.write(config.HTML_PRE)
+            f.write(app_config.html_pre)
             for lou in range(start_lou, end_lou + 1):
                 if lou in html_content_dict:
                     f.write(f"<h2>第{lou}楼</h2>\n")
                     f.write(html_content_dict[lou])
                     f.write("<hr/>\n")
-            f.write(config.HTML_POST)
+            f.write(app_config.html_post)
             f.write("\n</body>\n</html>\n")
         # 调用weasyprint生成pdf
         command_list.append(f'weasyprint "{pdf_html_path}" "{pdf_output_path}"')

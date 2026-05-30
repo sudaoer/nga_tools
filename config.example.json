@@ -1,0 +1,17 @@
+{
+  "base_url": "https://bbs.nga.cn",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0",
+  "output_dir": "output",
+  "thread_config_file": "thread_configs.json",
+  "pdf_page_size": "A4",
+  "pdf_page_margin": "12mm",
+  "pdf_long_image_min_width": 800,
+  "pdf_long_image_min_ratio": 4.0,
+  "pdf_long_image_slice_ratio": 1.35,
+  "pdf_speaker_portrait_max_dimension": 640,
+  "pdf_speaker_portrait_max_ratio": 3.0,
+  "pdf_speaker_portrait_size": "14mm",
+  "html_pre": "<div class=\"bbcode_container\">",
+  "html_post": "</div>",
+  "html_font_family": "Verdana, Tahoma, Arial, \"Microsoft YaHei\", \"Hiragino Sans GB\", \"WenQuanYi Micro Hei\", sans-serif"
+}

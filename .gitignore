@@ -7,10 +7,13 @@ __pycache__/
 *.xlsx
 *.json
 !pyrightconfig.strict.json
+!config.example.json
+!secrets.example.json
 # pixi environments
 .pixi/*
 !.pixi/config.toml
 config.json
+secrets.json
 anjia-viewer/node_modules/
 anjia-viewer/dist/
 !anjia-viewer/public/data/*.json

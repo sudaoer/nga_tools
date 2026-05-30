@@ -29,10 +29,12 @@
 
 ## Configuration And Outputs
 
-- Do not commit local `config.py`, cookies, downloaded output, generated PDFs,
-  images, or temporary JSON exports.
-- Use `config_template.py` and `config.pyi` as the tracked contract for config
-  keys.
+- Do not commit local `config.json`, `secrets.json`, cookies, downloaded output,
+  generated PDFs, images, or temporary JSON exports.
+- Use `config.example.json`, `secrets.example.json`, and `nga_tools.config` as
+  the tracked contract for config keys.
+- Keep sensitive config such as NGA cookies in `secrets.json`; keep non-sensitive
+  runtime settings in `config.json`.
 - Preserve `thread_configs.json` unless the user explicitly asks to modify saved
   thread data.
 

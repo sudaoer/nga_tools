@@ -1,7 +1,6 @@
 {
   "include": [
-    "nga_tools",
-    "config.pyi"
+    "nga_tools"
   ],
   "exclude": [
     ".git",

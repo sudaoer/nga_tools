@@ -1,7 +1,8 @@
 from typing import Any, TypeAlias, cast
 
-import config
 import requests
+
+from nga_tools.config import get_config
 
 Tid: TypeAlias = int | str
 Aid: TypeAlias = int | str | None
@@ -10,17 +11,18 @@ PageData: TypeAlias = dict[str, Any]
 
 class NGAClient:
     def __init__(self) -> None:
+        app_config = get_config()
         self.session = requests.Session()
         self.session.headers.update(
             {
-                "User-Agent": config.UA,
+                "User-Agent": app_config.user_agent,
                 "Cookie": (
-                    f"ngaPassportUid={config.NGAPASSPORTUID}; "
-                    f"ngaPassportCid={config.NGAPASSPORTCID};"
+                    f"ngaPassportUid={app_config.nga_passport_uid}; "
+                    f"ngaPassportCid={app_config.nga_passport_cid};"
                 ),
             }
         )
-        self.base_url = config.BASE_URL
+        self.base_url = app_config.base_url
         self.page_cache: dict[str, PageData] = {}
 
     def page_cache_key(self, tid: Tid, aid: Aid, page: int) -> str:

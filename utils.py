@@ -1,5 +1,6 @@
-import config
 import os
+
+from nga_tools.config import get_config
 
 def sha256(filepath: str) -> str:
     """
@@ -23,7 +24,7 @@ def get_folder(tid: int | str, aid: int | str, subfolder: str | None = None) -> 
         tid = str(tid)
     if type(aid) == int:
         aid = str(aid)
-    folder = config.OUTPUT_DIR + "/" + tid + "_" + (aid if aid else "all")
+    folder = get_config().output_dir + "/" + tid + "_" + (aid if aid else "all")
     if subfolder:
         folder += "/" + subfolder
 

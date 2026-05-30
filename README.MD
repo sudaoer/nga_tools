@@ -7,26 +7,33 @@
 复制配置模板：
 
 ```powershell
-Copy-Item config_template.py config.py
+Copy-Item config.example.json config.json
+Copy-Item secrets.example.json secrets.json
 ```
 
-在 `config.py` 中填入自己的 NGA Cookie：
+在 `secrets.json` 中填入自己的 NGA Cookie：
 
-```python
-NGAPASSPORTUID = ""
-NGAPASSPORTCID = ""
+```json
+{
+  "nga_passport_uid": "",
+  "nga_passport_cid": ""
+}
 ```
 
-当前命令会读取帖子配置文件，请确保 `config.py` 中有配置文件路径：
+当前命令会读取帖子配置文件，请确保 `config.json` 中有配置文件路径：
 
-```python
-THREAD_CONFIG_FILE = "threads.json"
+```json
+{
+  "thread_config_file": "thread_configs.json"
+}
 ```
 
 如需调整输出目录，修改：
 
-```python
-OUTPUT_DIR = "output"
+```json
+{
+  "output_dir": "output"
+}
 ```
 
 ## 使用
@@ -88,7 +95,7 @@ pixi run python main.py backup pdf --name 帖子名 --lou_per_pdf 100
 pixi run python main.py backup pdf --name 帖子名 --pdf_workers 2
 ```
 
-PDF 生成功能会调用系统中的 `weasyprint` 命令，需要先确保它可以在命令行中直接运行。
+PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会使用 pixi 环境中的命令。
 
 ## 输出目录
 
