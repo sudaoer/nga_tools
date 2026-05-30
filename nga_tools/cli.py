@@ -26,6 +26,7 @@ class ActionConfig(TypedDict):
     usage: str
     examples: list[str]
     args: list[str]
+    notes: NotRequired[list[str]]
     required: NotRequired[list[str]]
     required_any: NotRequired[list[str]]
     defaults: NotRequired[dict[str, int]]
@@ -127,6 +128,11 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} backup pdf --name 帖子名",
                 f"{PROGRAM_USAGE} backup pdf --name 帖子名 --lou_per_pdf 100 --pdf_workers 2",
             ],
+            "notes": [
+                "Overlay：创建 <output_dir>/<tid>_<aid>/overlay/post_<楼层>.html "
+                "可在生成PDF时覆盖对应楼层。",
+                "Overlay只影响PDF生成，不会改写json、html或html_modified备份内容。",
+            ],
             "args": ["name", "tid", "aid", "lou_per_pdf", "pdf_workers"],
             "required_any": ["name", "tid"],
             "defaults": {"lou_per_pdf": 200},
@@ -217,6 +223,14 @@ def _format_examples(examples: list[str]) -> list[str]:
     return lines
 
 
+def _format_notes(notes: list[str]) -> list[str]:
+    if not notes:
+        return []
+    lines = ["", "说明："]
+    lines.extend(f"  {note}" for note in notes)
+    return lines
+
+
 def format_global_help() -> str:
     lines = [
         "NGA帖子备份器",
@@ -291,6 +305,7 @@ def format_action_help(command: str, action: str) -> str:
         lines.extend(["", "参数：", "  无"])
 
     lines.extend(_format_examples(action_config.get("examples", [])))
+    lines.extend(_format_notes(action_config.get("notes", [])))
     return "\n".join(lines)
 
 

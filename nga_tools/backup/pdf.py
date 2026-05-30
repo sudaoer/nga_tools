@@ -13,6 +13,7 @@ from bs4.element import NavigableString
 from PIL import Image
 
 from nga_tools import utils
+from nga_tools.backup.overlay import load_post_overlays
 from nga_tools.config import get_config
 
 SPEAKER_LINE_RE = re.compile(r"^([^\s：:][^：:]{0,15})[：:]")
@@ -251,15 +252,28 @@ def _read_pdf_html(
     slice_output_dir = os.path.join(folder_pdf, "long_image_slices")
     os.makedirs(slice_output_dir, exist_ok=True)
 
-    html_content_by_lou: dict[int, str] = {}
-    image_size_cache: dict[str, tuple[int, int]] = {}
-    slice_cache: dict[str, list[str]] = {}
-
+    html_sources_by_lou: dict[int, str] = {}
     for html_file in html_files:
         html_path = f"{folder_html_modified}/{html_file}"
         lou = int(html_file.split("_")[1].split(".")[0])
         with open(html_path, "r", encoding="utf-8") as file:
-            html_content = file.read()
+            html_sources_by_lou[lou] = file.read()
+
+    overlays_by_lou = load_post_overlays(tid, aid, set(html_sources_by_lou))
+    if overlays_by_lou:
+        print(f"应用{len(overlays_by_lou)}个post overlay。")
+        html_sources_by_lou.update(overlays_by_lou)
+
+    html_content_by_lou: dict[int, str] = {}
+    image_size_cache: dict[str, tuple[int, int]] = {}
+    slice_cache: dict[str, list[str]] = {}
+
+    for lou, html_content in sorted(html_sources_by_lou.items()):
+        source_name = (
+            f"overlay/post_{lou}.html"
+            if lou in overlays_by_lou
+            else f"html_modified/post_{lou}.html"
+        )
         soup = BeautifulSoup(html_content, "html.parser")
 
         images = cast(list[Tag], soup.find_all("img"))
@@ -271,7 +285,7 @@ def _read_pdf_html(
             image_filename = image_src.split("/")[-1]
             if image_filename not in filename_hash:
                 raise RuntimeError(
-                    f"HTML文件{html_file}中引用了不存在的图片文件{image_filename}！"
+                    f"HTML文件{source_name}中引用了不存在的图片文件{image_filename}！"
                 )
 
             image_hash = filename_hash[image_filename]

@@ -2,7 +2,9 @@
 
 ## Scope
 
-- Keep `main.py` focused on CLI parsing and dispatch.
+- Keep `main.py` as a thin launcher that imports and calls `nga_tools.cli.main`.
+- Keep CLI parsing, help formatting, validation, and command dispatch in
+  `nga_tools.cli`.
 - Put reusable implementation logic under the `nga_tools` package.
 - Keep NGA API fetching logic inside `nga_tools/ngaclient`.
 - Avoid duplicating logic between top-level scripts and package modules.
