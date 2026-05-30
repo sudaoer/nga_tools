@@ -1,49 +1,99 @@
-# 为保存nga安科到html这种东西写的
+# NGA 帖子备份器
 
-## 主要是存到markdown那个，不是每个人都有markdown阅读器的，而且没存bbcode
+把 NGA 帖子通过接口抓取到本地，保存原始 JSON、转换后的 HTML、图片文件，并可按楼层分段生成 PDF。
+
+## 配置
+
+复制配置模板：
+
+```powershell
+Copy-Item config_template.py config.py
+```
+
+在 `config.py` 中填入自己的 NGA Cookie：
+
+```python
+NGAPASSPORTUID = ""
+NGAPASSPORTCID = ""
+```
+
+当前命令会读取帖子配置文件，请确保 `config.py` 中有配置文件路径：
+
+```python
+THREAD_CONFIG_FILE = "threads.json"
+```
+
+如需调整输出目录，修改：
+
+```python
+OUTPUT_DIR = "output"
+```
 
 ## 使用
-将config_template.py复制为config.py然后填入自己的cookie
 
-安价统计运行resuanka.py，因为是垃圾代码所以自己改去吧
-
-## tid=43877379 安价 JSON 统计
-
-运行 `AnchorCounter.py` 会抓取 tid=43877379 的全帖观众回复并缓存到 `output/43877379_all/json/`，按 21552 楼规则统计安价，默认输出给前端读取的 JSON：
+添加帖子配置：
 
 ```powershell
-pixi run python AnchorCounter.py --output anjia-viewer/public/data/anchors_43877379.json
+pixi run python main.py thread add --name 帖子名 --tid 12345678
 ```
 
-统计器会把同一观众的所有未忽略楼一次性发给模型判断；同一普通主题多次提交时取最新楼，不同主题允许散放在多个回复中。送模型前会剥离 NGA 回复自带的 `Reply Post by ...` 引用块，避免把被回复者的安价算到回复者名下。DeepSeek 接口默认启用 thinking mode 和 JSON Output，可用 `--reasoning-effort high|max` 调整思考强度。
-
-默认会以 `--llm-workers 32` 并发请求模型；如果触发限流或想方便排查，可以改成 `--llm-workers 1` 串行运行。
-
-导出统计 XLSX：
+只备份某个作者的回复时添加 `--aid`：
 
 ```powershell
-pixi run python ExportAnchorsXlsx.py --input anjia-viewer/public/data/anchors_43877379.json --output output/43877379_all/anchor_counter/anchors_43877379.xlsx
+pixi run python main.py thread add --name 帖子名 --tid 12345678 --aid 987654
 ```
 
-如果不传 `--output`，脚本会默认在输入 JSON 同目录下生成一个同名 `.xlsx` 文件。工作簿会按主题拆成多个工作表，每个工作表只保留该主题的最终统计结果，并带上楼层、作者、结构化字段、加权目标、复核标记和链接这些便于核对的列。
-
-只检查抓取和确定性过滤时可以跳过模型：
+查看已保存的帖子配置：
 
 ```powershell
-pixi run python AnchorCounter.py --no-llm --output output/43877379_all/anchor_counter/test.json
+pixi run python main.py thread list
 ```
 
-Vue 查看器在 `anjia-viewer/`，页面会从网站路径 `/data/anchors_43877379.json` 获取统计结果。部署前先把统计 JSON 输出到 `anjia-viewer/public/data/anchors_43877379.json`，再构建前端。
-
-一键统计并部署到 SSH 配置里的 `al:/www/wwwroot/260502.anchor.gmgo.sudoer.cn`：
+抓取整帖并下载图片：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\deploy_anjia.ps1
+pixi run python main.py backup all --name 帖子名
 ```
 
-脚本会运行统计、构建 viewer、用 `scp` 上传 `anjia-viewer/dist` 到远端登录用户的临时目录，再通过 `sudo cp` 发布到 webroot，并执行 `sudo chown -R www:www` 与 `sudo chmod -R 755`。`www` 只是文件 owner，不作为 SSH 登录用户。如果只想复用现有统计 JSON 或构建产物，可加 `-SkipCounter` 或 `-SkipBuild`。
+也可以不使用保存的名称，直接指定 `tid` 和可选的 `aid`：
 
-## TODO（永远不会做（不是）的功能）
-- 添加config里写配置的功能，省的每次复制粘贴tid aid
-- 添加自动更新功能
-- 添加图片去重和多页一pdf，这样可能可以节省空间吧
+```powershell
+pixi run python main.py backup all --tid 12345678
+pixi run python main.py backup all --tid 12345678 --aid 987654
+```
+
+校验已下载图片，损坏或无法打开的图片会被删除：
+
+```powershell
+pixi run python main.py image verify --name 帖子名
+```
+
+## 生成 PDF
+
+先运行 `backup all` 生成 HTML 和图片，再生成 PDF：
+
+```powershell
+pixi run python main.py backup pdf --name 帖子名
+```
+
+默认每 200 楼生成一个 PDF，可以通过 `--lou_per_pdf` 修改：
+
+```powershell
+pixi run python main.py backup pdf --name 帖子名 --lou_per_pdf 100
+```
+
+PDF 生成功能会调用系统中的 `weasyprint` 命令，需要先确保它可以在命令行中直接运行。
+
+## 输出目录
+
+默认输出到 `output/<tid>_<aid|all>/`：
+
+- `json/`：接口返回的原始分页数据
+- `html/`：由 BBCode 转换出的单楼 HTML
+- `html_modified/`：替换本地图片路径后的 HTML
+- `images/`：下载的图片
+- `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
+
+## 协议
+
+MIT
