@@ -4,7 +4,7 @@ from collections.abc import Callable
 from functools import lru_cache
 from typing import Protocol, cast
 
-import bbcode
+import bbcode # type: ignore
 
 _Formatter = Callable[[str, str, dict[str, str], object | None, dict[str, object]], str]
 

@@ -212,14 +212,15 @@ def _rewrite_image_links(
             if not image_url:
                 continue
 
-            image_filename = _image_filename_from_url(image_url)
-            image["src"] = f"../images/{image_filename}"
-
             if not utils.NGA_img_link_verify(image_url):
                 print(
                     f"警告：{floor_labels.label(item['lou'])}的"
                     f"第{index + 1}张图片链接无效"
                 )
+                continue
+
+            image_filename = _image_filename_from_url(image_url)
+            image["src"] = f"../images/{image_filename}"
 
             if image_url not in seen_urls:
                 seen_urls.add(image_url)
