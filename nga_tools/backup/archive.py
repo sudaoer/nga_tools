@@ -16,6 +16,7 @@ from nga_tools.backup.floor_map import (
     RecoveredMissingPost,
     build_and_save_floor_map,
     load_floor_labels,
+    read_missing_author_lous_from_html_modified,
 )
 from nga_tools.bbcode_convert import bbcode_to_html
 from nga_tools.console import InlineProgress
@@ -182,6 +183,16 @@ def _find_missing_lou(htmls: list[PostHtml]) -> list[int]:
         expected_lou += 1
 
     return missing_lou
+
+
+def _merge_missing_lou(*missing_lou_groups: list[int]) -> list[int]:
+    return sorted(
+        {
+            lou
+            for missing_lou_group in missing_lou_groups
+            for lou in missing_lou_group
+        }
+    )
 
 
 def _fill_missing_lou(
@@ -440,6 +451,9 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         refresh_page_numbers,
     )
     missing_lou = _find_missing_lou(htmls)
+    if aid is not None:
+        previous_missing_lou = read_missing_author_lous_from_html_modified(tid, aid)
+        missing_lou = _merge_missing_lou(missing_lou, previous_missing_lou)
     floor_map_result = _build_floor_map_for_backup(
         client,
         tid,

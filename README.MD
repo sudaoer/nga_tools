@@ -87,7 +87,7 @@ pixi run python main.py backup all --name 帖子名
 pixi run python main.py backup sub --name 帖子名
 ```
 
-`backup sub` 会补抓缺失的 JSON 页，并刷新本地尾页到远端最后一页；随后补齐 HTML、`html_modified` 和缺失图片。
+`backup sub` 会补抓缺失的 JSON 页，并刷新本地尾页到远端最后一页；随后补齐 HTML、`html_modified` 和缺失图片。只看作者备份还会重试恢复之前仍为占位的缺失楼内容。
 
 也可以不使用保存的名称，直接指定 `tid` 和可选的 `aid`：
 

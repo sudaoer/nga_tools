@@ -11,13 +11,20 @@ from unittest.mock import patch
 from nga_tools import utils
 from nga_tools.backup.archive import (
     PostHtml,
+    backup_thread_sub,
     _build_floor_map_for_backup,
     _download_images,
     _fill_missing_lou,
+    _merge_missing_lou,
     _rewrite_image_links,
     _write_recovered_missing_post_htmls,
 )
-from nga_tools.backup.floor_map import FloorLabels, RecoveredMissingPost
+from nga_tools.backup.floor_map import (
+    MISSING_POST_HTML,
+    FloorLabels,
+    FloorMapBuildResult,
+    RecoveredMissingPost,
+)
 from nga_tools.ngaclient import NGAClient
 
 
@@ -132,6 +139,83 @@ class BackupFloorMapFallbackTest(unittest.TestCase):
 
         self.assertFalse(result.floor_labels.show_original)
         self.assertEqual(result.recovered_missing_posts_by_author_lou, {})
+
+
+class BackupThreadSubMissingLouTest(unittest.TestCase):
+    def test_merge_missing_lou_sorts_and_deduplicates(self) -> None:
+        self.assertEqual(_merge_missing_lou([4, 2], [2, 3], []), [2, 3, 4])
+
+    def test_backup_sub_retries_previous_missing_author_lous(self) -> None:
+        captured_missing_lou: list[int] = []
+
+        class FakeClient:
+            def get_page_count(self, tid: int, aid: int | None) -> int:
+                return 1
+
+            def get_page(self, tid: int, aid: int | None, page: int) -> dict[str, object]:
+                return {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "first"},
+                        {"lou": 3, "pid": 1003, "content": "third"},
+                    ],
+                }
+
+        def fake_build_floor_map(
+            client: object,
+            tid: int,
+            aid: int | None,
+            htmls: list[PostHtml],
+            missing_lou: list[int],
+        ) -> FloorMapBuildResult:
+            captured_missing_lou[:] = missing_lou
+            return FloorMapBuildResult(FloorLabels.plain(), {})
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            (temp_dir / "json").mkdir()
+            html_modified_dir = temp_dir / "html_modified"
+            html_modified_dir.mkdir()
+            (html_modified_dir / "post_2.html").write_text(
+                MISSING_POST_HTML,
+                encoding="utf-8",
+            )
+            (html_modified_dir / "post_4.html").write_text(
+                MISSING_POST_HTML,
+                encoding="utf-8",
+            )
+            (html_modified_dir / "post_9.html").write_text(
+                "already recovered",
+                encoding="utf-8",
+            )
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = temp_dir if subfolder is None else temp_dir / subfolder
+                path.mkdir(exist_ok=True)
+                return str(path)
+
+            with (
+                patch("nga_tools.backup.archive.NGAClient", return_value=FakeClient()),
+                patch(
+                    "nga_tools.backup.archive.utils.get_folder",
+                    side_effect=fake_get_folder,
+                ),
+                patch(
+                    "nga_tools.backup.archive._build_floor_map_for_backup",
+                    side_effect=fake_build_floor_map,
+                ),
+                patch("nga_tools.backup.archive._rewrite_image_links", return_value=[]),
+                patch("nga_tools.backup.archive._download_images"),
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                backup_thread_sub(123, 456)
+
+        self.assertEqual(captured_missing_lou, [2, 4])
 
 
 class DownloadImagesTest(unittest.TestCase):
