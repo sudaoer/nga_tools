@@ -6,6 +6,7 @@ from typing import NotRequired, Optional, TypedDict, cast
 
 from nga_tools.commands.backup import (
     backup_all,
+    backup_configs,
     backup_floors,
     backup_sub,
     pdf_generate,
@@ -190,6 +191,18 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "args": ["name", "tid", "aid"],
             "required_any": ["name", "tid"],
         },
+        "configs": {
+            "handler": backup_configs,
+            "summary": "增量备份thread_configs.json中的所有帖子",
+            "usage": f"{PROGRAM_USAGE} backup configs",
+            "examples": [f"{PROGRAM_USAGE} backup configs"],
+            "notes": [
+                "此命令按thread_configs.json中的ThreadList顺序逐个执行增量备份。",
+                "不会修改thread_configs.json，也不会生成PDF。",
+                "单个帖子失败时会继续处理后续配置，最后以非零退出码报告失败。",
+            ],
+            "args": [],
+        },
         "floors": {
             "handler": backup_floors,
             "summary": "根据已有备份生成只看作者楼层到原帖楼层的映射",
@@ -371,6 +384,7 @@ def format_global_help() -> str:
             f"  {PROGRAM_USAGE} forum list --fid 784",
             f"  {PROGRAM_USAGE} forum sync",
             f"  {PROGRAM_USAGE} backup all --name 帖子名",
+            f"  {PROGRAM_USAGE} backup configs",
             f"  {PROGRAM_USAGE} backup pdf --name 帖子名 --pdf_workers 2",
             f"  {PROGRAM_USAGE} stats words --name 帖子名",
         ]
