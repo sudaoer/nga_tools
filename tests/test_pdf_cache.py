@@ -6,11 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from PIL import Image
+
 from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.backup.pdf import (
     PDF_HASH_MANIFEST_FILENAME,
     PdfRenderPlan,
     _build_render_tasks,
+    _read_pdf_html,
     _write_pdf_hashes,
 )
 
@@ -162,6 +165,44 @@ class PdfHashCacheTest(unittest.TestCase):
             self.assertTrue((folder_pdf / "manual.pdf").exists())
             self.assertTrue((folder_pdf / "notes.html").exists())
             self.assertTrue((folder_pdf / "part_draft_2_3.pdf").exists())
+
+
+class PdfImageSourceTest(unittest.TestCase):
+    def test_read_pdf_html_resolves_global_image_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir) / "output"
+            html_dir = output_dir / "101_all" / "html_modified"
+            unique_dir = output_dir / "images_unique"
+            link_dir = output_dir / "images" / "mon_202506" / "06"
+            html_dir.mkdir(parents=True)
+            unique_dir.mkdir(parents=True)
+            link_dir.mkdir(parents=True)
+            unique_image = unique_dir / "hash.png"
+            Image.new("RGB", (2, 2), color="white").save(unique_image)
+            link_path = link_dir / "lsQkle-552eXuT3cS10p-7f7.png"
+            link_path.symlink_to(Path("../../..") / "images_unique" / "hash.png")
+            (html_dir / "post_1.html").write_text(
+                '<p><img src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"/></p>',
+                encoding="utf-8",
+            )
+
+            with (
+                patch(
+                    "nga_tools.utils.get_config",
+                    return_value=SimpleNamespace(output_dir=str(output_dir)),
+                ),
+                patch("nga_tools.backup.pdf._is_long_image", return_value=False),
+                patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
+            ):
+                html_content_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+
+        self.assertIn(
+            'src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"',
+            html_content_by_lou[1],
+        )
 
 
 if __name__ == "__main__":

@@ -4,11 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
+from bs4 import BeautifulSoup, Tag
 from PIL import Image
 
 from nga_tools import utils
+from nga_tools.backup import image_store
 from nga_tools.config import get_config
 
 
@@ -27,8 +29,13 @@ class ImageFileVerifyResult:
 
 
 def verify_downloaded_images(tid: int, aid: Optional[int]) -> None:
-    folder_images = utils.get_folder(tid, aid, "images")
-    _verify_images_in_folder(folder_images)
+    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified", create=False))
+    image_paths = _list_thread_referenced_image_paths(folder_html_modified)
+    result = _verify_image_paths(str(folder_html_modified), image_paths)
+    print(
+        f"帖子图片校验完成：引用图片{result.total}张，"
+        f"删除{result.removed}个损坏文件。"
+    )
 
 
 def verify_all_downloaded_images() -> None:
@@ -61,13 +68,54 @@ def _list_downloaded_image_folders() -> list[str]:
     if not output_dir.is_dir():
         return []
 
-    image_folders = [
-        str(images_dir)
-        for backup_dir in output_dir.iterdir()
-        if backup_dir.is_dir()
-        if (images_dir := backup_dir / "images").is_dir()
-    ]
-    return sorted(image_folders)
+    unique_images = output_dir / "images_unique"
+    if not unique_images.is_dir():
+        return []
+    return [str(unique_images)]
+
+
+def _tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
+    value = tag.get(attr_name)
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _image_path_from_src(image_src: str, source_dir: Path) -> Path:
+    link_path = image_store.link_path_for_image_src(image_src)
+    if link_path is not None:
+        return link_path
+
+    path = Path(image_src.split("?", 1)[0])
+    if path.is_absolute():
+        return path
+    return source_dir / path
+
+
+def _list_thread_referenced_image_paths(folder_html_modified: Path) -> list[Path]:
+    if not folder_html_modified.is_dir():
+        return []
+
+    image_paths: list[Path] = []
+    seen_paths: set[str] = set()
+    html_files = utils.list_files_in_folder(str(folder_html_modified), ends_with=".html")
+    for html_file in html_files:
+        html_path = folder_html_modified / html_file
+        soup = BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
+        images = cast(list[Tag], soup.find_all("img"))
+        for image in images:
+            image_src = _tag_attr_str(image, "src")
+            if not image_src:
+                continue
+            image_path = _image_path_from_src(image_src, folder_html_modified)
+            target_path = image_path.resolve() if image_path.exists() else image_path
+            key = str(target_path)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            image_paths.append(target_path)
+
+    return sorted(image_paths)
 
 
 def _verify_images_in_folder(folder_images: str) -> ImageVerifyResult:
@@ -98,25 +146,58 @@ def _verify_images_in_folder(folder_images: str) -> ImageVerifyResult:
     )
 
 
+def _verify_image_paths(folder_label: str, image_paths: list[Path]) -> ImageVerifyResult:
+    print(f"已下载图片文件数：{len(image_paths)}")
+    if not image_paths:
+        return ImageVerifyResult(folder=folder_label, total=0, removed=0)
+
+    worker_count = _image_verify_worker_count(len(image_paths))
+    print(f"并行校验worker数：{worker_count}")
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        results = list(executor.map(_verify_image_path, image_paths))
+
+    removed_count = 0
+    for result in results:
+        if result.error is None:
+            continue
+        print(f"图片文件损坏或无法打开：{result.image_file}，错误信息：{result.error}")
+        if result.removed:
+            removed_count += 1
+
+    return ImageVerifyResult(
+        folder=folder_label,
+        total=len(image_paths),
+        removed=removed_count,
+    )
+
+
 def _image_verify_worker_count(image_count: int) -> int:
     return max(1, min(32, image_count))
 
 
 def _verify_image_file(folder_images: str, image_file: str) -> ImageFileVerifyResult:
     image_path = os.path.join(folder_images, image_file)
+    return _verify_image_path(Path(image_path))
+
+
+def _verify_image_path(image_path: Path) -> ImageFileVerifyResult:
     try:
         with Image.open(image_path) as image:
             image.verify()
     except (OSError, SyntaxError) as error:
-        os.remove(image_path)
+        removed = False
+        if image_path.exists() or image_path.is_symlink():
+            image_path.unlink()
+            removed = True
         return ImageFileVerifyResult(
-            image_file=image_file,
-            removed=True,
+            image_file=str(image_path),
+            removed=removed,
             error=str(error),
         )
 
     return ImageFileVerifyResult(
-        image_file=image_file,
+        image_file=str(image_path),
         removed=False,
         error=None,
     )

@@ -18,6 +18,7 @@ from nga_tools.backup.floor_map import (
     load_floor_labels,
     read_missing_author_lous_from_html_modified,
 )
+from nga_tools.backup import image_store
 from nga_tools.bbcode_convert import bbcode_to_html
 from nga_tools.console import InlineProgress
 from nga_tools.ngaclient import NGAClient
@@ -61,10 +62,6 @@ def _tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
     if isinstance(value, str):
         return value
     return None
-
-
-def _image_filename_from_url(image_url: str) -> str:
-    return image_url.split("/")[-1].split("?")[0]
 
 
 def _read_page_json(path: Path) -> PageData:
@@ -242,9 +239,10 @@ def _rewrite_image_links(
     tid: int,
     aid: Optional[int],
     floor_labels: FloorLabels,
-) -> list[utils.DownloadTask]:
+) -> list[image_store.ImageDownloadTask]:
     seen_urls: set[str] = set()
-    files_to_download: list[utils.DownloadTask] = []
+    files_to_download: list[image_store.ImageDownloadTask] = []
+    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
 
     for item in htmls:
         soup = BeautifulSoup(item["html"], "html.parser")
@@ -254,22 +252,29 @@ def _rewrite_image_links(
             if not image_url:
                 continue
 
-            if not utils.NGA_img_link_verify(image_url):
+            normalized_image_url = image_store.normalize_nga_image_url(image_url)
+            if not utils.NGA_img_link_verify(normalized_image_url):
                 print(
                     f"警告：{floor_labels.label(item['lou'])}的"
                     f"第{index + 1}张图片链接无效"
                 )
                 continue
 
-            image_filename = _image_filename_from_url(image_url)
-            image["src"] = f"../images/{image_filename}"
+            image["src"] = image_store.image_link_src_from_html_dir(
+                normalized_image_url,
+                folder_html_modified,
+            )
 
-            if image_url not in seen_urls:
-                seen_urls.add(image_url)
-                save_path = (
-                    utils.get_folder(tid, aid, "images") + f"/{image_filename}"
+            if normalized_image_url not in seen_urls:
+                seen_urls.add(normalized_image_url)
+                files_to_download.append(
+                    {
+                        "url": normalized_image_url,
+                        "link_path": str(
+                            image_store.image_link_path(normalized_image_url)
+                        ),
+                    }
                 )
-                files_to_download.append({"url": image_url, "save_path": save_path})
 
         item["html"] = str(soup)
 
@@ -298,20 +303,17 @@ def _post_refs_from_htmls(htmls: list[PostHtml]) -> list[AuthorPostRef]:
 
 
 def _pending_download_tasks(
-    files_to_download: list[utils.DownloadTask],
-) -> list[utils.DownloadTask]:
-    return [
-        item
-        for item in files_to_download
-        if not Path(item["save_path"]).exists()
-    ]
+    files_to_download: list[image_store.ImageDownloadTask],
+) -> list[image_store.ImageDownloadTask]:
+    return image_store.pending_image_download_tasks(files_to_download)
 
 
 def _download_images(
     tid: int,
     aid: Optional[int],
-    files_to_download: list[utils.DownloadTask],
+    files_to_download: list[image_store.ImageDownloadTask],
 ) -> utils.DownloadSummary:
+    del tid, aid
     pending_downloads = _pending_download_tasks(files_to_download)
     total_count = len(files_to_download)
     pending_count = len(pending_downloads)
@@ -321,7 +323,6 @@ def _download_images(
         f"本次下载{pending_count}张。"
     )
 
-    utils.get_folder(tid, aid, "images")
     progress = InlineProgress()
     download_result: utils.DownloadSummary = {"succeeded": [], "failed": []}
 
@@ -335,7 +336,7 @@ def _download_images(
     progress.update(f"下载进度：0/{pending_count}")
     try:
         if pending_count > 0:
-            download_result = utils.download_files(
+            download_result = image_store.download_image_tasks(
                 pending_downloads,
                 on_progress=update_progress,
             )

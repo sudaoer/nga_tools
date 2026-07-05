@@ -20,6 +20,7 @@ from nga_tools.backup.floor_map import (
     load_floor_labels,
     validate_floor_labels,
 )
+from nga_tools.backup import image_store
 from nga_tools.backup.overlay import load_post_overlays
 from nga_tools.config import get_config
 
@@ -48,6 +49,13 @@ class PdfRenderPlan:
     skipped_count: int
     cleaned_count: int
     input_hashes: dict[str, str]
+
+
+@dataclass(frozen=True)
+class PdfHtmlSource:
+    html: str
+    source_name: str
+    source_dir: Path
 
 
 def _tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
@@ -378,36 +386,47 @@ def _build_render_tasks(
     return PdfRenderPlan(render_tasks, skipped_count, cleaned_count, input_hashes)
 
 
+def _image_path_for_pdf(image_src: str, source_dir: Path) -> Path:
+    link_path = image_store.link_path_for_image_src(image_src)
+    if link_path is not None:
+        return link_path
+
+    parsed_src = image_src.split("?", 1)[0]
+    src_parts = parsed_src.split(":", 1)
+    if len(src_parts) == 2 and src_parts[0].isalpha():
+        raise RuntimeError(f"不支持的远程图片链接：{image_src}")
+
+    path = Path(parsed_src)
+    if path.is_absolute():
+        return path
+    return source_dir / path
+
+
 def _read_pdf_html(
     tid: int,
     aid: Optional[int],
 ) -> tuple[dict[int, str], str, FloorLabels]:
-    folder_images = utils.get_folder(tid, aid, "images")
-    filename_hash: dict[str, str] = {}
-    hash_filename: dict[str, str] = {}
-    image_files = utils.list_files_in_folder(folder_images)
-    for image_file in image_files:
-        image_path = f"{folder_images}/{image_file}"
-        image_hash = utils.sha256(image_path)
-        filename_hash[image_file] = image_hash
-        if image_hash not in hash_filename:
-            hash_filename[image_hash] = image_file
-
-    folder_html_modified = utils.get_folder(tid, aid, "html_modified")
-    html_files = utils.list_files_in_folder(folder_html_modified, ends_with=".html")
+    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+    html_files = utils.list_files_in_folder(str(folder_html_modified), ends_with=".html")
     folder_pdf = utils.get_folder(tid, aid, "pdf")
     slice_output_dir = os.path.join(folder_pdf, "long_image_slices")
     os.makedirs(slice_output_dir, exist_ok=True)
 
-    html_sources_by_lou: dict[int, str] = {}
+    html_sources_by_lou: dict[int, PdfHtmlSource] = {}
     for html_file in html_files:
-        html_path = f"{folder_html_modified}/{html_file}"
+        html_path = folder_html_modified / html_file
         lou = int(html_file.split("_")[1].split(".")[0])
-        with open(html_path, "r", encoding="utf-8") as file:
-            html_sources_by_lou[lou] = file.read()
+        html_sources_by_lou[lou] = PdfHtmlSource(
+            html=html_path.read_text(encoding="utf-8"),
+            source_name=f"html_modified/post_{lou}.html",
+            source_dir=folder_html_modified,
+        )
 
     floor_labels = load_floor_labels(tid, aid)
-    validate_floor_labels(floor_labels, html_sources_by_lou)
+    html_text_by_lou = {
+        lou: source.html for lou, source in html_sources_by_lou.items()
+    }
+    validate_floor_labels(floor_labels, html_text_by_lou)
 
     overlays_by_lou = load_post_overlays(
         tid,
@@ -417,20 +436,21 @@ def _read_pdf_html(
     )
     if overlays_by_lou:
         print(f"应用{len(overlays_by_lou)}个post overlay。")
-        html_sources_by_lou.update(overlays_by_lou)
+        overlay_folder = Path(utils.get_folder(tid, aid, "overlay"))
+        for lou, overlay_html in overlays_by_lou.items():
+            html_sources_by_lou[lou] = PdfHtmlSource(
+                html=overlay_html,
+                source_name=f"overlay/post_{lou}.html",
+                source_dir=overlay_folder,
+            )
 
     html_content_by_lou: dict[int, str] = {}
     image_size_cache: dict[str, tuple[int, int]] = {}
     slice_cache: dict[str, list[str]] = {}
 
-    for lou, html_content in sorted(html_sources_by_lou.items()):
-        source_name = (
-            f"overlay/post_{lou}.html"
-            if lou in overlays_by_lou
-            else f"html_modified/post_{lou}.html"
-        )
-        source_desc = f"{source_name}（{floor_labels.label(lou)}）"
-        soup = BeautifulSoup(html_content, "html.parser")
+    for lou, source in sorted(html_sources_by_lou.items()):
+        source_desc = f"{source.source_name}（{floor_labels.label(lou)}）"
+        soup = BeautifulSoup(source.html, "html.parser")
 
         images = cast(list[Tag], soup.find_all("img"))
         for image in images:
@@ -438,30 +458,26 @@ def _read_pdf_html(
             if not image_src:
                 continue
 
-            image_filename = image_src.split("/")[-1]
-            if image_filename not in filename_hash:
+            image_path = _image_path_for_pdf(image_src, source.source_dir)
+            if not image_path.exists():
                 raise RuntimeError(
-                    f"HTML文件{source_desc}中引用了不存在的图片文件{image_filename}！"
+                    f"HTML文件{source_desc}中引用了不存在的图片文件{image_src}！"
                 )
 
-            image_hash = filename_hash[image_filename]
-            canonical_filename = hash_filename[image_hash]
-            canonical_path = os.path.join(folder_images, canonical_filename)
-            if canonical_filename != image_filename:
-                image["src"] = f"../images/{canonical_filename}"
+            image["src"] = _relative_dir_path(folder_pdf, str(image_path))
 
             try:
-                width, height = _get_image_size(canonical_path, image_size_cache)
+                width, height = _get_image_size(str(image_path), image_size_cache)
             except OSError as error:
                 print(
                     f"警告：{floor_labels.label(lou)}跳过无法识别尺寸的图片 "
-                    f"{canonical_filename}: {error}"
+                    f"{image_path}: {error}"
                 )
                 continue
 
             if _is_long_image(width, height):
                 slice_paths = _slice_long_image_for_pdf(
-                    canonical_path,
+                    str(image_path),
                     slice_output_dir,
                     slice_cache,
                 )

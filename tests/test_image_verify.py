@@ -12,6 +12,7 @@ from nga_tools.backup.images import (
     ImageVerifyResult,
     _image_verify_worker_count,
     _list_downloaded_image_folders,
+    _list_thread_referenced_image_paths,
     _verify_images_in_folder,
     verify_all_downloaded_images,
 )
@@ -75,13 +76,12 @@ class ImageVerifyHandlerTest(unittest.TestCase):
 
 
 class ImageVerifyAllTest(unittest.TestCase):
-    def test_lists_only_direct_backup_image_directories(self) -> None:
+    def test_lists_global_unique_image_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
-            first_images = output_dir / "101_201" / "images"
-            second_images = output_dir / "102_all" / "images"
-            first_images.mkdir(parents=True)
-            second_images.mkdir(parents=True)
+            unique_images = output_dir / "images_unique"
+            unique_images.mkdir(parents=True)
+            (output_dir / "101_201" / "images").mkdir(parents=True)
             (output_dir / "103_301").mkdir()
             (output_dir / "101_201" / "pdf" / "long_image_slices").mkdir(parents=True)
 
@@ -94,20 +94,18 @@ class ImageVerifyAllTest(unittest.TestCase):
         self.assertEqual(
             folders,
             [
-                str(first_images),
-                str(second_images),
+                str(unique_images),
             ],
         )
 
-    def test_verify_all_reports_each_image_directory(self) -> None:
+    def test_verify_all_reports_global_unique_image_directory(self) -> None:
         results = [
-            ImageVerifyResult(folder="output/101_201/images", total=2, removed=1),
-            ImageVerifyResult(folder="output/102_all/images", total=3, removed=0),
+            ImageVerifyResult(folder="output/images_unique", total=2, removed=1),
         ]
         with (
             patch(
                 "nga_tools.backup.images._list_downloaded_image_folders",
-                return_value=["output/101_201/images", "output/102_all/images"],
+                return_value=["output/images_unique"],
             ),
             patch(
                 "nga_tools.backup.images._verify_images_in_folder",
@@ -120,10 +118,31 @@ class ImageVerifyAllTest(unittest.TestCase):
         self.assertEqual(
             verify_mock.call_args_list,
             [
-                call("output/101_201/images"),
-                call("output/102_all/images"),
+                call("output/images_unique"),
             ],
         )
+
+    def test_thread_reference_listing_resolves_global_image_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "output"
+            html_dir = output_dir / "101_201" / "html_modified"
+            link_dir = output_dir / "images" / "mon_202506" / "06"
+            unique_dir = output_dir / "images_unique"
+            html_dir.mkdir(parents=True)
+            link_dir.mkdir(parents=True)
+            unique_dir.mkdir()
+            unique_image = unique_dir / "abc.png"
+            Image.new("RGB", (1, 1), color="white").save(unique_image)
+            link_path = link_dir / "lsQkle-552eXuT3cS10p-7f7.png"
+            link_path.symlink_to(Path("../../..") / "images_unique" / "abc.png")
+            (html_dir / "post_1.html").write_text(
+                '<img src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"/>',
+                encoding="utf-8",
+            )
+
+            paths = _list_thread_referenced_image_paths(html_dir)
+
+        self.assertEqual(paths, [unique_image])
 
     def test_parallel_folder_verify_removes_broken_images(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

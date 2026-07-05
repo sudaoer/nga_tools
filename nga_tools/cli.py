@@ -253,7 +253,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} image verify --name 帖子名",
             ],
             "notes": [
-                "不提供参数时会扫描output_dir下所有本地备份的images目录。",
+                "不提供参数时会校验output_dir/images_unique中的全局图片。",
+                "提供帖子参数时会校验该帖html_modified引用到的图片文件。",
             ],
             "args": ["name", "tid", "aid"],
         },

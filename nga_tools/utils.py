@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import os
 import re
@@ -8,6 +9,7 @@ import sys
 import traceback
 from collections.abc import Callable
 from typing import NoReturn, NotRequired, Optional, TypedDict
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -36,6 +38,15 @@ DownloadProgressCallback = Callable[[int, int, DownloadFileResult], None]
 
 
 _CREATED_FOLDERS: set[str] = set()
+_NGA_IMAGE_FILENAME_RE = re.compile(
+    r"^[A-Za-z0-9-][A-Za-z0-9_-]*"
+    r"\.(?:jpg|jpeg|png|gif|webp)"
+    r"(?:\.(?:thumb|thumb_s|thumb_ss|medium)\.jpg)?$",
+    re.IGNORECASE,
+)
+_NGA_IMAGE_PATH_RE = re.compile(
+    r"^/attachments/(mon_(\d{4})(\d{2}))/(\d{2})/([^/]+)$"
+)
 
 
 def sha256(filepath: str) -> str:
@@ -254,11 +265,26 @@ def NGA_img_link_verify(url: str) -> bool:
     验证NGA图片链接是否有效
     """
     # 形如https://img.nga.178.com/attachments/mon_202601/07/lsQ0-e21K1sT3cSu3-g8.webp.medium.jpg
-    # 需要验证中间的mon_yyyymm/dd部分，无需验证文件名和后缀
-    pattern = re.compile(
-        r"^https://img\.nga\.178\.com/attachments/mon_\d{6}/\d{2}/.+$"
-    )
-    return bool(pattern.match(url))
+    parsed_url = urlsplit(url)
+    if parsed_url.scheme != "https" or parsed_url.netloc != "img.nga.178.com":
+        return False
+    if parsed_url.fragment:
+        return False
+
+    path_match = _NGA_IMAGE_PATH_RE.fullmatch(parsed_url.path)
+    if path_match is None:
+        return False
+
+    year = int(path_match.group(2))
+    month = int(path_match.group(3))
+    day = int(path_match.group(4))
+    filename = path_match.group(5)
+    try:
+        datetime.date(year, month, day)
+    except ValueError:
+        return False
+
+    return bool(_NGA_IMAGE_FILENAME_RE.fullmatch(filename))
 
 
 if __name__ == "__main__":
