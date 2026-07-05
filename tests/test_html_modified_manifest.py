@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from nga_tools.backup import html_modified_manifest
+
+
+class HtmlModifiedManifestTest(unittest.TestCase):
+    def test_completed_post_lous_require_matching_source_hash_and_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            html_dir = Path(tmp_dir)
+            output_path = html_dir / "post_1.html"
+            output_path.write_text("output", encoding="utf-8")
+            source_hash = html_modified_manifest.hash_text("source")
+            output_hash = html_modified_manifest.hash_text("output")
+
+            html_modified_manifest.write_updated_manifest(
+                html_dir,
+                previous_entries={},
+                source_hash_by_lou={1: source_hash},
+                skipped_lous=set(),
+                completed_lous={1},
+                output_hash_by_lou={1: output_hash},
+            )
+
+            entries = html_modified_manifest.load_manifest(html_dir)
+            completed_lous = html_modified_manifest.completed_post_lous(
+                html_dir,
+                {1: source_hash, 2: source_hash},
+                entries,
+            )
+            output_path.unlink()
+            completed_lous_after_missing_file = (
+                html_modified_manifest.completed_post_lous(
+                    html_dir,
+                    {1: source_hash},
+                    entries,
+                )
+            )
+
+        self.assertEqual(completed_lous, {1})
+        self.assertEqual(completed_lous_after_missing_file, set())
+
+    def test_generation_version_mismatch_is_empty_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            html_dir = Path(tmp_dir)
+            manifest_path = html_modified_manifest.manifest_path(html_dir)
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": html_modified_manifest.HTML_MODIFIED_MANIFEST_VERSION,
+                        "modified_generation_version": 999,
+                        "algorithm": html_modified_manifest.HTML_MODIFIED_HASH_ALGORITHM,
+                        "files": {
+                            "post_1.html": {
+                                "source_hash": "source",
+                                "output_hash": "output",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            entries = html_modified_manifest.load_manifest(html_dir)
+
+        self.assertEqual(entries, {})
+
+    def test_invalid_manifest_is_empty_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            html_dir = Path(tmp_dir)
+            html_modified_manifest.manifest_path(html_dir).write_text(
+                "{bad",
+                encoding="utf-8",
+            )
+
+            with patch("builtins.print"):
+                entries = html_modified_manifest.load_manifest(html_dir)
+
+        self.assertEqual(entries, {})
+
+
+if __name__ == "__main__":
+    unittest.main()

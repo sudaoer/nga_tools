@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from bs4 import BeautifulSoup, Tag
 
 from nga_tools import utils
+from nga_tools.backup import html_modified_manifest
 from nga_tools.backup.floor_map import (
     MISSING_POST_HTML,
     PAGE_JSON_RE,
@@ -451,12 +452,14 @@ def _rewrite_image_links(
     floor_labels: FloorLabels,
     failed_image_urls: set[str] | None = None,
     image_lookup: image_store.ImageLookupCache | None = None,
-) -> None:
+) -> set[int]:
     folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
     failed_image_urls = failed_image_urls or set()
     placeholder_image_src: str | None = None
+    completed_lous: set[int] = set()
 
     for item in htmls:
+        item_complete = True
         soup = BeautifulSoup(item["html"], "html.parser")
         images = cast(list[Tag], soup.find_all("img"))
         for index, image in enumerate(images):
@@ -466,6 +469,7 @@ def _rewrite_image_links(
 
             normalized_image_url = image_store.normalize_nga_image_url(image_url)
             if not utils.NGA_img_link_verify(normalized_image_url):
+                item_complete = False
                 continue
 
             if image_lookup is None:
@@ -484,7 +488,9 @@ def _rewrite_image_links(
                         folder_html_modified,
                     )
                 image_src = placeholder_image_src
+                item_complete = False
             if image_src is None:
+                item_complete = False
                 print(
                     f"警告：{floor_labels.label(item['lou'])}的"
                     f"第{index + 1}张图片未找到已下载文件"
@@ -494,17 +500,61 @@ def _rewrite_image_links(
             image["src"] = image_src
 
         item["html"] = str(soup)
+        if item_complete:
+            completed_lous.add(item["lou"])
+
+    return completed_lous
 
 
-def _write_modified_htmls(htmls: list[PostHtml], tid: int, aid: Optional[int]) -> None:
-    folder_html_modified = utils.get_folder(tid, aid, "html_modified")
+def _write_text_atomically(path: Path, text: str) -> None:
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(text, encoding="utf-8")
+    temp_path.replace(path)
+
+
+def _write_modified_htmls(
+    htmls: list[PostHtml],
+    tid: int,
+    aid: Optional[int],
+) -> dict[int, str]:
+    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+    output_hash_by_lou: dict[int, str] = {}
     for item in htmls:
-        with open(
-            f"{folder_html_modified}/post_{item['lou']}.html",
-            "w",
-            encoding="utf-8",
-        ) as file:
-            file.write(item["html"])
+        html = item["html"]
+        path = folder_html_modified / html_modified_manifest.post_html_filename(
+            item["lou"]
+        )
+        _write_text_atomically(path, html)
+        output_hash_by_lou[item["lou"]] = html_modified_manifest.hash_text(html)
+    return output_hash_by_lou
+
+
+def _html_source_hashes_by_lou(htmls: list[PostHtml]) -> dict[int, str]:
+    return {
+        item["lou"]: html_modified_manifest.hash_text(item["html"])
+        for item in htmls
+    }
+
+
+def _completed_html_modified_lous(
+    htmls: list[PostHtml],
+    tid: int,
+    aid: Optional[int],
+) -> tuple[
+    Path,
+    dict[int, str],
+    dict[str, html_modified_manifest.HtmlModifiedManifestEntry],
+    set[int],
+]:
+    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+    source_hash_by_lou = _html_source_hashes_by_lou(htmls)
+    manifest_entries = html_modified_manifest.load_manifest(folder_html_modified)
+    skipped_lous = html_modified_manifest.completed_post_lous(
+        folder_html_modified,
+        source_hash_by_lou,
+        manifest_entries,
+    )
+    return folder_html_modified, source_hash_by_lou, manifest_entries, skipped_lous
 
 
 def _post_refs_from_htmls(htmls: list[PostHtml]) -> list[AuthorPostRef]:
@@ -630,10 +680,12 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
     )
 
     _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
+    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+    source_hash_by_lou = _html_source_hashes_by_lou(htmls)
     files_to_download = _collect_image_download_tasks(htmls, floor_labels)
     download_result = _download_images(tid, aid, files_to_download)
     image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
-    _rewrite_image_links(
+    completed_lous = _rewrite_image_links(
         htmls,
         tid,
         aid,
@@ -641,7 +693,15 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
         _failed_image_urls(download_result),
         image_lookup,
     )
-    _write_modified_htmls(htmls, tid, aid)
+    output_hash_by_lou = _write_modified_htmls(htmls, tid, aid)
+    html_modified_manifest.write_updated_manifest(
+        folder_html_modified,
+        previous_entries={},
+        source_hash_by_lou=source_hash_by_lou,
+        skipped_lous=set(),
+        completed_lous=completed_lous,
+        output_hash_by_lou=output_hash_by_lou,
+    )
 
 
 def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
@@ -706,15 +766,31 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
     )
 
     _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
-    files_to_download = _collect_image_download_tasks(htmls, floor_labels)
+    (
+        folder_html_modified,
+        source_hash_by_lou,
+        manifest_entries,
+        skipped_lous,
+    ) = _completed_html_modified_lous(htmls, tid, aid)
+    active_htmls = [item for item in htmls if item["lou"] not in skipped_lous]
+
+    files_to_download = _collect_image_download_tasks(active_htmls, floor_labels)
     download_result = _download_images(tid, aid, files_to_download)
     image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
-    _rewrite_image_links(
-        htmls,
+    completed_lous = _rewrite_image_links(
+        active_htmls,
         tid,
         aid,
         floor_labels,
         _failed_image_urls(download_result),
         image_lookup,
     )
-    _write_modified_htmls(htmls, tid, aid)
+    output_hash_by_lou = _write_modified_htmls(active_htmls, tid, aid)
+    html_modified_manifest.write_updated_manifest(
+        folder_html_modified,
+        previous_entries=manifest_entries,
+        source_hash_by_lou=source_hash_by_lou,
+        skipped_lous=skipped_lous,
+        completed_lous=completed_lous,
+        output_hash_by_lou=output_hash_by_lou,
+    )
