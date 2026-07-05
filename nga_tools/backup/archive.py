@@ -452,7 +452,12 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
     )
     missing_lou = _find_missing_lou(htmls)
     if aid is not None:
-        previous_missing_lou = read_missing_author_lous_from_html_modified(tid, aid)
+        present_lou = {item["lou"] for item in htmls}
+        previous_missing_lou = [
+            lou
+            for lou in read_missing_author_lous_from_html_modified(tid, aid)
+            if lou not in present_lou
+        ]
         missing_lou = _merge_missing_lou(missing_lou, previous_missing_lou)
     floor_map_result = _build_floor_map_for_backup(
         client,
