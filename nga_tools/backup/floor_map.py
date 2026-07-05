@@ -127,8 +127,17 @@ def _optional_int_list(
     return result
 
 
-def _page_post_refs(page_data: PageData, source: str) -> list[tuple[int, int]]:
+def _page_post_refs(
+    page_data: PageData,
+    source: str,
+    *,
+    allow_missing_posts: bool = False,
+) -> list[tuple[int, int]]:
     raw_posts = page_data.get("result")
+    if raw_posts is None and allow_missing_posts:
+        print(f"警告：{source} 缺少帖子列表，按空页处理。", flush=True)
+        return []
+
     if not isinstance(raw_posts, list):
         raise ValueError(f"{source} 缺少帖子列表。")
 
@@ -587,7 +596,11 @@ def _scan_original_pages(
 
         page_data = client.get_page(tid, None, page_number)
         scanned_pages.add(page_number)
-        for pid, original_lou in _page_post_refs(page_data, f"原帖第{page_number}页"):
+        for pid, original_lou in _page_post_refs(
+            page_data,
+            f"原帖第{page_number}页",
+            allow_missing_posts=True,
+        ):
             seen_original_lous.add(original_lou)
             for author_lou in pid_to_author_lous.get(pid, []):
                 original_lou_by_author_lou[author_lou] = original_lou

@@ -84,6 +84,28 @@ class WordCountCleaningTest(unittest.TestCase):
         self.assertNotIn("r1d50", cleaned)
         self.assertIn("骰子后面的剧情正文", cleaned)
 
+    def test_strips_bbcode_tags_with_library_parser(self) -> None:
+        content = (
+            "[size=12pt]字号正文[/size]"
+            "[font=serif]字体正文[/font]"
+            "[align=center]居中正文[/align]"
+            "[collapse=标题]折叠正文[/collapse]"
+            "[url=https://example.com]链接文本[/url]"
+        )
+
+        cleaned = clean_post_content(content)
+
+        self.assertIn("字号正文", cleaned)
+        self.assertIn("字体正文", cleaned)
+        self.assertIn("居中正文", cleaned)
+        self.assertIn("折叠正文", cleaned)
+        self.assertIn("链接文本", cleaned)
+        self.assertNotIn("[size", cleaned)
+        self.assertNotIn("[font", cleaned)
+        self.assertNotIn("[align", cleaned)
+        self.assertNotIn("[collapse", cleaned)
+        self.assertNotIn("https://example.com", cleaned)
+
 
 class BackupWordCountTest(unittest.TestCase):
     def test_counts_only_posts_above_body_threshold(self) -> None:

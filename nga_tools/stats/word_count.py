@@ -10,15 +10,12 @@ from typing import Optional, cast
 from bs4 import BeautifulSoup, Tag
 
 from nga_tools import utils
+from nga_tools.bbcode_convert import strip_bbcode_tags
 from nga_tools.ngaclient.client import PageData
 
 PAGE_JSON_RE = re.compile(r"^page_(\d+)\.json$")
 BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 IMG_BBCODE_RE = re.compile(r"\[img\].*?\[/img\]", re.IGNORECASE | re.DOTALL)
-URL_BBCODE_RE = re.compile(
-    r"\[url(?:=[^\]]*)?\](.*?)\[/url\]",
-    re.IGNORECASE | re.DOTALL,
-)
 REPLY_HEADER_RE = re.compile(
     r"<b>\s*Reply to\s+\[pid=.*?</b>",
     re.IGNORECASE | re.DOTALL,
@@ -29,11 +26,6 @@ UID_BLOCK_RE = re.compile(
 )
 MENTION_RE = re.compile(r"\[@[^\]\r\n]+\]")
 EMOTE_RE = re.compile(r"\[s:[^\]\r\n]+\]", re.IGNORECASE)
-TECHNICAL_BBCODE_RE = re.compile(
-    r"\[/?(?:b|i|u|s|quote|code|color|size|font|align|collapse|del)"
-    r"(?:=[^\]]*)?\]",
-    re.IGNORECASE,
-)
 DICE_BBCODE_RE = re.compile(
     r"\[(?:\d*d\d+(?:[+\-*/]\d+)*(?:=[^\]\r\n]*)?|"
     r"\.\s*r[^\]\r\n]*)\]",
@@ -140,14 +132,13 @@ def clean_post_content(content: str) -> str:
     text = IMG_BBCODE_RE.sub("\n", text)
     text = _strip_reply_quote_blocks(text)
     text = REPLY_HEADER_RE.sub("\n", text)
-    text = URL_BBCODE_RE.sub(r"\1", text)
     text = UID_BLOCK_RE.sub("\n", text)
     text = MENTION_RE.sub("\n", text)
     text = EMOTE_RE.sub("\n", text)
     text = DICE_BBCODE_RE.sub("\n", text)
     text = DOT_DICE_RE.sub("\n", text)
     text = BR_RE.sub("\n", text)
-    text = TECHNICAL_BBCODE_RE.sub("", text)
+    text = strip_bbcode_tags(text)
     text = _remove_html_noise(text)
     text = html.unescape(text)
     text = WHITESPACE_RE.sub(" ", text)

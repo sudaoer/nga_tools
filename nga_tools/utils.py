@@ -11,6 +11,7 @@ from typing import NoReturn, NotRequired, Optional, TypedDict
 
 import aiohttp
 
+from nga_tools.bbcode_convert import strip_bbcode_tags
 from nga_tools.config import get_config
 
 
@@ -209,16 +210,11 @@ def download_files(
     return asyncio.run(download_all(pending_downloads))
 
 
-# 从bbcode统计字数
 def delete_bbcode_tags(text: str) -> str:
     """
     删除文本中的BBCode标签
     """
-    # 定义BBCode标签的正则表达式模式
-    bbcode_pattern = re.compile(r"\[/?[a-zA-Z]+(?:=[^\]]+)?\]")
-    # 使用正则表达式替换BBCode标签为空字符串
-    cleaned_text = bbcode_pattern.sub("", text)
-    return cleaned_text
+    return strip_bbcode_tags(text)
 
 
 def TODO(message: str) -> NoReturn:

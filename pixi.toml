@@ -22,3 +22,6 @@ pyright = ">=1.1.409,<2"
 weasyprint = "*"
 font-ttf-noto-cjk = "*"
 poppler = "*"
+
+[pypi-dependencies]
+bbcode = ">=1.1.0, <2"
