@@ -9,6 +9,7 @@ __pycache__/
 !pyrightconfig.strict.json
 !config.example.json
 !secrets.example.json
+!forum_watch_configs.example.json
 hbrgo-anjia-260529/rules.md
 # pixi environments
 .pixi/*

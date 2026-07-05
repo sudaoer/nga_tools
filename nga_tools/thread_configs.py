@@ -73,7 +73,7 @@ class NGAThreadConfigs:
 
     def add_thread(
         self, thread_name: str, tid: int, aid: Optional[int] = None, description: str = ""
-    ) -> None:
+    ) -> bool:
         thread_config: ThreadConfig = {
             "thread_name": thread_name,
             "tid": tid,
@@ -83,8 +83,9 @@ class NGAThreadConfigs:
         for existing in self.ThreadList:
             if existing["tid"] == tid and existing.get("aid") == aid:
                 print("该帖子配置已存在，跳过添加。")
-                return
+                return False
         self.ThreadList.append(thread_config)
+        return True
 
     def save_configs(self) -> None:
         data = {"ThreadList": self.ThreadList}

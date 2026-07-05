@@ -56,6 +56,24 @@ pixi run python main.py thread add --name 帖子名 --tid 12345678 --aid 987654
 pixi run python main.py thread list
 ```
 
+扫描版面主题（例如 NGA 二次元跑团综合 `fid=784`）：
+
+```powershell
+pixi run python main.py forum list --fid 784 --pages 1
+```
+
+根据规则扫描版面，并把匹配主题保存到 `thread_configs.json`：
+
+```powershell
+Copy-Item forum_watch_configs.example.json forum_watch_configs.json
+pixi run python main.py forum sync
+```
+
+规则文件默认读取 `forum_watch_configs.json`。匹配规则为：`include_tids`
+中的 tid 会强制保存；否则标题包含任一 `keywords` 且不包含
+`exclude_keywords` 时保存。保存时会把主题楼主 `authorid` 写为 `aid`，
+后续使用 `backup all/sub --name 帖子名` 会默认只看楼主。
+
 抓取整帖并下载图片：
 
 ```powershell

@@ -10,6 +10,7 @@ from nga_tools.commands.backup import (
     backup_sub,
     pdf_generate,
 )
+from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
 from nga_tools.commands.image import image_verify
 from nga_tools.commands.stats import stats_words
 from nga_tools.commands.thread import handle_thread_add, handle_thread_list
@@ -58,6 +59,12 @@ ARG_DEFS: dict[str, ArgDef] = {
         "metavar": "AID",
         "help": "作者aid（可选）",
     },
+    "fid": {
+        "flags": ("--fid",),
+        "type": int,
+        "metavar": "FID",
+        "help": "版面fid",
+    },
     "description": {
         "flags": ("--description",),
         "type": str,
@@ -81,6 +88,18 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": int,
         "metavar": "N",
         "help": "正文楼层判定阈值（中文+中文标点数）",
+    },
+    "pages": {
+        "flags": ("--pages",),
+        "type": int,
+        "metavar": "N",
+        "help": "扫描版面页数",
+    },
+    "watch_config": {
+        "flags": ("--watch_config",),
+        "type": str,
+        "metavar": "PATH",
+        "help": "版面监控规则JSON路径",
     },
 }
 
@@ -107,6 +126,40 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "usage": f"{PROGRAM_USAGE} thread list",
             "examples": [f"{PROGRAM_USAGE} thread list"],
             "args": [],
+        },
+    },
+    "forum": {
+        "list": {
+            "handler": handle_forum_list,
+            "summary": "列出版面主题",
+            "usage": f"{PROGRAM_USAGE} forum list --fid FID [--pages N]",
+            "examples": [
+                f"{PROGRAM_USAGE} forum list --fid 784",
+                f"{PROGRAM_USAGE} forum list --fid 784 --pages 2",
+            ],
+            "notes": [
+                "此命令只列出版面主题，不修改thread_configs.json。",
+                "需要secrets.json中有可访问NGA App API的登录Cookie。",
+            ],
+            "args": ["fid", "pages"],
+            "required": ["fid"],
+            "defaults": {"pages": 1},
+            "positive": ["pages"],
+        },
+        "sync": {
+            "handler": handle_forum_sync,
+            "summary": "根据版面监控规则保存匹配主题配置",
+            "usage": f"{PROGRAM_USAGE} forum sync [--watch_config PATH]",
+            "examples": [
+                f"{PROGRAM_USAGE} forum sync",
+                f"{PROGRAM_USAGE} forum sync --watch_config forum_watch_configs.json",
+            ],
+            "notes": [
+                "默认读取forum_watch_configs.json。",
+                "匹配主题会写入thread_configs.json，aid使用主题楼主authorid。",
+                "此命令只保存配置，不自动下载帖子内容。",
+            ],
+            "args": ["watch_config"],
         },
     },
     "backup": {
@@ -315,6 +368,8 @@ def format_global_help() -> str:
             "",
             "常用示例：",
             f"  {PROGRAM_USAGE} thread list",
+            f"  {PROGRAM_USAGE} forum list --fid 784",
+            f"  {PROGRAM_USAGE} forum sync",
             f"  {PROGRAM_USAGE} backup all --name 帖子名",
             f"  {PROGRAM_USAGE} backup pdf --name 帖子名 --pdf_workers 2",
             f"  {PROGRAM_USAGE} stats words --name 帖子名",

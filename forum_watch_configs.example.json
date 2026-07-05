@@ -1,0 +1,19 @@
+{
+  "ForumWatchList": [
+    {
+      "watch_name": "rp784",
+      "fid": 784,
+      "pages": 2,
+      "keywords": [
+        "安价",
+        "安科"
+      ],
+      "exclude_keywords": [
+        "公告"
+      ],
+      "include_tids": [],
+      "name_template": "{watch_name}-{tid}",
+      "description_template": "{forumname} | {author}: {subject}"
+    }
+  ]
+}
