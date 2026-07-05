@@ -11,7 +11,7 @@ from nga_tools.backup.floor_map import (
 )
 
 BACKUP_STATE_FILENAME = "backup_state.json"
-BACKUP_STATE_VERSION = 1
+BACKUP_STATE_VERSION = 2
 
 
 class BackupState(TypedDict):
@@ -24,6 +24,7 @@ class BackupState(TypedDict):
     floor_map_generation_version: int
     html_manifest_entry_count: int
     html_modified_manifest_entry_count: int
+    unresolved_missing_count: int
 
 
 def state_path(thread_folder: Path) -> Path:
@@ -68,11 +69,14 @@ def load_state(thread_folder: Path) -> BackupState | None:
         "page_count",
         "html_manifest_entry_count",
         "html_modified_manifest_entry_count",
+        "unresolved_missing_count",
     )
     for field in int_fields:
         if type(data.get(field)) is not int:
             print(f"警告：备份状态文件字段无效，按无状态处理：{path}: {field}")
             return None
+    if data["unresolved_missing_count"] != 0:
+        return None
 
     return {
         "version": BACKUP_STATE_VERSION,
@@ -89,6 +93,7 @@ def load_state(thread_folder: Path) -> BackupState | None:
             int,
             data["html_modified_manifest_entry_count"],
         ),
+        "unresolved_missing_count": 0,
     }
 
 
@@ -99,6 +104,7 @@ def write_state(
     page_count: int,
     html_manifest_entry_count: int,
     html_modified_manifest_entry_count: int,
+    unresolved_missing_count: int,
 ) -> None:
     state: BackupState = {
         "version": BACKUP_STATE_VERSION,
@@ -112,6 +118,7 @@ def write_state(
         "floor_map_generation_version": FLOOR_MAP_GENERATION_VERSION,
         "html_manifest_entry_count": html_manifest_entry_count,
         "html_modified_manifest_entry_count": html_modified_manifest_entry_count,
+        "unresolved_missing_count": unresolved_missing_count,
     }
     path = state_path(thread_folder)
     temp_path = path.with_name(f".{path.name}.tmp")

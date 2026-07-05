@@ -1015,6 +1015,50 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
             ):
                 backup_thread_sub(123, 456)
 
+    def test_unresolved_missing_placeholder_does_not_write_fast_skip_state(
+        self,
+    ) -> None:
+        class MissingFloorClient:
+            def get_page_count(self, tid: int, aid: int | None) -> int:
+                return 1
+
+            def get_page(
+                self,
+                tid: int,
+                aid: int | None,
+                page: int,
+            ) -> dict[str, object]:
+                return {
+                    "totalPage": 1,
+                    "vrows": 3,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "first"},
+                        {"lou": 3, "pid": 1003, "content": "third"},
+                    ],
+                }
+
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 1001, "author_lou": 1},
+            {"pid": 1003, "author_lou": 3},
+        ]
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            self._write_current_floor_map(temp_dir, author_posts, [2])
+            self._run_backup_sub(temp_dir, MissingFloorClient())
+
+            entries = html_modified_manifest.load_manifest(
+                temp_dir / "html_modified"
+            )
+            missing_html = (temp_dir / "html_modified" / "post_2.html").read_text(
+                encoding="utf-8"
+            )
+            backup_state_exists = (temp_dir / "backup_state.json").exists()
+
+        self.assertFalse(backup_state_exists)
+        self.assertEqual(missing_html, MISSING_POST_HTML)
+        self.assertEqual(set(entries), {"post_1.html", "post_3.html"})
+
     def test_backup_sub_rebuilds_only_changed_source_hash_lous(self) -> None:
         client = self.MutableFakeClient()
         captured_lous: list[int] = []

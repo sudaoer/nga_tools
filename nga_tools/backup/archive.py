@@ -707,6 +707,15 @@ def _html_hashes_by_lou(records: Sequence[PostRecord]) -> dict[int, str]:
     return {record["lou"]: record["html_hash"] for record in records}
 
 
+def _unresolved_missing_placeholder_lous(records: Sequence[PostRecord]) -> set[int]:
+    missing_html_hash = html_manifest.hash_text(MISSING_POST_HTML)
+    return {
+        record["lou"]
+        for record in records
+        if record["pid"] is None and record["html_hash"] == missing_html_hash
+    }
+
+
 def _completed_html_modified_lous(  # pyright: ignore[reportUnusedFunction]
     htmls: list[PostHtml],
     tid: int,
@@ -838,6 +847,9 @@ def _write_backup_state_if_complete(
 ) -> None:
     if aid is None or author_total_lou_count is None:
         return
+    unresolved_missing_lous = _unresolved_missing_placeholder_lous(records)
+    if unresolved_missing_lous:
+        return
     if set(source_hash_by_lou) - (skipped_lous | completed_lous):
         return
     if (
@@ -871,6 +883,7 @@ def _write_backup_state_if_complete(
         page_count=page_count,
         html_manifest_entry_count=len(html_entries),
         html_modified_manifest_entry_count=len(html_modified_entries),
+        unresolved_missing_count=0,
     )
 
 
@@ -1034,14 +1047,18 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
     )
     download_result = _download_images(tid, aid, files_to_download)
     image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
-    completed_lous = _rewrite_parsed_image_links(
-        parsed_htmls,
-        tid,
-        aid,
-        floor_labels,
-        _failed_image_urls(download_result),
-        image_lookup,
+    completed_lous = set(
+        _rewrite_parsed_image_links(
+            parsed_htmls,
+            tid,
+            aid,
+            floor_labels,
+            _failed_image_urls(download_result),
+            image_lookup,
+        )
     )
+    unresolved_missing_lous = _unresolved_missing_placeholder_lous(records)
+    completed_lous -= unresolved_missing_lous
     output_hash_by_lou = _write_modified_htmls(htmls, tid, aid)
     html_modified_manifest.write_updated_manifest(
         folder_html_modified,
@@ -1148,6 +1165,8 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         manifest_entries,
         skipped_lous,
     ) = _completed_html_modified_lous_for_records(records, tid, aid)
+    unresolved_missing_lous = _unresolved_missing_placeholder_lous(records)
+    skipped_lous -= unresolved_missing_lous
     active_records = [item for item in records if item["lou"] not in skipped_lous]
     active_htmls = _load_post_htmls_for_records(active_records, tid, aid)
 
@@ -1158,14 +1177,17 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
     )
     download_result = _download_images(tid, aid, files_to_download)
     image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
-    completed_lous = _rewrite_parsed_image_links(
-        parsed_htmls,
-        tid,
-        aid,
-        floor_labels,
-        _failed_image_urls(download_result),
-        image_lookup,
+    completed_lous = set(
+        _rewrite_parsed_image_links(
+            parsed_htmls,
+            tid,
+            aid,
+            floor_labels,
+            _failed_image_urls(download_result),
+            image_lookup,
+        )
     )
+    completed_lous -= unresolved_missing_lous
     output_hash_by_lou = _write_modified_htmls(active_htmls, tid, aid)
     html_modified_manifest.write_updated_manifest(
         folder_html_modified,
