@@ -12,6 +12,7 @@ from nga_tools.thread_configs import ThreadConfig
 DEFAULT_WATCH_CONFIG_PATH = "forum_watch_configs.json"
 DEFAULT_NAME_TEMPLATE = "{watch_name}-{tid}"
 DEFAULT_DESCRIPTION_TEMPLATE = "{forumname} | {author}: {subject}"
+DEFAULT_MIN_REPLIES = 500
 
 JsonObject: TypeAlias = dict[str, object]
 SyncStatus: TypeAlias = Literal["added", "skipped", "conflict"]
@@ -21,6 +22,7 @@ class ForumWatchConfig(TypedDict):
     watch_name: str
     fid: int
     pages: int
+    min_replies: int
     keywords: list[str]
     exclude_keywords: list[str]
     include_tids: list[int]
@@ -130,6 +132,12 @@ def _parse_watch_config(item: object) -> ForumWatchConfig:
         "watch_name": _required_str(data, "watch_name", source),
         "fid": _required_int(data, "fid", source),
         "pages": _optional_positive_int(data, "pages", 1, source),
+        "min_replies": _optional_positive_int(
+            data,
+            "min_replies",
+            DEFAULT_MIN_REPLIES,
+            source,
+        ),
         "keywords": _optional_str_list(data, "keywords", source),
         "exclude_keywords": _optional_str_list(data, "exclude_keywords", source),
         "include_tids": _optional_int_list(data, "include_tids", source),
@@ -169,7 +177,8 @@ def thread_matches_watch(thread: ForumThread, watch_config: ForumWatchConfig) ->
     subject = thread["subject"]
     has_keyword = _contains_any(subject, watch_config["keywords"])
     has_excluded_keyword = _contains_any(subject, watch_config["exclude_keywords"])
-    return has_keyword and not has_excluded_keyword
+    has_enough_replies = thread["replies"] >= watch_config["min_replies"]
+    return has_keyword and not has_excluded_keyword and has_enough_replies
 
 
 def _template_values(

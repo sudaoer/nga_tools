@@ -70,9 +70,10 @@ pixi run python main.py forum sync
 ```
 
 规则文件默认读取 `forum_watch_configs.json`。匹配规则为：`include_tids`
-中的 tid 会强制保存；否则标题包含任一 `keywords` 且不包含
-`exclude_keywords` 时保存。保存时会把主题楼主 `authorid` 写为 `aid`，
-后续使用 `backup all/sub --name 帖子名` 会默认只看楼主。
+中的 tid 会强制保存；否则标题包含任一 `keywords`、不包含
+`exclude_keywords`，且回复数达到 `min_replies` 时保存。`min_replies`
+未配置时默认为 500。保存时会把主题楼主 `authorid` 写为 `aid`，后续使用
+`backup all/sub --name 帖子名` 会默认只看楼主。
 
 抓取整帖并下载图片：
 

@@ -22,6 +22,7 @@ def _thread(
     tid: int = 123,
     subject: str = "安价测试帖",
     authorid: int = 456,
+    replies: int = 600,
 ) -> ForumThread:
     return {
         "tid": tid,
@@ -31,7 +32,7 @@ def _thread(
         "authorid": authorid,
         "postdate": 1000,
         "lastpost": 2000,
-        "replies": 30,
+        "replies": replies,
         "forumname": "二次元跑团综合",
     }
 
@@ -41,11 +42,13 @@ def _watch(
     keywords: list[str] | None = None,
     exclude_keywords: list[str] | None = None,
     include_tids: list[int] | None = None,
+    min_replies: int = 500,
 ) -> ForumWatchConfig:
     return {
         "watch_name": "rp784",
         "fid": 784,
         "pages": 1,
+        "min_replies": min_replies,
         "keywords": [] if keywords is None else keywords,
         "exclude_keywords": [] if exclude_keywords is None else exclude_keywords,
         "include_tids": [] if include_tids is None else include_tids,
@@ -69,8 +72,54 @@ class ForumWatchConfigTest(unittest.TestCase):
 
         self.assertEqual(len(configs), 1)
         self.assertEqual(configs[0]["pages"], 1)
+        self.assertEqual(configs[0]["min_replies"], 500)
         self.assertEqual(configs[0]["keywords"], [])
         self.assertEqual(configs[0]["name_template"], "{watch_name}-{tid}")
+
+    def test_loads_custom_min_replies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "forum_watch_configs.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "ForumWatchList": [
+                            {
+                                "watch_name": "rp784",
+                                "fid": 784,
+                                "min_replies": 120,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            configs = load_forum_watch_configs(config_path)
+
+        self.assertEqual(configs[0]["min_replies"], 120)
+
+    def test_rejects_invalid_min_replies(self) -> None:
+        for min_replies in [0, "500"]:
+            with self.subTest(min_replies=min_replies):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    config_path = Path(tmp_dir) / "forum_watch_configs.json"
+                    config_path.write_text(
+                        json.dumps(
+                            {
+                                "ForumWatchList": [
+                                    {
+                                        "watch_name": "rp784",
+                                        "fid": 784,
+                                        "min_replies": min_replies,
+                                    }
+                                ]
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(ValueError, "min_replies"):
+                        load_forum_watch_configs(config_path)
 
 
 class ForumWatchMatchTest(unittest.TestCase):
@@ -91,6 +140,20 @@ class ForumWatchMatchTest(unittest.TestCase):
                 exclude_keywords=["公告"],
                 include_tids=[999],
             ),
+        )
+
+        self.assertTrue(matched)
+
+    def test_min_replies_filters_keyword_matches(self) -> None:
+        watch = _watch(keywords=["安价"], min_replies=500)
+
+        self.assertFalse(thread_matches_watch(_thread(replies=499), watch))
+        self.assertTrue(thread_matches_watch(_thread(replies=500), watch))
+
+    def test_include_tid_bypasses_min_replies(self) -> None:
+        matched = thread_matches_watch(
+            _thread(tid=999, replies=1),
+            _watch(keywords=["安价"], include_tids=[999], min_replies=500),
         )
 
         self.assertTrue(matched)
