@@ -133,6 +133,12 @@ class NetworkLimitsTest(unittest.TestCase):
         self.assertEqual(len(result["succeeded"]), 1)
         self.assertEqual(_AsyncSlot.entered_count, 1)
 
+    def test_default_download_concurrency_uses_configured_image_limit(self) -> None:
+        configure_network_limits(api_concurrency=4, image_concurrency=100)
+
+        self.assertEqual(utils._effective_download_concurrency(None), 100)
+        self.assertEqual(utils._effective_download_concurrency(50), 50)
+
 
 if __name__ == "__main__":
     unittest.main()

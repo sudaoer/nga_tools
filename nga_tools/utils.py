@@ -50,10 +50,13 @@ _NGA_IMAGE_PATH_RE = re.compile(
 )
 
 
-def _effective_download_concurrency(max_concurrency: int) -> int:
+def _effective_download_concurrency(max_concurrency: int | None) -> int:
+    image_concurrency = network_limits.get_image_concurrency()
+    if max_concurrency is None:
+        return image_concurrency
     if max_concurrency <= 0:
         raise ValueError("max_concurrency must be greater than 0.")
-    return min(max_concurrency, network_limits.get_image_concurrency())
+    return min(max_concurrency, image_concurrency)
 
 
 def sha256(filepath: str) -> str:
@@ -119,7 +122,7 @@ def download_files(
     retries: int = 5,
     backoff_factor: float = 0.5,
     retry_statuses: tuple[int, ...] = (429, 500, 502, 503, 504),
-    max_concurrency: int = 50,
+    max_concurrency: int | None = None,
     on_progress: DownloadProgressCallback | None = None,
 ) -> DownloadSummary:
     """
@@ -130,7 +133,7 @@ def download_files(
     retries: 每个文件的最大重试次数
     backoff_factor: 指数退避基数（等待时间 = backoff_factor * 2 ** attempt）
     retry_statuses: 针对这些HTTP状态码进行重试
-    max_concurrency: 最多同时下载的文件数
+    max_concurrency: 本次调用的下载并发上限；未提供时使用全局图片下载上限
     on_progress: 每个文件完成后调用，参数为(已完成数, 总数, 下载结果)
     """
 
