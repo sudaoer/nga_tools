@@ -6,7 +6,7 @@ import os
 import re
 import sys
 import traceback
-from collections.abc import Awaitable
+from collections.abc import Callable
 from typing import NoReturn, NotRequired, Optional, TypedDict
 
 import aiohttp
@@ -30,6 +30,9 @@ class DownloadFileResult(TypedDict):
 class DownloadSummary(TypedDict):
     succeeded: list[DownloadFileResult]
     failed: list[DownloadFileResult]
+
+
+DownloadProgressCallback = Callable[[int, int, DownloadFileResult], None]
 
 
 _CREATED_FOLDERS: set[str] = set()
@@ -99,6 +102,7 @@ def download_files(
     backoff_factor: float = 0.5,
     retry_statuses: tuple[int, ...] = (429, 500, 502, 503, 504),
     max_concurrency: int = 10,
+    on_progress: DownloadProgressCallback | None = None,
 ) -> DownloadSummary:
     """
     并发下载多个文件，带出错重试机制，限制最大并发数
@@ -109,6 +113,7 @@ def download_files(
     backoff_factor: 指数退避基数（等待时间 = backoff_factor * 2 ** attempt）
     retry_statuses: 针对这些HTTP状态码进行重试
     max_concurrency: 最多同时下载的文件数
+    on_progress: 每个文件完成后调用，参数为(已完成数, 总数, 下载结果)
     """
 
     async def fetch_and_save(
@@ -194,12 +199,31 @@ def download_files(
         connector = aiohttp.TCPConnector(limit=max_concurrency)
         semaphore = asyncio.Semaphore(max_concurrency)
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-            tasks: list[Awaitable[DownloadFileResult]] = []
+            tasks: list[asyncio.Task[DownloadFileResult]] = []
             for item in url_filename_lists:
-                tasks.append(fetch_and_save(session, item["url"], item["save_path"], semaphore))
-            results = await asyncio.gather(*tasks)
-            succeeded = [r for r in results if r["success"]]
-            failed = [r for r in results if not r["success"]]
+                tasks.append(
+                    asyncio.create_task(
+                        fetch_and_save(
+                            session,
+                            item["url"],
+                            item["save_path"],
+                            semaphore,
+                        )
+                    )
+                )
+            succeeded: list[DownloadFileResult] = []
+            failed: list[DownloadFileResult] = []
+            total = len(tasks)
+            completed = 0
+            for task in asyncio.as_completed(tasks):
+                result = await task
+                completed += 1
+                if result["success"]:
+                    succeeded.append(result)
+                else:
+                    failed.append(result)
+                if on_progress is not None:
+                    on_progress(completed, total, result)
             return {"succeeded": succeeded, "failed": failed}
 
     # 检查文件是否在本地存在，如果存在则去除该条下载任务

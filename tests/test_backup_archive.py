@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import io
+from contextlib import redirect_stdout
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from nga_tools.backup.archive import PostHtml, _rewrite_image_links
+from nga_tools import utils
+from nga_tools.backup.archive import (
+    PostHtml,
+    _download_images,
+    _rewrite_image_links,
+)
 from nga_tools.backup.floor_map import FloorLabels
 
 
@@ -52,6 +61,92 @@ class RewriteImageLinksTest(unittest.TestCase):
         self.assertEqual(tasks, [])
         get_folder.assert_not_called()
         print_mock.assert_called_once_with("警告：第3095楼的第1张图片链接无效")
+
+
+class DownloadImagesTest(unittest.TestCase):
+    def test_reports_existing_pending_and_completion_progress(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            existing_path = Path(temp_dir) / "existing.png"
+            pending_path = Path(temp_dir) / "pending.png"
+            existing_path.write_bytes(b"already here")
+            files_to_download: list[utils.DownloadTask] = [
+                {
+                    "url": "https://img.nga.178.com/existing.png",
+                    "save_path": str(existing_path),
+                },
+                {
+                    "url": "https://img.nga.178.com/pending.png",
+                    "save_path": str(pending_path),
+                },
+            ]
+            output = io.StringIO()
+
+            def fake_download_files(
+                pending_downloads: list[utils.DownloadTask],
+                *,
+                on_progress: utils.DownloadProgressCallback | None = None,
+            ) -> utils.DownloadSummary:
+                self.assertEqual(pending_downloads, [files_to_download[1]])
+                result: utils.DownloadFileResult = {
+                    "url": files_to_download[1]["url"],
+                    "save_path": files_to_download[1]["save_path"],
+                    "success": True,
+                }
+                if on_progress is not None:
+                    on_progress(1, 1, result)
+                return {"succeeded": [result], "failed": []}
+
+            with (
+                patch(
+                    "nga_tools.backup.archive.utils.get_folder",
+                    return_value=temp_dir,
+                ),
+                patch(
+                    "nga_tools.backup.archive.utils.download_files",
+                    side_effect=fake_download_files,
+                ),
+                redirect_stdout(output),
+            ):
+                _download_images(123, None, files_to_download)
+
+        output_text = output.getvalue()
+        self.assertIn("共2张图片，已存在1张，本次下载1张。", output_text)
+        self.assertIn("下载进度：0/1", output_text)
+        self.assertIn("下载进度：1/1", output_text)
+        self.assertIn("图片下载完成。", output_text)
+        self.assertIn("成功下载1个文件，失败0个文件。", output_text)
+
+    def test_reports_zero_progress_when_all_images_exist(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            existing_path = Path(temp_dir) / "existing.png"
+            existing_path.write_bytes(b"already here")
+            files_to_download: list[utils.DownloadTask] = [
+                {
+                    "url": "https://img.nga.178.com/existing.png",
+                    "save_path": str(existing_path),
+                }
+            ]
+            output = io.StringIO()
+
+            with (
+                patch(
+                    "nga_tools.backup.archive.utils.get_folder",
+                    return_value=temp_dir,
+                ),
+                patch(
+                    "nga_tools.backup.archive.utils.download_files",
+                    return_value={"succeeded": [], "failed": []},
+                ) as download_files,
+                redirect_stdout(output),
+            ):
+                _download_images(123, None, files_to_download)
+
+            download_files.assert_not_called()
+
+        output_text = output.getvalue()
+        self.assertIn("共1张图片，已存在1张，本次下载0张。", output_text)
+        self.assertIn("下载进度：0/0", output_text)
+        self.assertIn("成功下载0个文件，失败0个文件。", output_text)
 
 
 if __name__ == "__main__":

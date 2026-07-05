@@ -265,6 +265,51 @@ def _pending_download_tasks(
     ]
 
 
+def _download_images(
+    tid: int,
+    aid: Optional[int],
+    files_to_download: list[utils.DownloadTask],
+) -> utils.DownloadSummary:
+    pending_downloads = _pending_download_tasks(files_to_download)
+    total_count = len(files_to_download)
+    pending_count = len(pending_downloads)
+    existing_count = total_count - pending_count
+    print(
+        f"共{total_count}张图片，已存在{existing_count}张，"
+        f"本次下载{pending_count}张。"
+    )
+
+    utils.get_folder(tid, aid, "images")
+    progress = InlineProgress()
+    download_result: utils.DownloadSummary = {"succeeded": [], "failed": []}
+
+    def update_progress(
+        completed: int,
+        total: int,
+        _result: utils.DownloadFileResult,
+    ) -> None:
+        progress.update(f"下载进度：{completed}/{total}")
+
+    progress.update(f"下载进度：0/{pending_count}")
+    try:
+        if pending_count > 0:
+            download_result = utils.download_files(
+                pending_downloads,
+                on_progress=update_progress,
+            )
+    finally:
+        progress.finish()
+
+    print("图片下载完成。")
+    print(
+        f"成功下载{len(download_result['succeeded'])}个文件，"
+        f"失败{len(download_result['failed'])}个文件。"
+    )
+    for failed in download_result["failed"]:
+        print(f"下载失败：{failed['url']}，保存为：{failed['save_path']}")
+    return download_result
+
+
 def backup_thread(tid: int, aid: Optional[int]) -> None:
     client = NGAClient()
     page_count = client.get_page_count(tid, aid)
@@ -289,17 +334,7 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
     files_to_download = _rewrite_image_links(htmls, tid, aid, floor_labels)
     _write_modified_htmls(htmls, tid, aid)
 
-    pending_downloads = _pending_download_tasks(files_to_download)
-    print(f"准备下载{len(pending_downloads)}个图片文件...")
-    utils.get_folder(tid, aid, "images")
-    download_result = utils.download_files(pending_downloads)
-    print("图片下载完成。")
-    print(
-        f"成功下载{len(download_result['succeeded'])}个文件，"
-        f"失败{len(download_result['failed'])}个文件。"
-    )
-    for failed in download_result["failed"]:
-        print(f"下载失败：{failed['url']}，保存为：{failed['save_path']}")
+    _download_images(tid, aid, files_to_download)
 
 
 def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
@@ -355,14 +390,4 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
     files_to_download = _rewrite_image_links(htmls, tid, aid, floor_labels)
     _write_modified_htmls(htmls, tid, aid)
 
-    pending_downloads = _pending_download_tasks(files_to_download)
-    print(f"准备补充下载{len(pending_downloads)}个图片文件...")
-    utils.get_folder(tid, aid, "images")
-    download_result = utils.download_files(pending_downloads)
-    print("图片下载完成。")
-    print(
-        f"成功下载{len(download_result['succeeded'])}个文件，"
-        f"失败{len(download_result['failed'])}个文件。"
-    )
-    for failed in download_result["failed"]:
-        print(f"下载失败：{failed['url']}，保存为：{failed['save_path']}")
+    _download_images(tid, aid, files_to_download)
