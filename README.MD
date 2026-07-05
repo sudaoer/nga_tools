@@ -81,6 +81,8 @@ pixi run python main.py forum sync
 pixi run python main.py backup all --name 帖子名
 ```
 
+图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在 `output/image_index.sqlite3`。
+
 补充本地缺失内容和远端新增内容：
 
 ```powershell
@@ -115,6 +117,18 @@ pixi run python main.py image verify
 
 ```powershell
 pixi run python main.py image verify --name 帖子名
+```
+
+旧版本曾在 `output/images/` 下创建按 NGA 原路径组织的软链接。已有旧产物可以显式迁移到 SQLite 映射和 `images_unique` 引用：
+
+```powershell
+pixi run python main.py image migrate
+```
+
+迁移命令会保留旧软链接目录。确认 `html_modified` 已不再引用旧软链接后，可以清理旧目录：
+
+```powershell
+pixi run python main.py image prune-links
 ```
 
 统计已有备份中的正文中文字数：
@@ -159,10 +173,15 @@ PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会�
 
 - `json/`：接口返回的原始分页数据
 - `html/`：由 BBCode 转换出的单楼 HTML
-- `html_modified/`：替换本地图片路径后的 HTML
-- `images/`：下载的图片
+- `html_modified/`：替换为本地 `images_unique` 图片路径后的 HTML
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 - `floor_map.json`：只看作者楼层到原帖楼层的映射
+
+全局图片产物位于 `output/` 根目录：
+
+- `images_unique/`：按内容 hash 保存的实际图片文件
+- `image_index.sqlite3`：原始 NGA 图片 URL 到 `images_unique` 文件的映射
+- `images/`：旧版本软链接目录，仅迁移前的历史产物会存在
 
 ## 协议
 

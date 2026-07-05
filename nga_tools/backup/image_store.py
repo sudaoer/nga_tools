@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import datetime
 import filecmp
 import os
 import shutil
+import sqlite3
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NotRequired, TypedDict
@@ -17,12 +20,10 @@ from nga_tools.config import get_config
 
 class ImageDownloadTask(TypedDict):
     url: str
-    link_path: str
 
 
 class StoredImageResult(TypedDict):
     url: str
-    link_path: str
     unique_path: str
     reused: bool
     collision: NotRequired[bool]
@@ -36,12 +37,24 @@ class NgaImageUrl:
     filename: str
 
 
+@dataclass(frozen=True)
+class ImageMapping:
+    url: str
+    unique_rel_path: str
+
+    @property
+    def unique_path(self) -> Path:
+        return output_dir() / self.unique_rel_path
+
+
 IMAGE_FORMAT_BY_PILLOW_FORMAT = {
     "JPEG": "jpg",
     "PNG": "png",
     "GIF": "gif",
     "WEBP": "webp",
 }
+
+IMAGE_INDEX_FILENAME = "image_index.sqlite3"
 
 
 def normalize_nga_image_url(url: str) -> str:
@@ -70,6 +83,10 @@ def unique_images_dir() -> Path:
     return output_dir() / "images_unique"
 
 
+def image_index_path() -> Path:
+    return output_dir() / IMAGE_INDEX_FILENAME
+
+
 def image_links_dir() -> Path:
     return output_dir() / "images"
 
@@ -89,9 +106,117 @@ def image_link_src_from_html_dir(url: str, html_dir: str | Path) -> str:
     return os.path.relpath(link_path, html_dir).replace("\\", "/")
 
 
+def unique_image_src_from_html_dir(url: str, html_dir: str | Path) -> str | None:
+    image_path = mapped_image_path_for_url(url)
+    if image_path is None:
+        return None
+    return os.path.relpath(image_path, html_dir).replace("\\", "/")
+
+
+def _now_utc_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _connect_image_index() -> sqlite3.Connection:
+    db_path = image_index_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS image_mappings (
+            url TEXT PRIMARY KEY,
+            unique_rel_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    return connection
+
+
+def _unique_rel_path(path: Path) -> str:
+    return os.path.relpath(path, output_dir()).replace("\\", "/")
+
+
+def upsert_image_mapping(url: str, unique_path: Path) -> ImageMapping:
+    return upsert_image_mappings([(url, unique_path)])[0]
+
+
+def upsert_image_mappings(
+    mappings: list[tuple[str, Path]],
+) -> list[ImageMapping]:
+    if not mappings:
+        return []
+
+    now = _now_utc_iso()
+    image_mappings = [
+        ImageMapping(url=url, unique_rel_path=_unique_rel_path(unique_path))
+        for url, unique_path in mappings
+    ]
+    rows = [
+        (mapping.url, mapping.unique_rel_path, now, now)
+        for mapping in image_mappings
+    ]
+    with closing(_connect_image_index()) as connection:
+        with connection:
+            connection.executemany(
+                """
+                INSERT INTO image_mappings (url, unique_rel_path, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    unique_rel_path = excluded.unique_rel_path,
+                    updated_at = excluded.updated_at
+                """,
+                rows,
+            )
+    return image_mappings
+
+
+def image_mapping_for_url(url: str) -> ImageMapping | None:
+    normalized_url = normalize_nga_image_url(url)
+    if not utils.NGA_img_link_verify(normalized_url):
+        return None
+
+    with closing(_connect_image_index()) as connection:
+        row = connection.execute(
+            "SELECT unique_rel_path FROM image_mappings WHERE url = ?",
+            (normalized_url,),
+        ).fetchone()
+
+    if row is None:
+        return None
+    unique_rel_path = row[0]
+    if not isinstance(unique_rel_path, str):
+        return None
+    return ImageMapping(url=normalized_url, unique_rel_path=unique_rel_path)
+
+
+def image_mappings_by_url() -> dict[str, ImageMapping]:
+    with closing(_connect_image_index()) as connection:
+        rows = connection.execute(
+            "SELECT url, unique_rel_path FROM image_mappings"
+        ).fetchall()
+
+    mappings: dict[str, ImageMapping] = {}
+    for url, unique_rel_path in rows:
+        if isinstance(url, str) and isinstance(unique_rel_path, str):
+            mappings[url] = ImageMapping(url=url, unique_rel_path=unique_rel_path)
+    return mappings
+
+
+def mapped_image_path_for_url(url: str) -> Path | None:
+    mapping = image_mapping_for_url(url)
+    if mapping is None:
+        return None
+    image_path = mapping.unique_path
+    if not image_path.exists():
+        return None
+    return image_path
+
+
 def image_task_is_complete(task: ImageDownloadTask) -> bool:
-    link_path = Path(task["link_path"])
-    return link_path.is_symlink() and link_path.exists()
+    return mapped_image_path_for_url(task["url"]) is not None
 
 
 def pending_image_download_tasks(
@@ -104,6 +229,9 @@ def link_path_for_image_src(image_src: str) -> Path | None:
     normalized_url = normalize_nga_image_url(image_src)
     if not utils.NGA_img_link_verify(normalized_url):
         return None
+    image_path = mapped_image_path_for_url(normalized_url)
+    if image_path is not None:
+        return image_path
     return image_link_path(normalized_url)
 
 
@@ -162,17 +290,6 @@ def _target_path_for_download(
         collision_index += 1
 
 
-def _replace_with_relative_symlink(link_path: Path, target_path: Path) -> None:
-    link_path.parent.mkdir(parents=True, exist_ok=True)
-    if link_path.exists() or link_path.is_symlink():
-        if link_path.is_dir() and not link_path.is_symlink():
-            raise RuntimeError(f"图片链接路径被目录占用：{link_path}")
-        link_path.unlink()
-
-    relative_target = os.path.relpath(target_path, link_path.parent)
-    link_path.symlink_to(relative_target)
-
-
 def store_downloaded_image(temp_path: Path, task: ImageDownloadTask) -> StoredImageResult:
     image_hash = utils.sha256(str(temp_path))
     extension = _image_extension_from_file(temp_path, task["url"])
@@ -184,11 +301,9 @@ def store_downloaded_image(temp_path: Path, task: ImageDownloadTask) -> StoredIm
     if not reused:
         shutil.move(str(temp_path), target_path)
 
-    link_path = Path(task["link_path"])
-    _replace_with_relative_symlink(link_path, target_path)
+    upsert_image_mapping(task["url"], target_path)
     result: StoredImageResult = {
         "url": task["url"],
-        "link_path": str(link_path),
         "unique_path": str(target_path),
         "reused": reused,
     }
@@ -236,14 +351,14 @@ def download_image_tasks(
                     )
                     result = {
                         "url": image_task["url"],
-                        "save_path": stored_image["link_path"],
+                        "save_path": stored_image["unique_path"],
                         "success": True,
                     }
                     succeeded.append(result)
                 except Exception as error:
                     result = {
                         "url": image_task["url"],
-                        "save_path": image_task["link_path"],
+                        "save_path": str(unique_images_dir()),
                         "success": False,
                         "error": str(error),
                     }
@@ -251,7 +366,7 @@ def download_image_tasks(
             else:
                 result = {
                     "url": image_task["url"],
-                    "save_path": image_task["link_path"],
+                    "save_path": str(unique_images_dir()),
                     "success": False,
                     "error": download_result.get("error", "unknown"),
                 }

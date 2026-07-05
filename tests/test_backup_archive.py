@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import os
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,6 +14,7 @@ from nga_tools.backup.archive import (
     PostHtml,
     backup_thread_sub,
     _build_floor_map_for_backup,
+    _collect_image_download_tasks,
     _download_images,
     _fill_missing_lou,
     _merge_missing_lou,
@@ -32,7 +32,7 @@ from nga_tools.ngaclient import NGAClient
 
 
 class RewriteImageLinksTest(unittest.TestCase):
-    def test_rewrites_valid_image_and_adds_download_task(self) -> None:
+    def test_collects_valid_image_and_rewrites_after_download(self) -> None:
         image_url = (
             "https://img.nga.178.com/attachments/"
             "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
@@ -44,6 +44,10 @@ class RewriteImageLinksTest(unittest.TestCase):
         with TemporaryDirectory() as temp_dir_name:
             output_dir = Path(temp_dir_name) / "output"
             thread_dir = output_dir / "123_all"
+            unique_dir = output_dir / "images_unique"
+            unique_dir.mkdir(parents=True)
+            unique_path = unique_dir / "hash.png"
+            unique_path.write_bytes(b"image")
 
             def fake_get_folder(
                 tid: int,
@@ -64,25 +68,20 @@ class RewriteImageLinksTest(unittest.TestCase):
                     return_value=type("Config", (), {"output_dir": str(output_dir)})(),
                 ),
             ):
-                tasks = _rewrite_image_links(htmls, 123, None, FloorLabels.plain())
+                tasks = _collect_image_download_tasks(htmls, FloorLabels.plain())
+                image_store.upsert_image_mapping(image_url, unique_path)
+                _rewrite_image_links(htmls, 123, None, FloorLabels.plain())
 
         self.assertEqual(
             tasks,
             [
                 {
                     "url": image_url,
-                    "link_path": str(
-                        output_dir
-                        / "images"
-                        / "mon_202506"
-                        / "06"
-                        / "lsQkle-552eXuT3cS10p-7f7.png"
-                    ),
                 }
             ],
         )
         self.assertIn(
-            'src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"',
+            'src="../../images_unique/hash.png"',
             htmls[0]["html"],
         )
 
@@ -109,20 +108,14 @@ class RewriteImageLinksTest(unittest.TestCase):
                 path.mkdir(parents=True, exist_ok=True)
                 return str(path)
 
-            with (
-                patch(
-                    "nga_tools.backup.archive.utils.get_folder",
-                    side_effect=fake_get_folder,
-                ),
-                patch(
-                    "nga_tools.backup.image_store.get_config",
-                    return_value=type("Config", (), {"output_dir": str(output_dir)})(),
-                ),
+            with patch(
+                "nga_tools.backup.archive.utils.get_folder",
+                side_effect=fake_get_folder,
             ):
-                tasks = _rewrite_image_links(htmls, 123, None, FloorLabels.plain())
+                tasks = _collect_image_download_tasks(htmls, FloorLabels.plain())
 
         self.assertEqual(tasks[0]["url"], normalized_url)
-        self.assertIn("lsQkle-552eXuT3cS10p-7f7.png", htmls[0]["html"])
+        self.assertIn("lsQkle-,552eXuT3cS10p-7f7.png", htmls[0]["html"])
 
     def test_skips_invalid_image_download_task(self) -> None:
         invalid_url = "./mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png[/img</span></div>]"
@@ -137,7 +130,7 @@ class RewriteImageLinksTest(unittest.TestCase):
             ),
             patch("builtins.print") as print_mock,
         ):
-            tasks = _rewrite_image_links(htmls, 123, None, FloorLabels.plain())
+            tasks = _collect_image_download_tasks(htmls, FloorLabels.plain())
 
         self.assertEqual(tasks, [])
         print_mock.assert_called_once_with("警告：第3095楼的第1张图片链接无效")
@@ -510,25 +503,18 @@ class DownloadImagesTest(unittest.TestCase):
     def test_reports_existing_pending_and_completion_progress(self) -> None:
         with TemporaryDirectory() as temp_dir:
             unique_dir = Path(temp_dir) / "images_unique"
-            link_dir = Path(temp_dir) / "images" / "mon_202506" / "06"
             unique_dir.mkdir()
-            link_dir.mkdir(parents=True)
             unique_existing_path = unique_dir / "existing.png"
-            existing_link_path = link_dir / "existing.png"
-            pending_link_path = link_dir / "pending.png"
             unique_existing_path.write_bytes(b"already here")
-            existing_link_path.symlink_to(
-                Path(os.path.relpath(unique_existing_path, existing_link_path.parent))
+            existing_url = (
+                "https://img.nga.178.com/attachments/mon_202506/06/existing.png"
+            )
+            pending_url = (
+                "https://img.nga.178.com/attachments/mon_202506/06/pending.png"
             )
             files_to_download: list[image_store.ImageDownloadTask] = [
-                {
-                    "url": "https://img.nga.178.com/existing.png",
-                    "link_path": str(existing_link_path),
-                },
-                {
-                    "url": "https://img.nga.178.com/pending.png",
-                    "link_path": str(pending_link_path),
-                },
+                {"url": existing_url},
+                {"url": pending_url},
             ]
             output = io.StringIO()
 
@@ -540,7 +526,7 @@ class DownloadImagesTest(unittest.TestCase):
                 self.assertEqual(pending_downloads, [files_to_download[1]])
                 result: utils.DownloadFileResult = {
                     "url": files_to_download[1]["url"],
-                    "save_path": files_to_download[1]["link_path"],
+                    "save_path": str(unique_dir / "pending.png"),
                     "success": True,
                 }
                 if on_progress is not None:
@@ -549,11 +535,16 @@ class DownloadImagesTest(unittest.TestCase):
 
             with (
                 patch(
+                    "nga_tools.backup.image_store.get_config",
+                    return_value=type("Config", (), {"output_dir": str(temp_dir)})(),
+                ),
+                patch(
                     "nga_tools.backup.archive.image_store.download_image_tasks",
                     side_effect=fake_download_image_tasks,
                 ),
                 redirect_stdout(output),
             ):
+                image_store.upsert_image_mapping(existing_url, unique_existing_path)
                 _download_images(123, None, files_to_download)
 
         output_text = output.getvalue()
@@ -566,30 +557,29 @@ class DownloadImagesTest(unittest.TestCase):
     def test_reports_zero_progress_when_all_images_exist(self) -> None:
         with TemporaryDirectory() as temp_dir:
             unique_dir = Path(temp_dir) / "images_unique"
-            link_dir = Path(temp_dir) / "images" / "mon_202506" / "06"
             unique_dir.mkdir()
-            link_dir.mkdir(parents=True)
             unique_existing_path = unique_dir / "existing.png"
-            existing_link_path = link_dir / "existing.png"
             unique_existing_path.write_bytes(b"already here")
-            existing_link_path.symlink_to(
-                Path(os.path.relpath(unique_existing_path, existing_link_path.parent))
+            existing_url = (
+                "https://img.nga.178.com/attachments/mon_202506/06/existing.png"
             )
             files_to_download: list[image_store.ImageDownloadTask] = [
-                {
-                    "url": "https://img.nga.178.com/existing.png",
-                    "link_path": str(existing_link_path),
-                }
+                {"url": existing_url}
             ]
             output = io.StringIO()
 
             with (
+                patch(
+                    "nga_tools.backup.image_store.get_config",
+                    return_value=type("Config", (), {"output_dir": str(temp_dir)})(),
+                ),
                 patch(
                     "nga_tools.backup.archive.image_store.download_image_tasks",
                     return_value={"succeeded": [], "failed": []},
                 ) as download_image_tasks,
                 redirect_stdout(output),
             ):
+                image_store.upsert_image_mapping(existing_url, unique_existing_path)
                 _download_images(123, None, files_to_download)
 
             download_image_tasks.assert_not_called()

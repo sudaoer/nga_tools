@@ -414,15 +414,12 @@ def _write_recovered_missing_post_htmls(
     return recovered_html_by_lou
 
 
-def _rewrite_image_links(
+def _collect_image_download_tasks(
     htmls: list[PostHtml],
-    tid: int,
-    aid: Optional[int],
     floor_labels: FloorLabels,
 ) -> list[image_store.ImageDownloadTask]:
     seen_urls: set[str] = set()
     files_to_download: list[image_store.ImageDownloadTask] = []
-    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
 
     for item in htmls:
         soup = BeautifulSoup(item["html"], "html.parser")
@@ -440,25 +437,47 @@ def _rewrite_image_links(
                 )
                 continue
 
-            image["src"] = image_store.image_link_src_from_html_dir(
+            if normalized_image_url not in seen_urls:
+                seen_urls.add(normalized_image_url)
+                files_to_download.append({"url": normalized_image_url})
+
+    return files_to_download
+
+
+def _rewrite_image_links(
+    htmls: list[PostHtml],
+    tid: int,
+    aid: Optional[int],
+    floor_labels: FloorLabels,
+) -> None:
+    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+
+    for item in htmls:
+        soup = BeautifulSoup(item["html"], "html.parser")
+        images = cast(list[Tag], soup.find_all("img"))
+        for index, image in enumerate(images):
+            image_url = _tag_attr_str(image, "src")
+            if not image_url:
+                continue
+
+            normalized_image_url = image_store.normalize_nga_image_url(image_url)
+            if not utils.NGA_img_link_verify(normalized_image_url):
+                continue
+
+            image_src = image_store.unique_image_src_from_html_dir(
                 normalized_image_url,
                 folder_html_modified,
             )
-
-            if normalized_image_url not in seen_urls:
-                seen_urls.add(normalized_image_url)
-                files_to_download.append(
-                    {
-                        "url": normalized_image_url,
-                        "link_path": str(
-                            image_store.image_link_path(normalized_image_url)
-                        ),
-                    }
+            if image_src is None:
+                print(
+                    f"警告：{floor_labels.label(item['lou'])}的"
+                    f"第{index + 1}张图片未找到已下载文件"
                 )
+                continue
+
+            image["src"] = image_src
 
         item["html"] = str(soup)
-
-    return files_to_download
 
 
 def _write_modified_htmls(htmls: list[PostHtml], tid: int, aid: Optional[int]) -> None:
@@ -587,10 +606,10 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
     )
 
     _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
-    files_to_download = _rewrite_image_links(htmls, tid, aid, floor_labels)
-    _write_modified_htmls(htmls, tid, aid)
-
+    files_to_download = _collect_image_download_tasks(htmls, floor_labels)
     _download_images(tid, aid, files_to_download)
+    _rewrite_image_links(htmls, tid, aid, floor_labels)
+    _write_modified_htmls(htmls, tid, aid)
 
 
 def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
@@ -655,7 +674,7 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
     )
 
     _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
-    files_to_download = _rewrite_image_links(htmls, tid, aid, floor_labels)
-    _write_modified_htmls(htmls, tid, aid)
-
+    files_to_download = _collect_image_download_tasks(htmls, floor_labels)
     _download_images(tid, aid, files_to_download)
+    _rewrite_image_links(htmls, tid, aid, floor_labels)
+    _write_modified_htmls(htmls, tid, aid)

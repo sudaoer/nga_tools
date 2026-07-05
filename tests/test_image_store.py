@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,7 +46,7 @@ class NgaImageLinkVerifyTest(unittest.TestCase):
 
 
 class ImageStoreTest(unittest.TestCase):
-    def test_store_downloaded_image_uses_hash_name_and_relative_symlink(self) -> None:
+    def test_store_downloaded_image_uses_hash_name_and_sqlite_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             output_dir = Path(temp_dir_name) / "output"
             temp_image = Path(temp_dir_name) / "download.png"
@@ -56,7 +55,6 @@ class ImageStoreTest(unittest.TestCase):
                 "https://img.nga.178.com/attachments/"
                 "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
             )
-            link_path = output_dir / "images" / "mon_202506" / "06" / "image.png"
 
             with patch(
                 "nga_tools.backup.image_store.get_config",
@@ -64,16 +62,22 @@ class ImageStoreTest(unittest.TestCase):
             ):
                 result = image_store.store_downloaded_image(
                     temp_image,
-                    {"url": image_url, "link_path": str(link_path)},
+                    {"url": image_url},
                 )
+                mapping = image_store.image_mapping_for_url(image_url)
 
             unique_path = Path(result["unique_path"])
             self.assertTrue(unique_path.exists())
             self.assertTrue(unique_path.parent.samefile(output_dir / "images_unique"))
             self.assertRegex(unique_path.name, r"^[0-9a-f]{64}\.png$")
-            self.assertTrue(link_path.is_symlink())
-            self.assertFalse(os.readlink(link_path).startswith("/"))
-            self.assertTrue(link_path.exists())
+            self.assertIsNotNone(mapping)
+            assert mapping is not None
+            self.assertEqual(
+                mapping.unique_rel_path,
+                f"images_unique/{unique_path.name}",
+            )
+            self.assertFalse((output_dir / "images").exists())
+            self.assertTrue((output_dir / "image_index.sqlite3").exists())
 
     def test_store_downloaded_image_preserves_hash_collision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -97,29 +101,11 @@ class ImageStoreTest(unittest.TestCase):
             ):
                 first = image_store.store_downloaded_image(
                     first_temp,
-                    {
-                        "url": image_url,
-                        "link_path": str(
-                            output_dir
-                            / "images"
-                            / "mon_202506"
-                            / "06"
-                            / "first.png"
-                        ),
-                    },
+                    {"url": image_url},
                 )
                 second = image_store.store_downloaded_image(
                     second_temp,
-                    {
-                        "url": image_url,
-                        "link_path": str(
-                            output_dir
-                            / "images"
-                            / "mon_202506"
-                            / "06"
-                            / "second.png"
-                        ),
-                    },
+                    {"url": image_url},
                 )
 
             self.assertEqual(Path(first["unique_path"]).name, f"{'a' * 64}.png")
