@@ -99,6 +99,13 @@ def completed_post_lous(
     return completed_lous
 
 
+def manifest_files_exist(
+    folder_html_modified: Path,
+    entries: dict[str, HtmlModifiedManifestEntry],
+) -> bool:
+    return all((folder_html_modified / filename).is_file() for filename in entries)
+
+
 def write_manifest(
     folder_html_modified: Path,
     entries: dict[str, HtmlModifiedManifestEntry],

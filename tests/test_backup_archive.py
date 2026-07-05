@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sqlite3
 from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
@@ -14,23 +15,34 @@ from PIL import Image
 from nga_tools import utils
 from nga_tools.backup import html_modified_manifest, image_store
 from nga_tools.backup.archive import (
+    ParsedPostHtml,
     PostHtml,
     backup_thread,
     backup_thread_sub,
     _build_floor_map_for_backup,
+    _collect_image_download_tasks_from_parsed,
     _collect_image_download_tasks,
     _download_images,
     _fill_missing_lou,
     _merge_missing_lou,
+    _parse_post_htmls_for_images,
+    _prepare_post_records,
+    _rewrite_parsed_image_links,
     _rewrite_image_links,
+    _write_html_manifest_for_records,
     _write_post_htmls,
     _write_recovered_missing_post_htmls,
 )
 from nga_tools.backup.floor_map import (
     MISSING_POST_HTML,
+    FLOOR_MAP_GENERATION_VERSION,
+    FLOOR_MAP_HASH_ALGORITHM,
+    FLOOR_MAP_VERSION,
+    AuthorPostRef,
     FloorLabels,
     FloorMapBuildResult,
     RecoveredMissingPost,
+    floor_map_input_signature,
 )
 from nga_tools.ngaclient import NGAClient
 
@@ -100,6 +112,61 @@ class RewriteImageLinksTest(unittest.TestCase):
             'src="../../images_unique/hash.png"',
             htmls[0]["html"],
         )
+
+    def test_collects_and_rewrites_from_preparsed_htmls(self) -> None:
+        image_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+        )
+        htmls: list[PostHtml] = [
+            {"lou": 1, "pid": 1001, "html": f'<img src="{image_url}" alt="" />'}
+        ]
+
+        with TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+            thread_dir = output_dir / "123_all"
+            unique_dir = output_dir / "images_unique"
+            unique_dir.mkdir(parents=True)
+            unique_path = unique_dir / "hash.png"
+            unique_path.write_bytes(b"image")
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = thread_dir if subfolder is None else thread_dir / subfolder
+                path.mkdir(parents=True, exist_ok=True)
+                return str(path)
+
+            with (
+                patch(
+                    "nga_tools.backup.archive.utils.get_folder",
+                    side_effect=fake_get_folder,
+                ),
+                patch(
+                    "nga_tools.backup.image_store.get_config",
+                    return_value=type("Config", (), {"output_dir": str(output_dir)})(),
+                ),
+            ):
+                parsed_htmls = _parse_post_htmls_for_images(htmls)
+                tasks = _collect_image_download_tasks_from_parsed(
+                    parsed_htmls,
+                    FloorLabels.plain(),
+                )
+                image_store.upsert_image_mapping(image_url, unique_path)
+                image_lookup = image_store.ImageLookupCache.for_tasks(tasks)
+                completed_lous = _rewrite_parsed_image_links(
+                    parsed_htmls,
+                    123,
+                    None,
+                    FloorLabels.plain(),
+                    image_lookup=image_lookup,
+                )
+
+        self.assertEqual(tasks, [{"url": image_url}])
+        self.assertEqual(completed_lous, {1})
+        self.assertIn('src="../../images_unique/hash.png"', htmls[0]["html"])
 
     def test_removes_comma_before_validating_and_downloading_image(self) -> None:
         image_url = (
@@ -221,6 +288,73 @@ class RewriteImageLinksTest(unittest.TestCase):
 
 
 class WritePostHtmlsImageRepairTest(unittest.TestCase):
+    def test_html_manifest_skips_unchanged_non_refreshed_page(self) -> None:
+        page_one = {
+            "result": [
+                {
+                    "lou": 1,
+                    "pid": 1001,
+                    "content": "first",
+                    "attches": [],
+                }
+            ]
+        }
+        page_two = {
+            "result": [
+                {
+                    "lou": 2,
+                    "pid": 1002,
+                    "content": "second",
+                    "attches": [],
+                }
+            ]
+        }
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = temp_dir if subfolder is None else temp_dir / subfolder
+                path.mkdir(exist_ok=True)
+                return str(path)
+
+            with patch(
+                "nga_tools.backup.archive.utils.get_folder",
+                side_effect=fake_get_folder,
+            ):
+                records = _prepare_post_records(
+                    {1: page_one, 2: page_two},
+                    123,
+                    None,
+                    None,
+                )
+                _write_html_manifest_for_records(records, 123, None)
+
+                def fake_convert(post: object) -> str:
+                    post_data = cast(dict[str, object], post)
+                    if post_data["lou"] == 1:
+                        raise AssertionError("unchanged page should use html manifest")
+                    return "second rebuilt"
+
+                with patch(
+                    "nga_tools.backup.archive._post_html_from_content",
+                    side_effect=fake_convert,
+                ):
+                    refreshed_records = _prepare_post_records(
+                        {1: page_one, 2: page_two},
+                        123,
+                        None,
+                        {2},
+                    )
+
+        html_by_lou = {record["lou"]: record["html"] for record in refreshed_records}
+        self.assertIsNone(html_by_lou[1])
+        self.assertEqual(html_by_lou[2], "second rebuilt")
+
     def test_repairs_bad_img_from_attches_before_writing_html(self) -> None:
         page_data = {
             "result": [
@@ -499,10 +633,13 @@ class BackupThreadSubMissingLouTest(unittest.TestCase):
                     side_effect=fake_get_folder,
                 ),
                 patch(
-                    "nga_tools.backup.archive._build_floor_map_for_backup",
+                    "nga_tools.backup.archive._build_floor_map_for_post_refs",
                     side_effect=fake_build_floor_map,
                 ),
-                patch("nga_tools.backup.archive._rewrite_image_links", return_value=[]),
+                patch(
+                    "nga_tools.backup.archive._rewrite_parsed_image_links",
+                    return_value=[],
+                ),
                 patch(
                     "nga_tools.backup.archive._download_images",
                     return_value={"succeeded": [], "failed": []},
@@ -567,10 +704,13 @@ class BackupThreadSubMissingLouTest(unittest.TestCase):
                     side_effect=fake_get_folder,
                 ),
                 patch(
-                    "nga_tools.backup.archive._build_floor_map_for_backup",
+                    "nga_tools.backup.archive._build_floor_map_for_post_refs",
                     side_effect=fake_build_floor_map,
                 ),
-                patch("nga_tools.backup.archive._rewrite_image_links", return_value=[]),
+                patch(
+                    "nga_tools.backup.archive._rewrite_parsed_image_links",
+                    return_value=[],
+                ),
                 patch(
                     "nga_tools.backup.archive._download_images",
                     return_value={"succeeded": [], "failed": []},
@@ -606,6 +746,50 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
                 ],
             }
 
+    class CountedFakeClient(MutableFakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.page_calls: list[int] = []
+
+        def get_page(self, tid: int, aid: int | None, page: int) -> dict[str, object]:
+            self.page_calls.append(page)
+            page_data = super().get_page(tid, aid, page)
+            page_data["vrows"] = 2
+            return page_data
+
+    def _write_current_floor_map(
+        self,
+        temp_dir: Path,
+        author_posts: list[AuthorPostRef],
+        missing_lou: list[int] | None = None,
+    ) -> None:
+        missing_lou = missing_lou or []
+        signature = floor_map_input_signature(author_posts, missing_lou)
+        entries = [
+            {
+                "pid": post["pid"],
+                "author_lou": post["author_lou"],
+                "original_lou": post["author_lou"],
+            }
+            for post in author_posts
+        ]
+        (temp_dir / "floor_map.json").write_text(
+            json.dumps(
+                {
+                    "version": FLOOR_MAP_VERSION,
+                    "floor_map_generation_version": FLOOR_MAP_GENERATION_VERSION,
+                    "algorithm": FLOOR_MAP_HASH_ALGORITHM,
+                    "input_signature": signature,
+                    "tid": 123,
+                    "aid": 456,
+                    "entries": entries,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
     def _run_backup_sub(
         self,
         temp_dir: Path,
@@ -635,7 +819,7 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
             )
             stack.enter_context(
                 patch(
-                    "nga_tools.backup.archive._build_floor_map_for_backup",
+                    "nga_tools.backup.archive._build_floor_map_for_post_refs",
                     return_value=FloorMapBuildResult(FloorLabels.plain(), {}),
                 )
             )
@@ -646,10 +830,27 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
                 )
             )
             if rewrite_side_effect is not None:
+                def rewrite_adapter(
+                    parsed_htmls: list[ParsedPostHtml],
+                    tid: int,
+                    aid: int | None,
+                    floor_labels: FloorLabels,
+                    failed_image_urls: set[str] | None = None,
+                    image_lookup: image_store.ImageLookupCache | None = None,
+                ) -> set[int]:
+                    return rewrite_side_effect(
+                        [parsed_html.post_html for parsed_html in parsed_htmls],
+                        tid,
+                        aid,
+                        floor_labels,
+                        failed_image_urls,
+                        image_lookup,
+                    )
+
                 stack.enter_context(
                     patch(
-                        "nga_tools.backup.archive._rewrite_image_links",
-                        side_effect=rewrite_side_effect,
+                        "nga_tools.backup.archive._rewrite_parsed_image_links",
+                        side_effect=rewrite_adapter,
                     )
                 )
             if download_return is not None:
@@ -689,7 +890,7 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
             )
             stack.enter_context(
                 patch(
-                    "nga_tools.backup.archive._build_floor_map_for_backup",
+                    "nga_tools.backup.archive._build_floor_map_for_post_refs",
                     return_value=FloorMapBuildResult(FloorLabels.plain(), {}),
                 )
             )
@@ -766,6 +967,53 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
 
         self.assertEqual(set(entries), {"post_1.html", "post_2.html"})
         self.assertEqual(captured_lous, [])
+
+    def test_backup_all_state_makes_following_sub_fast_skip_by_author_lou_count(
+        self,
+    ) -> None:
+        client = self.CountedFakeClient()
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 1001, "author_lou": 1},
+            {"pid": 1002, "author_lou": 2},
+        ]
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            self._write_current_floor_map(temp_dir, author_posts)
+            self._run_backup_all(temp_dir, client)
+            self.assertTrue((temp_dir / "backup_state.json").is_file())
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = temp_dir if subfolder is None else temp_dir / subfolder
+                path.mkdir(exist_ok=True)
+                return str(path)
+
+            with (
+                patch("nga_tools.backup.archive.NGAClient", return_value=client),
+                patch(
+                    "nga_tools.backup.archive.utils.get_folder",
+                    side_effect=fake_get_folder,
+                ),
+                patch(
+                    "nga_tools.backup.archive._build_floor_map_for_post_refs",
+                    side_effect=AssertionError("fast skip should not build floor map"),
+                ),
+                patch(
+                    "nga_tools.backup.archive._download_images",
+                    side_effect=AssertionError("fast skip should not check images"),
+                ),
+                patch(
+                    "nga_tools.backup.archive._rewrite_parsed_image_links",
+                    side_effect=AssertionError("fast skip should not rewrite images"),
+                ),
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                backup_thread_sub(123, 456)
 
     def test_backup_sub_rebuilds_only_changed_source_hash_lous(self) -> None:
         client = self.MutableFakeClient()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,9 @@ from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
 
 FLOOR_MAP_FILENAME = "floor_map.json"
+FLOOR_MAP_VERSION = 1
+FLOOR_MAP_GENERATION_VERSION = 1
+FLOOR_MAP_HASH_ALGORITHM = "sha256"
 PAGE_JSON_RE = re.compile(r"^page_(\d+)\.json$")
 MISSING_POST_HTML = "<p><em>本楼层内容缺失。</em></p>"
 ORIGINAL_POSTS_PER_PAGE = 20
@@ -284,19 +288,28 @@ def _write_floor_map(
     tid: int,
     aid: int,
     entries: Sequence[FloorMapEntry],
+    *,
+    input_signature: str | None = None,
 ) -> None:
     path = get_floor_map_path(tid, aid)
-    data = {
+    data: dict[str, object] = {
+        "version": FLOOR_MAP_VERSION,
+        "floor_map_generation_version": FLOOR_MAP_GENERATION_VERSION,
+        "algorithm": FLOOR_MAP_HASH_ALGORITHM,
         "tid": tid,
         "aid": aid,
         "entries": list(entries),
     }
+    if input_signature is not None:
+        data["input_signature"] = input_signature
     path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
     print(f"已写入楼层映射：{path}")
 
 
-def _load_floor_map_entries(path: Path) -> list[FloorMapEntry]:
-    data = _read_json_object(path)
+def _load_floor_map_entries_from_data(
+    data: dict[str, object],
+    path: Path,
+) -> list[FloorMapEntry]:
     raw_entries = data.get("entries")
     if not isinstance(raw_entries, list):
         raise ValueError(f"{path} 缺少entries列表。")
@@ -324,19 +337,14 @@ def _load_floor_map_entries(path: Path) -> list[FloorMapEntry]:
     return entries
 
 
-def load_floor_labels(tid: int, aid: Optional[int]) -> FloorLabels:
-    if aid is None:
-        return FloorLabels.plain()
+def _load_floor_map_entries(path: Path) -> list[FloorMapEntry]:
+    return _load_floor_map_entries_from_data(_read_json_object(path), path)
 
-    path = get_floor_map_path(tid, aid)
-    if not path.exists():
-        raise RuntimeError(
-            f"缺少楼层映射文件：{path}。请先运行 backup floors 生成floor_map.json。"
-        )
 
+def _floor_labels_from_entries(entries: Sequence[FloorMapEntry]) -> FloorLabels:
     original_lou_by_author_lou: dict[int, int] = {}
     candidate_original_lous_by_author_lou: dict[int, list[int]] = {}
-    for entry in _load_floor_map_entries(path):
+    for entry in entries:
         original_lou = entry["original_lou"]
         if original_lou is not None:
             original_lou_by_author_lou[entry["author_lou"]] = original_lou
@@ -353,6 +361,19 @@ def load_floor_labels(tid: int, aid: Optional[int]) -> FloorLabels:
         candidate_original_lous_by_author_lou=candidate_original_lous_by_author_lou,
         show_original=True,
     )
+
+
+def load_floor_labels(tid: int, aid: Optional[int]) -> FloorLabels:
+    if aid is None:
+        return FloorLabels.plain()
+
+    path = get_floor_map_path(tid, aid)
+    if not path.exists():
+        raise RuntimeError(
+            f"缺少楼层映射文件：{path}。请先运行 backup floors 生成floor_map.json。"
+        )
+
+    return _floor_labels_from_entries(_load_floor_map_entries(path))
 
 
 def validate_floor_labels(
@@ -380,6 +401,57 @@ def validate_floor_labels(
     )
 
 
+def floor_map_input_signature(
+    author_posts: Sequence[AuthorPostRef],
+    missing_author_lous: Sequence[int],
+) -> str:
+    payload = {
+        "floor_map_generation_version": FLOOR_MAP_GENERATION_VERSION,
+        "author_posts": [
+            [post["author_lou"], post["pid"]]
+            for post in sorted(author_posts, key=lambda item: item["author_lou"])
+        ],
+        "missing_author_lous": sorted(set(missing_author_lous)),
+    }
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def load_floor_map_build_result_if_current(
+    tid: int,
+    aid: int,
+    author_posts: Sequence[AuthorPostRef],
+    missing_author_lous: Sequence[int],
+) -> FloorMapBuildResult | None:
+    path = get_floor_map_path(tid, aid)
+    if not path.exists():
+        return None
+
+    data = _read_json_object(path)
+    if data.get("version") != FLOOR_MAP_VERSION:
+        return None
+    if data.get("floor_map_generation_version") != FLOOR_MAP_GENERATION_VERSION:
+        return None
+    if data.get("algorithm") != FLOOR_MAP_HASH_ALGORITHM:
+        return None
+    if data.get("input_signature") != floor_map_input_signature(
+        author_posts,
+        missing_author_lous,
+    ):
+        return None
+
+    entries = _load_floor_map_entries_from_data(data, path)
+    return FloorMapBuildResult(
+        floor_labels=_floor_labels_from_entries(entries),
+        recovered_missing_posts_by_author_lou={},
+    )
+
+
 def build_and_save_floor_map(
     client: NGAClient,
     tid: int,
@@ -393,6 +465,7 @@ def build_and_save_floor_map(
         raise RuntimeError("没有可用于生成楼层映射的只看作者帖子。")
 
     print(f"准备生成楼层映射：只看作者{len(author_posts)}楼。", flush=True)
+    input_signature = floor_map_input_signature(author_posts, missing_author_lous)
 
     author_lou_to_pid: dict[int, int] = {}
     for post in author_posts:
@@ -549,7 +622,7 @@ def build_and_save_floor_map(
         )
     entries.sort(key=lambda entry: entry["author_lou"])
 
-    _write_floor_map(tid, aid, entries)
+    _write_floor_map(tid, aid, entries, input_signature=input_signature)
     return FloorMapBuildResult(
         floor_labels=FloorLabels(
             original_lou_by_author_lou=all_original_by_author_lou,

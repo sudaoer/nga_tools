@@ -11,6 +11,7 @@ from nga_tools.backup.floor_map import (
     FloorMapBuildResult,
     build_and_save_floor_map,
     find_missing_author_lous,
+    load_floor_map_build_result_if_current,
     _page_post_refs,
     _scan_original_pages,
 )
@@ -212,6 +213,55 @@ class FloorMapMissingInferenceTest(unittest.TestCase):
             result.floor_labels.candidate_original_lous_by_author_lou[2],
             [11, 12],
         )
+
+
+class FloorMapSignatureCacheTest(unittest.TestCase):
+    def test_current_input_signature_loads_cached_floor_map(self) -> None:
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 1001, "author_lou": 1},
+            {"pid": 1002, "author_lou": 2},
+        ]
+        client = FakeClient(
+            pages={
+                1: {
+                    "result": [
+                        {"pid": 1001, "lou": 10, "author": {"uid": 42}},
+                        {"pid": 1002, "lou": 11, "author": {"uid": 42}},
+                    ]
+                }
+            },
+            page_count=1,
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            with (
+                patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir),
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                build_and_save_floor_map(
+                    client,
+                    123,
+                    456,
+                    author_posts,
+                    [],
+                )
+                cached = load_floor_map_build_result_if_current(
+                    123,
+                    456,
+                    author_posts,
+                    [],
+                )
+                changed = load_floor_map_build_result_if_current(
+                    123,
+                    456,
+                    author_posts,
+                    [3],
+                )
+
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached.floor_labels.original_lou_by_author_lou[1], 10)
+        self.assertIsNone(changed)
 
 
 class FloorMapMissingAuthorLousTest(unittest.TestCase):

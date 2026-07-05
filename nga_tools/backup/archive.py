@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, TypedDict, cast
 from urllib.parse import urlsplit
@@ -9,7 +11,7 @@ from urllib.parse import urlsplit
 from bs4 import BeautifulSoup, Tag
 
 from nga_tools import utils
-from nga_tools.backup import html_modified_manifest
+from nga_tools.backup import backup_state, html_manifest, html_modified_manifest
 from nga_tools.backup.floor_map import (
     MISSING_POST_HTML,
     PAGE_JSON_RE,
@@ -18,6 +20,7 @@ from nga_tools.backup.floor_map import (
     FloorLabels,
     RecoveredMissingPost,
     build_and_save_floor_map,
+    load_floor_map_build_result_if_current,
     load_floor_labels,
     read_missing_author_lous_from_html_modified,
 )
@@ -53,6 +56,21 @@ class PostHtml(TypedDict):
     lou: int
     pid: Optional[int]
     html: str
+
+
+class PostRecord(TypedDict):
+    lou: int
+    pid: Optional[int]
+    html: Optional[str]
+    source_hash: str
+    html_hash: str
+
+
+@dataclass(frozen=True)
+class ParsedPostHtml:
+    post_html: PostHtml
+    soup: BeautifulSoup
+    images: list[Tag]
 
 
 def _page_posts(page_data: PageData) -> list[PostData]:
@@ -319,41 +337,128 @@ def _write_pages_json(
     return page_data_by_page
 
 
-def _write_post_htmls(
+def _post_source_hash(post: PostData) -> str:
+    return html_manifest.hash_object(
+        {
+            "content": post["content"],
+            "image_attachments": post["image_attachments"],
+        }
+    )
+
+
+def _prepare_post_records(
+    page_data_by_page: dict[int, PageData],
+    tid: int,
+    aid: Optional[int],
+    refresh_pages: Optional[set[int]],
+) -> list[PostRecord]:
+    folder_html = Path(utils.get_folder(tid, aid, "html"))
+    manifest_entries = html_manifest.load_manifest(folder_html)
+    records: list[PostRecord] = []
+
+    for page_number, page_data in sorted(page_data_by_page.items()):
+        page_posts = _page_posts(page_data)
+        for post in page_posts:
+            filename = html_manifest.post_html_filename(post["lou"])
+            html_path = folder_html / filename
+            should_refresh = refresh_pages is None or page_number in refresh_pages
+            source_hash = _post_source_hash(post)
+            manifest_entry = manifest_entries.get(filename)
+            post_html: str | None = None
+            html_hash: str
+
+            if (
+                not should_refresh
+                and manifest_entry is not None
+                and manifest_entry["source_hash"] == source_hash
+                and html_path.is_file()
+            ):
+                html_hash = manifest_entry["output_hash"]
+            elif not should_refresh and html_path.is_file():
+                cached_html = html_path.read_text(encoding="utf-8")
+                if _html_has_invalid_image_src(cached_html):
+                    post_html = _post_html_from_content(post)
+                    _write_text_atomically(html_path, post_html)
+                else:
+                    post_html = cached_html
+                html_hash = html_manifest.hash_text(post_html)
+            else:
+                post_html = _post_html_from_content(post)
+                _write_text_atomically(html_path, post_html)
+                html_hash = html_manifest.hash_text(post_html)
+
+            records.append(
+                {
+                    "lou": post["lou"],
+                    "pid": post["pid"],
+                    "html": post_html,
+                    "source_hash": source_hash,
+                    "html_hash": html_hash,
+                }
+            )
+
+    return records
+
+
+def _write_html_manifest_for_records(
+    records: Sequence[PostRecord],
+    tid: int,
+    aid: Optional[int],
+) -> dict[str, html_manifest.HtmlManifestEntry]:
+    folder_html = Path(utils.get_folder(tid, aid, "html"))
+    entries: dict[str, html_manifest.HtmlManifestEntry] = {}
+    for record in records:
+        filename = html_manifest.post_html_filename(record["lou"])
+        if not (folder_html / filename).is_file():
+            continue
+        entries[filename] = {
+            "source_hash": record["source_hash"],
+            "output_hash": record["html_hash"],
+        }
+    html_manifest.write_manifest(folder_html, entries)
+    return entries
+
+
+def _load_post_htmls_for_records(
+    records: Sequence[PostRecord],
+    tid: int,
+    aid: Optional[int],
+) -> list[PostHtml]:
+    folder_html = Path(utils.get_folder(tid, aid, "html"))
+    htmls: list[PostHtml] = []
+    for record in records:
+        post_html = record["html"]
+        if post_html is None:
+            post_html = (
+                folder_html / html_manifest.post_html_filename(record["lou"])
+            ).read_text(encoding="utf-8")
+        htmls.append(
+            {
+                "lou": record["lou"],
+                "pid": record["pid"],
+                "html": post_html,
+            }
+        )
+    return htmls
+
+
+def _write_post_htmls(  # pyright: ignore[reportUnusedFunction]
     page_data_by_page: dict[int, PageData],
     tid: int,
     aid: Optional[int],
     refresh_pages: Optional[set[int]],
 ) -> list[PostHtml]:
-    folder_html = Path(utils.get_folder(tid, aid, "html"))
-    htmls: list[PostHtml] = []
-
-    for page_number, page_data in sorted(page_data_by_page.items()):
-        page_posts = _page_posts(page_data)
-        for post in page_posts:
-            html_path = folder_html / f"post_{post['lou']}.html"
-            should_refresh = refresh_pages is None or page_number in refresh_pages
-            if should_refresh or not html_path.exists():
-                post_html = _post_html_from_content(post)
-                html_path.write_text(post_html, encoding="utf-8")
-            else:
-                post_html = html_path.read_text(encoding="utf-8")
-                if _html_has_invalid_image_src(post_html):
-                    post_html = _post_html_from_content(post)
-                    html_path.write_text(post_html, encoding="utf-8")
-            htmls.append(
-                {"lou": post["lou"], "pid": post["pid"], "html": post_html}
-            )
-
-    return htmls
+    records = _prepare_post_records(page_data_by_page, tid, aid, refresh_pages)
+    _write_html_manifest_for_records(records, tid, aid)
+    return _load_post_htmls_for_records(records, tid, aid)
 
 
-def _find_missing_lou(htmls: list[PostHtml]) -> list[int]:
-    htmls.sort(key=lambda item: item["lou"])
-
+def _find_missing_lou(
+    posts: Sequence[PostHtml] | Sequence[PostRecord],
+) -> list[int]:
     expected_lou = 1
     missing_lou: list[int] = []
-    for item in htmls:
+    for item in sorted(posts, key=lambda post: post["lou"]):
         if item["lou"] != expected_lou:
             for lou in range(expected_lou, item["lou"]):
                 missing_lou.append(lou)
@@ -373,7 +478,7 @@ def _merge_missing_lou(*missing_lou_groups: list[int]) -> list[int]:
     )
 
 
-def _fill_missing_lou(
+def _fill_missing_lou(  # pyright: ignore[reportUnusedFunction]
     htmls: list[PostHtml],
     missing_lou: list[int],
     floor_labels: FloorLabels,
@@ -397,6 +502,34 @@ def _fill_missing_lou(
     htmls.sort(key=lambda item: item["lou"])
 
 
+def _fill_missing_post_records(
+    records: list[PostRecord],
+    missing_lou: list[int],
+    floor_labels: FloorLabels,
+    recovered_missing_html_by_lou: dict[int, str],
+) -> None:
+    for lou in missing_lou:
+        if lou in recovered_missing_html_by_lou:
+            print(f"已恢复缺失{floor_labels.label(lou)}。")
+        else:
+            print(f"警告：缺失{floor_labels.label(lou)}！")
+
+    for lou in missing_lou:
+        post_html = recovered_missing_html_by_lou.get(lou, MISSING_POST_HTML)
+        html_hash = html_manifest.hash_text(post_html)
+        records.append(
+            {
+                "lou": lou,
+                "pid": None,
+                "html": post_html,
+                "source_hash": html_manifest.hash_text(f"missing:{html_hash}"),
+                "html_hash": html_hash,
+            }
+        )
+
+    records.sort(key=lambda item: item["lou"])
+
+
 def _write_recovered_missing_post_htmls(
     tid: int,
     aid: Optional[int],
@@ -415,17 +548,24 @@ def _write_recovered_missing_post_htmls(
     return recovered_html_by_lou
 
 
-def _collect_image_download_tasks(
-    htmls: list[PostHtml],
+def _parse_post_htmls_for_images(htmls: Sequence[PostHtml]) -> list[ParsedPostHtml]:
+    parsed_htmls: list[ParsedPostHtml] = []
+    for item in htmls:
+        soup = BeautifulSoup(item["html"], "html.parser")
+        images = cast(list[Tag], soup.find_all("img"))
+        parsed_htmls.append(ParsedPostHtml(item, soup, images))
+    return parsed_htmls
+
+
+def _collect_image_download_tasks_from_parsed(
+    parsed_htmls: Sequence[ParsedPostHtml],
     floor_labels: FloorLabels,
 ) -> list[image_store.ImageDownloadTask]:
     seen_urls: set[str] = set()
     files_to_download: list[image_store.ImageDownloadTask] = []
 
-    for item in htmls:
-        soup = BeautifulSoup(item["html"], "html.parser")
-        images = cast(list[Tag], soup.find_all("img"))
-        for index, image in enumerate(images):
+    for parsed_html in parsed_htmls:
+        for index, image in enumerate(parsed_html.images):
             image_url = _tag_attr_str(image, "src")
             if not image_url:
                 continue
@@ -433,7 +573,7 @@ def _collect_image_download_tasks(
             normalized_image_url = image_store.normalize_nga_image_url(image_url)
             if not utils.NGA_img_link_verify(normalized_image_url):
                 print(
-                    f"警告：{floor_labels.label(item['lou'])}的"
+                    f"警告：{floor_labels.label(parsed_html.post_html['lou'])}的"
                     f"第{index + 1}张图片链接无效"
                 )
                 continue
@@ -445,8 +585,18 @@ def _collect_image_download_tasks(
     return files_to_download
 
 
-def _rewrite_image_links(
+def _collect_image_download_tasks(  # pyright: ignore[reportUnusedFunction]
     htmls: list[PostHtml],
+    floor_labels: FloorLabels,
+) -> list[image_store.ImageDownloadTask]:
+    return _collect_image_download_tasks_from_parsed(
+        _parse_post_htmls_for_images(htmls),
+        floor_labels,
+    )
+
+
+def _rewrite_parsed_image_links(
+    parsed_htmls: Sequence[ParsedPostHtml],
     tid: int,
     aid: Optional[int],
     floor_labels: FloorLabels,
@@ -458,11 +608,10 @@ def _rewrite_image_links(
     placeholder_image_src: str | None = None
     completed_lous: set[int] = set()
 
-    for item in htmls:
+    for parsed_html in parsed_htmls:
+        item = parsed_html.post_html
         item_complete = True
-        soup = BeautifulSoup(item["html"], "html.parser")
-        images = cast(list[Tag], soup.find_all("img"))
-        for index, image in enumerate(images):
+        for index, image in enumerate(parsed_html.images):
             image_url = _tag_attr_str(image, "src")
             if not image_url:
                 continue
@@ -499,11 +648,29 @@ def _rewrite_image_links(
 
             image["src"] = image_src
 
-        item["html"] = str(soup)
+        item["html"] = str(parsed_html.soup)
         if item_complete:
             completed_lous.add(item["lou"])
 
     return completed_lous
+
+
+def _rewrite_image_links(  # pyright: ignore[reportUnusedFunction]
+    htmls: list[PostHtml],
+    tid: int,
+    aid: Optional[int],
+    floor_labels: FloorLabels,
+    failed_image_urls: set[str] | None = None,
+    image_lookup: image_store.ImageLookupCache | None = None,
+) -> set[int]:
+    return _rewrite_parsed_image_links(
+        _parse_post_htmls_for_images(htmls),
+        tid,
+        aid,
+        floor_labels,
+        failed_image_urls,
+        image_lookup,
+    )
 
 
 def _write_text_atomically(path: Path, text: str) -> None:
@@ -536,7 +703,11 @@ def _html_source_hashes_by_lou(htmls: list[PostHtml]) -> dict[int, str]:
     }
 
 
-def _completed_html_modified_lous(
+def _html_hashes_by_lou(records: Sequence[PostRecord]) -> dict[int, str]:
+    return {record["lou"]: record["html_hash"] for record in records}
+
+
+def _completed_html_modified_lous(  # pyright: ignore[reportUnusedFunction]
     htmls: list[PostHtml],
     tid: int,
     aid: Optional[int],
@@ -557,14 +728,150 @@ def _completed_html_modified_lous(
     return folder_html_modified, source_hash_by_lou, manifest_entries, skipped_lous
 
 
-def _post_refs_from_htmls(htmls: list[PostHtml]) -> list[AuthorPostRef]:
+def _completed_html_modified_lous_for_records(
+    records: Sequence[PostRecord],
+    tid: int,
+    aid: Optional[int],
+) -> tuple[
+    Path,
+    dict[int, str],
+    dict[str, html_modified_manifest.HtmlModifiedManifestEntry],
+    set[int],
+]:
+    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+    source_hash_by_lou = _html_hashes_by_lou(records)
+    manifest_entries = html_modified_manifest.load_manifest(folder_html_modified)
+    skipped_lous = html_modified_manifest.completed_post_lous(
+        folder_html_modified,
+        source_hash_by_lou,
+        manifest_entries,
+    )
+    return folder_html_modified, source_hash_by_lou, manifest_entries, skipped_lous
+
+
+def _post_refs_from_posts(
+    posts: Sequence[PostHtml] | Sequence[PostRecord],
+) -> list[AuthorPostRef]:
     post_refs: list[AuthorPostRef] = []
-    for item in htmls:
+    for item in posts:
         pid = item["pid"]
         if pid is None:
             continue
         post_refs.append({"pid": pid, "author_lou": item["lou"]})
     return post_refs
+
+
+def _post_refs_from_htmls(htmls: list[PostHtml]) -> list[AuthorPostRef]:
+    return _post_refs_from_posts(htmls)
+
+
+def _page_count_from_page_data(page_data: PageData) -> int:
+    total_pages = page_data.get("totalPage", 1)
+    if not isinstance(total_pages, int):
+        raise ValueError(f"Invalid totalPage value: {total_pages!r}")
+    return total_pages
+
+
+def _author_total_lou_count_from_page_data(
+    page_data: PageData,
+    aid: Optional[int],
+) -> int | None:
+    if aid is None:
+        return None
+    total_lous = page_data.get("vrows")
+    if type(total_lous) is int:
+        return total_lous
+    return None
+
+
+def _can_fast_skip_author_backup(
+    tid: int,
+    aid: Optional[int],
+    author_total_lou_count: int | None,
+) -> bool:
+    if aid is None or author_total_lou_count is None:
+        return False
+
+    thread_folder = Path(utils.get_folder(tid, aid))
+    state = backup_state.load_state(thread_folder)
+    if state is None:
+        return False
+    if state["author_total_lou_count"] != author_total_lou_count:
+        return False
+
+    folder_json = Path(utils.get_folder(tid, aid, "json"))
+    expected_pages = set(range(1, state["page_count"] + 1))
+    if not expected_pages <= _existing_page_numbers(folder_json):
+        return False
+
+    folder_html = Path(utils.get_folder(tid, aid, "html"))
+    html_entries = html_manifest.load_manifest(folder_html)
+    if len(html_entries) != state["html_manifest_entry_count"]:
+        return False
+    if not html_manifest.manifest_files_exist(folder_html, html_entries):
+        return False
+
+    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+    html_modified_entries = html_modified_manifest.load_manifest(folder_html_modified)
+    if len(html_modified_entries) != state["html_modified_manifest_entry_count"]:
+        return False
+    if not html_modified_manifest.manifest_files_exist(
+        folder_html_modified,
+        html_modified_entries,
+    ):
+        return False
+
+    return (thread_folder / "floor_map.json").is_file()
+
+
+def _write_backup_state_if_complete(
+    tid: int,
+    aid: Optional[int],
+    page_count: int,
+    author_total_lou_count: int | None,
+    records: Sequence[PostRecord],
+    missing_lou: Sequence[int],
+    html_entries: dict[str, html_manifest.HtmlManifestEntry],
+    source_hash_by_lou: dict[int, str],
+    skipped_lous: set[int],
+    completed_lous: set[int],
+) -> None:
+    if aid is None or author_total_lou_count is None:
+        return
+    if set(source_hash_by_lou) - (skipped_lous | completed_lous):
+        return
+    if (
+        load_floor_map_build_result_if_current(
+            tid,
+            aid,
+            _post_refs_from_posts(records),
+            missing_lou,
+        )
+        is None
+    ):
+        return
+
+    folder_html = Path(utils.get_folder(tid, aid, "html"))
+    if not html_manifest.manifest_files_exist(folder_html, html_entries):
+        return
+
+    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+    html_modified_entries = html_modified_manifest.load_manifest(folder_html_modified)
+    if len(html_modified_entries) != len(source_hash_by_lou):
+        return
+    if not html_modified_manifest.manifest_files_exist(
+        folder_html_modified,
+        html_modified_entries,
+    ):
+        return
+
+    backup_state.write_state(
+        Path(utils.get_folder(tid, aid)),
+        author_total_lou_count=author_total_lou_count,
+        page_count=page_count,
+        html_manifest_entry_count=len(html_entries),
+        html_modified_manifest_entry_count=len(html_modified_entries),
+    )
 
 
 def _pending_download_tasks(
@@ -626,22 +933,48 @@ def _failed_image_urls(download_result: utils.DownloadSummary) -> set[str]:
     }
 
 
-def _build_floor_map_for_backup(
+def _build_floor_map_for_backup(  # pyright: ignore[reportUnusedFunction]
     client: NGAClient,
     tid: int,
     aid: Optional[int],
     htmls: list[PostHtml],
     missing_lou: list[int],
 ) -> FloorMapBuildResult:
+    return _build_floor_map_for_post_refs(
+        client,
+        tid,
+        aid,
+        _post_refs_from_htmls(htmls),
+        missing_lou,
+    )
+
+
+def _build_floor_map_for_post_refs(
+    client: NGAClient,
+    tid: int,
+    aid: Optional[int],
+    post_refs: list[AuthorPostRef],
+    missing_lou: list[int],
+) -> FloorMapBuildResult:
     if aid is None:
         return FloorMapBuildResult(FloorLabels.plain(), {})
 
     try:
+        if not missing_lou:
+            current_result = load_floor_map_build_result_if_current(
+                tid,
+                aid,
+                post_refs,
+                missing_lou,
+            )
+            if current_result is not None:
+                print("楼层映射输入未变化，复用已有floor_map.json。")
+                return current_result
         return build_and_save_floor_map(
             client,
             tid,
             aid,
-            _post_refs_from_htmls(htmls),
+            post_refs,
             missing_lou,
             strict=False,
         )
@@ -657,19 +990,24 @@ def _build_floor_map_for_backup(
 
 def backup_thread(tid: int, aid: Optional[int]) -> None:
     client = NGAClient()
-    page_count = client.get_page_count(tid, aid)
+    first_page_data = client.get_page(tid, aid, 1)
+    page_count = _page_count_from_page_data(first_page_data)
+    author_total_lou_count = _author_total_lou_count_from_page_data(
+        first_page_data,
+        aid,
+    )
 
     page_data_by_page = _write_pages_json(client, tid, aid, page_count)
 
     print("开始处理")
 
-    htmls = _write_post_htmls(page_data_by_page, tid, aid, None)
-    missing_lou = _find_missing_lou(htmls)
-    floor_map_result = _build_floor_map_for_backup(
+    records = _prepare_post_records(page_data_by_page, tid, aid, None)
+    missing_lou = _find_missing_lou(records)
+    floor_map_result = _build_floor_map_for_post_refs(
         client,
         tid,
         aid,
-        htmls,
+        _post_refs_from_posts(records),
         missing_lou,
     )
     floor_labels = floor_map_result.floor_labels
@@ -679,14 +1017,25 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
         floor_map_result.recovered_missing_posts_by_author_lou,
     )
 
-    _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
+    _fill_missing_post_records(
+        records,
+        missing_lou,
+        floor_labels,
+        recovered_missing_html_by_lou,
+    )
+    html_entries = _write_html_manifest_for_records(records, tid, aid)
     folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
-    source_hash_by_lou = _html_source_hashes_by_lou(htmls)
-    files_to_download = _collect_image_download_tasks(htmls, floor_labels)
+    source_hash_by_lou = _html_hashes_by_lou(records)
+    htmls = _load_post_htmls_for_records(records, tid, aid)
+    parsed_htmls = _parse_post_htmls_for_images(htmls)
+    files_to_download = _collect_image_download_tasks_from_parsed(
+        parsed_htmls,
+        floor_labels,
+    )
     download_result = _download_images(tid, aid, files_to_download)
     image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
-    completed_lous = _rewrite_image_links(
-        htmls,
+    completed_lous = _rewrite_parsed_image_links(
+        parsed_htmls,
         tid,
         aid,
         floor_labels,
@@ -702,11 +1051,32 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
         completed_lous=completed_lous,
         output_hash_by_lou=output_hash_by_lou,
     )
+    _write_backup_state_if_complete(
+        tid,
+        aid,
+        page_count,
+        author_total_lou_count,
+        records,
+        missing_lou,
+        html_entries,
+        source_hash_by_lou,
+        skipped_lous=set(),
+        completed_lous=completed_lous,
+    )
 
 
 def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
     client = NGAClient()
-    page_count = client.get_page_count(tid, aid)
+    first_page_data = client.get_page(tid, aid, 1)
+    page_count = _page_count_from_page_data(first_page_data)
+    author_total_lou_count = _author_total_lou_count_from_page_data(
+        first_page_data,
+        aid,
+    )
+    if _can_fast_skip_author_backup(tid, aid, author_total_lou_count):
+        print("只看楼主总楼数未变化，跳过增量处理。")
+        return
+
     folder_json = Path(utils.get_folder(tid, aid, "json"))
     existing_page_numbers = _existing_page_numbers(folder_json)
 
@@ -736,26 +1106,26 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
 
     print("开始处理")
 
-    htmls = _write_post_htmls(
+    records = _prepare_post_records(
         page_data_by_page,
         tid,
         aid,
         refresh_page_numbers,
     )
-    missing_lou = _find_missing_lou(htmls)
+    missing_lou = _find_missing_lou(records)
     if aid is not None:
-        present_lou = {item["lou"] for item in htmls}
+        present_lou = {item["lou"] for item in records}
         previous_missing_lou = [
             lou
             for lou in read_missing_author_lous_from_html_modified(tid, aid)
             if lou not in present_lou
         ]
         missing_lou = _merge_missing_lou(missing_lou, previous_missing_lou)
-    floor_map_result = _build_floor_map_for_backup(
+    floor_map_result = _build_floor_map_for_post_refs(
         client,
         tid,
         aid,
-        htmls,
+        _post_refs_from_posts(records),
         missing_lou,
     )
     floor_labels = floor_map_result.floor_labels
@@ -765,20 +1135,31 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         floor_map_result.recovered_missing_posts_by_author_lou,
     )
 
-    _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
+    _fill_missing_post_records(
+        records,
+        missing_lou,
+        floor_labels,
+        recovered_missing_html_by_lou,
+    )
+    html_entries = _write_html_manifest_for_records(records, tid, aid)
     (
         folder_html_modified,
         source_hash_by_lou,
         manifest_entries,
         skipped_lous,
-    ) = _completed_html_modified_lous(htmls, tid, aid)
-    active_htmls = [item for item in htmls if item["lou"] not in skipped_lous]
+    ) = _completed_html_modified_lous_for_records(records, tid, aid)
+    active_records = [item for item in records if item["lou"] not in skipped_lous]
+    active_htmls = _load_post_htmls_for_records(active_records, tid, aid)
 
-    files_to_download = _collect_image_download_tasks(active_htmls, floor_labels)
+    parsed_htmls = _parse_post_htmls_for_images(active_htmls)
+    files_to_download = _collect_image_download_tasks_from_parsed(
+        parsed_htmls,
+        floor_labels,
+    )
     download_result = _download_images(tid, aid, files_to_download)
     image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
-    completed_lous = _rewrite_image_links(
-        active_htmls,
+    completed_lous = _rewrite_parsed_image_links(
+        parsed_htmls,
         tid,
         aid,
         floor_labels,
@@ -793,4 +1174,16 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         skipped_lous=skipped_lous,
         completed_lous=completed_lous,
         output_hash_by_lou=output_hash_by_lou,
+    )
+    _write_backup_state_if_complete(
+        tid,
+        aid,
+        page_count,
+        author_total_lou_count,
+        records,
+        missing_lou,
+        html_entries,
+        source_hash_by_lou,
+        skipped_lous=skipped_lous,
+        completed_lous=completed_lous,
     )
