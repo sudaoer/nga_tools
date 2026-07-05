@@ -9,7 +9,7 @@ import tempfile
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import Iterable, NotRequired, TypedDict
 from urllib.parse import urlsplit
 
 from PIL import Image, ImageDraw
@@ -45,6 +45,45 @@ class ImageMapping:
     @property
     def unique_path(self) -> Path:
         return output_dir() / self.unique_rel_path
+
+
+@dataclass(frozen=True)
+class ImageLookupCache:
+    mappings_by_url: dict[str, ImageMapping]
+
+    @classmethod
+    def for_urls(cls, urls: Iterable[str]) -> ImageLookupCache:
+        return cls(image_mappings_for_urls(urls))
+
+    @classmethod
+    def for_tasks(cls, tasks: Iterable[ImageDownloadTask]) -> ImageLookupCache:
+        return cls.for_urls(task["url"] for task in tasks)
+
+    def mapped_image_path_for_url(self, url: str) -> Path | None:
+        normalized_url = normalize_nga_image_url(url)
+        if not utils.NGA_img_link_verify(normalized_url):
+            return None
+
+        mapping = self.mappings_by_url.get(normalized_url)
+        if mapping is None:
+            return None
+        image_path = mapping.unique_path
+        if not image_path.exists():
+            return None
+        return image_path
+
+    def unique_image_src_from_html_dir(
+        self,
+        url: str,
+        html_dir: str | Path,
+    ) -> str | None:
+        image_path = self.mapped_image_path_for_url(url)
+        if image_path is None:
+            return None
+        return os.path.relpath(image_path, html_dir).replace("\\", "/")
+
+    def image_task_is_complete(self, task: ImageDownloadTask) -> bool:
+        return self.mapped_image_path_for_url(task["url"]) is not None
 
 
 IMAGE_FORMAT_BY_PILLOW_FORMAT = {
@@ -226,24 +265,54 @@ def image_mappings_by_url() -> dict[str, ImageMapping]:
     return mappings
 
 
+def image_mappings_for_urls(urls: Iterable[str]) -> dict[str, ImageMapping]:
+    normalized_urls = sorted(
+        {
+            normalized_url
+            for url in urls
+            if utils.NGA_img_link_verify(
+                normalized_url := normalize_nga_image_url(url)
+            )
+        }
+    )
+    if not normalized_urls:
+        return {}
+
+    mappings: dict[str, ImageMapping] = {}
+    with closing(_connect_image_index()) as connection:
+        for start in range(0, len(normalized_urls), 900):
+            chunk = normalized_urls[start : start + 900]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = connection.execute(
+                f"""
+                SELECT url, unique_rel_path
+                FROM image_mappings
+                WHERE url IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+            for url, unique_rel_path in rows:
+                if isinstance(url, str) and isinstance(unique_rel_path, str):
+                    mappings[url] = ImageMapping(
+                        url=url,
+                        unique_rel_path=unique_rel_path,
+                    )
+    return mappings
+
+
 def mapped_image_path_for_url(url: str) -> Path | None:
-    mapping = image_mapping_for_url(url)
-    if mapping is None:
-        return None
-    image_path = mapping.unique_path
-    if not image_path.exists():
-        return None
-    return image_path
+    return ImageLookupCache.for_urls([url]).mapped_image_path_for_url(url)
 
 
 def image_task_is_complete(task: ImageDownloadTask) -> bool:
-    return mapped_image_path_for_url(task["url"]) is not None
+    return ImageLookupCache.for_tasks([task]).image_task_is_complete(task)
 
 
 def pending_image_download_tasks(
     image_tasks: list[ImageDownloadTask],
 ) -> list[ImageDownloadTask]:
-    return [task for task in image_tasks if not image_task_is_complete(task)]
+    image_lookup = ImageLookupCache.for_tasks(image_tasks)
+    return [task for task in image_tasks if not image_lookup.image_task_is_complete(task)]
 
 
 def link_path_for_image_src(image_src: str) -> Path | None:

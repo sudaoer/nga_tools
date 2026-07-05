@@ -73,7 +73,18 @@ class RewriteImageLinksTest(unittest.TestCase):
             ):
                 tasks = _collect_image_download_tasks(htmls, FloorLabels.plain())
                 image_store.upsert_image_mapping(image_url, unique_path)
-                _rewrite_image_links(htmls, 123, None, FloorLabels.plain())
+                image_lookup = image_store.ImageLookupCache.for_tasks(tasks)
+                with patch(
+                    "nga_tools.backup.archive.image_store.unique_image_src_from_html_dir",
+                    side_effect=AssertionError("unexpected per-image lookup"),
+                ):
+                    _rewrite_image_links(
+                        htmls,
+                        123,
+                        None,
+                        FloorLabels.plain(),
+                        image_lookup=image_lookup,
+                    )
 
         self.assertEqual(
             tasks,

@@ -450,6 +450,7 @@ def _rewrite_image_links(
     aid: Optional[int],
     floor_labels: FloorLabels,
     failed_image_urls: set[str] | None = None,
+    image_lookup: image_store.ImageLookupCache | None = None,
 ) -> None:
     folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
     failed_image_urls = failed_image_urls or set()
@@ -467,10 +468,16 @@ def _rewrite_image_links(
             if not utils.NGA_img_link_verify(normalized_image_url):
                 continue
 
-            image_src = image_store.unique_image_src_from_html_dir(
-                normalized_image_url,
-                folder_html_modified,
-            )
+            if image_lookup is None:
+                image_src = image_store.unique_image_src_from_html_dir(
+                    normalized_image_url,
+                    folder_html_modified,
+                )
+            else:
+                image_src = image_lookup.unique_image_src_from_html_dir(
+                    normalized_image_url,
+                    folder_html_modified,
+                )
             if image_src is None and normalized_image_url in failed_image_urls:
                 if placeholder_image_src is None:
                     placeholder_image_src = image_store.placeholder_image_src_from_html_dir(
@@ -625,12 +632,14 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
     _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
     files_to_download = _collect_image_download_tasks(htmls, floor_labels)
     download_result = _download_images(tid, aid, files_to_download)
+    image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
     _rewrite_image_links(
         htmls,
         tid,
         aid,
         floor_labels,
         _failed_image_urls(download_result),
+        image_lookup,
     )
     _write_modified_htmls(htmls, tid, aid)
 
@@ -699,11 +708,13 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
     _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
     files_to_download = _collect_image_download_tasks(htmls, floor_labels)
     download_result = _download_images(tid, aid, files_to_download)
+    image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
     _rewrite_image_links(
         htmls,
         tid,
         aid,
         floor_labels,
         _failed_image_urls(download_result),
+        image_lookup,
     )
     _write_modified_htmls(htmls, tid, aid)

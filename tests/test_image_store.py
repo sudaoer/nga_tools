@@ -106,6 +106,39 @@ class ImageStoreTest(unittest.TestCase):
             self.assertFalse((output_dir / "images").exists())
             self.assertTrue((output_dir / "image_index.sqlite3").exists())
 
+    def test_pending_image_download_tasks_uses_batched_index_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+            unique_dir = output_dir / "images_unique"
+            unique_dir.mkdir(parents=True)
+            existing_path = unique_dir / "existing.png"
+            existing_path.write_bytes(b"image")
+            existing_url_with_comma = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202506/06/lsQkle-,552eXuT3cS10p-7f7.png"
+            )
+            existing_url = image_store.normalize_nga_image_url(existing_url_with_comma)
+            missing_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202506/06/lsQ2w-8o79K8ToS5k-5k.webp"
+            )
+            invalid_url = "https://example.com/not-nga.png"
+
+            with patch(
+                "nga_tools.backup.image_store.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                image_store.upsert_image_mapping(existing_url, existing_path)
+                mappings = image_store.image_mappings_for_urls(
+                    [existing_url_with_comma, missing_url, invalid_url]
+                )
+                pending_tasks = image_store.pending_image_download_tasks(
+                    [{"url": existing_url_with_comma}, {"url": missing_url}]
+                )
+
+            self.assertEqual(set(mappings), {existing_url})
+            self.assertEqual(pending_tasks, [{"url": missing_url}])
+
     def test_store_downloaded_image_preserves_hash_collision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             output_dir = Path(temp_dir_name) / "output"
