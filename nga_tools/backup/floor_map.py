@@ -7,12 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NotRequired, Optional, TypedDict, cast
 
-import requests
-
 from nga_tools import utils
 from nga_tools.console import InlineProgress
 from nga_tools.ngaclient import NGAClient
-from nga_tools.ngaclient.client import PageData, PidRedirectTarget
+from nga_tools.ngaclient.client import PageData
 
 FLOOR_MAP_FILENAME = "floor_map.json"
 PAGE_JSON_RE = re.compile(r"^page_(\d+)\.json$")
@@ -79,13 +77,6 @@ class FloorLabels:
 class FloorMapBuildResult:
     floor_labels: FloorLabels
     recovered_missing_posts_by_author_lou: dict[int, RecoveredMissingPost]
-
-
-@dataclass(frozen=True)
-class PidPageLookup:
-    pages: list[int]
-    pid_to_author_lous: dict[int, list[int]]
-    located_author_lou_count: int
 
 
 def _format_candidate_lous(candidates: Sequence[int]) -> str:
@@ -431,14 +422,28 @@ def build_and_save_floor_map(
         if author_lou not in found_original_by_author_lou
     )
     if pending_author_lous:
-        _scan_pending_original_pages(
+        page_count = client.get_page_count(tid, None)
+        pages_to_scan = _pages_for_pending_author_lous(
+            pending_author_lous,
+            original_lou_by_author_lou,
+            page_count,
+        )
+        print(
+            f"增量扫描原帖{len(pages_to_scan)}页，"
+            f"匹配{len(pending_author_lous)}个未映射楼层。",
+            flush=True,
+        )
+        _scan_original_pages(
             client,
             tid,
-            pending_author_lous,
-            author_lou_to_pid,
+            pages_to_scan,
             scanned_pages,
             seen_original_lous,
             original_posts_by_lou,
+            _pid_to_author_lous_for_author_lous(
+                pending_author_lous,
+                author_lou_to_pid,
+            ),
             original_lou_by_author_lou,
             len(author_posts),
         )
@@ -665,134 +670,6 @@ def _pid_to_author_lous_for_author_lous(
         pid = author_lou_to_pid[author_lou]
         pid_to_author_lous.setdefault(pid, []).append(author_lou)
     return pid_to_author_lous
-
-
-def _pid_redirect_target_matches_thread(
-    redirect_target: Optional[PidRedirectTarget],
-    tid: int,
-) -> bool:
-    return redirect_target is not None and redirect_target["tid"] == tid
-
-
-def _locate_pending_original_pages_by_pid(
-    client: NGAClient,
-    tid: int,
-    pending_author_lous: Sequence[int],
-    author_lou_to_pid: dict[int, int],
-) -> PidPageLookup:
-    pages: set[int] = set()
-    pid_to_author_lous: dict[int, list[int]] = {}
-    redirect_error: Optional[requests.RequestException] = None
-    progress = InlineProgress()
-    try:
-        for index, author_lou in enumerate(pending_author_lous, start=1):
-            pid = author_lou_to_pid[author_lou]
-            if pid < 1:
-                continue
-
-            progress.update(
-                f"正在通过回复地址定位原帖页，"
-                f"进度{index}/{len(pending_author_lous)}..."
-            )
-            try:
-                redirect_target = client.get_pid_redirect_target(pid)
-            except requests.RequestException as error:
-                if redirect_error is None:
-                    redirect_error = error
-                continue
-
-            if not _pid_redirect_target_matches_thread(redirect_target, tid):
-                continue
-
-            assert redirect_target is not None
-            pages.add(redirect_target["page"])
-            pid_to_author_lous.setdefault(pid, []).append(author_lou)
-    finally:
-        progress.finish()
-
-    if redirect_error is not None:
-        print(f"警告：回复地址定位失败，将回退原帖扫描：{redirect_error}", flush=True)
-
-    located_count = sum(len(author_lous) for author_lous in pid_to_author_lous.values())
-    return PidPageLookup(
-        pages=sorted(pages),
-        pid_to_author_lous=pid_to_author_lous,
-        located_author_lou_count=located_count,
-    )
-
-
-def _scan_pending_original_pages(
-    client: NGAClient,
-    tid: int,
-    pending_author_lous: Sequence[int],
-    author_lou_to_pid: dict[int, int],
-    scanned_pages: set[int],
-    seen_original_lous: set[int],
-    original_posts_by_lou: Optional[dict[int, OriginalPostSnapshot]],
-    original_lou_by_author_lou: dict[int, int],
-    author_post_count: int,
-) -> None:
-    pid_lookup = _locate_pending_original_pages_by_pid(
-        client,
-        tid,
-        pending_author_lous,
-        author_lou_to_pid,
-    )
-    if pid_lookup.pid_to_author_lous:
-        print(
-            f"通过回复地址定位{pid_lookup.located_author_lou_count}/"
-            f"{len(pending_author_lous)}个未映射楼层，"
-            f"需抓取原帖{len(pid_lookup.pages)}页。",
-            flush=True,
-        )
-        _scan_original_pages(
-            client,
-            tid,
-            pid_lookup.pages,
-            scanned_pages,
-            seen_original_lous,
-            original_posts_by_lou,
-            pid_lookup.pid_to_author_lous,
-            original_lou_by_author_lou,
-            author_post_count,
-        )
-    else:
-        print("回复地址未能定位未映射楼层，回退原帖扫描。", flush=True)
-
-    unresolved_author_lous = [
-        author_lou
-        for author_lou in pending_author_lous
-        if author_lou not in original_lou_by_author_lou
-    ]
-    if not unresolved_author_lous:
-        print("回复地址定位已覆盖所有未映射楼层。", flush=True)
-        return
-
-    page_count = client.get_page_count(tid, None)
-    pages_to_scan = _pages_for_pending_author_lous(
-        unresolved_author_lous,
-        original_lou_by_author_lou,
-        page_count,
-    )
-    print(
-        f"增量扫描原帖{len(pages_to_scan)}页，"
-        f"匹配{len(unresolved_author_lous)}个未映射楼层。",
-        flush=True,
-    )
-    _scan_original_pages(
-        client,
-        tid,
-        pages_to_scan,
-        scanned_pages,
-        seen_original_lous,
-        original_posts_by_lou,
-        _pid_to_author_lous_for_author_lous(
-            unresolved_author_lous,
-            author_lou_to_pid,
-        ),
-        original_lou_by_author_lou,
-        author_post_count,
-    )
 
 
 def _scan_original_pages(

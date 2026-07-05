@@ -1,5 +1,4 @@
 from typing import Any, Optional, TypeAlias, TypedDict, cast
-from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -20,36 +19,6 @@ class ForumThread(TypedDict):
     lastpost: int
     replies: int
     forumname: str
-
-
-class PidRedirectTarget(TypedDict):
-    tid: int
-    page: int
-
-
-def _parse_positive_query_int(
-    query_values: dict[str, list[str]],
-    key: str,
-) -> Optional[int]:
-    values = query_values.get(key)
-    if not values:
-        return None
-    try:
-        value = int(values[0])
-    except ValueError:
-        return None
-    if value < 1:
-        return None
-    return value
-
-
-def _parse_pid_redirect_location(location: str) -> Optional[PidRedirectTarget]:
-    query_values = parse_qs(urlparse(location).query)
-    tid = _parse_positive_query_int(query_values, "tid")
-    page = _parse_positive_query_int(query_values, "page")
-    if tid is None or page is None:
-        return None
-    return {"tid": tid, "page": page}
 
 
 def _required_int(data: dict[str, object], key: str, source: object) -> int:
@@ -144,26 +113,6 @@ class NGAClient:
 
         self.page_cache[cache_key] = page_data
         return page_data
-
-    def get_pid_redirect_target(self, pid: int) -> Optional[PidRedirectTarget]:
-        if pid < 1:
-            raise ValueError("PID must be greater than 0.")
-
-        response = self.session.get(
-            f"{self.base_url}/read.php",
-            params={"pid": str(pid), "opt": "128"},
-            timeout=30,
-            allow_redirects=False,
-        )
-        if not response.is_redirect:
-            if response.status_code >= 400:
-                response.raise_for_status()
-            return None
-
-        location = response.headers.get("Location")
-        if location is None:
-            return None
-        return _parse_pid_redirect_location(location)
 
     def get_forum_threads(self, fid: int, page: int) -> list[ForumThread]:
         if page < 1:
