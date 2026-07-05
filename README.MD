@@ -105,7 +105,13 @@ pixi run python main.py backup floors --name 帖子名
 
 楼层映射会增量刷新。缺失楼无法唯一确定原帖楼层时，`floor_map.json` 会记录 `candidate_original_lous` 候选列表。
 
-校验已下载图片，损坏或无法打开的图片会被删除：
+并行校验所有本地备份中的已下载图片，损坏或无法打开的图片会被删除：
+
+```powershell
+pixi run python main.py image verify
+```
+
+也可以只校验指定帖子：
 
 ```powershell
 pixi run python main.py image verify --name 帖子名

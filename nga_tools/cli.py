@@ -247,10 +247,15 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
         "verify": {
             "handler": image_verify,
             "summary": "校验已下载图片，删除损坏文件",
-            "usage": f"{PROGRAM_USAGE} image verify (--name NAME | --tid TID) [--aid AID]",
-            "examples": [f"{PROGRAM_USAGE} image verify --name 帖子名"],
+            "usage": f"{PROGRAM_USAGE} image verify [(--name NAME | --tid TID) [--aid AID]]",
+            "examples": [
+                f"{PROGRAM_USAGE} image verify",
+                f"{PROGRAM_USAGE} image verify --name 帖子名",
+            ],
+            "notes": [
+                "不提供参数时会扫描output_dir下所有本地备份的images目录。",
+            ],
             "args": ["name", "tid", "aid"],
-            "required_any": ["name", "tid"],
         },
     },
     "stats": {
