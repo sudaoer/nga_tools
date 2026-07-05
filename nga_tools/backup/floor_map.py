@@ -580,21 +580,20 @@ def _scan_original_pages(
         for index, page_number in enumerate(page_numbers, start=1):
             if page_number in scanned_pages:
                 continue
-            if index == 1 or index % 50 == 0 or index == len(page_numbers):
-                if target_author_lous:
-                    matched_count = sum(
-                        1
-                        for author_lou in target_author_lous
-                        if author_lou in original_lou_by_author_lou
-                    )
-                    progress_text = f"已匹配{matched_count}/{author_post_count}楼..."
-                else:
-                    progress_text = "正在收集原帖楼层信息..."
-                progress.update(
-                    f"正在扫描原帖第{page_number}页，"
-                    f"进度{index}/{len(page_numbers)}，"
-                    f"{progress_text}"
+            if target_author_lous:
+                matched_count = sum(
+                    1
+                    for author_lou in target_author_lous
+                    if author_lou in original_lou_by_author_lou
                 )
+                progress_text = f"已匹配{matched_count}/{author_post_count}楼..."
+            else:
+                progress_text = "正在收集原帖楼层信息..."
+            progress.update(
+                f"正在扫描原帖第{page_number}页，"
+                f"进度{index}/{len(page_numbers)}，"
+                f"{progress_text}"
+            )
 
             page_data = client.get_page(tid, None, page_number)
             scanned_pages.add(page_number)
