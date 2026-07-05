@@ -449,8 +449,11 @@ def _rewrite_image_links(
     tid: int,
     aid: Optional[int],
     floor_labels: FloorLabels,
+    failed_image_urls: set[str] | None = None,
 ) -> None:
     folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+    failed_image_urls = failed_image_urls or set()
+    placeholder_image_src: str | None = None
 
     for item in htmls:
         soup = BeautifulSoup(item["html"], "html.parser")
@@ -468,6 +471,12 @@ def _rewrite_image_links(
                 normalized_image_url,
                 folder_html_modified,
             )
+            if image_src is None and normalized_image_url in failed_image_urls:
+                if placeholder_image_src is None:
+                    placeholder_image_src = image_store.placeholder_image_src_from_html_dir(
+                        folder_html_modified,
+                    )
+                image_src = placeholder_image_src
             if image_src is None:
                 print(
                     f"警告：{floor_labels.label(item['lou'])}的"
@@ -552,6 +561,14 @@ def _download_images(
     return download_result
 
 
+def _failed_image_urls(download_result: utils.DownloadSummary) -> set[str]:
+    return {
+        image_store.normalize_nga_image_url(failed["url"])
+        for failed in download_result["failed"]
+        if utils.NGA_img_link_verify(image_store.normalize_nga_image_url(failed["url"]))
+    }
+
+
 def _build_floor_map_for_backup(
     client: NGAClient,
     tid: int,
@@ -607,8 +624,14 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
 
     _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
     files_to_download = _collect_image_download_tasks(htmls, floor_labels)
-    _download_images(tid, aid, files_to_download)
-    _rewrite_image_links(htmls, tid, aid, floor_labels)
+    download_result = _download_images(tid, aid, files_to_download)
+    _rewrite_image_links(
+        htmls,
+        tid,
+        aid,
+        floor_labels,
+        _failed_image_urls(download_result),
+    )
     _write_modified_htmls(htmls, tid, aid)
 
 
@@ -675,6 +698,12 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
 
     _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
     files_to_download = _collect_image_download_tasks(htmls, floor_labels)
-    _download_images(tid, aid, files_to_download)
-    _rewrite_image_links(htmls, tid, aid, floor_labels)
+    download_result = _download_images(tid, aid, files_to_download)
+    _rewrite_image_links(
+        htmls,
+        tid,
+        aid,
+        floor_labels,
+        _failed_image_urls(download_result),
+    )
     _write_modified_htmls(htmls, tid, aid)

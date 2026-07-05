@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import io
+import sqlite3
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
 from unittest.mock import patch
+
+from PIL import Image
 
 from nga_tools import utils
 from nga_tools.backup import image_store
@@ -134,6 +137,73 @@ class RewriteImageLinksTest(unittest.TestCase):
 
         self.assertEqual(tasks, [])
         print_mock.assert_called_once_with("警告：第3095楼的第1张图片链接无效")
+
+    def test_rewrites_failed_download_to_placeholder_without_mapping(self) -> None:
+        image_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202506/06/failed.png"
+        )
+        htmls: list[PostHtml] = [
+            {"lou": 1, "pid": 1001, "html": f'<img src="{image_url}" alt="" />'}
+        ]
+
+        with TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+            thread_dir = output_dir / "123_all"
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = thread_dir if subfolder is None else thread_dir / subfolder
+                path.mkdir(parents=True, exist_ok=True)
+                return str(path)
+
+            with (
+                patch(
+                    "nga_tools.backup.archive.utils.get_folder",
+                    side_effect=fake_get_folder,
+                ),
+                patch(
+                    "nga_tools.backup.image_store.get_config",
+                    return_value=type("Config", (), {"output_dir": str(output_dir)})(),
+                ),
+            ):
+                _rewrite_image_links(
+                    htmls,
+                    123,
+                    None,
+                    FloorLabels.plain(),
+                    {image_url},
+                )
+                placeholder_path = (
+                    output_dir
+                    / "images_unique"
+                    / image_store.PLACEHOLDER_IMAGE_FILENAME
+                )
+                with Image.open(placeholder_path) as image:
+                    image.verify()
+                connection = sqlite3.connect(output_dir / "image_index.sqlite3")
+                try:
+                    placeholder_mappings = connection.execute(
+                        """
+                        SELECT COUNT(*) FROM image_mappings
+                        WHERE unique_rel_path = ?
+                        """,
+                        (
+                            f"images_unique/"
+                            f"{image_store.PLACEHOLDER_IMAGE_FILENAME}",
+                        ),
+                    ).fetchone()[0]
+                finally:
+                    connection.close()
+
+        self.assertIn(
+            f'src="../../images_unique/{image_store.PLACEHOLDER_IMAGE_FILENAME}"',
+            htmls[0]["html"],
+        )
+        self.assertEqual(placeholder_mappings, 0)
 
 
 class WritePostHtmlsImageRepairTest(unittest.TestCase):
@@ -419,7 +489,10 @@ class BackupThreadSubMissingLouTest(unittest.TestCase):
                     side_effect=fake_build_floor_map,
                 ),
                 patch("nga_tools.backup.archive._rewrite_image_links", return_value=[]),
-                patch("nga_tools.backup.archive._download_images"),
+                patch(
+                    "nga_tools.backup.archive._download_images",
+                    return_value={"succeeded": [], "failed": []},
+                ),
                 patch("builtins.print"),
                 patch("sys.stdout", new_callable=io.StringIO),
             ):
@@ -484,7 +557,10 @@ class BackupThreadSubMissingLouTest(unittest.TestCase):
                     side_effect=fake_build_floor_map,
                 ),
                 patch("nga_tools.backup.archive._rewrite_image_links", return_value=[]),
-                patch("nga_tools.backup.archive._download_images"),
+                patch(
+                    "nga_tools.backup.archive._download_images",
+                    return_value={"succeeded": [], "failed": []},
+                ),
                 patch("builtins.print"),
                 patch("sys.stdout", new_callable=io.StringIO),
             ):

@@ -46,6 +46,33 @@ class NgaImageLinkVerifyTest(unittest.TestCase):
 
 
 class ImageStoreTest(unittest.TestCase):
+    def test_placeholder_image_path_creates_valid_png_without_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+
+            with patch(
+                "nga_tools.backup.image_store.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                placeholder_path = image_store.placeholder_image_path()
+                placeholder_src = image_store.placeholder_image_src_from_html_dir(
+                    output_dir / "123_all" / "html_modified",
+                )
+
+            with Image.open(placeholder_path) as image:
+                image.verify()
+            self.assertEqual(
+                placeholder_path,
+                output_dir
+                / "images_unique"
+                / image_store.PLACEHOLDER_IMAGE_FILENAME,
+            )
+            self.assertEqual(
+                placeholder_src,
+                f"../../images_unique/{image_store.PLACEHOLDER_IMAGE_FILENAME}",
+            )
+            self.assertFalse((output_dir / "image_index.sqlite3").exists())
+
     def test_store_downloaded_image_uses_hash_name_and_sqlite_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             output_dir = Path(temp_dir_name) / "output"

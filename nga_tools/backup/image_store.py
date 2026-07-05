@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import NotRequired, TypedDict
 from urllib.parse import urlsplit
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from nga_tools import utils
 from nga_tools.config import get_config
@@ -55,6 +55,7 @@ IMAGE_FORMAT_BY_PILLOW_FORMAT = {
 }
 
 IMAGE_INDEX_FILENAME = "image_index.sqlite3"
+PLACEHOLDER_IMAGE_FILENAME = "download_failed_placeholder.png"
 
 
 def normalize_nga_image_url(url: str) -> str:
@@ -81,6 +82,26 @@ def output_dir() -> Path:
 
 def unique_images_dir() -> Path:
     return output_dir() / "images_unique"
+
+
+def placeholder_image_path() -> Path:
+    placeholder_path = unique_images_dir() / PLACEHOLDER_IMAGE_FILENAME
+    if _image_file_is_valid(placeholder_path):
+        return placeholder_path
+
+    placeholder_path.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", (320, 180), (242, 244, 247))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 319, 179), outline=(148, 163, 184), width=4)
+    draw.line((42, 138, 278, 42), fill=(100, 116, 139), width=6)
+    draw.line((42, 42, 278, 138), fill=(100, 116, 139), width=6)
+    draw.text((86, 146), "image unavailable", fill=(71, 85, 105))
+    image.save(placeholder_path, format="PNG")
+    return placeholder_path
+
+
+def placeholder_image_src_from_html_dir(html_dir: str | Path) -> str:
+    return os.path.relpath(placeholder_image_path(), html_dir).replace("\\", "/")
 
 
 def image_index_path() -> Path:
@@ -260,6 +281,17 @@ def _same_file_content(first: Path, second: Path) -> bool:
     if not first.exists() or not second.exists():
         return False
     return filecmp.cmp(first, second, shallow=False)
+
+
+def _image_file_is_valid(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with Image.open(path) as image:
+            image.verify()
+    except (OSError, SyntaxError):
+        return False
+    return True
 
 
 def _target_path_for_download(

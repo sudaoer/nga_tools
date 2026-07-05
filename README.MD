@@ -81,7 +81,7 @@ pixi run python main.py forum sync
 pixi run python main.py backup all --name 帖子名
 ```
 
-图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在 `output/image_index.sqlite3`。
+图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在 `output/image_index.sqlite3`。下载失败的图片会在 `html_modified` 中指向 `images_unique/download_failed_placeholder.png` 占位图，不写入 SQLite 映射，后续增量备份仍会继续重试原图。
 
 补充本地缺失内容和远端新增内容：
 
@@ -180,6 +180,7 @@ PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会�
 全局图片产物位于 `output/` 根目录：
 
 - `images_unique/`：按内容 hash 保存的实际图片文件
+- `images_unique/download_failed_placeholder.png`：下载失败图片的占位图，按需生成
 - `image_index.sqlite3`：原始 NGA 图片 URL 到 `images_unique` 文件的映射
 - `images/`：旧版本软链接目录，仅迁移前的历史产物会存在
 
