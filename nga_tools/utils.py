@@ -101,7 +101,7 @@ def download_files(
     retries: int = 5,
     backoff_factor: float = 0.5,
     retry_statuses: tuple[int, ...] = (429, 500, 502, 503, 504),
-    max_concurrency: int = 10,
+    max_concurrency: int = 50,
     on_progress: DownloadProgressCallback | None = None,
 ) -> DownloadSummary:
     """
