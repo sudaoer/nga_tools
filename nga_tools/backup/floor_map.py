@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import NotRequired, Optional, TypedDict, cast
 
 from nga_tools import utils
+from nga_tools.console import InlineProgress
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
 
@@ -574,36 +575,41 @@ def _scan_original_pages(
         for author_lous in pid_to_author_lous.values()
         for author_lou in author_lous
     }
-    for index, page_number in enumerate(page_numbers, start=1):
-        if page_number in scanned_pages:
-            continue
-        if index == 1 or index % 50 == 0 or index == len(page_numbers):
-            if target_author_lous:
-                matched_count = sum(
-                    1
-                    for author_lou in target_author_lous
-                    if author_lou in original_lou_by_author_lou
+    progress = InlineProgress()
+    try:
+        for index, page_number in enumerate(page_numbers, start=1):
+            if page_number in scanned_pages:
+                continue
+            if index == 1 or index % 50 == 0 or index == len(page_numbers):
+                if target_author_lous:
+                    matched_count = sum(
+                        1
+                        for author_lou in target_author_lous
+                        if author_lou in original_lou_by_author_lou
+                    )
+                    progress_text = f"已匹配{matched_count}/{author_post_count}楼..."
+                else:
+                    progress_text = "正在收集原帖楼层信息..."
+                progress.update(
+                    f"正在扫描原帖第{page_number}页，"
+                    f"进度{index}/{len(page_numbers)}，"
+                    f"{progress_text}"
                 )
-                progress_text = f"已匹配{matched_count}/{author_post_count}楼..."
-            else:
-                progress_text = "正在收集原帖楼层信息..."
-            print(
-                f"正在扫描原帖第{page_number}页，"
-                f"进度{index}/{len(page_numbers)}，"
-                f"{progress_text}",
-                flush=True,
-            )
 
-        page_data = client.get_page(tid, None, page_number)
-        scanned_pages.add(page_number)
-        for pid, original_lou in _page_post_refs(
-            page_data,
-            f"原帖第{page_number}页",
-            allow_missing_posts=True,
-        ):
-            seen_original_lous.add(original_lou)
-            for author_lou in pid_to_author_lous.get(pid, []):
-                original_lou_by_author_lou[author_lou] = original_lou
+            page_data = client.get_page(tid, None, page_number)
+            scanned_pages.add(page_number)
+            if page_data.get("result") is None:
+                progress.finish()
+            for pid, original_lou in _page_post_refs(
+                page_data,
+                f"原帖第{page_number}页",
+                allow_missing_posts=True,
+            ):
+                seen_original_lous.add(original_lou)
+                for author_lou in pid_to_author_lous.get(pid, []):
+                    original_lou_by_author_lou[author_lou] = original_lou
+    finally:
+        progress.finish()
 
 
 @dataclass(frozen=True)

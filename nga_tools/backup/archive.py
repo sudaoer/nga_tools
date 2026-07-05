@@ -15,6 +15,7 @@ from nga_tools.backup.floor_map import (
     build_and_save_floor_map,
 )
 from nga_tools.bbcode_convert import bbcode_to_html
+from nga_tools.console import InlineProgress
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
 
@@ -127,11 +128,15 @@ def _write_pages_json(
 ) -> dict[int, PageData]:
     folder_json = Path(utils.get_folder(tid, aid, "json"))
     page_data_by_page: dict[int, PageData] = {}
-    for page_number in range(1, page_count + 1):
-        print(f"正在获取第{page_number}页...")
-        page_data = client.get_page(tid, aid, page_number)
-        _write_page_json(folder_json, page_number, page_data)
-        page_data_by_page[page_number] = page_data
+    progress = InlineProgress()
+    try:
+        for page_number in range(1, page_count + 1):
+            progress.update(f"正在获取第{page_number}页...")
+            page_data = client.get_page(tid, aid, page_number)
+            _write_page_json(folder_json, page_number, page_data)
+            page_data_by_page[page_number] = page_data
+    finally:
+        progress.finish()
     return page_data_by_page
 
 
@@ -313,10 +318,14 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         f"准备增量备份：远端{page_count}页，本地{len(existing_page_numbers)}页，"
         f"需获取{len(refresh_page_numbers)}页。"
     )
-    for page_number in sorted(refresh_page_numbers):
-        print(f"正在获取第{page_number}页...")
-        page_data = client.get_page(tid, aid, page_number)
-        _write_page_json(folder_json, page_number, page_data)
+    progress = InlineProgress()
+    try:
+        for page_number in sorted(refresh_page_numbers):
+            progress.update(f"正在获取第{page_number}页...")
+            page_data = client.get_page(tid, aid, page_number)
+            _write_page_json(folder_json, page_number, page_data)
+    finally:
+        progress.finish()
 
     page_data_by_page = _read_pages_json(folder_json)
     if not page_data_by_page:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import unittest
 from unittest.mock import patch
 
@@ -45,7 +46,7 @@ class FloorMapOriginalScanTest(unittest.TestCase):
         seen_original_lous: set[int] = set()
         original_lou_by_author_lou: dict[int, int] = {}
 
-        with patch("builtins.print"):
+        with patch("builtins.print"), patch("sys.stdout", new_callable=io.StringIO):
             _scan_original_pages(
                 client,
                 123,
