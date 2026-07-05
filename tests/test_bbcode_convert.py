@@ -60,6 +60,29 @@ class BBCodeToHtmlTest(unittest.TestCase):
             '<span style="font-size:12pt">字号</span></strong></blockquote>',
         )
 
+    def test_image_src_resolver_repairs_or_preserves_bad_image_text(self) -> None:
+        content = (
+            "[img]broken</span>[/img]"
+            "[img]./mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png[/img]"
+        )
+
+        def resolve_image_src(image_src: str) -> str | None:
+            if image_src.startswith("./mon_202506/06/"):
+                return (
+                    "https://img.nga.178.com/attachments/"
+                    "mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png"
+                )
+            return None
+
+        html = bbcode_to_html(content, image_src_resolver=resolve_image_src)
+
+        self.assertIn("[img]broken&lt;/span&gt;[/img]", html)
+        self.assertIn(
+            '<img src="https://img.nga.178.com/attachments/'
+            'mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png" alt="" />',
+            html,
+        )
+
 
 class BBCodeStripTest(unittest.TestCase):
     def test_strips_known_tags_but_keeps_text(self) -> None:

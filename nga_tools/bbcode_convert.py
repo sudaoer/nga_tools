@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import lru_cache
+from html import escape
 from typing import Protocol, cast
 
 import bbcode # type: ignore
 
 _Formatter = Callable[[str, str, dict[str, str], object | None, dict[str, object]], str]
+ImageSrcResolver = Callable[[str], str | None]
+_IMAGE_SRC_RESOLVER_CONTEXT_KEY = "image_src_resolver"
 
 
 class _BBCodeParser(Protocol):
@@ -62,8 +65,15 @@ def _render_img(
     value: str,
     _options: dict[str, str],
     _parent: object | None,
-    _context: dict[str, object],
+    context: dict[str, object],
 ) -> str:
+    resolver = context.get(_IMAGE_SRC_RESOLVER_CONTEXT_KEY)
+    if callable(resolver):
+        resolved_value = cast(ImageSrcResolver, resolver)(value)
+        if resolved_value is None:
+            return escape(f"[img]{value}[/img]", quote=False)
+        value = resolved_value
+
     return f'<img src="{value}" alt="" />'
 
 
@@ -150,8 +160,17 @@ def _strip_parser() -> _BBCodeParser:
     return parser
 
 
-def bbcode_to_html(text: str) -> str:
-    return _html_parser().format(text)
+def bbcode_to_html(
+    text: str,
+    *,
+    image_src_resolver: ImageSrcResolver | None = None,
+) -> str:
+    if image_src_resolver is None:
+        return _html_parser().format(text)
+    return _html_parser().format(
+        text,
+        **{_IMAGE_SRC_RESOLVER_CONTEXT_KEY: image_src_resolver},
+    )
 
 
 def strip_bbcode_tags(text: str) -> str:

@@ -19,6 +19,7 @@ from nga_tools.backup.archive import (
     _fill_missing_lou,
     _merge_missing_lou,
     _rewrite_image_links,
+    _write_post_htmls,
     _write_recovered_missing_post_htmls,
 )
 from nga_tools.backup.floor_map import (
@@ -140,6 +141,155 @@ class RewriteImageLinksTest(unittest.TestCase):
 
         self.assertEqual(tasks, [])
         print_mock.assert_called_once_with("警告：第3095楼的第1张图片链接无效")
+
+
+class WritePostHtmlsImageRepairTest(unittest.TestCase):
+    def test_repairs_bad_img_from_attches_before_writing_html(self) -> None:
+        page_data = {
+            "result": [
+                {
+                    "lou": 3095,
+                    "pid": 826501105,
+                    "content": (
+                        "24213和24215补档<br/>"
+                        "[img]https://img.nga.178.com/attachments/"
+                        "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png[/img]"
+                        "<br/>[img]./mon_202506/06/"
+                        "lsQkle-8g6uXvT3cS10o-75l.png[/img</span></div>]"
+                    ),
+                    "attches": [
+                        {
+                            "type": "img",
+                            "attachurl": "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png",
+                        },
+                        {
+                            "type": "img",
+                            "attachurl": "mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png",
+                        },
+                    ],
+                }
+            ]
+        }
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = temp_dir if subfolder is None else temp_dir / subfolder
+                path.mkdir(exist_ok=True)
+                return str(path)
+
+            with patch(
+                "nga_tools.backup.archive.utils.get_folder",
+                side_effect=fake_get_folder,
+            ):
+                htmls = _write_post_htmls({155: page_data}, 123, None, None)
+
+            html_path = temp_dir / "html" / "post_3095.html"
+            html = html_path.read_text(encoding="utf-8")
+
+        self.assertEqual(htmls[0]["html"], html)
+        self.assertEqual(html.count("<img"), 2)
+        self.assertIn(
+            "https://img.nga.178.com/attachments/"
+            "mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png",
+            html,
+        )
+        self.assertNotIn("./mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png[/img", html)
+
+    def test_unrepairable_bad_img_is_preserved_as_text_not_img(self) -> None:
+        page_data = {
+            "result": [
+                {
+                    "lou": 1,
+                    "pid": 1001,
+                    "content": "[img]./broken.png[/img</span>]",
+                    "attches": [],
+                }
+            ]
+        }
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = temp_dir if subfolder is None else temp_dir / subfolder
+                path.mkdir(exist_ok=True)
+                return str(path)
+
+            with patch(
+                "nga_tools.backup.archive.utils.get_folder",
+                side_effect=fake_get_folder,
+            ):
+                htmls = _write_post_htmls({1: page_data}, 123, None, None)
+
+        self.assertNotIn("<img", htmls[0]["html"])
+        self.assertIn("[img]./broken.png", htmls[0]["html"])
+        self.assertIn("&lt;/span&gt;", htmls[0]["html"])
+
+    def test_rebuilds_existing_html_cache_with_invalid_image_src(self) -> None:
+        page_data = {
+            "result": [
+                {
+                    "lou": 3095,
+                    "pid": 826501105,
+                    "content": (
+                        "[img]./mon_202506/06/"
+                        "lsQkle-8g6uXvT3cS10o-75l.png[/img</span></div>]"
+                    ),
+                    "attches": [
+                        {
+                            "type": "img",
+                            "attachurl": "mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            html_dir = temp_dir / "html"
+            html_dir.mkdir()
+            html_path = html_dir / "post_3095.html"
+            html_path.write_text(
+                '<img src="./mon_202506/06/'
+                'lsQkle-8g6uXvT3cS10o-75l.png[/img</span></div>]" />',
+                encoding="utf-8",
+            )
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = temp_dir if subfolder is None else temp_dir / subfolder
+                path.mkdir(exist_ok=True)
+                return str(path)
+
+            with patch(
+                "nga_tools.backup.archive.utils.get_folder",
+                side_effect=fake_get_folder,
+            ):
+                htmls = _write_post_htmls({155: page_data}, 123, None, set())
+
+            rebuilt_html = html_path.read_text(encoding="utf-8")
+
+        self.assertEqual(htmls[0]["html"], rebuilt_html)
+        self.assertIn(
+            "https://img.nga.178.com/attachments/"
+            "mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png",
+            rebuilt_html,
+        )
+        self.assertNotIn("[/img</span>", rebuilt_html)
 
 
 class FillMissingLouTest(unittest.TestCase):
