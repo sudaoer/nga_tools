@@ -8,6 +8,7 @@ version = "0.1.0"
 [tasks]
 typecheck = "pyright -p pyrightconfig.strict.json"
 main = "python main.py"
+ankebak = "python main.py forum sync && python main.py backup configs"
 
 [dependencies]
 python = ">=3.14.4,<3.15"
