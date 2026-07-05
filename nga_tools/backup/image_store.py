@@ -6,6 +6,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,6 +96,9 @@ IMAGE_FORMAT_BY_PILLOW_FORMAT = {
 
 IMAGE_INDEX_FILENAME = "image_index.sqlite3"
 PLACEHOLDER_IMAGE_FILENAME = "download_failed_placeholder.png"
+_IMAGE_STORE_LOCK = threading.RLock()
+_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
+_SQLITE_BUSY_TIMEOUT_MILLISECONDS = int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)
 
 
 def normalize_nga_image_url(url: str) -> str:
@@ -125,17 +129,18 @@ def unique_images_dir() -> Path:
 
 def placeholder_image_path() -> Path:
     placeholder_path = unique_images_dir() / PLACEHOLDER_IMAGE_FILENAME
-    if _image_file_is_valid(placeholder_path):
-        return placeholder_path
+    with _IMAGE_STORE_LOCK:
+        if _image_file_is_valid(placeholder_path):
+            return placeholder_path
 
-    placeholder_path.parent.mkdir(parents=True, exist_ok=True)
-    image = Image.new("RGB", (320, 180), (242, 244, 247))
-    draw = ImageDraw.Draw(image)
-    draw.rectangle((0, 0, 319, 179), outline=(148, 163, 184), width=4)
-    draw.line((42, 138, 278, 42), fill=(100, 116, 139), width=6)
-    draw.line((42, 42, 278, 138), fill=(100, 116, 139), width=6)
-    draw.text((86, 146), "image unavailable", fill=(71, 85, 105))
-    image.save(placeholder_path, format="PNG")
+        placeholder_path.parent.mkdir(parents=True, exist_ok=True)
+        image = Image.new("RGB", (320, 180), (242, 244, 247))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 0, 319, 179), outline=(148, 163, 184), width=4)
+        draw.line((42, 138, 278, 42), fill=(100, 116, 139), width=6)
+        draw.line((42, 42, 278, 138), fill=(100, 116, 139), width=6)
+        draw.text((86, 146), "image unavailable", fill=(71, 85, 105))
+        image.save(placeholder_path, format="PNG")
     return placeholder_path
 
 
@@ -180,7 +185,8 @@ def _now_utc_iso() -> str:
 def _connect_image_index() -> sqlite3.Connection:
     db_path = image_index_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path)
+    connection = sqlite3.connect(db_path, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
+    connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MILLISECONDS}")
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS image_mappings (
@@ -218,18 +224,24 @@ def upsert_image_mappings(
         (mapping.url, mapping.unique_rel_path, now, now)
         for mapping in image_mappings
     ]
-    with closing(_connect_image_index()) as connection:
-        with connection:
-            connection.executemany(
-                """
-                INSERT INTO image_mappings (url, unique_rel_path, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(url) DO UPDATE SET
-                    unique_rel_path = excluded.unique_rel_path,
-                    updated_at = excluded.updated_at
-                """,
-                rows,
-            )
+    with _IMAGE_STORE_LOCK:
+        with closing(_connect_image_index()) as connection:
+            with connection:
+                connection.executemany(
+                    """
+                    INSERT INTO image_mappings (
+                        url,
+                        unique_rel_path,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(url) DO UPDATE SET
+                        unique_rel_path = excluded.unique_rel_path,
+                        updated_at = excluded.updated_at
+                    """,
+                    rows,
+                )
     return image_mappings
 
 
@@ -394,15 +406,16 @@ def _target_path_for_download(
 def store_downloaded_image(temp_path: Path, task: ImageDownloadTask) -> StoredImageResult:
     image_hash = utils.sha256(str(temp_path))
     extension = _image_extension_from_file(temp_path, task["url"])
-    target_path, reused, collision = _target_path_for_download(
-        temp_path,
-        image_hash,
-        extension,
-    )
-    if not reused:
-        shutil.move(str(temp_path), target_path)
+    with _IMAGE_STORE_LOCK:
+        target_path, reused, collision = _target_path_for_download(
+            temp_path,
+            image_hash,
+            extension,
+        )
+        if not reused:
+            shutil.move(str(temp_path), target_path)
 
-    upsert_image_mapping(task["url"], target_path)
+        upsert_image_mapping(task["url"], target_path)
     result: StoredImageResult = {
         "url": task["url"],
         "unique_path": str(target_path),

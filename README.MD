@@ -36,6 +36,17 @@ Copy-Item secrets.example.json secrets.json
 }
 ```
 
+批量备份默认并行 4 个帖子；NGA API 请求和图片下载分别限流。需要调整时可在
+`config.json` 中设置：
+
+```json
+{
+  "backup_configs_workers": 4,
+  "api_concurrency": 4,
+  "image_concurrency": 50
+}
+```
+
 ## 使用
 
 添加帖子配置：
@@ -97,6 +108,13 @@ pixi run python main.py backup sub --name 帖子名
 pixi run python main.py backup all --tid 12345678
 pixi run python main.py backup all --tid 12345678 --aid 987654
 pixi run python main.py backup sub --tid 12345678 --aid 987654
+```
+
+批量增量备份 `thread_configs.json` 中的所有帖子：
+
+```powershell
+pixi run python main.py backup configs
+pixi run python main.py backup configs --workers 4 --api_concurrency 4 --image_concurrency 50
 ```
 
 已有只看作者备份缺少楼层映射时，可以单独生成映射：

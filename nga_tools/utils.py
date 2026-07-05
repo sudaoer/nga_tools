@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
+from nga_tools import network_limits
 from nga_tools.bbcode_convert import strip_bbcode_tags
 from nga_tools.config import get_config
 
@@ -47,6 +48,12 @@ _NGA_IMAGE_FILENAME_RE = re.compile(
 _NGA_IMAGE_PATH_RE = re.compile(
     r"^/attachments/(mon_(\d{4})(\d{2}))/(\d{2})/([^/]+)$"
 )
+
+
+def _effective_download_concurrency(max_concurrency: int) -> int:
+    if max_concurrency <= 0:
+        raise ValueError("max_concurrency must be greater than 0.")
+    return min(max_concurrency, network_limits.get_image_concurrency())
 
 
 def sha256(filepath: str) -> str:
@@ -139,22 +146,23 @@ def download_files(
             try:
                 # only hold the semaphore during the actual network+write operation
                 async with semaphore:
-                    async with session.get(url) as response:
-                        # treat certain HTTP errors as exceptions to trigger retry logic
-                        if response.status >= 400:
-                            raise aiohttp.ClientResponseError(
-                                request_info=response.request_info,
-                                history=response.history,
-                                status=response.status,
-                                message=f"HTTP {response.status}",
-                                headers=response.headers,
-                            )
-                        content = await response.read()
-                        dirpath = os.path.dirname(save_path)
-                        if dirpath:
-                            os.makedirs(dirpath, exist_ok=True)
-                        with open(save_path, "wb") as f:
-                            f.write(content)
+                    async with network_limits.image_download_slot():
+                        async with session.get(url) as response:
+                            # treat certain HTTP errors as exceptions to trigger retry logic
+                            if response.status >= 400:
+                                raise aiohttp.ClientResponseError(
+                                    request_info=response.request_info,
+                                    history=response.history,
+                                    status=response.status,
+                                    message=f"HTTP {response.status}",
+                                    headers=response.headers,
+                                )
+                            content = await response.read()
+                            dirpath = os.path.dirname(save_path)
+                            if dirpath:
+                                os.makedirs(dirpath, exist_ok=True)
+                            with open(save_path, "wb") as f:
+                                f.write(content)
                 return {"url": url, "save_path": save_path, "success": True}
             except (
                 aiohttp.ClientConnectorError,
@@ -206,9 +214,10 @@ def download_files(
         }
 
     async def download_all(url_filename_lists: list[DownloadTask]) -> DownloadSummary:
+        effective_max_concurrency = _effective_download_concurrency(max_concurrency)
         timeout = aiohttp.ClientTimeout(total=60)
-        connector = aiohttp.TCPConnector(limit=max_concurrency)
-        semaphore = asyncio.Semaphore(max_concurrency)
+        connector = aiohttp.TCPConnector(limit=effective_max_concurrency)
+        semaphore = asyncio.Semaphore(effective_max_concurrency)
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             tasks: list[asyncio.Task[DownloadFileResult]] = []
             for item in url_filename_lists:
@@ -241,6 +250,8 @@ def download_files(
     pending_downloads = [
         item for item in url_filename_lists if not os.path.exists(item["save_path"])
     ]
+    if not pending_downloads:
+        return {"succeeded": [], "failed": []}
 
     return asyncio.run(download_all(pending_downloads))
 

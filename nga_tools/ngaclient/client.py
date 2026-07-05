@@ -3,6 +3,7 @@ from typing import Any, Optional, TypeAlias, TypedDict, cast
 import requests
 
 from nga_tools.config import get_config
+from nga_tools.network_limits import api_request_slot
 
 Tid: TypeAlias = int | str
 Aid: TypeAlias = Optional[int | str]
@@ -98,7 +99,8 @@ class NGAClient:
         if aid:
             data["authorid"] = str(aid)
 
-        response = self.session.post(url, data=data, timeout=30)
+        with api_request_slot():
+            response = self.session.post(url, data=data, timeout=30)
         response.raise_for_status()
 
         json_data = response.json()
@@ -119,11 +121,12 @@ class NGAClient:
             raise ValueError("Page number must be greater than 0.")
 
         url = f"{self.base_url}/app_api.php?__lib=subject&__act=list"
-        response = self.session.post(
-            url,
-            data={"fid": str(fid), "page": str(page)},
-            timeout=30,
-        )
+        with api_request_slot():
+            response = self.session.post(
+                url,
+                data={"fid": str(fid), "page": str(page)},
+                timeout=30,
+            )
         response.raise_for_status()
 
         json_data = response.json()

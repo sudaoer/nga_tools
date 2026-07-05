@@ -7,6 +7,7 @@ from nga_tools.commands.types import (
     optional_str,
     required_int,
 )
+from nga_tools.commands.network import configure_network_limits_from_args
 from nga_tools.forum_watch import (
     DEFAULT_WATCH_CONFIG_PATH,
     collect_matching_threads,
@@ -20,6 +21,7 @@ from nga_tools.thread_configs import NGAThreadConfigs
 def handle_forum_list(args: CommandArgs) -> None:
     fid = required_int(args, "fid")
     pages = required_int(args, "pages")
+    configure_network_limits_from_args(args)
 
     client = NGAClient()
     total_threads = 0
@@ -43,6 +45,7 @@ def handle_forum_sync(args: CommandArgs) -> None:
         print("没有找到任何版面监控配置。")
         return
 
+    configure_network_limits_from_args(args)
     client = NGAClient()
     scanned_count, matches = collect_matching_threads(client, watch_configs)
 

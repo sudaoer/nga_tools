@@ -84,6 +84,24 @@ ARG_DEFS: dict[str, ArgDef] = {
         "metavar": "N",
         "help": "生成PDF时并行运行weasyprint的worker数量（仅pdf命令有效）",
     },
+    "workers": {
+        "flags": ("--workers",),
+        "type": int,
+        "metavar": "N",
+        "help": "批量备份帖子时的并行worker数量",
+    },
+    "api_concurrency": {
+        "flags": ("--api_concurrency",),
+        "type": int,
+        "metavar": "N",
+        "help": "NGA API请求的全局并发上限",
+    },
+    "image_concurrency": {
+        "flags": ("--image_concurrency",),
+        "type": int,
+        "metavar": "N",
+        "help": "图片下载的全局并发上限",
+    },
     "min_body_chars": {
         "flags": ("--min_body_chars",),
         "type": int,
@@ -133,7 +151,10 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
         "list": {
             "handler": handle_forum_list,
             "summary": "列出版面主题",
-            "usage": f"{PROGRAM_USAGE} forum list --fid FID [--pages N]",
+            "usage": (
+                f"{PROGRAM_USAGE} forum list --fid FID [--pages N] "
+                "[--api_concurrency N]"
+            ),
             "examples": [
                 f"{PROGRAM_USAGE} forum list --fid 784",
                 f"{PROGRAM_USAGE} forum list --fid 784 --pages 2",
@@ -142,15 +163,18 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "此命令只列出版面主题，不修改thread_configs.json。",
                 "需要secrets.json中有可访问NGA App API的登录Cookie。",
             ],
-            "args": ["fid", "pages"],
+            "args": ["fid", "pages", "api_concurrency"],
             "required": ["fid"],
             "defaults": {"pages": 1},
-            "positive": ["pages"],
+            "positive": ["pages", "api_concurrency"],
         },
         "sync": {
             "handler": handle_forum_sync,
             "summary": "根据版面监控规则保存匹配主题配置",
-            "usage": f"{PROGRAM_USAGE} forum sync [--watch_config PATH]",
+            "usage": (
+                f"{PROGRAM_USAGE} forum sync [--watch_config PATH] "
+                "[--api_concurrency N]"
+            ),
             "examples": [
                 f"{PROGRAM_USAGE} forum sync",
                 f"{PROGRAM_USAGE} forum sync --watch_config forum_watch_configs.json",
@@ -160,25 +184,33 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "匹配主题会写入thread_configs.json，aid使用主题楼主authorid。",
                 "此命令只保存配置，不自动下载帖子内容。",
             ],
-            "args": ["watch_config"],
+            "args": ["watch_config", "api_concurrency"],
+            "positive": ["api_concurrency"],
         },
     },
     "backup": {
         "all": {
             "handler": backup_all,
             "summary": "抓取帖子内容并下载图片",
-            "usage": f"{PROGRAM_USAGE} backup all (--name NAME | --tid TID) [--aid AID]",
+            "usage": (
+                f"{PROGRAM_USAGE} backup all (--name NAME | --tid TID) [--aid AID] "
+                "[--api_concurrency N] [--image_concurrency N]"
+            ),
             "examples": [
                 f"{PROGRAM_USAGE} backup all --name 帖子名",
                 f"{PROGRAM_USAGE} backup all --tid 12345678 --aid 987654",
             ],
-            "args": ["name", "tid", "aid"],
+            "args": ["name", "tid", "aid", "api_concurrency", "image_concurrency"],
             "required_any": ["name", "tid"],
+            "positive": ["api_concurrency", "image_concurrency"],
         },
         "sub": {
             "handler": backup_sub,
             "summary": "增量补充本地缺失内容和远端新增内容",
-            "usage": f"{PROGRAM_USAGE} backup sub (--name NAME | --tid TID) [--aid AID]",
+            "usage": (
+                f"{PROGRAM_USAGE} backup sub (--name NAME | --tid TID) [--aid AID] "
+                "[--api_concurrency N] [--image_concurrency N]"
+            ),
             "examples": [
                 f"{PROGRAM_USAGE} backup sub --name 帖子名",
                 f"{PROGRAM_USAGE} backup sub --tid 12345678 --aid 987654",
@@ -188,25 +220,36 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "随后会补齐缺失或新增的HTML、html_modified和图片文件。",
                 "author-only备份会增量刷新floor_map.json。",
             ],
-            "args": ["name", "tid", "aid"],
+            "args": ["name", "tid", "aid", "api_concurrency", "image_concurrency"],
             "required_any": ["name", "tid"],
+            "positive": ["api_concurrency", "image_concurrency"],
         },
         "configs": {
             "handler": backup_configs,
             "summary": "增量备份thread_configs.json中的所有帖子",
-            "usage": f"{PROGRAM_USAGE} backup configs",
-            "examples": [f"{PROGRAM_USAGE} backup configs"],
+            "usage": (
+                f"{PROGRAM_USAGE} backup configs [--workers N] "
+                "[--api_concurrency N] [--image_concurrency N]"
+            ),
+            "examples": [
+                f"{PROGRAM_USAGE} backup configs",
+                f"{PROGRAM_USAGE} backup configs --workers 4",
+            ],
             "notes": [
-                "此命令按thread_configs.json中的ThreadList顺序逐个执行增量备份。",
+                "此命令按thread_configs.json中的ThreadList批量执行增量备份。",
                 "不会修改thread_configs.json，也不会生成PDF。",
                 "单个帖子失败时会继续处理后续配置，最后以非零退出码报告失败。",
             ],
-            "args": [],
+            "args": ["workers", "api_concurrency", "image_concurrency"],
+            "positive": ["workers", "api_concurrency", "image_concurrency"],
         },
         "floors": {
             "handler": backup_floors,
             "summary": "根据已有备份生成只看作者楼层到原帖楼层的映射",
-            "usage": f"{PROGRAM_USAGE} backup floors (--name NAME | --tid TID) [--aid AID]",
+            "usage": (
+                f"{PROGRAM_USAGE} backup floors (--name NAME | --tid TID) [--aid AID] "
+                "[--api_concurrency N]"
+            ),
             "examples": [
                 f"{PROGRAM_USAGE} backup floors --name 帖子名",
                 f"{PROGRAM_USAGE} backup floors --tid 12345678 --aid 987654",
@@ -216,8 +259,9 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "author-only备份生成PDF前必须先有floor_map.json。",
                 "缺失楼无法唯一确定原楼层时，会在floor_map.json中记录候选原楼层。",
             ],
-            "args": ["name", "tid", "aid"],
+            "args": ["name", "tid", "aid", "api_concurrency"],
             "required_any": ["name", "tid"],
+            "positive": ["api_concurrency"],
         },
         "pdf": {
             "handler": pdf_generate,

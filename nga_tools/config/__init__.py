@@ -12,6 +12,9 @@ PathValue: TypeAlias = str | Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.json"
 DEFAULT_SECRETS_PATH = PROJECT_ROOT / "secrets.json"
+DEFAULT_API_CONCURRENCY = 4
+DEFAULT_IMAGE_CONCURRENCY = 50
+DEFAULT_BACKUP_CONFIGS_WORKERS = 4
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,9 @@ class AppConfig:
     html_font_family: str
     nga_passport_uid: str
     nga_passport_cid: str
+    api_concurrency: int
+    image_concurrency: int
+    backup_configs_workers: int
 
     @property
     def html_style(self) -> str:
@@ -182,6 +188,18 @@ def _required_float(data: JsonObject, key: str, source: Path) -> float:
     raise ValueError(f"{source} 缺少数字配置项：{key}")
 
 
+def _optional_positive_int(
+    data: JsonObject,
+    key: str,
+    source: Path,
+    default: int,
+) -> int:
+    value = data.get(key, default)
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    raise ValueError(f"{source} 配置项必须是大于0的整数：{key}")
+
+
 def _path_or_default(path: Optional[PathValue], default_path: Path) -> Path:
     if path is None:
         return default_path
@@ -236,6 +254,24 @@ def load_config(
         ),
         nga_passport_cid=_required_str(
             secrets_data, "nga_passport_cid", resolved_secrets_path
+        ),
+        api_concurrency=_optional_positive_int(
+            config_data,
+            "api_concurrency",
+            resolved_config_path,
+            DEFAULT_API_CONCURRENCY,
+        ),
+        image_concurrency=_optional_positive_int(
+            config_data,
+            "image_concurrency",
+            resolved_config_path,
+            DEFAULT_IMAGE_CONCURRENCY,
+        ),
+        backup_configs_workers=_optional_positive_int(
+            config_data,
+            "backup_configs_workers",
+            resolved_config_path,
+            DEFAULT_BACKUP_CONFIGS_WORKERS,
         ),
     )
 
