@@ -27,6 +27,7 @@ SPEAKER_LINE_RE = re.compile(r"^([^\s：:][^：:]{0,15})[：:]")
 PDF_HASH_MANIFEST_FILENAME = "pdf_input_hashes.json"
 PDF_HASH_MANIFEST_VERSION = 1
 PDF_HASH_ALGORITHM = "sha256"
+PDF_PART_ARTIFACT_RE = re.compile(r"^part_\d+_\d+\.(?:html|pdf)$")
 
 
 class PdfHashManifest(TypedDict):
@@ -45,6 +46,7 @@ class PdfRenderTask:
 class PdfRenderPlan:
     render_tasks: list[PdfRenderTask]
     skipped_count: int
+    cleaned_count: int
     input_hashes: dict[str, str]
 
 
@@ -311,6 +313,25 @@ def _write_text_if_changed(path: str, content: str) -> None:
     output_path.write_text(content, encoding="utf-8")
 
 
+def _cleanup_stale_pdf_parts(folder_pdf: str, expected_filenames: set[str]) -> int:
+    cleaned_count = 0
+    for path in Path(folder_pdf).iterdir():
+        if not path.is_file():
+            continue
+        if not PDF_PART_ARTIFACT_RE.fullmatch(path.name):
+            continue
+        if path.name in expected_filenames:
+            continue
+
+        try:
+            path.unlink()
+        except OSError as error:
+            raise RuntimeError(f"无法删除旧PDF分段文件：{path}: {error}") from error
+        cleaned_count += 1
+
+    return cleaned_count
+
+
 def _build_render_tasks(
     html_content_by_lou: dict[int, str],
     folder_pdf: str,
@@ -320,6 +341,7 @@ def _build_render_tasks(
     render_tasks: list[PdfRenderTask] = []
     cached_hashes = _load_pdf_hashes(folder_pdf)
     input_hashes: dict[str, str] = {}
+    expected_filenames: set[str] = set()
     skipped_count = 0
 
     for index in range(1, len(html_content_by_lou) // lou_per_pdf + 2):
@@ -331,6 +353,8 @@ def _build_render_tasks(
         pdf_html_path = f"{folder_pdf}/part_{start_lou}_{end_lou}.html"
         pdf_output_path = f"{folder_pdf}/part_{start_lou}_{end_lou}.pdf"
         html_filename = os.path.basename(pdf_html_path)
+        pdf_filename = os.path.basename(pdf_output_path)
+        expected_filenames.update({html_filename, pdf_filename})
         pdf_html = _render_pdf_html(
             html_content_by_lou,
             start_lou,
@@ -350,7 +374,8 @@ def _build_render_tasks(
         Path(pdf_html_path).write_text(pdf_html, encoding="utf-8")
         render_tasks.append(PdfRenderTask(pdf_html_path, pdf_output_path))
 
-    return PdfRenderPlan(render_tasks, skipped_count, input_hashes)
+    cleaned_count = _cleanup_stale_pdf_parts(folder_pdf, expected_filenames)
+    return PdfRenderPlan(render_tasks, skipped_count, cleaned_count, input_hashes)
 
 
 def _read_pdf_html(
@@ -479,6 +504,8 @@ def generate_pdf(
     worker_desc = pdf_workers if pdf_workers is not None else "默认"
     if render_plan.skipped_count:
         print(f"跳过{render_plan.skipped_count}个输入HTML未变化的PDF。")
+    if render_plan.cleaned_count:
+        print(f"删除{render_plan.cleaned_count}个旧PDF分段文件。")
 
     print(f"开始生成{len(render_tasks)}个PDF，worker数量：{worker_desc}")
     if render_tasks:
