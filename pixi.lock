@@ -120,6 +120,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/font-ttf-dejavu-sans-mono-2.37-hab24e00_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/font-ttf-inconsolata-3.000-h77eed37_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/font-ttf-noto-cjk-2.004-h77eed37_0.tar.bz2
+      - conda: https://conda.anaconda.org/conda-forge/noarch/font-ttf-noto-emoji-2.034-h77eed37_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/font-ttf-source-code-pro-2.038-h77eed37_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/font-ttf-ubuntu-0.83-h77eed37_3.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/fonts-conda-ecosystem-1-0.tar.bz2
@@ -1915,6 +1916,15 @@ packages:
   purls: []
   size: 179752686
   timestamp: 1647882350774
+- conda: https://conda.anaconda.org/conda-forge/noarch/font-ttf-noto-emoji-2.034-h77eed37_0.tar.bz2
+  sha256: 5efafa1a655a71c08bd68a02690faa2e072a542a9e505728546aacef5a9476ac
+  md5: 0104a9fc7e58c350a26a048e011bcbb4
+  license: OFL-1.1
+  license_family: OTHER
+  purls: []
+  run_exports: {}
+  size: 18700010
+  timestamp: 1647882510283
 - conda: https://conda.anaconda.org/conda-forge/noarch/font-ttf-source-code-pro-2.038-h77eed37_0.tar.bz2
   sha256: 00925c8c055a2275614b4d983e1df637245e19058d79fc7dd1a93b8d9fb4b139
   md5: 4d59c254e01d9cde7957100457e2d5fb

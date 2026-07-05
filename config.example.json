@@ -13,5 +13,5 @@
   "pdf_speaker_portrait_size": "14mm",
   "html_pre": "<div class=\"bbcode_container\">",
   "html_post": "</div>",
-  "html_font_family": "\"Noto Sans CJK SC\", \"Source Han Sans SC\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", \"WenQuanYi Micro Hei\", sans-serif"
+  "html_font_family": "\"Noto Sans CJK SC\", \"Noto Color Emoji\", \"Noto Emoji\", \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Source Han Sans SC\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", \"WenQuanYi Micro Hei\", sans-serif"
 }
