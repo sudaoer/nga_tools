@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import io
+import json
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from nga_tools.backup.floor_map import (
+    AuthorPostRef,
+    FloorMapBuildResult,
+    build_and_save_floor_map,
+    find_missing_author_lous,
     _page_post_refs,
     _scan_original_pages,
     _scan_pending_original_pages,
@@ -82,6 +88,7 @@ class FloorMapOriginalScanTest(unittest.TestCase):
                 [1, 2, 3],
                 scanned_pages,
                 seen_original_lous,
+                None,
                 {1001: [1], 1003: [2]},
                 original_lou_by_author_lou,
                 2,
@@ -121,6 +128,7 @@ class FloorMapFastLookupTest(unittest.TestCase):
                 {1: 1001, 2: 1002},
                 scanned_pages,
                 seen_original_lous,
+                None,
                 original_lou_by_author_lou,
                 2,
             )
@@ -149,6 +157,7 @@ class FloorMapFastLookupTest(unittest.TestCase):
                 {1: 1001},
                 scanned_pages,
                 seen_original_lous,
+                None,
                 original_lou_by_author_lou,
                 1,
             )
@@ -158,6 +167,180 @@ class FloorMapFastLookupTest(unittest.TestCase):
         self.assertEqual(scanned_pages, {1})
         self.assertEqual(seen_original_lous, {3})
         self.assertEqual(original_lou_by_author_lou, {1: 3})
+
+    def test_pid_zero_falls_back_to_page_scan(self) -> None:
+        client = FastLookupClient(
+            pages={1: {"result": [{"pid": 0, "lou": 0}]}},
+            redirects={},
+            page_count=1,
+        )
+        scanned_pages: set[int] = set()
+        seen_original_lous: set[int] = set()
+        original_lou_by_author_lou: dict[int, int] = {}
+
+        with patch("builtins.print"), patch("sys.stdout", new_callable=io.StringIO):
+            _scan_pending_original_pages(
+                client,
+                123,
+                [0],
+                {0: 0},
+                scanned_pages,
+                seen_original_lous,
+                None,
+                original_lou_by_author_lou,
+                1,
+            )
+
+        self.assertEqual(client.page_calls, [1])
+        self.assertEqual(original_lou_by_author_lou, {0: 0})
+
+
+class FloorMapMissingInferenceTest(unittest.TestCase):
+    def _build_floor_map(
+        self,
+        page_result: list[dict[str, object]],
+        missing_author_lous: list[int],
+    ) -> tuple[dict[str, object], FloorMapBuildResult]:
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 1001, "author_lou": 1},
+            {"pid": 1003, "author_lou": 3},
+        ]
+        client = FastLookupClient(
+            pages={1: {"result": page_result}},
+            redirects={
+                1001: {"tid": 123, "page": 1},
+                1003: {"tid": 123, "page": 1},
+            },
+            page_count=1,
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            with (
+                patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir),
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                result = build_and_save_floor_map(
+                    client,
+                    123,
+                    456,
+                    author_posts,
+                    missing_author_lous,
+                )
+            with open(f"{temp_dir}/floor_map.json", encoding="utf-8") as file:
+                floor_map = json.load(file)
+
+        return floor_map, result
+
+    def test_single_anonymous_original_post_recovers_missing_author_lou(self) -> None:
+        floor_map, result = self._build_floor_map(
+            [
+                {
+                    "pid": 1001,
+                    "lou": 10,
+                    "author": {"uid": 42},
+                    "content": "known before",
+                },
+                {
+                    "pid": 2002,
+                    "lou": 11,
+                    "author": {"uid": -1},
+                    "content": "anonymous body",
+                },
+                {
+                    "pid": 1003,
+                    "lou": 12,
+                    "author": {"uid": 42},
+                    "content": "known after",
+                },
+            ],
+            [2],
+        )
+
+        self.assertEqual(result.floor_labels.original_lou_by_author_lou[2], 11)
+        self.assertEqual(
+            result.recovered_missing_posts_by_author_lou[2],
+            {"original_pid": 2002, "original_lou": 11, "content": "anonymous body"},
+        )
+        self.assertIn(
+            {
+                "pid": None,
+                "author_lou": 2,
+                "original_lou": 11,
+                "original_pid": 2002,
+            },
+            floor_map["entries"],
+        )
+
+    def test_deleted_original_post_still_maps_without_recovered_content(self) -> None:
+        _floor_map, result = self._build_floor_map(
+            [
+                {
+                    "pid": 1001,
+                    "lou": 10,
+                    "author": {"uid": 42},
+                    "content": "known before",
+                },
+                {
+                    "pid": 1003,
+                    "lou": 12,
+                    "author": {"uid": 42},
+                    "content": "known after",
+                },
+            ],
+            [2],
+        )
+
+        self.assertEqual(result.floor_labels.original_lou_by_author_lou[2], 11)
+        self.assertEqual(result.recovered_missing_posts_by_author_lou, {})
+
+    def test_ambiguous_anonymous_candidates_are_not_exactly_mapped(self) -> None:
+        _floor_map, result = self._build_floor_map(
+            [
+                {
+                    "pid": 1001,
+                    "lou": 10,
+                    "author": {"uid": 42},
+                    "content": "known before",
+                },
+                {
+                    "pid": 2002,
+                    "lou": 11,
+                    "author": {"uid": -1},
+                    "content": "first anonymous",
+                },
+                {
+                    "pid": 2003,
+                    "lou": 12,
+                    "author": {"uid": -1},
+                    "content": "second anonymous",
+                },
+                {
+                    "pid": 1003,
+                    "lou": 13,
+                    "author": {"uid": 42},
+                    "content": "known after",
+                },
+            ],
+            [2],
+        )
+
+        self.assertNotIn(2, result.floor_labels.original_lou_by_author_lou)
+        self.assertEqual(
+            result.floor_labels.candidate_original_lous_by_author_lou[2],
+            [11, 12],
+        )
+
+
+class FloorMapMissingAuthorLousTest(unittest.TestCase):
+    def test_finds_gaps_while_accepting_zero_floor(self) -> None:
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 0, "author_lou": 0},
+            {"pid": 1001, "author_lou": 1},
+            {"pid": 1003, "author_lou": 3},
+        ]
+
+        self.assertEqual(find_missing_author_lous(author_posts), [2])
 
 
 if __name__ == "__main__":

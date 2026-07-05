@@ -4,16 +4,21 @@ import io
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 import unittest
 from unittest.mock import patch
 
 from nga_tools import utils
 from nga_tools.backup.archive import (
     PostHtml,
+    _build_floor_map_for_backup,
     _download_images,
+    _fill_missing_lou,
     _rewrite_image_links,
+    _write_recovered_missing_post_htmls,
 )
-from nga_tools.backup.floor_map import FloorLabels
+from nga_tools.backup.floor_map import FloorLabels, RecoveredMissingPost
+from nga_tools.ngaclient import NGAClient
 
 
 class RewriteImageLinksTest(unittest.TestCase):
@@ -61,6 +66,72 @@ class RewriteImageLinksTest(unittest.TestCase):
         self.assertEqual(tasks, [])
         get_folder.assert_not_called()
         print_mock.assert_called_once_with("警告：第3095楼的第1张图片链接无效")
+
+
+class FillMissingLouTest(unittest.TestCase):
+    def test_recovered_missing_post_uses_original_content_html(self) -> None:
+        recovered_posts: dict[int, RecoveredMissingPost] = {
+            94: {
+                "original_pid": 824709822,
+                "original_lou": 255,
+                "content": "[b]anonymous body[/b]",
+            }
+        }
+        htmls: list[PostHtml] = []
+        floor_labels = FloorLabels(
+            original_lou_by_author_lou={94: 255},
+            candidate_original_lous_by_author_lou={},
+            show_original=True,
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            with patch(
+                "nga_tools.backup.archive.utils.get_folder",
+                return_value=temp_dir,
+            ):
+                recovered_html = _write_recovered_missing_post_htmls(
+                    123,
+                    456,
+                    recovered_posts,
+                )
+
+            with patch("builtins.print"):
+                _fill_missing_lou(htmls, [94, 95], floor_labels, recovered_html)
+
+            recovered_file = Path(temp_dir) / "post_94.html"
+            self.assertTrue(recovered_file.exists())
+            self.assertIn("anonymous body", recovered_file.read_text(encoding="utf-8"))
+
+        html_by_lou = {item["lou"]: item["html"] for item in htmls}
+        self.assertIn("anonymous body", html_by_lou[94])
+        self.assertEqual(html_by_lou[95], "<p><em>本楼层内容缺失。</em></p>")
+
+
+class BackupFloorMapFallbackTest(unittest.TestCase):
+    def test_floor_map_failure_falls_back_to_plain_labels(self) -> None:
+        htmls: list[PostHtml] = [{"lou": 1, "pid": 1001, "html": "body"}]
+
+        with (
+            patch(
+                "nga_tools.backup.archive.build_and_save_floor_map",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch(
+                "nga_tools.backup.archive.load_floor_labels",
+                side_effect=RuntimeError("no map"),
+            ),
+            patch("builtins.print"),
+        ):
+            result = _build_floor_map_for_backup(
+                cast(NGAClient, object()),
+                123,
+                456,
+                htmls,
+                [],
+            )
+
+        self.assertFalse(result.floor_labels.show_original)
+        self.assertEqual(result.recovered_missing_posts_by_author_lou, {})
 
 
 class DownloadImagesTest(unittest.TestCase):

@@ -11,8 +11,11 @@ from nga_tools.backup.floor_map import (
     MISSING_POST_HTML,
     PAGE_JSON_RE,
     AuthorPostRef,
+    FloorMapBuildResult,
     FloorLabels,
+    RecoveredMissingPost,
     build_and_save_floor_map,
+    load_floor_labels,
 )
 from nga_tools.bbcode_convert import bbcode_to_html
 from nga_tools.console import InlineProgress
@@ -185,14 +188,42 @@ def _fill_missing_lou(
     htmls: list[PostHtml],
     missing_lou: list[int],
     floor_labels: FloorLabels,
+    recovered_missing_html_by_lou: dict[int, str],
 ) -> None:
     for lou in missing_lou:
-        print(f"警告：缺失{floor_labels.label(lou)}！")
+        if lou in recovered_missing_html_by_lou:
+            print(f"已恢复缺失{floor_labels.label(lou)}。")
+        else:
+            print(f"警告：缺失{floor_labels.label(lou)}！")
 
     for lou in missing_lou:
-        htmls.append({"lou": lou, "pid": None, "html": MISSING_POST_HTML})
+        htmls.append(
+            {
+                "lou": lou,
+                "pid": None,
+                "html": recovered_missing_html_by_lou.get(lou, MISSING_POST_HTML),
+            }
+        )
 
     htmls.sort(key=lambda item: item["lou"])
+
+
+def _write_recovered_missing_post_htmls(
+    tid: int,
+    aid: Optional[int],
+    recovered_missing_posts: dict[int, RecoveredMissingPost],
+) -> dict[int, str]:
+    if not recovered_missing_posts:
+        return {}
+
+    folder_html = Path(utils.get_folder(tid, aid, "html"))
+    recovered_html_by_lou: dict[int, str] = {}
+    for author_lou, recovered_post in sorted(recovered_missing_posts.items()):
+        post_html = bbcode_to_html(recovered_post["content"])
+        html_path = folder_html / f"post_{author_lou}.html"
+        html_path.write_text(post_html, encoding="utf-8")
+        recovered_html_by_lou[author_lou] = post_html
+    return recovered_html_by_lou
 
 
 def _rewrite_image_links(
@@ -310,6 +341,35 @@ def _download_images(
     return download_result
 
 
+def _build_floor_map_for_backup(
+    client: NGAClient,
+    tid: int,
+    aid: Optional[int],
+    htmls: list[PostHtml],
+    missing_lou: list[int],
+) -> FloorMapBuildResult:
+    if aid is None:
+        return FloorMapBuildResult(FloorLabels.plain(), {})
+
+    try:
+        return build_and_save_floor_map(
+            client,
+            tid,
+            aid,
+            _post_refs_from_htmls(htmls),
+            missing_lou,
+            strict=False,
+        )
+    except Exception as error:
+        print(f"警告：楼层映射生成失败，继续生成备份：{error}")
+        try:
+            floor_labels = load_floor_labels(tid, aid)
+        except Exception as load_error:
+            print(f"警告：无法加载已有楼层映射，使用普通楼层标签：{load_error}")
+            floor_labels = FloorLabels.plain()
+        return FloorMapBuildResult(floor_labels, {})
+
+
 def backup_thread(tid: int, aid: Optional[int]) -> None:
     client = NGAClient()
     page_count = client.get_page_count(tid, aid)
@@ -320,17 +380,21 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
 
     htmls = _write_post_htmls(page_data_by_page, tid, aid, None)
     missing_lou = _find_missing_lou(htmls)
-    floor_labels = FloorLabels.plain()
-    if aid is not None:
-        floor_labels = build_and_save_floor_map(
-            client,
-            tid,
-            aid,
-            _post_refs_from_htmls(htmls),
-            missing_lou,
-        )
+    floor_map_result = _build_floor_map_for_backup(
+        client,
+        tid,
+        aid,
+        htmls,
+        missing_lou,
+    )
+    floor_labels = floor_map_result.floor_labels
+    recovered_missing_html_by_lou = _write_recovered_missing_post_htmls(
+        tid,
+        aid,
+        floor_map_result.recovered_missing_posts_by_author_lou,
+    )
 
-    _fill_missing_lou(htmls, missing_lou, floor_labels)
+    _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
     files_to_download = _rewrite_image_links(htmls, tid, aid, floor_labels)
     _write_modified_htmls(htmls, tid, aid)
 
@@ -376,17 +440,21 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         refresh_page_numbers,
     )
     missing_lou = _find_missing_lou(htmls)
-    floor_labels = FloorLabels.plain()
-    if aid is not None:
-        floor_labels = build_and_save_floor_map(
-            client,
-            tid,
-            aid,
-            _post_refs_from_htmls(htmls),
-            missing_lou,
-        )
+    floor_map_result = _build_floor_map_for_backup(
+        client,
+        tid,
+        aid,
+        htmls,
+        missing_lou,
+    )
+    floor_labels = floor_map_result.floor_labels
+    recovered_missing_html_by_lou = _write_recovered_missing_post_htmls(
+        tid,
+        aid,
+        floor_map_result.recovered_missing_posts_by_author_lou,
+    )
 
-    _fill_missing_lou(htmls, missing_lou, floor_labels)
+    _fill_missing_lou(htmls, missing_lou, floor_labels, recovered_missing_html_by_lou)
     files_to_download = _rewrite_image_links(htmls, tid, aid, floor_labels)
     _write_modified_htmls(htmls, tid, aid)
 
