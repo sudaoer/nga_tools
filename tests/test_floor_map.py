@@ -40,7 +40,7 @@ class FloorMapPagePostRefsTest(unittest.TestCase):
             _page_post_refs({"result": None}, "作者页")
 
     def test_missing_result_can_be_treated_as_empty_page(self) -> None:
-        with patch("builtins.print") as print_mock:
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
             refs = _page_post_refs(
                 {"result": None},
                 "原帖第2538页",
@@ -48,7 +48,7 @@ class FloorMapPagePostRefsTest(unittest.TestCase):
             )
 
         self.assertEqual(refs, [])
-        print_mock.assert_called_once()
+        self.assertIn("警告：原帖第2538页 缺少帖子列表", output.getvalue())
 
 
 class FloorMapOriginalScanTest(unittest.TestCase):

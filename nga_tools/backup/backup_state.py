@@ -9,6 +9,7 @@ from nga_tools.backup.floor_map import (
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,
 )
+from nga_tools.console import report_warning
 
 BACKUP_STATE_FILENAME = "backup_state.json"
 BACKUP_STATE_VERSION = 2
@@ -38,11 +39,11 @@ def load_state(thread_folder: Path) -> BackupState | None:
     except FileNotFoundError:
         return None
     except json.JSONDecodeError as error:
-        print(f"警告：备份状态文件无效，按无状态处理：{path}: {error}")
+        report_warning(f"备份状态文件无效，按无状态处理：{path}: {error}")
         return None
 
     if not isinstance(raw_data, dict):
-        print(f"警告：备份状态文件格式无效，按无状态处理：{path}")
+        report_warning(f"备份状态文件格式无效，按无状态处理：{path}")
         return None
 
     data = cast(dict[object, object], raw_data)
@@ -73,7 +74,7 @@ def load_state(thread_folder: Path) -> BackupState | None:
     )
     for field in int_fields:
         if type(data.get(field)) is not int:
-            print(f"警告：备份状态文件字段无效，按无状态处理：{path}: {field}")
+            report_warning(f"备份状态文件字段无效，按无状态处理：{path}: {field}")
             return None
     if data["unresolved_missing_count"] != 0:
         return None

@@ -211,12 +211,12 @@ class RewriteImageLinksTest(unittest.TestCase):
                 "nga_tools.backup.archive.utils.get_folder",
                 return_value="/tmp/html_modified",
             ),
-            patch("builtins.print") as print_mock,
+            redirect_stdout(io.StringIO()) as output,
         ):
             tasks = _collect_image_download_tasks(htmls, FloorLabels.plain())
 
         self.assertEqual(tasks, [])
-        print_mock.assert_called_once_with("警告：第3095楼的第1张图片链接无效")
+        self.assertIn("警告：第3095楼的第1张图片链接无效", output.getvalue())
 
     def test_rewrites_failed_download_to_placeholder_without_mapping(self) -> None:
         image_url = (
@@ -1194,9 +1194,9 @@ class DownloadImagesTest(unittest.TestCase):
                 _download_images(123, None, files_to_download)
 
         output_text = output.getvalue()
-        self.assertIn("共2张图片，已存在1张，本次下载1张。", output_text)
-        self.assertIn("下载进度：0/1", output_text)
-        self.assertIn("下载进度：1/1", output_text)
+        self.assertIn("共2张图片，已存在1张，本次下载1张", output_text)
+        self.assertIn("本次下载1张 (0/1)", output_text)
+        self.assertIn("图片下载进度 (1/1)", output_text)
         self.assertIn("图片下载完成。", output_text)
         self.assertIn("成功下载1个文件，失败0个文件。", output_text)
 
@@ -1231,8 +1231,8 @@ class DownloadImagesTest(unittest.TestCase):
             download_image_tasks.assert_not_called()
 
         output_text = output.getvalue()
-        self.assertIn("共1张图片，已存在1张，本次下载0张。", output_text)
-        self.assertIn("下载进度：0/0", output_text)
+        self.assertIn("共1张图片，已存在1张，本次下载0张", output_text)
+        self.assertIn("图片下载进度 (0/0)", output_text)
         self.assertIn("成功下载0个文件，失败0个文件。", output_text)
 
 

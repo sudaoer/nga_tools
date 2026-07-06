@@ -16,6 +16,7 @@ import aiohttp
 from nga_tools import network_limits
 from nga_tools.bbcode_convert import strip_bbcode_tags
 from nga_tools.config import get_config
+from nga_tools.console import report_info, report_warning
 
 
 class DownloadTask(TypedDict):
@@ -178,7 +179,7 @@ def download_files(
                 is_status_retry = status in retry_statuses if status is not None else True
                 can_retry = attempt < retries and is_status_retry
                 if not can_retry:
-                    print(f"Download failed, skipping {url}: {e}")
+                    report_warning(f"Download failed, skipping {url}: {e}")
                     return {
                         "url": url,
                         "save_path": save_path,
@@ -186,15 +187,17 @@ def download_files(
                         "error": str(e),
                     }
                 wait = backoff_factor * (2**attempt)
-                print(
+                report_warning(
                     f"Download failed ({e}), retrying {attempt + 1}/{retries} "
                     f"after {wait:.1f}s: {url}"
                 )
                 await asyncio.sleep(wait)
                 attempt += 1
             except Exception as e:
-                print(f"Unexpected error downloading {url}, skipping: {e}")
-                traceback.print_exc()
+                report_warning(
+                    f"Unexpected error downloading {url}, skipping: {e}\n"
+                    f"{traceback.format_exc().rstrip()}"
+                )
                 return {
                     "url": url,
                     "save_path": save_path,
@@ -202,7 +205,7 @@ def download_files(
                     "error": str(e),
                 }
         if last_exc:
-            print(f"Exhausted retries, skipping {url}: {last_exc}")
+            report_warning(f"Exhausted retries, skipping {url}: {last_exc}")
             return {
                 "url": url,
                 "save_path": save_path,
@@ -270,7 +273,7 @@ def TODO(message: str) -> NoReturn:
     """
     标记待办事项
     """
-    print(f"TODO: {message}")
+    report_info(f"TODO: {message}")
     sys.exit(1)
 
 
@@ -304,6 +307,6 @@ def NGA_img_link_verify(url: str) -> bool:
 if __name__ == "__main__":
     sample_text = "[b]Bold Text[/b] and [url=http://example.com]Example Link[/url]"
     cleaned_text = delete_bbcode_tags(sample_text)
-    print("Original Text:", sample_text)
-    print("Cleaned Text:", cleaned_text)
-    print("Word Count:", len(cleaned_text.split()))
+    report_info(f"Original Text: {sample_text}")
+    report_info(f"Cleaned Text: {cleaned_text}")
+    report_info(f"Word Count: {len(cleaned_text.split())}")

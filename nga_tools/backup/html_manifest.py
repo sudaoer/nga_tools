@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import TypedDict, cast
 
+from nga_tools.console import report_warning
+
 HTML_MANIFEST_FILENAME = "html_manifest.json"
 HTML_MANIFEST_VERSION = 1
 HTML_GENERATION_VERSION = 1
@@ -52,11 +54,11 @@ def load_manifest(folder_html: Path) -> dict[str, HtmlManifestEntry]:
     except FileNotFoundError:
         return {}
     except json.JSONDecodeError as error:
-        print(f"警告：html缓存文件无效，按空缓存处理：{path}: {error}")
+        report_warning(f"html缓存文件无效，按空缓存处理：{path}: {error}")
         return {}
 
     if not isinstance(raw_data, dict):
-        print(f"警告：html缓存文件格式无效，按空缓存处理：{path}")
+        report_warning(f"html缓存文件格式无效，按空缓存处理：{path}")
         return {}
 
     data = cast(dict[object, object], raw_data)
@@ -69,19 +71,19 @@ def load_manifest(folder_html: Path) -> dict[str, HtmlManifestEntry]:
 
     raw_files = data.get("files")
     if not isinstance(raw_files, dict):
-        print(f"警告：html缓存文件缺少files对象，按空缓存处理：{path}")
+        report_warning(f"html缓存文件缺少files对象，按空缓存处理：{path}")
         return {}
 
     files: dict[str, HtmlManifestEntry] = {}
     for raw_filename, raw_entry in cast(dict[object, object], raw_files).items():
         if not isinstance(raw_filename, str) or not isinstance(raw_entry, dict):
-            print(f"警告：html缓存文件files格式无效，按空缓存处理：{path}")
+            report_warning(f"html缓存文件files格式无效，按空缓存处理：{path}")
             return {}
         entry = cast(dict[object, object], raw_entry)
         source_hash = entry.get("source_hash")
         output_hash = entry.get("output_hash")
         if not isinstance(source_hash, str) or not isinstance(output_hash, str):
-            print(f"警告：html缓存文件files格式无效，按空缓存处理：{path}")
+            report_warning(f"html缓存文件files格式无效，按空缓存处理：{path}")
             return {}
         files[raw_filename] = {
             "source_hash": source_hash,

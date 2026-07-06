@@ -26,7 +26,7 @@ from nga_tools.backup.floor_map import (
 )
 from nga_tools.backup import image_store
 from nga_tools.bbcode_convert import ImageSrcResolver, bbcode_to_html
-from nga_tools.console import InlineProgress
+from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
 
@@ -325,15 +325,20 @@ def _write_pages_json(
 ) -> dict[int, PageData]:
     folder_json = Path(utils.get_folder(tid, aid, "json"))
     page_data_by_page: dict[int, PageData] = {}
-    progress = InlineProgress()
-    try:
-        for page_number in range(1, page_count + 1):
-            progress.update(f"正在获取第{page_number}页...")
-            page_data = client.get_page(tid, aid, page_number)
-            _write_page_json(folder_json, page_number, page_data)
-            page_data_by_page[page_number] = page_data
-    finally:
-        progress.finish()
+    for page_number in range(1, page_count + 1):
+        report_progress(
+            f"正在获取第{page_number}页",
+            completed=page_number - 1,
+            total=page_count,
+        )
+        page_data = client.get_page(tid, aid, page_number)
+        _write_page_json(folder_json, page_number, page_data)
+        page_data_by_page[page_number] = page_data
+    report_progress(
+        "页面获取完成",
+        completed=page_count,
+        total=page_count,
+    )
     return page_data_by_page
 
 
@@ -486,9 +491,9 @@ def _fill_missing_lou(  # pyright: ignore[reportUnusedFunction]
 ) -> None:
     for lou in missing_lou:
         if lou in recovered_missing_html_by_lou:
-            print(f"已恢复缺失{floor_labels.label(lou)}。")
+            report_info(f"已恢复缺失{floor_labels.label(lou)}。")
         else:
-            print(f"警告：缺失{floor_labels.label(lou)}！")
+            report_warning(f"缺失{floor_labels.label(lou)}！")
 
     for lou in missing_lou:
         htmls.append(
@@ -510,9 +515,9 @@ def _fill_missing_post_records(
 ) -> None:
     for lou in missing_lou:
         if lou in recovered_missing_html_by_lou:
-            print(f"已恢复缺失{floor_labels.label(lou)}。")
+            report_info(f"已恢复缺失{floor_labels.label(lou)}。")
         else:
-            print(f"警告：缺失{floor_labels.label(lou)}！")
+            report_warning(f"缺失{floor_labels.label(lou)}！")
 
     for lou in missing_lou:
         post_html = recovered_missing_html_by_lou.get(lou, MISSING_POST_HTML)
@@ -572,8 +577,8 @@ def _collect_image_download_tasks_from_parsed(
 
             normalized_image_url = image_store.normalize_nga_image_url(image_url)
             if not utils.NGA_img_link_verify(normalized_image_url):
-                print(
-                    f"警告：{floor_labels.label(parsed_html.post_html['lou'])}的"
+                report_warning(
+                    f"{floor_labels.label(parsed_html.post_html['lou'])}的"
                     f"第{index + 1}张图片链接无效"
                 )
                 continue
@@ -640,8 +645,8 @@ def _rewrite_parsed_image_links(
                 item_complete = False
             if image_src is None:
                 item_complete = False
-                print(
-                    f"警告：{floor_labels.label(item['lou'])}的"
+                report_warning(
+                    f"{floor_labels.label(item['lou'])}的"
                     f"第{index + 1}张图片未找到已下载文件"
                 )
                 continue
@@ -903,12 +908,13 @@ def _download_images(
     total_count = len(files_to_download)
     pending_count = len(pending_downloads)
     existing_count = total_count - pending_count
-    print(
+    report_progress(
         f"共{total_count}张图片，已存在{existing_count}张，"
-        f"本次下载{pending_count}张。"
+        f"本次下载{pending_count}张",
+        completed=0,
+        total=pending_count,
     )
 
-    progress = InlineProgress()
     download_result: utils.DownloadSummary = {"succeeded": [], "failed": []}
 
     def update_progress(
@@ -916,25 +922,27 @@ def _download_images(
         total: int,
         _result: utils.DownloadFileResult,
     ) -> None:
-        progress.update(f"下载进度：{completed}/{total}")
+        report_progress(
+            "图片下载进度",
+            completed=completed,
+            total=total,
+        )
 
-    progress.update(f"下载进度：0/{pending_count}")
-    try:
-        if pending_count > 0:
-            download_result = image_store.download_image_tasks(
-                pending_downloads,
-                on_progress=update_progress,
-            )
-    finally:
-        progress.finish()
+    if pending_count > 0:
+        download_result = image_store.download_image_tasks(
+            pending_downloads,
+            on_progress=update_progress,
+        )
+    else:
+        report_progress("图片下载进度", completed=0, total=0)
 
-    print("图片下载完成。")
-    print(
+    report_info("图片下载完成。")
+    report_info(
         f"成功下载{len(download_result['succeeded'])}个文件，"
         f"失败{len(download_result['failed'])}个文件。"
     )
     for failed in download_result["failed"]:
-        print(f"下载失败：{failed['url']}，保存为：{failed['save_path']}")
+        report_warning(f"下载失败：{failed['url']}，保存为：{failed['save_path']}")
     return download_result
 
 
@@ -981,7 +989,7 @@ def _build_floor_map_for_post_refs(
                 missing_lou,
             )
             if current_result is not None:
-                print("楼层映射输入未变化，复用已有floor_map.json。")
+                report_info("楼层映射输入未变化，复用已有floor_map.json。")
                 return current_result
         return build_and_save_floor_map(
             client,
@@ -992,11 +1000,11 @@ def _build_floor_map_for_post_refs(
             strict=False,
         )
     except Exception as error:
-        print(f"警告：楼层映射生成失败，继续生成备份：{error}")
+        report_warning(f"楼层映射生成失败，继续生成备份：{error}")
         try:
             floor_labels = load_floor_labels(tid, aid)
         except Exception as load_error:
-            print(f"警告：无法加载已有楼层映射，使用普通楼层标签：{load_error}")
+            report_warning(f"无法加载已有楼层映射，使用普通楼层标签：{load_error}")
             floor_labels = FloorLabels.plain()
         return FloorMapBuildResult(floor_labels, {})
 
@@ -1012,7 +1020,7 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
 
     page_data_by_page = _write_pages_json(client, tid, aid, page_count)
 
-    print("开始处理")
+    report_info("开始处理")
 
     records = _prepare_post_records(page_data_by_page, tid, aid, None)
     missing_lou = _find_missing_lou(records)
@@ -1091,7 +1099,7 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         aid,
     )
     if _can_fast_skip_author_backup(tid, aid, author_total_lou_count):
-        print("只看楼主总楼数未变化，跳过增量处理。")
+        report_info("只看楼主总楼数未变化，跳过增量处理。")
         return
 
     folder_json = Path(utils.get_folder(tid, aid, "json"))
@@ -1104,24 +1112,32 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
     missing_page_numbers = set(range(1, page_count + 1)) - existing_page_numbers
     refresh_page_numbers = set(range(tail_start, page_count + 1)) | missing_page_numbers
 
-    print(
+    report_progress(
         f"准备增量备份：远端{page_count}页，本地{len(existing_page_numbers)}页，"
-        f"需获取{len(refresh_page_numbers)}页。"
+        f"需获取{len(refresh_page_numbers)}页",
+        completed=0,
+        total=len(refresh_page_numbers),
     )
-    progress = InlineProgress()
-    try:
-        for page_number in sorted(refresh_page_numbers):
-            progress.update(f"正在获取第{page_number}页...")
-            page_data = client.get_page(tid, aid, page_number)
-            _write_page_json(folder_json, page_number, page_data)
-    finally:
-        progress.finish()
+    sorted_refresh_page_numbers = sorted(refresh_page_numbers)
+    for index, page_number in enumerate(sorted_refresh_page_numbers, start=1):
+        report_progress(
+            f"正在获取第{page_number}页",
+            completed=index - 1,
+            total=len(sorted_refresh_page_numbers),
+        )
+        page_data = client.get_page(tid, aid, page_number)
+        _write_page_json(folder_json, page_number, page_data)
+    report_progress(
+        "页面获取完成",
+        completed=len(sorted_refresh_page_numbers),
+        total=len(sorted_refresh_page_numbers),
+    )
 
     page_data_by_page = _read_pages_json(folder_json)
     if not page_data_by_page:
         raise RuntimeError("没有可处理的JSON备份。")
 
-    print("开始处理")
+    report_info("开始处理")
 
     records = _prepare_post_records(
         page_data_by_page,

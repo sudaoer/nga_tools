@@ -3,10 +3,15 @@ from __future__ import annotations
 import io
 import threading
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
+from rich.console import Console
+
 from nga_tools.cli import args_parse
+from nga_tools.console import ConsoleReporter, use_reporter
 from nga_tools.commands.backup import backup_configs
 from nga_tools.thread_configs import ThreadConfig
 
@@ -80,6 +85,19 @@ def _backup_config_app_config(workers: int = 4) -> SimpleNamespace:
     )
 
 
+@contextmanager
+def _captured_reporter() -> Iterator[io.StringIO]:
+    output = io.StringIO()
+    console = Console(
+        file=output,
+        force_terminal=False,
+        color_system=None,
+        width=120,
+    )
+    with use_reporter(ConsoleReporter(console)):
+        yield output
+
+
 class BackupConfigsHandlerTest(unittest.TestCase):
     def test_runs_sub_backup_for_each_thread_config_in_order_with_one_worker(
         self,
@@ -96,7 +114,7 @@ class BackupConfigsHandlerTest(unittest.TestCase):
                 "nga_tools.commands.backup.configure_network_limits_from_args",
                 return_value=_backup_config_app_config(),
             ),
-            patch("builtins.print"),
+            _captured_reporter(),
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
 
@@ -115,14 +133,14 @@ class BackupConfigsHandlerTest(unittest.TestCase):
                 "nga_tools.commands.backup.configure_network_limits_from_args",
                 return_value=_backup_config_app_config(),
             ),
-            patch("builtins.print") as print_mock,
+            _captured_reporter() as output,
         ):
             configs_cls.return_value.get_thread_configs.return_value = []
 
             backup_configs({})
 
         backup_mock.assert_not_called()
-        print_mock.assert_called_once_with("没有找到任何帖子配置。")
+        self.assertIn("没有找到任何帖子配置。", output.getvalue())
 
     def test_continues_after_failure_and_exits_nonzero(self) -> None:
         thread_configs = [
@@ -138,7 +156,7 @@ class BackupConfigsHandlerTest(unittest.TestCase):
                 "nga_tools.commands.backup.configure_network_limits_from_args",
                 return_value=_backup_config_app_config(workers=2),
             ),
-            patch("builtins.print"),
+            _captured_reporter() as output,
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
 
@@ -157,6 +175,9 @@ class BackupConfigsHandlerTest(unittest.TestCase):
             backup_mock.call_args_list,
             [call(101, 201), call(102, 202), call(103, None)],
         )
+        output_text = output.getvalue()
+        self.assertIn("批量备份完成：成功2个，失败1个。", output_text)
+        self.assertIn("失败：broken (tid: 102, aid: 202)：boom", output_text)
 
     def test_default_workers_run_backups_in_parallel(self) -> None:
         thread_configs = [
@@ -190,7 +211,7 @@ class BackupConfigsHandlerTest(unittest.TestCase):
                 "nga_tools.commands.backup.configure_network_limits_from_args",
                 return_value=_backup_config_app_config(workers=4),
             ),
-            patch("builtins.print"),
+            _captured_reporter(),
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
 

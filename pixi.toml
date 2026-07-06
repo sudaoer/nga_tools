@@ -19,6 +19,7 @@ pillow = ">=12.2.0,<13"
 openai = ">=2.33.0,<3"
 openpyxl = ">=3.1.5,<4"
 pyright = ">=1.1.411,<2"
+rich = ">=15.0.0,<16"
 
 [target.linux.dependencies]
 weasyprint = "*"

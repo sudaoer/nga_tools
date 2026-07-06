@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import NotRequired, Optional, TypedDict, cast
 
 from nga_tools import utils
-from nga_tools.console import InlineProgress
+from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
 
@@ -160,7 +160,7 @@ def _page_post_refs(
 ) -> list[tuple[int, int]]:
     raw_posts = page_data.get("result")
     if raw_posts is None and allow_missing_posts:
-        print(f"警告：{source} 缺少帖子列表，按空页处理。", flush=True)
+        report_warning(f"{source} 缺少帖子列表，按空页处理。")
         return []
 
     if not isinstance(raw_posts, list):
@@ -188,7 +188,7 @@ def _page_post_dicts(
 ) -> list[dict[str, object]]:
     raw_posts = page_data.get("result")
     if raw_posts is None and allow_missing_posts:
-        print(f"警告：{source} 缺少帖子列表，按空页处理。", flush=True)
+        report_warning(f"{source} 缺少帖子列表，按空页处理。")
         return []
 
     if not isinstance(raw_posts, list):
@@ -303,7 +303,7 @@ def _write_floor_map(
     if input_signature is not None:
         data["input_signature"] = input_signature
     path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
-    print(f"已写入楼层映射：{path}")
+    report_info(f"已写入楼层映射：{path}")
 
 
 def _load_floor_map_entries_from_data(
@@ -464,7 +464,7 @@ def build_and_save_floor_map(
     if not author_posts:
         raise RuntimeError("没有可用于生成楼层映射的只看作者帖子。")
 
-    print(f"准备生成楼层映射：只看作者{len(author_posts)}楼。", flush=True)
+    report_progress(f"准备生成楼层映射：只看作者{len(author_posts)}楼")
     input_signature = floor_map_input_signature(author_posts, missing_author_lous)
 
     author_lou_to_pid: dict[int, int] = {}
@@ -501,10 +501,11 @@ def build_and_save_floor_map(
             original_lou_by_author_lou,
             page_count,
         )
-        print(
+        report_progress(
             f"增量扫描原帖{len(pages_to_scan)}页，"
-            f"匹配{len(pending_author_lous)}个未映射楼层。",
-            flush=True,
+            f"匹配{len(pending_author_lous)}个未映射楼层",
+            completed=0,
+            total=len(pages_to_scan),
         )
         _scan_original_pages(
             client,
@@ -526,7 +527,7 @@ def build_and_save_floor_map(
             if author_lou in original_lou_by_author_lou
         }
     else:
-        print("已有楼层映射覆盖所有非缺失楼层。", flush=True)
+        report_info("已有楼层映射覆盖所有非缺失楼层。")
 
     unmapped_author_lous = sorted(
         author_lou
@@ -540,7 +541,7 @@ def build_and_save_floor_map(
         message = f"有{len(unmapped_author_lous)}个只看作者楼层未找到原帖楼层：{preview}。"
         if strict:
             raise RuntimeError(message)
-        print(f"警告：{message}", flush=True)
+        report_warning(message)
 
     missing_inference = _infer_missing_original_lous(
         client,
@@ -555,15 +556,9 @@ def build_and_save_floor_map(
     inferred_missing_originals = missing_inference.exact_original_by_author_lou
     candidate_missing_originals = missing_inference.candidate_originals_by_author_lou
     if inferred_missing_originals:
-        print(
-            f"已补全{len(inferred_missing_originals)}个缺失楼的原帖楼层。",
-            flush=True,
-        )
+        report_info(f"已补全{len(inferred_missing_originals)}个缺失楼的原帖楼层。")
     if candidate_missing_originals:
-        print(
-            f"已记录{len(candidate_missing_originals)}个缺失楼的候选原帖楼层。",
-            flush=True,
-        )
+        report_info(f"已记录{len(candidate_missing_originals)}个缺失楼的候选原帖楼层。")
 
     all_original_by_author_lou = {
         **original_lou_by_author_lou,
@@ -673,11 +668,10 @@ def _load_reusable_floor_map(
         or missing_original_lou_by_author_lou
         or candidate_originals_by_author_lou
     ):
-        print(
+        report_info(
             f"复用已有楼层映射：确定{len(original_lou_by_author_lou)}楼，"
             f"缺失确定{len(missing_original_lou_by_author_lou)}楼，"
             f"候选{len(candidate_originals_by_author_lou)}楼。",
-            flush=True,
         )
     return (
         original_lou_by_author_lou,
@@ -761,49 +755,48 @@ def _scan_original_pages(
         for author_lous in pid_to_author_lous.values()
         for author_lou in author_lous
     }
-    progress = InlineProgress()
-    try:
-        for index, page_number in enumerate(page_numbers, start=1):
-            if page_number in scanned_pages:
-                continue
-            if target_author_lous:
-                matched_count = sum(
-                    1
-                    for author_lou in target_author_lous
-                    if author_lou in original_lou_by_author_lou
-                )
-                progress_text = f"已匹配{matched_count}/{author_post_count}楼..."
-            else:
-                progress_text = "正在收集原帖楼层信息..."
-            progress.update(
-                f"正在扫描原帖第{page_number}页，"
-                f"进度{index}/{len(page_numbers)}，"
-                f"{progress_text}"
+    for index, page_number in enumerate(page_numbers, start=1):
+        if page_number in scanned_pages:
+            continue
+        if target_author_lous:
+            matched_count = sum(
+                1
+                for author_lou in target_author_lous
+                if author_lou in original_lou_by_author_lou
             )
+            progress_text = f"已匹配{matched_count}/{author_post_count}楼"
+        else:
+            progress_text = "正在收集原帖楼层信息"
+        report_progress(
+            f"正在扫描原帖第{page_number}页，{progress_text}",
+            completed=index - 1,
+            total=len(page_numbers),
+        )
 
-            page_data = client.get_page(tid, None, page_number)
-            scanned_pages.add(page_number)
-            if page_data.get("result") is None:
-                progress.finish()
-            for post in _page_post_dicts(
-                page_data,
-                f"原帖第{page_number}页",
-                allow_missing_posts=True,
-            ):
-                pid = cast(int, post["pid"])
-                original_lou = cast(int, post["lou"])
-                seen_original_lous.add(original_lou)
-                if original_posts_by_lou is not None:
-                    original_posts_by_lou[original_lou] = {
-                        "pid": pid,
-                        "lou": original_lou,
-                        "author_uid": _post_author_uid(post),
-                        "content": _post_content(post),
-                    }
-                for author_lou in pid_to_author_lous.get(pid, []):
-                    original_lou_by_author_lou[author_lou] = original_lou
-    finally:
-        progress.finish()
+        page_data = client.get_page(tid, None, page_number)
+        scanned_pages.add(page_number)
+        for post in _page_post_dicts(
+            page_data,
+            f"原帖第{page_number}页",
+            allow_missing_posts=True,
+        ):
+            pid = cast(int, post["pid"])
+            original_lou = cast(int, post["lou"])
+            seen_original_lous.add(original_lou)
+            if original_posts_by_lou is not None:
+                original_posts_by_lou[original_lou] = {
+                    "pid": pid,
+                    "lou": original_lou,
+                    "author_uid": _post_author_uid(post),
+                    "content": _post_content(post),
+                }
+            for author_lou in pid_to_author_lous.get(pid, []):
+                original_lou_by_author_lou[author_lou] = original_lou
+    report_progress(
+        "原帖扫描完成",
+        completed=len(page_numbers),
+        total=len(page_numbers),
+    )
 
 
 def _recover_missing_posts_from_original_pages(
@@ -852,7 +845,7 @@ def _recover_missing_posts_from_original_pages(
         }
 
     if recovered:
-        print(f"已从匿名原帖恢复{len(recovered)}个缺失楼内容。", flush=True)
+        report_info(f"已从匿名原帖恢复{len(recovered)}个缺失楼内容。")
     return recovered
 
 
@@ -907,7 +900,7 @@ def _infer_missing_original_lous(
             existing_candidate_lous = existing_candidates.get(missing_lou)
             if existing_candidate_lous:
                 candidates[missing_lou] = existing_candidate_lous
-            print(f"警告：无法推断第{missing_lou}楼的原帖楼层。")
+            report_warning(f"无法推断第{missing_lou}楼的原帖楼层。")
             continue
 
         prev_author_lou = prev_candidates[-1]
@@ -963,8 +956,8 @@ def _infer_missing_original_lous(
                 author_gap_lous,
                 possible_original_lous,
             )
-            print(
-                f"警告：无法唯一推断第{missing_lou}楼的原帖楼层，"
+            report_warning(
+                f"无法唯一推断第{missing_lou}楼的原帖楼层，"
                 f"只看作者缺失{len(author_gap_lous)}楼，"
                 f"原帖区间缺失{len(original_gap_lous)}楼，"
                 f"匿名候选{len(anonymous_original_lous)}楼。"
@@ -991,7 +984,7 @@ def _infer_missing_original_lous(
 
 def generate_floor_map_from_backup(tid: int, aid: Optional[int]) -> None:
     if aid is None:
-        print("未指定aid，原帖楼层与当前楼层一致，无需生成floor_map.json。")
+        report_info("未指定aid，原帖楼层与当前楼层一致，无需生成floor_map.json。")
         return
 
     author_posts = read_author_posts_from_json(tid, aid)
