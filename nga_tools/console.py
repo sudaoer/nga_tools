@@ -149,6 +149,23 @@ def _progress_text(completed: int | None, total: int | None) -> str:
     return f"{completed}/{total}"
 
 
+def _single_line_column(
+    *,
+    min_width: int | None = None,
+    max_width: int | None = None,
+    width: int | None = None,
+    ratio: int | None = None,
+) -> Column:
+    return Column(
+        min_width=min_width,
+        max_width=max_width,
+        width=width,
+        ratio=ratio,
+        no_wrap=True,
+        overflow="ellipsis",
+    )
+
+
 class BackupConfigTaskReporter:
     def __init__(
         self,
@@ -198,22 +215,31 @@ class BackupConfigsProgressDisplay:
             TextColumn(
                 "{task.description}",
                 markup=False,
-                table_column=Column(ratio=2, no_wrap=False),
+                table_column=_single_line_column(
+                    min_width=28,
+                    max_width=56,
+                    ratio=2,
+                ),
             ),
-            BarColumn(bar_width=None),
+            BarColumn(bar_width=24),
             TextColumn(
                 "{task.fields[progress_text]}",
                 justify="right",
                 markup=False,
+                table_column=_single_line_column(width=11),
             ),
             TextColumn(
                 "{task.fields[status]}",
                 markup=False,
-                table_column=Column(ratio=3),
+                table_column=_single_line_column(
+                    min_width=16,
+                    max_width=32,
+                    ratio=1,
+                ),
             ),
             TimeElapsedColumn(),
             console=self._console,
-            expand=True,
+            expand=False,
         )
         self._total_task = self._progress.add_task(
             "总进度",

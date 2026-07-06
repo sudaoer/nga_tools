@@ -98,6 +98,32 @@ class BackupConfigsProgressDisplayTest(unittest.TestCase):
         self.assertIn("[1/1] [攻] foo [/x]", visible_tasks)
         self.assertIn("警告：[攻] foo [/x]：坏 [b] [/x]", output_text)
 
+    def test_long_task_label_stays_on_one_named_progress_row(self) -> None:
+        output = io.StringIO()
+        console = Console(
+            file=output,
+            force_terminal=True,
+            color_system=None,
+            width=160,
+        )
+        label = (
+            "这是一个非常长的NGA主题标题包含很多中文字符以及tid aid "
+            "(tid: 12345678, aid: 87654321)"
+        )
+
+        with BackupConfigsProgressDisplay(235, console=console) as display:
+            reporter = display.start_thread(index=12, total=235, label=label)
+            reporter.progress(
+                "正在获取第123页，准备下载图片和生成HTML",
+                completed=3,
+                total=235,
+            )
+
+        output_text = output.getvalue()
+        self.assertIn("[12/235]", output_text)
+        self.assertIn("这是一个非常长的NGA主题标题", output_text)
+        self.assertNotIn("\n  …", output_text)
+
 
 if __name__ == "__main__":
     unittest.main()
