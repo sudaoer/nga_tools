@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from rich.console import Console
@@ -9,6 +11,10 @@ from nga_tools.console import (
     BackupConfigsProgressDisplay,
     ConsoleReporter,
     InlineProgress,
+    report_info,
+    report_warning,
+    use_reporter,
+    use_warning_log,
 )
 
 
@@ -46,6 +52,37 @@ class ConsoleReporterTest(unittest.TestCase):
 
         reporter.info("[攻略] foo [/x]")
         reporter.warning("[公告] bar [/b]")
+
+        self.assertEqual(
+            output.getvalue(),
+            "[攻略] foo [/x]\n警告：[公告] bar [/b]\n",
+        )
+
+    def test_warning_log_mirrors_warnings_and_overwrites_file(self) -> None:
+        output = io.StringIO()
+        console = Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=120,
+        )
+
+        with TemporaryDirectory() as temp_dir_name:
+            log_path = Path(temp_dir_name) / "thread" / "warnings.log"
+            log_path.parent.mkdir()
+            log_path.write_text("旧日志\n", encoding="utf-8")
+
+            with (
+                use_reporter(ConsoleReporter(console)),
+                use_warning_log(log_path),
+            ):
+                report_info("[攻略] foo [/x]")
+                report_warning("[公告] bar [/b]")
+
+            self.assertEqual(
+                log_path.read_text(encoding="utf-8"),
+                "警告：[公告] bar [/b]\n",
+            )
 
         self.assertEqual(
             output.getvalue(),

@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 import threading
 import unittest
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
 from rich.console import Console
 
 from nga_tools.cli import args_parse
-from nga_tools.console import ConsoleReporter, use_reporter
-from nga_tools.commands.backup import backup_configs
+from nga_tools.console import ConsoleReporter, report_warning, use_reporter
+from nga_tools.commands.backup import (
+    backup_all,
+    backup_configs,
+    backup_floors,
+    backup_sub,
+)
 from nga_tools.thread_configs import ThreadConfig
 
 
@@ -83,6 +90,22 @@ def _backup_config_app_config(workers: int = 4) -> SimpleNamespace:
     )
 
 
+def _fake_get_folder(base_dir: Path) -> Callable[..., str]:
+    def fake_get_folder(
+        tid: int,
+        aid: int | None,
+        subfolder: str | None = None,
+    ) -> str:
+        aid_part = str(aid) if aid is not None else "all"
+        path = base_dir / f"{tid}_{aid_part}"
+        if subfolder is not None:
+            path = path / subfolder
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+
+    return fake_get_folder
+
+
 @contextmanager
 def _captured_reporter() -> Iterator[io.StringIO]:
     output = io.StringIO()
@@ -94,6 +117,110 @@ def _captured_reporter() -> Iterator[io.StringIO]:
     )
     with use_reporter(ConsoleReporter(console)):
         yield output
+
+
+class BackupWarningLogTest(unittest.TestCase):
+    def test_single_thread_backup_commands_write_warning_log(self) -> None:
+        handlers = [
+            (backup_all, "nga_tools.commands.backup.backup_thread"),
+            (backup_sub, "nga_tools.commands.backup.backup_thread_sub"),
+            (
+                backup_floors,
+                "nga_tools.commands.backup.generate_floor_map_from_backup",
+            ),
+        ]
+
+        for handler, implementation_path in handlers:
+            with self.subTest(handler=handler.__name__):
+                with TemporaryDirectory() as temp_dir_name:
+                    base_dir = Path(temp_dir_name)
+                    thread_dir = base_dir / "101_all"
+                    thread_dir.mkdir()
+                    log_path = thread_dir / "warnings.log"
+                    log_path.write_text("旧日志\n", encoding="utf-8")
+
+                    def implementation(tid: int, aid: int | None) -> None:
+                        self.assertEqual((tid, aid), (101, None))
+                        report_warning("单帖警告")
+
+                    with (
+                        patch(
+                            "nga_tools.commands.backup.configure_network_limits_from_args",
+                            return_value=_backup_config_app_config(),
+                        ),
+                        patch(
+                            "nga_tools.commands.backup.resolve_command_thread_target",
+                            return_value=(101, None),
+                        ),
+                        patch(
+                            "nga_tools.commands.backup.utils.get_folder",
+                            side_effect=_fake_get_folder(base_dir),
+                        ),
+                        patch(implementation_path, side_effect=implementation),
+                        _captured_reporter() as output,
+                    ):
+                        handler({})
+
+                    self.assertEqual(
+                        log_path.read_text(encoding="utf-8"),
+                        "警告：单帖警告\n",
+                    )
+                    self.assertIn("警告：单帖警告", output.getvalue())
+
+    def test_backup_configs_writes_per_thread_warning_logs(self) -> None:
+        thread_configs = [
+            _thread_config(name="first", tid=101, aid=201),
+            _thread_config(name="second", tid=102, aid=None),
+        ]
+
+        with TemporaryDirectory() as temp_dir_name:
+            base_dir = Path(temp_dir_name)
+            (base_dir / "101_201").mkdir()
+            (base_dir / "102_all").mkdir()
+            (base_dir / "101_201" / "warnings.log").write_text(
+                "旧日志\n",
+                encoding="utf-8",
+            )
+            (base_dir / "102_all" / "warnings.log").write_text(
+                "旧日志\n",
+                encoding="utf-8",
+            )
+
+            def backup_side_effect(tid: int, aid: int | None) -> None:
+                report_warning(f"warning {tid} {aid}")
+
+            with (
+                patch("nga_tools.commands.backup.NGAThreadConfigs") as configs_cls,
+                patch(
+                    "nga_tools.commands.backup.backup_thread_sub",
+                    side_effect=backup_side_effect,
+                ),
+                patch(
+                    "nga_tools.commands.backup.configure_network_limits_from_args",
+                    return_value=_backup_config_app_config(workers=2),
+                ),
+                patch(
+                    "nga_tools.commands.backup.utils.get_folder",
+                    side_effect=_fake_get_folder(base_dir),
+                ),
+                _captured_reporter(),
+            ):
+                configs_cls.return_value.get_thread_configs.return_value = thread_configs
+
+                backup_configs({})
+
+            self.assertEqual(
+                (base_dir / "101_201" / "warnings.log").read_text(
+                    encoding="utf-8"
+                ),
+                "警告：warning 101 201\n",
+            )
+            self.assertEqual(
+                (base_dir / "102_all" / "warnings.log").read_text(
+                    encoding="utf-8"
+                ),
+                "警告：warning 102 None\n",
+            )
 
 
 class BackupConfigsHandlerTest(unittest.TestCase):

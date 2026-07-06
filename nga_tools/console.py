@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from pathlib import Path
 import sys
 from threading import RLock
 import unicodedata
@@ -105,6 +106,33 @@ class ConsoleReporter:
         self.info(f"{message} ({completed}/{total})")
 
 
+class WarningLogReporter:
+    def __init__(self, reporter: Reporter, log_file: TextIO) -> None:
+        self._reporter = reporter
+        self._log_file = log_file
+
+    @property
+    def console(self) -> Console:
+        return self._reporter.console
+
+    def info(self, message: str) -> None:
+        self._reporter.info(message)
+
+    def warning(self, message: str) -> None:
+        self._reporter.warning(message)
+        self._log_file.write(f"警告：{message}\n")
+        self._log_file.flush()
+
+    def progress(
+        self,
+        message: str,
+        *,
+        completed: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        self._reporter.progress(message, completed=completed, total=total)
+
+
 _DEFAULT_REPORTER = ConsoleReporter()
 _CURRENT_REPORTER: ContextVar[Reporter | None] = ContextVar(
     "nga_tools_reporter",
@@ -124,6 +152,16 @@ def use_reporter(reporter: Reporter) -> Generator[None]:
         yield
     finally:
         _CURRENT_REPORTER.reset(token)
+
+
+@contextmanager
+def use_warning_log(path: str | Path) -> Generator[None]:
+    log_path = Path(path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    reporter = get_reporter()
+    with log_path.open("w", encoding="utf-8") as log_file:
+        with use_reporter(WarningLogReporter(reporter, log_file)):
+            yield
 
 
 def report_info(message: str) -> None:
