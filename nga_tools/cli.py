@@ -14,7 +14,6 @@ from nga_tools.commands.backup import (
 from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
 from nga_tools.commands.image import image_migrate, image_prune_links, image_verify
 from nga_tools.commands.stats import stats_words
-from nga_tools.commands.thread import handle_thread_add, handle_thread_list
 from nga_tools.commands.types import CommandArgs, CommandHandler
 
 PROGRAM_USAGE = "python main.py"
@@ -147,29 +146,6 @@ ARG_DEFS: dict[str, ArgDef] = {
 
 
 COMMANDS: dict[str, dict[str, ActionConfig]] = {
-    "thread": {
-        "add": {
-            "handler": handle_thread_add,
-            "summary": "添加帖子配置",
-            "usage": (
-                f"{PROGRAM_USAGE} thread add --name NAME --tid TID "
-                "[--aid AID] [--description TEXT]"
-            ),
-            "examples": [
-                f"{PROGRAM_USAGE} thread add --name 帖子名 --tid 12345678",
-                f"{PROGRAM_USAGE} thread add --name 帖子名 --tid 12345678 --aid 987654",
-            ],
-            "args": ["name", "tid", "aid", "description"],
-            "required": ["name", "tid"],
-        },
-        "list": {
-            "handler": handle_thread_list,
-            "summary": "列出已保存的帖子配置",
-            "usage": f"{PROGRAM_USAGE} thread list",
-            "examples": [f"{PROGRAM_USAGE} thread list"],
-            "args": [],
-        },
-    },
     "forum": {
         "list": {
             "handler": handle_forum_list,
@@ -501,7 +477,6 @@ def format_global_help() -> str:
             f"  {PROGRAM_USAGE} <command> <action> --help",
             "",
             "常用示例：",
-            f"  {PROGRAM_USAGE} thread list",
             f"  {PROGRAM_USAGE} forum list --fid 784",
             f"  {PROGRAM_USAGE} forum sync",
             f"  {PROGRAM_USAGE} backup all --name 帖子名",

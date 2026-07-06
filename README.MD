@@ -49,24 +49,6 @@ Copy-Item secrets.example.json secrets.json
 
 ## 使用
 
-添加帖子配置：
-
-```powershell
-pixi run python main.py thread add --name 帖子名 --tid 12345678
-```
-
-只备份某个作者的回复时添加 `--aid`：
-
-```powershell
-pixi run python main.py thread add --name 帖子名 --tid 12345678 --aid 987654
-```
-
-查看已保存的帖子配置：
-
-```powershell
-pixi run python main.py thread list
-```
-
 扫描版面主题（例如 NGA 二次元跑团综合 `fid=784`）：
 
 ```powershell
