@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional, TypeAlias, TypedDict, cast
@@ -16,6 +17,7 @@ DEFAULT_MIN_REPLIES = 500
 
 JsonObject: TypeAlias = dict[str, object]
 SyncStatus: TypeAlias = Literal["added", "skipped", "conflict"]
+ForumScanProgressCallback: TypeAlias = Callable[["ForumScanProgress"], None]
 
 
 class ForumWatchConfig(TypedDict):
@@ -36,6 +38,16 @@ class MatchedForumThread:
     thread: ForumThread
     thread_name: str
     description: str
+
+
+@dataclass(frozen=True)
+class ForumScanProgress:
+    watch_name: str
+    fid: int
+    page: int
+    pages: int
+    scanned_count: int
+    matched_count: int
 
 
 @dataclass(frozen=True)
@@ -236,6 +248,7 @@ def build_matched_thread(
 def collect_matching_threads(
     client: NGAClient,
     watch_configs: list[ForumWatchConfig],
+    progress_callback: ForumScanProgressCallback | None = None,
 ) -> tuple[int, list[MatchedForumThread]]:
     scanned_count = 0
     matched_threads: list[MatchedForumThread] = []
@@ -247,6 +260,17 @@ def collect_matching_threads(
             for thread in page_threads:
                 if thread_matches_watch(thread, watch_config):
                     matched_threads.append(build_matched_thread(watch_config, thread))
+            if progress_callback is not None:
+                progress_callback(
+                    ForumScanProgress(
+                        watch_name=watch_config["watch_name"],
+                        fid=watch_config["fid"],
+                        page=page,
+                        pages=watch_config["pages"],
+                        scanned_count=scanned_count,
+                        matched_count=len(matched_threads),
+                    )
+                )
 
     return scanned_count, matched_threads
 

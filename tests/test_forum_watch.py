@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from nga_tools.commands.forum import handle_forum_sync
 from nga_tools.forum_watch import (
     ForumWatchConfig,
     MatchedForumThread,
     build_matched_thread,
+    collect_matching_threads,
     load_forum_watch_configs,
     sync_matches_to_thread_list,
     thread_matches_watch,
@@ -43,11 +47,12 @@ def _watch(
     exclude_keywords: list[str] | None = None,
     include_tids: list[int] | None = None,
     min_replies: int = 500,
+    pages: int = 1,
 ) -> ForumWatchConfig:
     return {
         "watch_name": "rp784",
         "fid": 784,
-        "pages": 1,
+        "pages": pages,
         "min_replies": min_replies,
         "keywords": [] if keywords is None else keywords,
         "exclude_keywords": [] if exclude_keywords is None else exclude_keywords,
@@ -55,6 +60,31 @@ def _watch(
         "name_template": "{watch_name}-{tid}",
         "description_template": "{forumname} | {author}: {subject}",
     }
+
+
+class _FakeForumClient:
+    def __init__(
+        self,
+        pages: dict[tuple[int, int], list[ForumThread]],
+        *,
+        fail_on: tuple[int, int] | None = None,
+    ) -> None:
+        self._pages = pages
+        self._fail_on = fail_on
+
+    def get_forum_threads(self, fid: int, page: int) -> list[ForumThread]:
+        if self._fail_on == (fid, page):
+            raise RuntimeError("forum fetch failed")
+        return self._pages[(fid, page)]
+
+
+class _FakeThreadConfigs:
+    def __init__(self, thread_list: list[ThreadConfig] | None = None) -> None:
+        self.ThreadList = [] if thread_list is None else thread_list
+        self.saved = False
+
+    def save_configs(self) -> None:
+        self.saved = True
 
 
 class ForumWatchConfigTest(unittest.TestCase):
@@ -172,6 +202,56 @@ class ForumWatchMatchTest(unittest.TestCase):
         self.assertEqual(matched.description, "二次元跑团综合/楼主/安科测试帖")
 
 
+class ForumWatchCollectTest(unittest.TestCase):
+    def test_collect_reports_page_progress(self) -> None:
+        watch = _watch(keywords=["安价"], pages=2)
+        client = _FakeForumClient(
+            {
+                (784, 1): [
+                    _thread(tid=101, subject="安价一号"),
+                    _thread(tid=102, subject="闲聊"),
+                ],
+                (784, 2): [_thread(tid=103, subject="安价二号")],
+            }
+        )
+        progress_events = []
+
+        scanned_count, matches = collect_matching_threads(
+            client,
+            [watch],
+            progress_callback=progress_events.append,
+        )
+
+        self.assertEqual(scanned_count, 3)
+        self.assertEqual([match.thread["tid"] for match in matches], [101, 103])
+        self.assertEqual(
+            [
+                (
+                    event.watch_name,
+                    event.fid,
+                    event.page,
+                    event.pages,
+                    event.scanned_count,
+                    event.matched_count,
+                )
+                for event in progress_events
+            ],
+            [
+                ("rp784", 784, 1, 2, 2, 1),
+                ("rp784", 784, 2, 2, 3, 2),
+            ],
+        )
+
+    def test_collect_keeps_callback_optional(self) -> None:
+        watch = _watch(keywords=["安价"])
+        client = _FakeForumClient({(784, 1): [_thread(tid=101, subject="安价一号")]})
+
+        scanned_count, matches = collect_matching_threads(client, [watch])
+
+        self.assertEqual(scanned_count, 1)
+        self.assertEqual([match.thread["tid"] for match in matches], [101])
+
+
 class ForumWatchSyncTest(unittest.TestCase):
     def test_sync_adds_new_thread_and_skips_existing_exact_match(self) -> None:
         thread_list: list[ThreadConfig] = [
@@ -232,6 +312,95 @@ class ForumWatchSyncTest(unittest.TestCase):
 
         self.assertEqual([outcome.status for outcome in outcomes], ["conflict", "conflict"])
         self.assertEqual(len(thread_list), 1)
+
+
+class ForumWatchCommandTest(unittest.TestCase):
+    def test_forum_sync_prints_progress_and_summary(self) -> None:
+        watch = _watch(keywords=["安价"])
+        client = _FakeForumClient({(784, 1): [_thread(tid=101, subject="安价一号")]})
+        thread_configs = _FakeThreadConfigs()
+
+        with (
+            patch(
+                "nga_tools.commands.forum.load_forum_watch_configs",
+                return_value=[watch],
+            ),
+            patch("nga_tools.commands.forum.configure_network_limits_from_args"),
+            patch("nga_tools.commands.forum.NGAClient", return_value=client),
+            patch(
+                "nga_tools.commands.forum.NGAThreadConfigs",
+                return_value=thread_configs,
+            ),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            handle_forum_sync({})
+
+        output_text = output.getvalue()
+        self.assertIn(
+            "\r正在扫描 rp784 fid=784 第1/1页，已扫描1个，匹配1个\n",
+            output_text,
+        )
+        self.assertIn("扫描1个主题，匹配1个；新增1个，跳过0个，冲突0个。", output_text)
+        self.assertIn("[added] rp784-101 (tid=101, aid=456) - 已添加配置", output_text)
+        self.assertTrue(thread_configs.saved)
+
+    def test_forum_sync_hides_skipped_result_details(self) -> None:
+        watch = _watch(keywords=["安价"])
+        client = _FakeForumClient({(784, 1): [_thread(tid=101, subject="安价一号")]})
+        thread_configs = _FakeThreadConfigs(
+            [
+                {
+                    "thread_name": "existing",
+                    "tid": 101,
+                    "aid": 456,
+                    "description": "",
+                }
+            ]
+        )
+
+        with (
+            patch(
+                "nga_tools.commands.forum.load_forum_watch_configs",
+                return_value=[watch],
+            ),
+            patch("nga_tools.commands.forum.configure_network_limits_from_args"),
+            patch("nga_tools.commands.forum.NGAClient", return_value=client),
+            patch(
+                "nga_tools.commands.forum.NGAThreadConfigs",
+                return_value=thread_configs,
+            ),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            handle_forum_sync({})
+
+        output_text = output.getvalue()
+        self.assertIn("扫描1个主题，匹配1个；新增0个，跳过1个，冲突0个。", output_text)
+        self.assertNotIn("[skipped]", output_text)
+        self.assertNotIn("已存在配置：existing", output_text)
+        self.assertFalse(thread_configs.saved)
+
+    def test_forum_sync_finishes_progress_line_when_scan_fails(self) -> None:
+        watch = _watch(keywords=["安价"], pages=2)
+        client = _FakeForumClient(
+            {
+                (784, 1): [_thread(tid=101, subject="安价一号")],
+            },
+            fail_on=(784, 2),
+        )
+
+        with (
+            patch(
+                "nga_tools.commands.forum.load_forum_watch_configs",
+                return_value=[watch],
+            ),
+            patch("nga_tools.commands.forum.configure_network_limits_from_args"),
+            patch("nga_tools.commands.forum.NGAClient", return_value=client),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "forum fetch failed"):
+                handle_forum_sync({})
+
+        self.assertTrue(output.getvalue().endswith("\n"))
 
 
 if __name__ == "__main__":

@@ -10,10 +10,12 @@ from nga_tools.commands.types import (
 from nga_tools.commands.network import configure_network_limits_from_args
 from nga_tools.forum_watch import (
     DEFAULT_WATCH_CONFIG_PATH,
+    ForumScanProgress,
     collect_matching_threads,
     load_forum_watch_configs,
     sync_matches_to_thread_list,
 )
+from nga_tools.console import InlineProgress
 from nga_tools.ngaclient import NGAClient
 from nga_tools.thread_configs import NGAThreadConfigs
 
@@ -47,7 +49,23 @@ def handle_forum_sync(args: CommandArgs) -> None:
 
     configure_network_limits_from_args(args)
     client = NGAClient()
-    scanned_count, matches = collect_matching_threads(client, watch_configs)
+    progress_display = InlineProgress()
+
+    def update_progress(progress: ForumScanProgress) -> None:
+        progress_display.update(
+            f"正在扫描 {progress.watch_name} fid={progress.fid} "
+            f"第{progress.page}/{progress.pages}页，已扫描"
+            f"{progress.scanned_count}个，匹配{progress.matched_count}个"
+        )
+
+    try:
+        scanned_count, matches = collect_matching_threads(
+            client,
+            watch_configs,
+            progress_callback=update_progress,
+        )
+    finally:
+        progress_display.finish()
 
     thread_configs = NGAThreadConfigs()
     outcomes = sync_matches_to_thread_list(thread_configs.ThreadList, matches)
@@ -61,6 +79,8 @@ def handle_forum_sync(args: CommandArgs) -> None:
         f"冲突{status_counts['conflict']}个。"
     )
     for outcome in outcomes:
+        if outcome.status == "skipped":
+            continue
         thread = outcome.match.thread
         print(
             f"[{outcome.status}] {outcome.match.thread_name} "
