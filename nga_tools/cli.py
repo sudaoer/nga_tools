@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import NotRequired, Optional, TypedDict, cast
+from typing import Literal, NotRequired, Optional, TypedDict, cast
 
 from nga_tools.commands.backup import (
     backup_all,
@@ -23,9 +23,10 @@ HELP_FLAGS = {"-h", "--help"}
 
 class ArgDef(TypedDict):
     flags: tuple[str, ...]
-    type: type[str] | type[int]
-    metavar: str
     help: str
+    type: NotRequired[type[str] | type[int]]
+    metavar: NotRequired[str]
+    action: NotRequired[Literal["store_true"]]
 
 
 class ActionConfig(TypedDict):
@@ -120,6 +121,23 @@ ARG_DEFS: dict[str, ArgDef] = {
         "metavar": "PATH",
         "help": "版面监控规则JSON路径",
     },
+    "full_postdate": {
+        "flags": ("--full_postdate",),
+        "action": "store_true",
+        "help": "按主题发布时间倒序全版面扫描并写入单独清单",
+    },
+    "scan_output": {
+        "flags": ("--scan_output",),
+        "type": str,
+        "metavar": "PATH",
+        "help": "发布时间全版面扫描输出JSONL路径",
+    },
+    "page_delay_seconds": {
+        "flags": ("--page_delay_seconds",),
+        "type": int,
+        "metavar": "N",
+        "help": "发布时间全版面扫描每页请求后的等待秒数",
+    },
 }
 
 
@@ -173,19 +191,36 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "summary": "根据版面监控规则保存匹配主题配置",
             "usage": (
                 f"{PROGRAM_USAGE} forum sync [--watch_config PATH] "
+                "[--api_concurrency N]\n"
+                f"       {PROGRAM_USAGE} forum sync --full_postdate "
+                "[--fid FID] [--scan_output PATH] [--page_delay_seconds N] "
                 "[--api_concurrency N]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} forum sync",
                 f"{PROGRAM_USAGE} forum sync --watch_config forum_watch_configs.json",
+                f"{PROGRAM_USAGE} forum sync --full_postdate --fid 784",
+                (
+                    f"{PROGRAM_USAGE} forum sync --full_postdate --fid 784 "
+                    "--page_delay_seconds 5"
+                ),
             ],
             "notes": [
                 "默认读取forum_watch_configs.json。",
                 "匹配主题会写入thread_configs.json，aid使用主题楼主authorid。",
                 "此命令只保存配置，不自动下载帖子内容。",
+                "--full_postdate模式只写主题清单，不修改thread_configs.json，也不请求单贴API。",
             ],
-            "args": ["watch_config", "api_concurrency"],
-            "positive": ["api_concurrency"],
+            "args": [
+                "watch_config",
+                "fid",
+                "full_postdate",
+                "scan_output",
+                "page_delay_seconds",
+                "api_concurrency",
+            ],
+            "defaults": {"page_delay_seconds": 3},
+            "positive": ["page_delay_seconds", "api_concurrency"],
         },
     },
     "backup": {
@@ -573,6 +608,16 @@ def _validate_args(
             + ", ".join(f"--{arg_name}" for arg_name in unused_args)
         )
 
+    if command == "forum" and action == "sync" and not args.get("full_postdate"):
+        postdate_only_args = sorted(
+            provided_args & {"fid", "page_delay_seconds", "scan_output"}
+        )
+        if postdate_only_args:
+            parser.error(
+                "以下参数仅支持与--full_postdate一起使用："
+                + ", ".join(f"--{name}" for name in postdate_only_args)
+            )
+
     for arg_name, default_value in action_config.get("defaults", {}).items():
         if args.get(arg_name) is None:
             args[arg_name] = default_value
@@ -617,10 +662,22 @@ def args_parse(argv: Optional[list[str]] = None) -> CommandArgs:
     )
 
     for arg_config in ARG_DEFS.values():
+        if "action" in arg_config:
+            parser.add_argument(
+                *arg_config["flags"],
+                action=arg_config["action"],
+                help=arg_config["help"],
+            )
+            continue
+
+        arg_type = arg_config.get("type")
+        if arg_type is None:
+            raise RuntimeError(f"参数定义缺少type：{arg_config['flags']}")
+
         parser.add_argument(
             *arg_config["flags"],
-            type=arg_config["type"],
-            metavar=arg_config["metavar"],
+            type=arg_type,
+            metavar=arg_config.get("metavar"),
             help=arg_config["help"],
         )
 

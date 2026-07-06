@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from nga_tools.cli import args_parse
 from nga_tools.commands.forum import handle_forum_sync
+from nga_tools.forum_export import scan_postdate_forum_threads
 from nga_tools.forum_watch import (
     ForumWatchConfig,
     MatchedForumThread,
@@ -17,7 +19,7 @@ from nga_tools.forum_watch import (
     sync_matches_to_thread_list,
     thread_matches_watch,
 )
-from nga_tools.ngaclient.client import ForumThread
+from nga_tools.ngaclient.client import ForumThread, ForumThreadPage, NGAForumPageError
 from nga_tools.thread_configs import ThreadConfig
 
 
@@ -96,6 +98,104 @@ class _FakeThreadConfigs:
 
     def save_configs(self) -> None:
         self.saved = True
+
+
+class _FakePostdateClient:
+    def __init__(
+        self,
+        pages: dict[tuple[int, int], ForumThreadPage],
+        *,
+        failures: dict[tuple[int, int], list[NGAForumPageError]] | None = None,
+    ) -> None:
+        self._pages = pages
+        self._failures = {} if failures is None else failures
+        self.thread_page_fetches: list[tuple[int, int, str | None]] = []
+
+    def get_forum_thread_page(
+        self,
+        fid: int,
+        page: int,
+        *,
+        order_by: str | None = None,
+    ) -> ForumThreadPage:
+        self.thread_page_fetches.append((fid, page, order_by))
+        failures = self._failures.get((fid, page), [])
+        if failures:
+            raise failures.pop(0)
+        return self._pages[(fid, page)]
+
+    def get_page(self, tid: int, aid: int | None, page: int) -> dict[str, object]:
+        raise AssertionError("postdate forum scan should not fetch thread pages")
+
+
+def _forum_page(
+    *,
+    fid: int = 784,
+    page: int = 1,
+    total_page: int = 1,
+    threads: list[ForumThread] | None = None,
+) -> ForumThreadPage:
+    page_threads = [] if threads is None else threads
+    return {
+        "fid": fid,
+        "forumname": "二次元跑团综合",
+        "current_page": page,
+        "total_page": total_page,
+        "per_page": 35,
+        "total": len(page_threads),
+        "threads": page_threads,
+    }
+
+
+class ForumWatchCliTest(unittest.TestCase):
+    def test_forum_sync_parses_full_postdate_args(self) -> None:
+        args = args_parse(
+            [
+                "forum",
+                "sync",
+                "--full_postdate",
+                "--fid",
+                "784",
+                "--scan_output",
+                "threads.jsonl",
+                "--page_delay_seconds",
+                "5",
+            ]
+        )
+
+        self.assertEqual(args["full_postdate"], True)
+        self.assertEqual(args["fid"], 784)
+        self.assertEqual(args["scan_output"], "threads.jsonl")
+        self.assertEqual(args["page_delay_seconds"], 5)
+
+    def test_forum_sync_defaults_postdate_delay(self) -> None:
+        args = args_parse(["forum", "sync", "--full_postdate", "--fid", "784"])
+
+        self.assertEqual(args["page_delay_seconds"], 3)
+
+    def test_forum_sync_rejects_non_positive_delay(self) -> None:
+        with (
+            patch("sys.stderr", new_callable=io.StringIO),
+            self.assertRaises(SystemExit),
+        ):
+            args_parse(
+                [
+                    "forum",
+                    "sync",
+                    "--full_postdate",
+                    "--fid",
+                    "784",
+                    "--page_delay_seconds",
+                    "0",
+                ]
+            )
+
+    def test_forum_sync_rejects_postdate_args_without_postdate_mode(self) -> None:
+        with (
+            patch("sys.stderr", new_callable=io.StringIO),
+            self.assertRaises(SystemExit),
+        ):
+            args_parse(["forum", "sync", "--fid", "784"])
 
 
 class ForumWatchConfigTest(unittest.TestCase):
@@ -493,7 +593,181 @@ class ForumWatchSyncTest(unittest.TestCase):
         self.assertEqual(len(thread_list), 1)
 
 
+class ForumPostdateScanTest(unittest.TestCase):
+    def test_scan_writes_jsonl_without_thread_page_fetches(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(
+                    page=1,
+                    total_page=2,
+                    threads=[_thread(tid=101, subject="旧帖一号", authorid=201)],
+                ),
+                (784, 2): _forum_page(
+                    page=2,
+                    total_page=2,
+                    threads=[_thread(tid=102, subject="旧帖二号", authorid=202)],
+                ),
+            }
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "threads.jsonl"
+            result = scan_postdate_forum_threads(
+                client,
+                fids=[784],
+                output_path=output_path,
+                page_delay_seconds=3,
+                sleep_func=sleeps.append,
+            )
+            records = [
+                json.loads(line)
+                for line in output_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(result.page_count, 2)
+        self.assertEqual(result.thread_count, 2)
+        self.assertEqual(
+            client.thread_page_fetches,
+            [(784, 1, "postdatedesc"), (784, 2, "postdatedesc")],
+        )
+        self.assertEqual(sleeps, [3])
+        self.assertEqual(records[0]["tid"], 101)
+        self.assertEqual(records[0]["aid"], 201)
+        self.assertEqual(records[0]["subject"], "旧帖一号")
+        self.assertEqual(records[0]["page"], 1)
+        self.assertEqual(records[0]["page_index"], 1)
+        self.assertEqual(records[0]["postdate"], 1000)
+        self.assertIsInstance(records[0]["postdate_text"], str)
+
+    def test_scan_deduplicates_fids_in_order(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(fid=784, threads=[]),
+                (785, 1): _forum_page(fid=785, threads=[]),
+            }
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = scan_postdate_forum_threads(
+                client,
+                fids=[784, 784, 785],
+                output_path=Path(tmp_dir) / "threads.jsonl",
+                page_delay_seconds=3,
+                sleep_func=sleeps.append,
+            )
+
+        self.assertEqual(result.fids, [784, 785])
+        self.assertEqual(
+            client.thread_page_fetches,
+            [(784, 1, "postdatedesc"), (785, 1, "postdatedesc")],
+        )
+        self.assertEqual(sleeps, [3])
+
+    def test_scan_retries_refresh_too_fast_errors(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(threads=[]),
+            },
+            failures={
+                (784, 1): [
+                    NGAForumPageError(2048, "刷新过快 请等候数秒再行访问")
+                ]
+            },
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = scan_postdate_forum_threads(
+                client,
+                fids=[784],
+                output_path=Path(tmp_dir) / "threads.jsonl",
+                page_delay_seconds=3,
+                sleep_func=sleeps.append,
+            )
+
+        self.assertEqual(result.page_count, 1)
+        self.assertEqual(
+            client.thread_page_fetches,
+            [(784, 1, "postdatedesc"), (784, 1, "postdatedesc")],
+        )
+        self.assertEqual(sleeps, [10])
+
+    def test_scan_does_not_retry_over_limit_errors(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(threads=[]),
+            },
+            failures={
+                (784, 1): [
+                    NGAForumPageError(
+                        2048,
+                        "超过限制,只有在使用 [单一版面主题发布时间排序] 时可翻阅超过100页",
+                    )
+                ]
+            },
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaisesRegex(NGAForumPageError, "超过限制"):
+                scan_postdate_forum_threads(
+                    client,
+                    fids=[784],
+                    output_path=Path(tmp_dir) / "threads.jsonl",
+                    page_delay_seconds=3,
+                    sleep_func=sleeps.append,
+                )
+
+        self.assertEqual(client.thread_page_fetches, [(784, 1, "postdatedesc")])
+        self.assertEqual(sleeps, [])
+
+
 class ForumWatchCommandTest(unittest.TestCase):
+    def test_forum_sync_full_postdate_writes_scan_file_only(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(
+                    threads=[_thread(tid=101, subject="旧帖一号", authorid=201)]
+                ),
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "threads.jsonl"
+            with (
+                patch("nga_tools.commands.forum.configure_network_limits_from_args"),
+                patch("nga_tools.commands.forum.NGAClient", return_value=client),
+                patch(
+                    "nga_tools.commands.forum.NGAThreadConfigs",
+                    side_effect=AssertionError(
+                        "full_postdate should not save thread configs"
+                    ),
+                ),
+                patch("sys.stdout", new_callable=io.StringIO) as output,
+            ):
+                handle_forum_sync(
+                    {
+                        "full_postdate": True,
+                        "fid": 784,
+                        "scan_output": str(output_path),
+                        "page_delay_seconds": 3,
+                    }
+                )
+
+            records = [
+                json.loads(line)
+                for line in output_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(records[0]["tid"], 101)
+        self.assertEqual(records[0]["aid"], 201)
+        self.assertEqual(client.thread_page_fetches, [(784, 1, "postdatedesc")])
+        output_text = output.getvalue()
+        self.assertIn("发布时间扫描完成：fid=784，扫描1页，写入1个主题。", output_text)
+        self.assertIn(str(output_path), output_text)
+
     def test_forum_sync_prints_progress_and_summary(self) -> None:
         watch = _watch(keywords=["安价"])
         client = _FakeForumClient({(784, 1): [_thread(tid=101, subject="安价一号")]})

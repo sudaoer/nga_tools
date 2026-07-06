@@ -37,3 +37,12 @@ def optional_int(args: CommandArgs, key: str) -> Optional[int]:
     if type(value) is int:
         return value
     raise ValueError(f"--{key}必须是整数。")
+
+
+def optional_bool(args: CommandArgs, key: str) -> bool:
+    value = args.get(key)
+    if value is None:
+        return False
+    if type(value) is bool:
+        return value
+    raise ValueError(f"--{key}必须是布尔值。")

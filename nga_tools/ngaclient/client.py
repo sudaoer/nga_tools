@@ -22,6 +22,23 @@ class ForumThread(TypedDict):
     forumname: str
 
 
+class ForumThreadPage(TypedDict):
+    fid: int
+    forumname: str
+    current_page: int
+    total_page: int
+    per_page: int
+    total: int
+    threads: list[ForumThread]
+
+
+class NGAForumPageError(Exception):
+    def __init__(self, code: object, message: str) -> None:
+        super().__init__(f"Error fetching forum page: {message}")
+        self.code = code
+        self.message = message
+
+
 def _required_int(data: dict[str, object], key: str, source: object) -> int:
     value = data.get(key)
     if type(value) is int:
@@ -116,15 +133,25 @@ class NGAClient:
         self.page_cache[cache_key] = page_data
         return page_data
 
-    def get_forum_threads(self, fid: int, page: int) -> list[ForumThread]:
+    def get_forum_thread_page(
+        self,
+        fid: int,
+        page: int,
+        *,
+        order_by: str | None = None,
+    ) -> ForumThreadPage:
         if page < 1:
             raise ValueError("Page number must be greater than 0.")
 
         url = f"{self.base_url}/app_api.php?__lib=subject&__act=list"
+        data = {"fid": str(fid), "page": str(page)}
+        if order_by is not None:
+            data["order_by"] = order_by
+
         with api_request_slot():
             response = self.session.post(
                 url,
-                data={"fid": str(fid), "page": str(page)},
+                data=data,
                 timeout=30,
             )
         response.raise_for_status()
@@ -135,9 +162,10 @@ class NGAClient:
 
         page_data = cast(dict[str, object], json_data)
         if page_data.get("code") != 0:
-            raise Exception(
-                f"Error fetching forum page: {page_data.get('msg', 'Unknown error')}"
-            )
+            message = page_data.get("msg")
+            if not isinstance(message, str):
+                message = "Unknown error"
+            raise NGAForumPageError(page_data.get("code"), message)
 
         result = page_data.get("result")
         if not isinstance(result, dict):
@@ -149,4 +177,17 @@ class NGAClient:
             raise ValueError("NGA forum response is missing thread list.")
 
         thread_items = cast(list[object], raw_threads)
-        return [_parse_forum_thread(raw_thread) for raw_thread in thread_items]
+        return {
+            "fid": _required_int(page_data, "fid", page_data),
+            "forumname": _required_str(page_data, "forumname", page_data),
+            "current_page": _required_int(page_data, "currentPage", page_data),
+            "total_page": _required_int(page_data, "totalPage", page_data),
+            "per_page": _required_int(page_data, "perPage", page_data),
+            "total": _required_int(page_data, "total", page_data),
+            "threads": [
+                _parse_forum_thread(raw_thread) for raw_thread in thread_items
+            ],
+        }
+
+    def get_forum_threads(self, fid: int, page: int) -> list[ForumThread]:
+        return self.get_forum_thread_page(fid, page)["threads"]

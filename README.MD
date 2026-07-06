@@ -88,6 +88,20 @@ pixi run python main.py forum sync
 默认为 20。保存时会把主题楼主 `authorid` 写为 `aid`，后续使用
 `backup all/sub --name 帖子名` 会默认只看楼主。
 
+按主题发布时间倒序全版面扫描并单独记录主题清单：
+
+```powershell
+pixi run python main.py forum sync --full_postdate --fid 784
+pixi run python main.py forum sync --full_postdate --fid 784 --page_delay_seconds 5
+```
+
+`--full_postdate` 会调用版面主题列表接口并传入
+`order_by=postdatedesc`，可翻阅超过 100 页；输出默认为
+`output/forum_sync/postdatedesc_threads_<时间>.jsonl`。每行记录一个主题，
+包含 `tid`、`aid`、标题、作者、发布时间、最后回复时间和回复数等主题列表
+已有字段。此模式不修改 `thread_configs.json`，也不会额外请求单贴 API；默认
+每页请求后等待 3 秒，可用 `--page_delay_seconds` 调大以减少限流。
+
 抓取整帖并下载图片：
 
 ```powershell
