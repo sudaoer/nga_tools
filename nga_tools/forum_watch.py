@@ -20,6 +20,11 @@ JsonObject: TypeAlias = dict[str, object]
 SyncStatus: TypeAlias = Literal["added", "skipped", "conflict"]
 ForumScanProgressCallback: TypeAlias = Callable[["ForumScanProgress"], None]
 ForumPageCallback: TypeAlias = Callable[[int, list[ForumThread]], None]
+ForumDatabaseScanProgressCallback: TypeAlias = Callable[
+    ["ForumDatabaseScanProgress"],
+    None,
+]
+ForumThreadSource: TypeAlias = Callable[["ForumWatchConfig"], list[ForumThread]]
 
 
 class ForumWatchConfig(TypedDict):
@@ -49,6 +54,14 @@ class ForumScanProgress:
     fid: int
     page: int
     pages: int
+    scanned_count: int
+    matched_count: int
+
+
+@dataclass(frozen=True)
+class ForumDatabaseScanProgress:
+    watch_name: str
+    fid: int
     scanned_count: int
     matched_count: int
 
@@ -280,6 +293,32 @@ def build_matched_thread(
     )
 
 
+def _matching_thread_or_none(
+    client: NGAClient,
+    watch_config: ForumWatchConfig,
+    thread: ForumThread,
+    existing_thread_list: list[ThreadConfig] | None,
+) -> MatchedForumThread | None:
+    if not thread_matches_watch(thread, watch_config):
+        return None
+
+    matched_thread = build_matched_thread(watch_config, thread)
+    if (
+        existing_thread_list is not None
+        and _match_would_not_add(existing_thread_list, matched_thread)
+    ):
+        return matched_thread
+
+    if not _thread_is_forced(thread, watch_config):
+        if not _thread_has_enough_author_lous(
+            client,
+            thread,
+            watch_config,
+        ):
+            return None
+    return matched_thread
+
+
 def collect_matching_threads(
     client: NGAClient,
     watch_configs: list[ForumWatchConfig],
@@ -297,23 +336,14 @@ def collect_matching_threads(
                 forum_page_callback(watch_config["fid"], page_threads)
             scanned_count += len(page_threads)
             for thread in page_threads:
-                if not thread_matches_watch(thread, watch_config):
-                    continue
-                matched_thread = build_matched_thread(watch_config, thread)
-                if (
-                    existing_thread_list is not None
-                    and _match_would_not_add(existing_thread_list, matched_thread)
-                ):
+                matched_thread = _matching_thread_or_none(
+                    client,
+                    watch_config,
+                    thread,
+                    existing_thread_list,
+                )
+                if matched_thread is not None:
                     matched_threads.append(matched_thread)
-                    continue
-                if not _thread_is_forced(thread, watch_config):
-                    if not _thread_has_enough_author_lous(
-                        client,
-                        thread,
-                        watch_config,
-                    ):
-                        continue
-                matched_threads.append(matched_thread)
             if progress_callback is not None:
                 progress_callback(
                     ForumScanProgress(
@@ -325,6 +355,41 @@ def collect_matching_threads(
                         matched_count=len(matched_threads),
                     )
                 )
+
+    return scanned_count, matched_threads
+
+
+def collect_matching_threads_from_thread_source(
+    client: NGAClient,
+    watch_configs: list[ForumWatchConfig],
+    thread_source: ForumThreadSource,
+    progress_callback: ForumDatabaseScanProgressCallback | None = None,
+    existing_thread_list: list[ThreadConfig] | None = None,
+) -> tuple[int, list[MatchedForumThread]]:
+    scanned_count = 0
+    matched_threads: list[MatchedForumThread] = []
+
+    for watch_config in watch_configs:
+        threads = thread_source(watch_config)
+        scanned_count += len(threads)
+        for thread in threads:
+            matched_thread = _matching_thread_or_none(
+                client,
+                watch_config,
+                thread,
+                existing_thread_list,
+            )
+            if matched_thread is not None:
+                matched_threads.append(matched_thread)
+        if progress_callback is not None:
+            progress_callback(
+                ForumDatabaseScanProgress(
+                    watch_name=watch_config["watch_name"],
+                    fid=watch_config["fid"],
+                    scanned_count=scanned_count,
+                    matched_count=len(matched_threads),
+                )
+            )
 
     return scanned_count, matched_threads
 

@@ -87,9 +87,10 @@ pixi run python main.py forum sync
 包含主楼。`min_replies` 未配置时默认为 500，`min_author_lous` 未配置时
 默认为 20。保存时会把主题楼主 `authorid` 写为 `aid`，后续使用
 `backup all/sub --name 帖子名` 会默认只看楼主。
-每次 `forum sync` 抓到的版面主题列表也会写入
-`output/forum_sync/forum_threads.sqlite3`，每个 fid 使用一张表，按 `tid`
-去重并更新标题、最后回复时间、回复数等主题列表字段。
+每次 `forum sync` 会先按监控配置里的 `pages` 从远端默认排序抓取对应页数，
+并写入 `output/forum_sync/forum_threads.sqlite3`；每个 fid 使用一张表，按
+`tid` 去重并更新标题、最后回复时间、回复数等主题列表字段。之后的筛查从
+SQLite 中读取该 fid 已保存的主题数据，`pages` 不限制数据库筛查范围。
 
 按主题发布时间倒序扫描版面主题，并写入主题数据库：
 

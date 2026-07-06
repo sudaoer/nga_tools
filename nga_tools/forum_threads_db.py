@@ -5,7 +5,7 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, cast
 
 from nga_tools.config import get_config
 from nga_tools.ngaclient.client import ForumThread
@@ -99,6 +99,35 @@ class ForumThreadStore:
             if isinstance(tid, int):
                 tids.add(tid)
         return tids
+
+    def list_threads(self, fid: int, *, forumname: str) -> list[ForumThread]:
+        with closing(self._connect()) as connection:
+            table_name = self._ensure_table(connection, fid)
+            rows = cast(
+                list[tuple[int, int, str, str, int, int, int]],
+                connection.execute(
+                    f"""
+                    SELECT tid, aid, author, subject, postdate, lastpost, replies
+                    FROM {table_name}
+                    ORDER BY lastpost DESC, tid DESC
+                    """
+                ).fetchall(),
+            )
+
+        return [
+            {
+                "tid": tid,
+                "fid": fid,
+                "subject": subject,
+                "author": author,
+                "authorid": aid,
+                "postdate": postdate,
+                "lastpost": lastpost,
+                "replies": replies,
+                "forumname": forumname,
+            }
+            for tid, aid, author, subject, postdate, lastpost, replies in rows
+        ]
 
     def upsert_threads(
         self,

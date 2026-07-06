@@ -12,8 +12,9 @@ from nga_tools.commands.types import (
 from nga_tools.commands.network import configure_network_limits_from_args
 from nga_tools.forum_watch import (
     DEFAULT_WATCH_CONFIG_PATH,
-    ForumScanProgress,
-    collect_matching_threads,
+    ForumDatabaseScanProgress,
+    ForumWatchConfig,
+    collect_matching_threads_from_thread_source,
     load_forum_watch_configs,
     sync_matches_to_thread_list,
 )
@@ -111,6 +112,46 @@ def _handle_forum_sync_full_postdate(args: CommandArgs) -> None:
     print(f"数据库：{result.db_path}")
 
 
+def _max_default_pages_by_fid(
+    watch_configs: list[ForumWatchConfig],
+) -> dict[int, int]:
+    pages_by_fid: dict[int, int] = {}
+    for watch_config in watch_configs:
+        fid = watch_config["fid"]
+        pages = watch_config["pages"]
+        pages_by_fid[fid] = max(pages_by_fid.get(fid, 0), pages)
+    return pages_by_fid
+
+
+def _fetch_default_forum_pages_to_db(
+    client: NGAClient,
+    forum_store: ForumThreadStore,
+    watch_configs: list[ForumWatchConfig],
+    progress_display: InlineProgress,
+) -> tuple[int, int, int]:
+    fetched_count = 0
+    db_inserted_count = 0
+    db_updated_count = 0
+
+    for fid, pages in _max_default_pages_by_fid(watch_configs).items():
+        for page in range(1, pages + 1):
+            progress_display.update(
+                f"正在抓取 fid={fid} 第{page}/{pages}页，"
+                f"已保存{fetched_count}个"
+            )
+            threads = client.get_forum_threads(fid, page)
+            result = forum_store.upsert_threads(fid, threads)
+            fetched_count += len(threads)
+            db_inserted_count += result.inserted_count
+            db_updated_count += result.updated_count
+            progress_display.update(
+                f"正在抓取 fid={fid} 第{page}/{pages}页，"
+                f"已保存{fetched_count}个"
+            )
+
+    return fetched_count, db_inserted_count, db_updated_count
+
+
 def handle_forum_sync(args: CommandArgs) -> None:
     if optional_bool(args, "full_postdate"):
         _handle_forum_sync_full_postdate(args)
@@ -134,29 +175,34 @@ def handle_forum_sync(args: CommandArgs) -> None:
     thread_configs = NGAThreadConfigs()
     forum_store = ForumThreadStore()
     progress_display = InlineProgress()
-    db_inserted_count = 0
-    db_updated_count = 0
 
-    def update_progress(progress: ForumScanProgress) -> None:
+    def update_db_scan_progress(progress: ForumDatabaseScanProgress) -> None:
         progress_display.update(
-            f"正在扫描 {progress.watch_name} fid={progress.fid} "
-            f"第{progress.page}/{progress.pages}页，已扫描"
-            f"{progress.scanned_count}个，匹配{progress.matched_count}个"
+            f"正在筛查数据库 {progress.watch_name} fid={progress.fid}，"
+            f"已扫描{progress.scanned_count}个，匹配{progress.matched_count}个"
         )
 
-    def store_forum_page(fid: int, threads: list[ForumThread]) -> None:
-        nonlocal db_inserted_count, db_updated_count
-        result = forum_store.upsert_threads(fid, threads)
-        db_inserted_count += result.inserted_count
-        db_updated_count += result.updated_count
+    def threads_for_watch(watch_config: ForumWatchConfig) -> list[ForumThread]:
+        return forum_store.list_threads(
+            watch_config["fid"],
+            forumname=watch_config["watch_name"],
+        )
 
     try:
-        scanned_count, matches = collect_matching_threads(
-            client,
-            watch_configs,
-            progress_callback=update_progress,
+        fetched_count, db_inserted_count, db_updated_count = (
+            _fetch_default_forum_pages_to_db(
+                client,
+                forum_store,
+                watch_configs,
+                progress_display,
+            )
+        )
+        scanned_count, matches = collect_matching_threads_from_thread_source(
+            client=client,
+            watch_configs=watch_configs,
+            thread_source=threads_for_watch,
+            progress_callback=update_db_scan_progress,
             existing_thread_list=thread_configs.ThreadList,
-            forum_page_callback=store_forum_page,
         )
     finally:
         progress_display.finish()
@@ -167,14 +213,15 @@ def handle_forum_sync(args: CommandArgs) -> None:
         thread_configs.save_configs()
 
     print(
-        f"扫描{scanned_count}个主题，匹配{len(matches)}个；"
+        f"远端抓取{fetched_count}个主题，"
+        f"数据库新增{db_inserted_count}个，更新{db_updated_count}个。"
+    )
+    print(
+        f"数据库筛查{scanned_count}个主题，匹配{len(matches)}个；"
         f"新增{status_counts['added']}个，跳过{status_counts['skipped']}个，"
         f"冲突{status_counts['conflict']}个。"
     )
-    print(
-        f"主题数据库：新增{db_inserted_count}个，"
-        f"更新{db_updated_count}个，路径：{forum_store.db_path}"
-    )
+    print(f"主题数据库：路径：{forum_store.db_path}")
     for outcome in outcomes:
         if outcome.status == "skipped":
             continue

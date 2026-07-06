@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from nga_tools.cli import args_parse
@@ -25,6 +26,7 @@ from nga_tools.forum_watch import (
     MatchedForumThread,
     build_matched_thread,
     collect_matching_threads,
+    collect_matching_threads_from_thread_source,
     load_forum_watch_configs,
     sync_matches_to_thread_list,
     thread_matches_watch,
@@ -59,6 +61,8 @@ def _thread(
 
 def _watch(
     *,
+    watch_name: str = "rp784",
+    fid: int = 784,
     keywords: list[str] | None = None,
     exclude_keywords: list[str] | None = None,
     include_tids: list[int] | None = None,
@@ -67,8 +71,8 @@ def _watch(
     pages: int = 1,
 ) -> ForumWatchConfig:
     return {
-        "watch_name": "rp784",
-        "fid": 784,
+        "watch_name": watch_name,
+        "fid": fid,
         "pages": pages,
         "min_replies": min_replies,
         "min_author_lous": min_author_lous,
@@ -91,9 +95,11 @@ class _FakeForumClient:
         self._pages = pages
         self._author_pages = {} if author_pages is None else author_pages
         self._fail_on = fail_on
+        self.forum_fetches: list[tuple[int, int]] = []
         self.page_fetches: list[tuple[int, int | None, int]] = []
 
     def get_forum_threads(self, fid: int, page: int) -> list[ForumThread]:
+        self.forum_fetches.append((fid, page))
         if self._fail_on == (fid, page):
             raise RuntimeError("forum fetch failed")
         return self._pages[(fid, page)]
@@ -117,8 +123,18 @@ class _FakeThreadConfigs:
 class _FakeForumThreadStore:
     db_path = Path("fake_forum_threads.sqlite3")
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        threads_by_fid: dict[int, list[ForumThread]] | None = None,
+    ) -> None:
         self.upserts: list[tuple[int, list[int]]] = []
+        self._threads_by_fid: dict[int, dict[int, ForumThread]] = {}
+        if threads_by_fid is not None:
+            for fid, threads in threads_by_fid.items():
+                self._threads_by_fid[fid] = {
+                    thread["tid"]: cast(ForumThread, thread.copy())
+                    for thread in threads
+                }
 
     def upsert_threads(
         self,
@@ -126,10 +142,37 @@ class _FakeForumThreadStore:
         threads: list[ForumThread],
     ) -> ForumThreadUpsertResult:
         self.upserts.append((fid, [thread["tid"] for thread in threads]))
+        stored_threads = self._threads_by_fid.setdefault(fid, {})
+        inserted_count = 0
+        updated_count = 0
+        for thread in threads:
+            if thread["tid"] in stored_threads:
+                updated_count += 1
+            else:
+                inserted_count += 1
+            stored_threads[thread["tid"]] = cast(ForumThread, thread.copy())
         return ForumThreadUpsertResult(
-            inserted_count=len(threads),
-            updated_count=0,
+            inserted_count=inserted_count,
+            updated_count=updated_count,
         )
+
+    def list_threads(self, fid: int, *, forumname: str) -> list[ForumThread]:
+        stored_threads = self._threads_by_fid.get(fid, {})
+        return [
+            cast(
+                ForumThread,
+                {
+                    **thread,
+                    "fid": fid,
+                    "forumname": forumname,
+                },
+            )
+            for thread in sorted(
+                stored_threads.values(),
+                key=lambda thread: (thread["lastpost"], thread["tid"]),
+                reverse=True,
+            )
+        ]
 
 
 class _FakePostdateClient:
@@ -494,6 +537,21 @@ class ForumWatchCollectTest(unittest.TestCase):
         self.assertEqual(scanned_count, 1)
         self.assertEqual([match.thread["tid"] for match in matches], [101])
 
+    def test_collect_from_thread_source_does_not_fetch_forum_pages(self) -> None:
+        watch = _watch(keywords=["安价"])
+        client = _FakeForumClient({})
+
+        scanned_count, matches = collect_matching_threads_from_thread_source(
+            client,
+            [watch],
+            lambda _watch_config: [_thread(tid=101, subject="安价一号")],
+        )
+
+        self.assertEqual(scanned_count, 1)
+        self.assertEqual([match.thread["tid"] for match in matches], [101])
+        self.assertEqual(client.forum_fetches, [])
+        self.assertEqual(client.page_fetches, [(101, 456, 1)])
+
     def test_collect_filters_keyword_matches_by_min_author_lous(self) -> None:
         watch = _watch(keywords=["安价"], min_author_lous=20)
         client = _FakeForumClient(
@@ -737,6 +795,25 @@ class ForumThreadStoreTest(unittest.TestCase):
         self.assertNotIn("page", columns)
         self.assertNotIn("page_index", columns)
         self.assertNotIn("pageindex", columns)
+
+    def test_list_threads_returns_rows_with_injected_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = ForumThreadStore(Path(tmp_dir) / "forum_threads.sqlite3")
+            store.upsert_threads(
+                784,
+                [
+                    _thread(tid=101, subject="较早回复", authorid=201, lastpost=2000),
+                    _thread(tid=102, subject="较新回复", authorid=202, lastpost=3000),
+                ],
+            )
+
+            threads = store.list_threads(784, forumname="rp784")
+
+        self.assertEqual([thread["tid"] for thread in threads], [102, 101])
+        self.assertEqual(threads[0]["fid"], 784)
+        self.assertEqual(threads[0]["forumname"], "rp784")
+        self.assertEqual(threads[0]["authorid"], 202)
+        self.assertEqual(threads[0]["subject"], "较新回复")
 
 
 class ForumPostdateScanTest(unittest.TestCase):
@@ -1112,7 +1189,9 @@ class ForumWatchCommandTest(unittest.TestCase):
         watch = _watch(keywords=["安价"])
         client = _FakeForumClient({(784, 1): [_thread(tid=101, subject="安价一号")]})
         thread_configs = _FakeThreadConfigs()
-        forum_store = _FakeForumThreadStore()
+        forum_store = _FakeForumThreadStore(
+            {784: [_thread(tid=102, subject="安价库内主题")]}
+        )
 
         with (
             patch(
@@ -1135,11 +1214,13 @@ class ForumWatchCommandTest(unittest.TestCase):
 
         output_text = output.getvalue()
         self.assertIn(
-            "\r正在扫描 rp784 fid=784 第1/1页，已扫描1个，匹配1个\n",
+            "\r正在筛查数据库 rp784 fid=784，已扫描2个，匹配2个\n",
             output_text,
         )
-        self.assertIn("扫描1个主题，匹配1个；新增1个，跳过0个，冲突0个。", output_text)
-        self.assertIn("主题数据库：新增1个，更新0个，路径：fake_forum_threads.sqlite3", output_text)
+        self.assertIn("远端抓取1个主题，数据库新增1个，更新0个。", output_text)
+        self.assertIn("数据库筛查2个主题，匹配2个；新增2个，跳过0个，冲突0个。", output_text)
+        self.assertIn("主题数据库：路径：fake_forum_threads.sqlite3", output_text)
+        self.assertIn("[added] rp784-102 (tid=102, aid=456) - 已添加配置", output_text)
         self.assertIn("[added] rp784-101 (tid=101, aid=456) - 已添加配置", output_text)
         self.assertEqual(forum_store.upserts, [(784, [101])])
         self.assertTrue(thread_configs.saved)
@@ -1179,12 +1260,48 @@ class ForumWatchCommandTest(unittest.TestCase):
             handle_forum_sync({})
 
         output_text = output.getvalue()
-        self.assertIn("扫描1个主题，匹配1个；新增0个，跳过1个，冲突0个。", output_text)
+        self.assertIn("远端抓取1个主题，数据库新增1个，更新0个。", output_text)
+        self.assertIn("数据库筛查1个主题，匹配1个；新增0个，跳过1个，冲突0个。", output_text)
         self.assertNotIn("[skipped]", output_text)
         self.assertNotIn("已存在配置：existing", output_text)
         self.assertEqual(forum_store.upserts, [(784, [101])])
         self.assertEqual(client.page_fetches, [])
         self.assertFalse(thread_configs.saved)
+
+    def test_forum_sync_fetches_max_pages_once_per_fid(self) -> None:
+        watches = [
+            _watch(watch_name="first", keywords=["甲"], pages=1),
+            _watch(watch_name="second", keywords=["乙"], pages=2),
+        ]
+        client = _FakeForumClient(
+            {
+                (784, 1): [_thread(tid=101, subject="甲主题")],
+                (784, 2): [_thread(tid=102, subject="乙主题")],
+            }
+        )
+        forum_store = _FakeForumThreadStore()
+
+        with (
+            patch(
+                "nga_tools.commands.forum.load_forum_watch_configs",
+                return_value=watches,
+            ),
+            patch("nga_tools.commands.forum.configure_network_limits_from_args"),
+            patch("nga_tools.commands.forum.NGAClient", return_value=client),
+            patch(
+                "nga_tools.commands.forum.ForumThreadStore",
+                return_value=forum_store,
+            ),
+            patch(
+                "nga_tools.commands.forum.NGAThreadConfigs",
+                return_value=_FakeThreadConfigs(),
+            ),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            handle_forum_sync({})
+
+        self.assertEqual(client.forum_fetches, [(784, 1), (784, 2)])
+        self.assertEqual(forum_store.upserts, [(784, [101]), (784, [102])])
 
     def test_forum_sync_finishes_progress_line_when_scan_fails(self) -> None:
         watch = _watch(keywords=["安价"], pages=2)

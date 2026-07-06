@@ -218,6 +218,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "默认读取forum_watch_configs.json。",
                 "匹配主题会写入thread_configs.json，aid使用主题楼主authorid。",
                 "此命令只保存配置，不自动下载帖子内容。",
+                "pages只限制远端默认排序抓取页数，筛查从主题数据库读取。",
                 "抓到的版面主题列表会写入output_dir/forum_sync/forum_threads.sqlite3。",
                 "--full_postdate默认遇到数据库已有tid后停止；--refresh会刷新到远端末页。",
             ],
