@@ -28,9 +28,10 @@ from nga_tools.backup import image_store
 from nga_tools.bbcode_convert import ImageSrcResolver, bbcode_to_html
 from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.ngaclient import NGAClient
-from nga_tools.ngaclient.client import PageData
+from nga_tools.ngaclient.client import NGAPageError, PageData
 
 _NGA_IMAGE_BASE_URL = "https://img.nga.178.com/attachments/"
+_AUTHOR_EMPTY_PAGE_MESSAGE = "找不到内容 或 没有更多页了"
 _IMAGE_PATH_IN_TEXT_RE = re.compile(
     r"mon_\d{6}/\d{2}/[A-Za-z0-9-][A-Za-z0-9_-]*"
     r"\.(?:jpg|jpeg|png|gif|webp)"
@@ -317,11 +318,54 @@ def _write_page_json(folder_json: Path, page_number: int, page_data: PageData) -
     )
 
 
+def _is_author_empty_page_error(
+    error: NGAPageError,
+    aid: Optional[int],
+    page_number: int,
+    page_count: int,
+) -> bool:
+    return (
+        aid is not None
+        and page_number > 1
+        and page_number <= page_count
+        and error.message == _AUTHOR_EMPTY_PAGE_MESSAGE
+    )
+
+
+def _empty_author_page_data(
+    first_page_data: PageData,
+    page_number: int,
+) -> PageData:
+    page_data = first_page_data.copy()
+    page_data["currentPage"] = page_number
+    page_data["msg"] = "作者筛选空页"
+    page_data["result"] = []
+    return page_data
+
+
+def _fetch_backup_page(
+    client: NGAClient,
+    tid: int,
+    aid: Optional[int],
+    page_number: int,
+    page_count: int,
+    first_page_data: PageData,
+) -> PageData:
+    try:
+        return client.get_page(tid, aid, page_number)
+    except NGAPageError as error:
+        if not _is_author_empty_page_error(error, aid, page_number, page_count):
+            raise
+        report_warning(f"只看作者第{page_number}页为空，继续获取后续页面。")
+        return _empty_author_page_data(first_page_data, page_number)
+
+
 def _write_pages_json(
     client: NGAClient,
     tid: int,
     aid: Optional[int],
     page_count: int,
+    first_page_data: PageData,
 ) -> dict[int, PageData]:
     folder_json = Path(utils.get_folder(tid, aid, "json"))
     page_data_by_page: dict[int, PageData] = {}
@@ -331,7 +375,14 @@ def _write_pages_json(
             completed=page_number - 1,
             total=page_count,
         )
-        page_data = client.get_page(tid, aid, page_number)
+        page_data = _fetch_backup_page(
+            client,
+            tid,
+            aid,
+            page_number,
+            page_count,
+            first_page_data,
+        )
         _write_page_json(folder_json, page_number, page_data)
         page_data_by_page[page_number] = page_data
     report_progress(
@@ -1018,7 +1069,13 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
         aid,
     )
 
-    page_data_by_page = _write_pages_json(client, tid, aid, page_count)
+    page_data_by_page = _write_pages_json(
+        client,
+        tid,
+        aid,
+        page_count,
+        first_page_data,
+    )
 
     report_info("开始处理")
 
@@ -1125,7 +1182,14 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
             completed=index - 1,
             total=len(sorted_refresh_page_numbers),
         )
-        page_data = client.get_page(tid, aid, page_number)
+        page_data = _fetch_backup_page(
+            client,
+            tid,
+            aid,
+            page_number,
+            page_count,
+            first_page_data,
+        )
         _write_page_json(folder_json, page_number, page_data)
     report_progress(
         "页面获取完成",

@@ -45,6 +45,7 @@ from nga_tools.backup.floor_map import (
     floor_map_input_signature,
 )
 from nga_tools.ngaclient import NGAClient
+from nga_tools.ngaclient.client import NGAPageError
 
 
 class RewriteImageLinksTest(unittest.TestCase):
@@ -572,6 +573,192 @@ class BackupFloorMapFallbackTest(unittest.TestCase):
 class BackupThreadSubMissingLouTest(unittest.TestCase):
     def test_merge_missing_lou_sorts_and_deduplicates(self) -> None:
         self.assertEqual(_merge_missing_lou([4, 2], [2, 3], []), [2, 3, 4])
+
+    def test_author_empty_page_is_written_and_later_pages_continue(self) -> None:
+        class SparseAuthorClient:
+            def __init__(self) -> None:
+                self.page_calls: list[int] = []
+
+            def get_page(
+                self,
+                tid: int,
+                aid: int | None,
+                page: int,
+            ) -> dict[str, object]:
+                del tid
+                self.page_calls.append(page)
+                if page == 2:
+                    raise NGAPageError(35, "找不到内容 或 没有更多页了")
+                return {
+                    "code": 0,
+                    "msg": "操作成功",
+                    "currentPage": page,
+                    "totalPage": 3,
+                    "vrows": 3,
+                    "result": [
+                        {
+                            "lou": page,
+                            "pid": 1000 + page,
+                            "content": f"page {page}",
+                        }
+                    ],
+                }
+
+        client = SparseAuthorClient()
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = temp_dir if subfolder is None else temp_dir / subfolder
+                path.mkdir(exist_ok=True)
+                return str(path)
+
+            with (
+                patch("nga_tools.backup.archive.NGAClient", return_value=client),
+                patch(
+                    "nga_tools.backup.archive.utils.get_folder",
+                    side_effect=fake_get_folder,
+                ),
+                patch(
+                    "nga_tools.backup.archive._build_floor_map_for_post_refs",
+                    return_value=FloorMapBuildResult(FloorLabels.plain(), {}),
+                ),
+                patch(
+                    "nga_tools.backup.archive._rewrite_parsed_image_links",
+                    return_value=[],
+                ),
+                patch(
+                    "nga_tools.backup.archive._download_images",
+                    return_value={"succeeded": [], "failed": []},
+                ),
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                backup_thread_sub(123, 456)
+
+            empty_page = json.loads(
+                (temp_dir / "json" / "page_2.json").read_text(encoding="utf-8")
+            )
+            page_three = json.loads(
+                (temp_dir / "json" / "page_3.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(client.page_calls, [1, 1, 2, 3])
+        self.assertEqual(empty_page["currentPage"], 2)
+        self.assertEqual(empty_page["msg"], "作者筛选空页")
+        self.assertEqual(empty_page["result"], [])
+        self.assertEqual(page_three["result"][0]["lou"], 3)
+
+    def test_original_empty_page_error_still_fails(self) -> None:
+        class OriginalClient:
+            def get_page(
+                self,
+                tid: int,
+                aid: int | None,
+                page: int,
+            ) -> dict[str, object]:
+                del tid, aid
+                if page == 2:
+                    raise NGAPageError(35, "找不到内容 或 没有更多页了")
+                return {
+                    "code": 0,
+                    "msg": "操作成功",
+                    "currentPage": page,
+                    "totalPage": 3,
+                    "result": [
+                        {
+                            "lou": page,
+                            "pid": 1000 + page,
+                            "content": f"page {page}",
+                        }
+                    ],
+                }
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = temp_dir if subfolder is None else temp_dir / subfolder
+                path.mkdir(exist_ok=True)
+                return str(path)
+
+            with (
+                patch(
+                    "nga_tools.backup.archive.NGAClient",
+                    return_value=OriginalClient(),
+                ),
+                patch(
+                    "nga_tools.backup.archive.utils.get_folder",
+                    side_effect=fake_get_folder,
+                ),
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                with self.assertRaisesRegex(
+                    NGAPageError,
+                    "找不到内容 或 没有更多页了",
+                ):
+                    backup_thread_sub(123, None)
+
+    def test_author_non_empty_page_error_still_fails(self) -> None:
+        class ErrorClient:
+            def get_page(
+                self,
+                tid: int,
+                aid: int | None,
+                page: int,
+            ) -> dict[str, object]:
+                del tid, aid
+                if page == 2:
+                    raise NGAPageError(403, "权限不足")
+                return {
+                    "code": 0,
+                    "msg": "操作成功",
+                    "currentPage": page,
+                    "totalPage": 3,
+                    "result": [
+                        {
+                            "lou": page,
+                            "pid": 1000 + page,
+                            "content": f"page {page}",
+                        }
+                    ],
+                }
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = temp_dir if subfolder is None else temp_dir / subfolder
+                path.mkdir(exist_ok=True)
+                return str(path)
+
+            with (
+                patch(
+                    "nga_tools.backup.archive.NGAClient",
+                    return_value=ErrorClient(),
+                ),
+                patch(
+                    "nga_tools.backup.archive.utils.get_folder",
+                    side_effect=fake_get_folder,
+                ),
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                with self.assertRaisesRegex(NGAPageError, "权限不足"):
+                    backup_thread_sub(123, 456)
 
     def test_backup_sub_retries_previous_missing_author_lous(self) -> None:
         captured_missing_lou: list[int] = []

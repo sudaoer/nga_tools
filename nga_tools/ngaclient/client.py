@@ -32,6 +32,13 @@ class ForumThreadPage(TypedDict):
     threads: list[ForumThread]
 
 
+class NGAPageError(Exception):
+    def __init__(self, code: object, message: str) -> None:
+        super().__init__(f"Error fetching page: {message}")
+        self.code = code
+        self.message = message
+
+
 class NGAForumPageError(Exception):
     def __init__(self, code: object, message: str) -> None:
         super().__init__(f"Error fetching forum page: {message}")
@@ -144,9 +151,10 @@ class NGAClient:
 
         page_data = cast(PageData, json_data)
         if page_data.get("code") != 0:
-            raise Exception(
-                f"Error fetching page: {page_data.get('msg', 'Unknown error')}"
-            )
+            message = page_data.get("msg")
+            if not isinstance(message, str):
+                message = "Unknown error"
+            raise NGAPageError(page_data.get("code"), message)
 
         self.page_cache[cache_key] = page_data
         return page_data

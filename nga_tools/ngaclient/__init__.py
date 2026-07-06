@@ -1,3 +1,3 @@
-from .client import NGAClient
+from .client import NGAClient, NGAPageError
 
-__all__ = ["NGAClient"]
+__all__ = ["NGAClient", "NGAPageError"]
