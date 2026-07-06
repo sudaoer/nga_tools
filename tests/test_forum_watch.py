@@ -2,14 +2,24 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 from nga_tools.cli import args_parse
 from nga_tools.commands.forum import handle_forum_sync
-from nga_tools.forum_export import scan_postdate_forum_threads
+from nga_tools.forum_export import (
+    scan_postdate_forum_threads,
+    sync_postdate_forum_threads_to_db,
+)
+from nga_tools.forum_threads_db import (
+    ForumThreadStore,
+    ForumThreadUpsertResult,
+    forum_thread_table_name,
+)
 from nga_tools.forum_watch import (
     ForumWatchConfig,
     MatchedForumThread,
@@ -26,18 +36,22 @@ from nga_tools.thread_configs import ThreadConfig
 def _thread(
     *,
     tid: int = 123,
+    fid: int = 784,
     subject: str = "安价测试帖",
+    author: str = "楼主",
     authorid: int = 456,
+    postdate: int = 1000,
+    lastpost: int = 2000,
     replies: int = 600,
 ) -> ForumThread:
     return {
         "tid": tid,
-        "fid": 784,
+        "fid": fid,
         "subject": subject,
-        "author": "楼主",
+        "author": author,
         "authorid": authorid,
-        "postdate": 1000,
-        "lastpost": 2000,
+        "postdate": postdate,
+        "lastpost": lastpost,
         "replies": replies,
         "forumname": "二次元跑团综合",
     }
@@ -100,6 +114,24 @@ class _FakeThreadConfigs:
         self.saved = True
 
 
+class _FakeForumThreadStore:
+    db_path = Path("fake_forum_threads.sqlite3")
+
+    def __init__(self) -> None:
+        self.upserts: list[tuple[int, list[int]]] = []
+
+    def upsert_threads(
+        self,
+        fid: int,
+        threads: list[ForumThread],
+    ) -> ForumThreadUpsertResult:
+        self.upserts.append((fid, [thread["tid"] for thread in threads]))
+        return ForumThreadUpsertResult(
+            inserted_count=len(threads),
+            updated_count=0,
+        )
+
+
 class _FakePostdateClient:
     def __init__(
         self,
@@ -156,8 +188,7 @@ class ForumWatchCliTest(unittest.TestCase):
                 "--full_postdate",
                 "--fid",
                 "784",
-                "--scan_output",
-                "threads.jsonl",
+                "--refresh",
                 "--start_page",
                 "544",
                 "--page_delay_seconds",
@@ -167,7 +198,7 @@ class ForumWatchCliTest(unittest.TestCase):
 
         self.assertEqual(args["full_postdate"], True)
         self.assertEqual(args["fid"], 784)
-        self.assertEqual(args["scan_output"], "threads.jsonl")
+        self.assertEqual(args["refresh"], True)
         self.assertEqual(args["start_page"], 544)
         self.assertEqual(args["page_delay_seconds"], 5)
 
@@ -203,10 +234,45 @@ class ForumWatchCliTest(unittest.TestCase):
                     "forum",
                     "sync",
                     "--full_postdate",
+                    "--refresh",
                     "--fid",
                     "784",
                     "--start_page",
                     "0",
+                ]
+            )
+
+    def test_forum_sync_rejects_start_page_without_refresh(self) -> None:
+        with (
+            patch("sys.stderr", new_callable=io.StringIO),
+            self.assertRaises(SystemExit),
+        ):
+            args_parse(
+                [
+                    "forum",
+                    "sync",
+                    "--full_postdate",
+                    "--fid",
+                    "784",
+                    "--start_page",
+                    "2",
+                ]
+            )
+
+    def test_forum_sync_rejects_removed_scan_output_arg(self) -> None:
+        with (
+            patch("sys.stderr", new_callable=io.StringIO),
+            self.assertRaises(SystemExit),
+        ):
+            args_parse(
+                [
+                    "forum",
+                    "sync",
+                    "--full_postdate",
+                    "--fid",
+                    "784",
+                    "--scan_output",
+                    "threads.jsonl",
                 ]
             )
 
@@ -613,6 +679,66 @@ class ForumWatchSyncTest(unittest.TestCase):
         self.assertEqual(len(thread_list), 1)
 
 
+class ForumThreadStoreTest(unittest.TestCase):
+    def test_upsert_uses_tid_primary_key_and_updates_thread_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "forum_threads.sqlite3"
+            store = ForumThreadStore(db_path)
+            table_name = forum_thread_table_name(784)
+
+            first_result = store.upsert_threads(
+                784,
+                [
+                    _thread(
+                        tid=101,
+                        subject="旧标题",
+                        author="旧作者",
+                        authorid=201,
+                        lastpost=2000,
+                        replies=10,
+                    )
+                ],
+            )
+            second_result = store.upsert_threads(
+                784,
+                [
+                    _thread(
+                        tid=101,
+                        subject="新标题",
+                        author="新作者",
+                        authorid=202,
+                        lastpost=3000,
+                        replies=20,
+                    )
+                ],
+            )
+
+            with closing(sqlite3.connect(db_path)) as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT tid, aid, author, subject, lastpost, replies
+                    FROM {table_name}
+                    """
+                ).fetchone()
+                columns = [
+                    column[1]
+                    for column in connection.execute(
+                        f"PRAGMA table_info({table_name})"
+                    ).fetchall()
+                ]
+
+        self.assertEqual(first_result.inserted_count, 1)
+        self.assertEqual(first_result.updated_count, 0)
+        self.assertEqual(second_result.inserted_count, 0)
+        self.assertEqual(second_result.updated_count, 1)
+        self.assertEqual(row, (101, 202, "新作者", "新标题", 3000, 20))
+        self.assertNotIn("fid", columns)
+        self.assertNotIn("forumname", columns)
+        self.assertNotIn("page", columns)
+        self.assertNotIn("page_index", columns)
+        self.assertNotIn("pageindex", columns)
+
+
 class ForumPostdateScanTest(unittest.TestCase):
     def test_scan_writes_jsonl_without_thread_page_fetches(self) -> None:
         client = _FakePostdateClient(
@@ -779,8 +905,126 @@ class ForumPostdateScanTest(unittest.TestCase):
         self.assertEqual(sleeps, [])
 
 
+class ForumPostdateDbSyncTest(unittest.TestCase):
+    def test_db_sync_stops_after_updating_existing_tid(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(
+                    page=1,
+                    total_page=2,
+                    threads=[
+                        _thread(tid=101, subject="新帖", authorid=201),
+                        _thread(
+                            tid=102,
+                            subject="已保存的新标题",
+                            authorid=202,
+                            lastpost=3000,
+                            replies=20,
+                        ),
+                    ],
+                ),
+                (784, 2): _forum_page(
+                    page=2,
+                    total_page=2,
+                    threads=[_thread(tid=103, subject="不应抓取")],
+                ),
+            }
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "forum_threads.sqlite3"
+            store = ForumThreadStore(db_path)
+            store.upsert_threads(
+                784,
+                [
+                    _thread(
+                        tid=102,
+                        subject="已保存的旧标题",
+                        authorid=202,
+                        lastpost=2000,
+                        replies=10,
+                    )
+                ],
+            )
+            result = sync_postdate_forum_threads_to_db(
+                client,
+                fids=[784],
+                store=store,
+                page_delay_seconds=3,
+                sleep_func=sleeps.append,
+            )
+            table_name = forum_thread_table_name(784)
+            with closing(sqlite3.connect(db_path)) as connection:
+                rows = connection.execute(
+                    f"SELECT tid, subject, lastpost, replies FROM {table_name} "
+                    "ORDER BY tid"
+                ).fetchall()
+
+        self.assertEqual(client.thread_page_fetches, [(784, 1, "postdatedesc")])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(result.page_count, 1)
+        self.assertEqual(result.thread_count, 2)
+        self.assertEqual(result.inserted_count, 1)
+        self.assertEqual(result.updated_count, 1)
+        self.assertEqual(result.stopped_existing_count, 1)
+        self.assertEqual(
+            rows,
+            [
+                (101, "新帖", 2000, 600),
+                (102, "已保存的新标题", 3000, 20),
+            ],
+        )
+
+    def test_db_sync_refresh_ignores_existing_tid_and_scans_to_last_page(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(
+                    page=1,
+                    total_page=2,
+                    threads=[
+                        _thread(tid=101, subject="新帖", authorid=201),
+                        _thread(tid=102, subject="已保存的新标题", authorid=202),
+                    ],
+                ),
+                (784, 2): _forum_page(
+                    page=2,
+                    total_page=2,
+                    threads=[_thread(tid=103, subject="第二页")],
+                ),
+            }
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = ForumThreadStore(Path(tmp_dir) / "forum_threads.sqlite3")
+            store.upsert_threads(
+                784,
+                [_thread(tid=102, subject="已保存的旧标题", authorid=202)],
+            )
+            result = sync_postdate_forum_threads_to_db(
+                client,
+                fids=[784],
+                store=store,
+                page_delay_seconds=3,
+                refresh=True,
+                sleep_func=sleeps.append,
+            )
+
+        self.assertEqual(
+            client.thread_page_fetches,
+            [(784, 1, "postdatedesc"), (784, 2, "postdatedesc")],
+        )
+        self.assertEqual(sleeps, [3])
+        self.assertEqual(result.page_count, 2)
+        self.assertEqual(result.thread_count, 3)
+        self.assertEqual(result.inserted_count, 2)
+        self.assertEqual(result.updated_count, 1)
+        self.assertEqual(result.stopped_existing_count, 0)
+
+
 class ForumWatchCommandTest(unittest.TestCase):
-    def test_forum_sync_full_postdate_writes_scan_file_only(self) -> None:
+    def test_forum_sync_full_postdate_writes_database_only(self) -> None:
         client = _FakePostdateClient(
             {
                 (784, 1): _forum_page(
@@ -790,10 +1034,12 @@ class ForumWatchCommandTest(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            output_path = Path(tmp_dir) / "threads.jsonl"
+            db_path = Path(tmp_dir) / "forum_threads.sqlite3"
+            store = ForumThreadStore(db_path)
             with (
                 patch("nga_tools.commands.forum.configure_network_limits_from_args"),
                 patch("nga_tools.commands.forum.NGAClient", return_value=client),
+                patch("nga_tools.commands.forum.ForumThreadStore", return_value=store),
                 patch(
                     "nga_tools.commands.forum.NGAThreadConfigs",
                     side_effect=AssertionError(
@@ -806,25 +1052,26 @@ class ForumWatchCommandTest(unittest.TestCase):
                     {
                         "full_postdate": True,
                         "fid": 784,
-                        "scan_output": str(output_path),
-                        "start_page": 1,
                         "page_delay_seconds": 3,
                     }
                 )
 
-            records = [
-                json.loads(line)
-                for line in output_path.read_text(encoding="utf-8").splitlines()
-            ]
+            table_name = forum_thread_table_name(784)
+            with closing(sqlite3.connect(db_path)) as connection:
+                row = connection.execute(
+                    f"SELECT tid, aid, subject FROM {table_name}"
+                ).fetchone()
 
-        self.assertEqual(records[0]["tid"], 101)
-        self.assertEqual(records[0]["aid"], 201)
+        self.assertEqual(row, (101, 201, "旧帖一号"))
         self.assertEqual(client.thread_page_fetches, [(784, 1, "postdatedesc")])
         output_text = output.getvalue()
-        self.assertIn("发布时间扫描完成：fid=784，扫描1页，写入1个主题。", output_text)
-        self.assertIn(str(output_path), output_text)
+        self.assertIn(
+            "发布时间扫描完成：fid=784，扫描1页，保存1个主题；新增1个，更新0个。",
+            output_text,
+        )
+        self.assertIn(str(db_path), output_text)
 
-    def test_forum_sync_full_postdate_accepts_start_page(self) -> None:
+    def test_forum_sync_full_postdate_accepts_start_page_with_refresh(self) -> None:
         client = _FakePostdateClient(
             {
                 (784, 2): _forum_page(
@@ -836,10 +1083,11 @@ class ForumWatchCommandTest(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            output_path = Path(tmp_dir) / "threads.jsonl"
+            store = ForumThreadStore(Path(tmp_dir) / "forum_threads.sqlite3")
             with (
                 patch("nga_tools.commands.forum.configure_network_limits_from_args"),
                 patch("nga_tools.commands.forum.NGAClient", return_value=client),
+                patch("nga_tools.commands.forum.ForumThreadStore", return_value=store),
                 patch(
                     "nga_tools.commands.forum.NGAThreadConfigs",
                     side_effect=AssertionError(
@@ -852,7 +1100,7 @@ class ForumWatchCommandTest(unittest.TestCase):
                     {
                         "full_postdate": True,
                         "fid": 784,
-                        "scan_output": str(output_path),
+                        "refresh": True,
                         "start_page": 2,
                         "page_delay_seconds": 3,
                     }
@@ -864,6 +1112,7 @@ class ForumWatchCommandTest(unittest.TestCase):
         watch = _watch(keywords=["安价"])
         client = _FakeForumClient({(784, 1): [_thread(tid=101, subject="安价一号")]})
         thread_configs = _FakeThreadConfigs()
+        forum_store = _FakeForumThreadStore()
 
         with (
             patch(
@@ -872,6 +1121,10 @@ class ForumWatchCommandTest(unittest.TestCase):
             ),
             patch("nga_tools.commands.forum.configure_network_limits_from_args"),
             patch("nga_tools.commands.forum.NGAClient", return_value=client),
+            patch(
+                "nga_tools.commands.forum.ForumThreadStore",
+                return_value=forum_store,
+            ),
             patch(
                 "nga_tools.commands.forum.NGAThreadConfigs",
                 return_value=thread_configs,
@@ -886,12 +1139,15 @@ class ForumWatchCommandTest(unittest.TestCase):
             output_text,
         )
         self.assertIn("扫描1个主题，匹配1个；新增1个，跳过0个，冲突0个。", output_text)
+        self.assertIn("主题数据库：新增1个，更新0个，路径：fake_forum_threads.sqlite3", output_text)
         self.assertIn("[added] rp784-101 (tid=101, aid=456) - 已添加配置", output_text)
+        self.assertEqual(forum_store.upserts, [(784, [101])])
         self.assertTrue(thread_configs.saved)
 
     def test_forum_sync_hides_skipped_result_details(self) -> None:
         watch = _watch(keywords=["安价"])
         client = _FakeForumClient({(784, 1): [_thread(tid=101, subject="安价一号")]})
+        forum_store = _FakeForumThreadStore()
         thread_configs = _FakeThreadConfigs(
             [
                 {
@@ -911,6 +1167,10 @@ class ForumWatchCommandTest(unittest.TestCase):
             patch("nga_tools.commands.forum.configure_network_limits_from_args"),
             patch("nga_tools.commands.forum.NGAClient", return_value=client),
             patch(
+                "nga_tools.commands.forum.ForumThreadStore",
+                return_value=forum_store,
+            ),
+            patch(
                 "nga_tools.commands.forum.NGAThreadConfigs",
                 return_value=thread_configs,
             ),
@@ -922,6 +1182,7 @@ class ForumWatchCommandTest(unittest.TestCase):
         self.assertIn("扫描1个主题，匹配1个；新增0个，跳过1个，冲突0个。", output_text)
         self.assertNotIn("[skipped]", output_text)
         self.assertNotIn("已存在配置：existing", output_text)
+        self.assertEqual(forum_store.upserts, [(784, [101])])
         self.assertEqual(client.page_fetches, [])
         self.assertFalse(thread_configs.saved)
 
@@ -933,6 +1194,7 @@ class ForumWatchCommandTest(unittest.TestCase):
             },
             fail_on=(784, 2),
         )
+        forum_store = _FakeForumThreadStore()
 
         with (
             patch(
@@ -941,6 +1203,10 @@ class ForumWatchCommandTest(unittest.TestCase):
             ),
             patch("nga_tools.commands.forum.configure_network_limits_from_args"),
             patch("nga_tools.commands.forum.NGAClient", return_value=client),
+            patch(
+                "nga_tools.commands.forum.ForumThreadStore",
+                return_value=forum_store,
+            ),
             patch("sys.stdout", new_callable=io.StringIO) as output,
         ):
             with self.assertRaisesRegex(RuntimeError, "forum fetch failed"):

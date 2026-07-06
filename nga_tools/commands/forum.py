@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import Counter
-from pathlib import Path
 
 from nga_tools.commands.types import (
     CommandArgs,
@@ -21,12 +20,13 @@ from nga_tools.forum_watch import (
 from nga_tools.forum_export import (
     DEFAULT_PAGE_DELAY_SECONDS,
     ForumPostdateScanProgress,
-    default_postdate_scan_output_path,
-    scan_postdate_forum_threads,
+    sync_postdate_forum_threads_to_db,
     unique_fids,
 )
+from nga_tools.forum_threads_db import ForumThreadStore
 from nga_tools.console import InlineProgress
 from nga_tools.ngaclient import NGAClient
+from nga_tools.ngaclient.client import ForumThread
 from nga_tools.thread_configs import NGAThreadConfigs
 
 
@@ -63,41 +63,38 @@ def _postdate_scan_fids(args: CommandArgs) -> list[int]:
     return fids
 
 
-def _postdate_scan_output_path(args: CommandArgs) -> Path:
-    output_path = optional_str(args, "scan_output")
-    if output_path is not None:
-        return Path(output_path)
-    return default_postdate_scan_output_path()
-
-
 def _handle_forum_sync_full_postdate(args: CommandArgs) -> None:
     configure_network_limits_from_args(args)
     client = NGAClient()
     fids = _postdate_scan_fids(args)
-    output_path = _postdate_scan_output_path(args)
     page_delay_arg = optional_int(args, "page_delay_seconds")
     page_delay_seconds = (
         DEFAULT_PAGE_DELAY_SECONDS if page_delay_arg is None else page_delay_arg
     )
+    refresh = optional_bool(args, "refresh")
     start_page_arg = optional_int(args, "start_page")
     start_page = 1 if start_page_arg is None else start_page_arg
+    if start_page_arg is not None and not refresh:
+        raise ValueError("--start_page仅支持与--full_postdate --refresh一起使用。")
+    forum_store = ForumThreadStore()
     progress_display = InlineProgress()
 
     def update_progress(progress: ForumPostdateScanProgress) -> None:
         total_pages = "?" if progress.total_pages is None else str(progress.total_pages)
         progress_display.update(
             f"正在按发布时间扫描 fid={progress.fid} "
-            f"第{progress.page}/{total_pages}页，已写"
+            f"第{progress.page}/{total_pages}页，已保存"
             f"{progress.written_count}个，{progress.message}"
         )
 
     try:
-        result = scan_postdate_forum_threads(
+        result = sync_postdate_forum_threads_to_db(
             client,
             fids=fids,
-            output_path=output_path,
+            store=forum_store,
             start_page=start_page,
             page_delay_seconds=page_delay_seconds,
+            refresh=refresh,
             progress_callback=update_progress,
         )
     finally:
@@ -106,9 +103,12 @@ def _handle_forum_sync_full_postdate(args: CommandArgs) -> None:
     fid_text = ", ".join(str(fid) for fid in result.fids)
     print(
         f"发布时间扫描完成：fid={fid_text}，扫描{result.page_count}页，"
-        f"写入{result.thread_count}个主题。"
+        f"保存{result.thread_count}个主题；"
+        f"新增{result.inserted_count}个，更新{result.updated_count}个。"
     )
-    print(f"输出：{result.output_path}")
+    if result.stopped_existing_count > 0:
+        print(f"遇到{result.stopped_existing_count}个数据库已有主题，已停止后续扫描。")
+    print(f"数据库：{result.db_path}")
 
 
 def handle_forum_sync(args: CommandArgs) -> None:
@@ -118,10 +118,10 @@ def handle_forum_sync(args: CommandArgs) -> None:
 
     if (
         optional_int(args, "fid") is not None
-        or optional_str(args, "scan_output")
         or optional_int(args, "start_page") is not None
+        or optional_bool(args, "refresh")
     ):
-        raise ValueError("--fid、--scan_output和--start_page仅在--full_postdate模式下可用。")
+        raise ValueError("--fid、--refresh和--start_page仅在--full_postdate模式下可用。")
 
     watch_config_path = optional_str(args, "watch_config") or DEFAULT_WATCH_CONFIG_PATH
     watch_configs = load_forum_watch_configs(watch_config_path)
@@ -132,7 +132,10 @@ def handle_forum_sync(args: CommandArgs) -> None:
     configure_network_limits_from_args(args)
     client = NGAClient()
     thread_configs = NGAThreadConfigs()
+    forum_store = ForumThreadStore()
     progress_display = InlineProgress()
+    db_inserted_count = 0
+    db_updated_count = 0
 
     def update_progress(progress: ForumScanProgress) -> None:
         progress_display.update(
@@ -141,12 +144,19 @@ def handle_forum_sync(args: CommandArgs) -> None:
             f"{progress.scanned_count}个，匹配{progress.matched_count}个"
         )
 
+    def store_forum_page(fid: int, threads: list[ForumThread]) -> None:
+        nonlocal db_inserted_count, db_updated_count
+        result = forum_store.upsert_threads(fid, threads)
+        db_inserted_count += result.inserted_count
+        db_updated_count += result.updated_count
+
     try:
         scanned_count, matches = collect_matching_threads(
             client,
             watch_configs,
             progress_callback=update_progress,
             existing_thread_list=thread_configs.ThreadList,
+            forum_page_callback=store_forum_page,
         )
     finally:
         progress_display.finish()
@@ -160,6 +170,10 @@ def handle_forum_sync(args: CommandArgs) -> None:
         f"扫描{scanned_count}个主题，匹配{len(matches)}个；"
         f"新增{status_counts['added']}个，跳过{status_counts['skipped']}个，"
         f"冲突{status_counts['conflict']}个。"
+    )
+    print(
+        f"主题数据库：新增{db_inserted_count}个，"
+        f"更新{db_updated_count}个，路径：{forum_store.db_path}"
     )
     for outcome in outcomes:
         if outcome.status == "skipped":

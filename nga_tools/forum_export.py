@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal, Protocol, TypedDict
 
 from nga_tools.config import get_config
+from nga_tools.forum_threads_db import ForumThreadStore, timestamp_text
 from nga_tools.ngaclient.client import ForumThread, ForumThreadPage, NGAForumPageError
 
 POSTDATE_ORDER = "postdatedesc"
@@ -72,6 +73,17 @@ class ForumPostdateScanResult:
     thread_count: int
 
 
+@dataclass(frozen=True)
+class ForumPostdateDbSyncResult:
+    db_path: Path
+    fids: list[int]
+    page_count: int
+    thread_count: int
+    inserted_count: int
+    updated_count: int
+    stopped_existing_count: int
+
+
 def unique_fids(fids: Iterable[int]) -> list[int]:
     seen: set[int] = set()
     ordered_fids: list[int] = []
@@ -93,7 +105,7 @@ def default_postdate_scan_output_path(now: datetime | None = None) -> Path:
 
 
 def _timestamp_text(timestamp: int) -> str:
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    return timestamp_text(timestamp)
 
 
 def _thread_record(
@@ -277,4 +289,89 @@ def scan_postdate_forum_threads(
         fids=scan_fids,
         page_count=total_pages_scanned,
         thread_count=total_written,
+    )
+
+
+def sync_postdate_forum_threads_to_db(
+    client: ForumThreadPageClient,
+    *,
+    fids: Sequence[int],
+    store: ForumThreadStore | None = None,
+    start_page: int = 1,
+    page_delay_seconds: int = DEFAULT_PAGE_DELAY_SECONDS,
+    refresh: bool = False,
+    sleep_func: SleepFunc = time.sleep,
+    progress_callback: ForumPostdateScanProgressCallback | None = None,
+) -> ForumPostdateDbSyncResult:
+    if start_page <= 0:
+        raise ValueError("start_page必须大于0。")
+    if page_delay_seconds <= 0:
+        raise ValueError("page_delay_seconds必须大于0。")
+    if start_page != 1 and not refresh:
+        raise ValueError("start_page仅支持与refresh一起使用。")
+
+    scan_fids = unique_fids(fids)
+    if not scan_fids:
+        raise ValueError("至少需要一个fid。")
+
+    thread_store = ForumThreadStore() if store is None else store
+    total_threads = 0
+    total_inserted = 0
+    total_updated = 0
+    total_pages_scanned = 0
+    stopped_existing_count = 0
+
+    for fid_index, fid in enumerate(scan_fids, start=1):
+        known_tids: set[int] = set() if refresh else thread_store.existing_tids(fid)
+        total_pages: int | None = None
+        page = start_page
+        while total_pages is None or page <= total_pages:
+            page_data = _fetch_postdate_page_with_retry(
+                client,
+                fid=fid,
+                page=page,
+                total_pages=total_pages,
+                written_count=total_threads,
+                page_delay_seconds=page_delay_seconds,
+                sleep_func=sleep_func,
+                progress_callback=progress_callback,
+            )
+            total_pages = page_data["total_page"]
+            page_tids = {thread["tid"] for thread in page_data["threads"]}
+            found_existing_tids = page_tids & known_tids
+            upsert_result = thread_store.upsert_threads(fid, page_data["threads"])
+            total_threads += upsert_result.total_count
+            total_inserted += upsert_result.inserted_count
+            total_updated += upsert_result.updated_count
+            total_pages_scanned += 1
+
+            stop_after_page = not refresh and bool(found_existing_tids)
+            if stop_after_page:
+                stopped_existing_count += len(found_existing_tids)
+
+            has_more_pages = page < total_pages and not stop_after_page
+            has_more_fids = fid_index < len(scan_fids)
+            if has_more_pages or has_more_fids:
+                _report_progress(
+                    progress_callback,
+                    fid=fid,
+                    page=page,
+                    total_pages=total_pages,
+                    written_count=total_threads,
+                    status="waiting",
+                    message=f"等待{page_delay_seconds}秒",
+                )
+                sleep_func(page_delay_seconds)
+            if stop_after_page:
+                break
+            page += 1
+
+    return ForumPostdateDbSyncResult(
+        db_path=thread_store.db_path,
+        fids=scan_fids,
+        page_count=total_pages_scanned,
+        thread_count=total_threads,
+        inserted_count=total_inserted,
+        updated_count=total_updated,
+        stopped_existing_count=stopped_existing_count,
     )

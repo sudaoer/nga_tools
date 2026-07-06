@@ -19,6 +19,7 @@ DEFAULT_MIN_AUTHOR_LOUS = 20
 JsonObject: TypeAlias = dict[str, object]
 SyncStatus: TypeAlias = Literal["added", "skipped", "conflict"]
 ForumScanProgressCallback: TypeAlias = Callable[["ForumScanProgress"], None]
+ForumPageCallback: TypeAlias = Callable[[int, list[ForumThread]], None]
 
 
 class ForumWatchConfig(TypedDict):
@@ -284,6 +285,7 @@ def collect_matching_threads(
     watch_configs: list[ForumWatchConfig],
     progress_callback: ForumScanProgressCallback | None = None,
     existing_thread_list: list[ThreadConfig] | None = None,
+    forum_page_callback: ForumPageCallback | None = None,
 ) -> tuple[int, list[MatchedForumThread]]:
     scanned_count = 0
     matched_threads: list[MatchedForumThread] = []
@@ -291,6 +293,8 @@ def collect_matching_threads(
     for watch_config in watch_configs:
         for page in range(1, watch_config["pages"] + 1):
             page_threads = client.get_forum_threads(watch_config["fid"], page)
+            if forum_page_callback is not None:
+                forum_page_callback(watch_config["fid"], page_threads)
             scanned_count += len(page_threads)
             for thread in page_threads:
                 if not thread_matches_watch(thread, watch_config):

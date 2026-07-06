@@ -124,13 +124,12 @@ ARG_DEFS: dict[str, ArgDef] = {
     "full_postdate": {
         "flags": ("--full_postdate",),
         "action": "store_true",
-        "help": "按主题发布时间倒序全版面扫描并写入单独清单",
+        "help": "按主题发布时间倒序扫描版面主题并写入数据库",
     },
-    "scan_output": {
-        "flags": ("--scan_output",),
-        "type": str,
-        "metavar": "PATH",
-        "help": "发布时间全版面扫描输出JSONL路径",
+    "refresh": {
+        "flags": ("--refresh",),
+        "action": "store_true",
+        "help": "刷新已有数据库数据，不因已有tid提前停止",
     },
     "page_delay_seconds": {
         "flags": ("--page_delay_seconds",),
@@ -199,7 +198,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} forum sync [--watch_config PATH] "
                 "[--api_concurrency N]\n"
                 f"       {PROGRAM_USAGE} forum sync --full_postdate "
-                "[--fid FID] [--scan_output PATH] [--start_page N] "
+                "[--fid FID] [--refresh [--start_page N]] "
                 "[--page_delay_seconds N] [--api_concurrency N]"
             ),
             "examples": [
@@ -211,7 +210,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                     "--page_delay_seconds 5"
                 ),
                 (
-                    f"{PROGRAM_USAGE} forum sync --full_postdate --fid 784 "
+                    f"{PROGRAM_USAGE} forum sync --full_postdate --refresh --fid 784 "
                     "--start_page 544"
                 ),
             ],
@@ -219,13 +218,14 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "默认读取forum_watch_configs.json。",
                 "匹配主题会写入thread_configs.json，aid使用主题楼主authorid。",
                 "此命令只保存配置，不自动下载帖子内容。",
-                "--full_postdate模式只写主题清单，不修改thread_configs.json，也不请求单贴API。",
+                "抓到的版面主题列表会写入output_dir/forum_sync/forum_threads.sqlite3。",
+                "--full_postdate默认遇到数据库已有tid后停止；--refresh会刷新到远端末页。",
             ],
             "args": [
                 "watch_config",
                 "fid",
                 "full_postdate",
-                "scan_output",
+                "refresh",
                 "start_page",
                 "page_delay_seconds",
                 "api_concurrency",
@@ -621,13 +621,22 @@ def _validate_args(
 
     if command == "forum" and action == "sync" and not args.get("full_postdate"):
         postdate_only_args = sorted(
-            provided_args & {"fid", "page_delay_seconds", "scan_output", "start_page"}
+            provided_args & {"fid", "page_delay_seconds", "refresh", "start_page"}
         )
         if postdate_only_args:
             parser.error(
                 "以下参数仅支持与--full_postdate一起使用："
                 + ", ".join(f"--{name}" for name in postdate_only_args)
             )
+
+    if (
+        command == "forum"
+        and action == "sync"
+        and args.get("full_postdate")
+        and "start_page" in provided_args
+        and not args.get("refresh")
+    ):
+        parser.error("--start_page仅支持与--full_postdate --refresh一起使用。")
 
     for arg_name, default_value in action_config.get("defaults", {}).items():
         if args.get(arg_name) is None:
