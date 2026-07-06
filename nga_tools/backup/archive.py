@@ -630,7 +630,7 @@ def _collect_image_download_tasks_from_parsed(
             if not utils.NGA_img_link_verify(normalized_image_url):
                 report_warning(
                     f"{floor_labels.label(parsed_html.post_html['lou'])}的"
-                    f"第{index + 1}张图片链接 {normalized_image_url} 无效"
+                    f"第{index + 1}张图片链接无效：{normalized_image_url}"
                 )
                 continue
 

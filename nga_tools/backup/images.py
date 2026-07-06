@@ -13,6 +13,7 @@ from PIL import Image
 from nga_tools import utils
 from nga_tools.backup import image_store
 from nga_tools.config import get_config
+from nga_tools.console import report_info, report_warning
 
 
 @dataclass(frozen=True)
@@ -51,7 +52,7 @@ def verify_downloaded_images(tid: int, aid: Optional[int]) -> None:
     folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified", create=False))
     image_paths = _list_thread_referenced_image_paths(folder_html_modified)
     result = _verify_image_paths(str(folder_html_modified), image_paths)
-    print(
+    report_info(
         f"帖子图片校验完成：引用图片{result.total}张，"
         f"删除{result.removed}个损坏文件。"
     )
@@ -60,23 +61,23 @@ def verify_downloaded_images(tid: int, aid: Optional[int]) -> None:
 def verify_all_downloaded_images() -> None:
     image_folders = _list_downloaded_image_folders()
     if not image_folders:
-        print("没有找到任何图片目录。")
+        report_info("没有找到任何图片目录。")
         return
 
     total_folders = len(image_folders)
     total_images = 0
     total_removed = 0
     for index, folder_images in enumerate(image_folders, start=1):
-        print(f"[{index}/{total_folders}] 正在校验图片目录：{folder_images}")
+        report_info(f"[{index}/{total_folders}] 正在校验图片目录：{folder_images}")
         result = _verify_images_in_folder(folder_images)
         total_images += result.total
         total_removed += result.removed
-        print(
+        report_info(
             f"[{index}/{total_folders}] 图片目录校验完成："
             f"{folder_images}，删除{result.removed}个损坏文件。"
         )
 
-    print(
+    report_info(
         f"全部图片校验完成：目录{total_folders}个，"
         f"图片{total_images}张，删除{total_removed}个损坏文件。"
     )
@@ -350,12 +351,12 @@ def _list_thread_referenced_image_paths(folder_html_modified: Path) -> list[Path
 
 def _verify_images_in_folder(folder_images: str) -> ImageVerifyResult:
     image_files = utils.list_files_in_folder(folder_images)
-    print(f"已下载图片文件数：{len(image_files)}")
+    report_info(f"已下载图片文件数：{len(image_files)}")
     if not image_files:
         return ImageVerifyResult(folder=folder_images, total=0, removed=0)
 
     worker_count = _image_verify_worker_count(len(image_files))
-    print(f"并行校验worker数：{worker_count}")
+    report_info(f"并行校验worker数：{worker_count}")
 
     image_tasks = [(folder_images, image_file) for image_file in image_files]
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -365,7 +366,9 @@ def _verify_images_in_folder(folder_images: str) -> ImageVerifyResult:
     for result in results:
         if result.error is None:
             continue
-        print(f"图片文件损坏或无法打开：{result.image_file}，错误信息：{result.error}")
+        report_warning(
+            f"图片文件损坏或无法打开：{result.image_file}，错误信息：{result.error}"
+        )
         if result.removed:
             removed_count += 1
 
@@ -377,12 +380,12 @@ def _verify_images_in_folder(folder_images: str) -> ImageVerifyResult:
 
 
 def _verify_image_paths(folder_label: str, image_paths: list[Path]) -> ImageVerifyResult:
-    print(f"已下载图片文件数：{len(image_paths)}")
+    report_info(f"已下载图片文件数：{len(image_paths)}")
     if not image_paths:
         return ImageVerifyResult(folder=folder_label, total=0, removed=0)
 
     worker_count = _image_verify_worker_count(len(image_paths))
-    print(f"并行校验worker数：{worker_count}")
+    report_info(f"并行校验worker数：{worker_count}")
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         results = list(executor.map(_verify_image_path, image_paths))
@@ -391,7 +394,9 @@ def _verify_image_paths(folder_label: str, image_paths: list[Path]) -> ImageVeri
     for result in results:
         if result.error is None:
             continue
-        print(f"图片文件损坏或无法打开：{result.image_file}，错误信息：{result.error}")
+        report_warning(
+            f"图片文件损坏或无法打开：{result.image_file}，错误信息：{result.error}"
+        )
         if result.removed:
             removed_count += 1
 

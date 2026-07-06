@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import call, patch
 
 from PIL import Image
+from rich.console import Console
 
 from nga_tools.backup import image_store
 from nga_tools.backup.images import (
@@ -20,6 +22,7 @@ from nga_tools.backup.images import (
     verify_all_downloaded_images,
 )
 from nga_tools.cli import args_parse
+from nga_tools.console import ConsoleReporter, report_warning, use_reporter
 from nga_tools.commands.image import image_verify
 
 
@@ -82,6 +85,62 @@ class ImageVerifyHandlerTest(unittest.TestCase):
         resolve_mock.assert_called_once_with(args)
         verify_mock.assert_called_once_with(101, 201)
 
+    def test_single_thread_verify_writes_warning_log(self) -> None:
+        args = {"name": "帖子名", "tid": None, "aid": None}
+        output = io.StringIO()
+        console = Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=120,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            base_dir = Path(temp_dir_name)
+            thread_dir = base_dir / "101_201"
+            thread_dir.mkdir()
+            log_path = thread_dir / "warnings.log"
+            log_path.write_text("旧日志\n", encoding="utf-8")
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                self.assertEqual((tid, aid), (101, 201))
+                path = thread_dir
+                if subfolder is not None:
+                    path = path / subfolder
+                path.mkdir(parents=True, exist_ok=True)
+                return str(path)
+
+            def verify_side_effect(tid: int, aid: int | None) -> None:
+                self.assertEqual((tid, aid), (101, 201))
+                report_warning("单帖图片告警")
+
+            with (
+                patch(
+                    "nga_tools.commands.image.resolve_command_thread_target",
+                    return_value=(101, 201),
+                ),
+                patch(
+                    "nga_tools.commands.image.verify_downloaded_images",
+                    side_effect=verify_side_effect,
+                ),
+                patch(
+                    "nga_tools.commands.warning_log.utils.get_folder",
+                    side_effect=fake_get_folder,
+                ),
+                use_reporter(ConsoleReporter(console)),
+            ):
+                image_verify(args)
+
+            self.assertEqual(
+                log_path.read_text(encoding="utf-8"),
+                "警告：单帖图片告警\n",
+            )
+            self.assertIn("警告：单帖图片告警", output.getvalue())
+
     def test_aid_without_thread_target_is_rejected(self) -> None:
         with patch("nga_tools.commands.image.verify_all_downloaded_images") as all_mock:
             with self.assertRaises(ValueError):
@@ -127,6 +186,7 @@ class ImageVerifyAllTest(unittest.TestCase):
                 side_effect=results,
             ) as verify_mock,
             patch("builtins.print"),
+            patch("sys.stdout", new_callable=io.StringIO),
         ):
             verify_all_downloaded_images()
 
@@ -254,7 +314,10 @@ class ImageVerifyAllTest(unittest.TestCase):
             Image.new("RGB", (1, 1), color="white").save(valid_image)
             broken_image.write_bytes(b"not an image")
 
-            with patch("builtins.print"):
+            with (
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
                 result = _verify_images_in_folder(str(image_dir))
 
             self.assertEqual(result.total, 2)

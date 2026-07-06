@@ -81,17 +81,22 @@ class Reporter(Protocol):
 
 class ConsoleReporter:
     def __init__(self, console: Console | None = None) -> None:
-        self._console = console if console is not None else Console()
+        self._console = console
+
+    def _active_console(self) -> Console:
+        if self._console is not None:
+            return self._console
+        return Console(file=sys.stdout, soft_wrap=True)
 
     @property
     def console(self) -> Console:
-        return self._console
+        return self._active_console()
 
     def info(self, message: str) -> None:
-        self._console.print(message, markup=False)
+        self._active_console().print(message, markup=False)
 
     def warning(self, message: str) -> None:
-        self._console.print(f"警告：{message}", markup=False)
+        self._active_console().print(f"警告：{message}", markup=False)
 
     def progress(
         self,

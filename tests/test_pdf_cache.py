@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -116,7 +117,10 @@ class PdfHashCacheTest(unittest.TestCase):
             )
             (folder_pdf / "part_0_1.pdf").write_bytes(b"%PDF-1.7\n")
 
-            with patch("builtins.print"):
+            with (
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
                 plan = self._build_plan(folder_pdf, {0: "<p>zero</p>"})
 
             self.assertEqual(plan.skipped_count, 0)

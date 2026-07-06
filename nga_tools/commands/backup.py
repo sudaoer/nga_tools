@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from pathlib import Path
 
-from nga_tools import utils
 from nga_tools.backup.archive import backup_thread, backup_thread_sub
 from nga_tools.backup.floor_map import generate_floor_map_from_backup
 from nga_tools.console import (
@@ -19,6 +17,7 @@ from nga_tools.backup.pdf import generate_pdf
 from nga_tools.commands.network import configure_network_limits_from_args
 from nga_tools.commands.resolve import resolve_command_thread_target
 from nga_tools.commands.types import CommandArgs, optional_int, required_int
+from nga_tools.commands.warning_log import warning_log_path
 from nga_tools.thread_configs import (
     NGAThreadConfigs,
     ThreadConfig,
@@ -27,25 +26,19 @@ from nga_tools.thread_configs import (
     thread_config_tid,
 )
 
-WARNING_LOG_FILENAME = "warnings.log"
-
 
 def backup_all(args: CommandArgs) -> None:
     configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
-    with use_warning_log(_warning_log_path(thread_tid, thread_aid)):
+    with use_warning_log(warning_log_path(thread_tid, thread_aid)):
         backup_thread(thread_tid, thread_aid)
 
 
 def backup_sub(args: CommandArgs) -> None:
     configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
-    with use_warning_log(_warning_log_path(thread_tid, thread_aid)):
+    with use_warning_log(warning_log_path(thread_tid, thread_aid)):
         backup_thread_sub(thread_tid, thread_aid)
-
-
-def _warning_log_path(tid: int, aid: int | None) -> Path:
-    return Path(utils.get_folder(tid, aid)) / WARNING_LOG_FILENAME
 
 
 def _thread_config_label(thread_config: ThreadConfig) -> str:
@@ -77,11 +70,11 @@ def _backup_thread_config_with_progress(
         total=total,
         label=thread_label,
     )
-    warning_log_path = _warning_log_path(
+    log_path = warning_log_path(
         thread_config_tid(thread_config),
         thread_config_aid(thread_config),
     )
-    with use_reporter(task_reporter), use_warning_log(warning_log_path):
+    with use_reporter(task_reporter), use_warning_log(log_path):
         report_progress("正在增量备份")
         try:
             _backup_single_thread_config(thread_config)
@@ -193,15 +186,16 @@ def backup_configs(args: CommandArgs) -> None:
 def backup_floors(args: CommandArgs) -> None:
     configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
-    with use_warning_log(_warning_log_path(thread_tid, thread_aid)):
+    with use_warning_log(warning_log_path(thread_tid, thread_aid)):
         generate_floor_map_from_backup(thread_tid, thread_aid)
 
 
 def pdf_generate(args: CommandArgs) -> None:
     thread_tid, thread_aid = resolve_command_thread_target(args)
-    generate_pdf(
-        tid=thread_tid,
-        aid=thread_aid,
-        lou_per_pdf=required_int(args, "lou_per_pdf"),
-        pdf_workers=optional_int(args, "pdf_workers"),
-    )
+    with use_warning_log(warning_log_path(thread_tid, thread_aid)):
+        generate_pdf(
+            tid=thread_tid,
+            aid=thread_aid,
+            lou_per_pdf=required_int(args, "lou_per_pdf"),
+            pdf_workers=optional_int(args, "pdf_workers"),
+        )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
@@ -78,7 +79,10 @@ class HtmlModifiedManifestTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("builtins.print"):
+            with (
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
                 entries = html_modified_manifest.load_manifest(html_dir)
 
         self.assertEqual(entries, {})

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -158,6 +159,7 @@ class ImageStoreTest(unittest.TestCase):
                 ),
                 patch("nga_tools.backup.image_store.utils.sha256", return_value="a" * 64),
                 patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
             ):
                 first = image_store.store_downloaded_image(
                     first_temp,

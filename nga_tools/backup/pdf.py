@@ -23,6 +23,7 @@ from nga_tools.backup.floor_map import (
 from nga_tools.backup import image_store
 from nga_tools.backup.overlay import load_post_overlays
 from nga_tools.config import get_config
+from nga_tools.console import report_info, report_warning
 
 SPEAKER_LINE_RE = re.compile(r"^([^\s：:][^：:]{0,15})[：:]")
 PDF_HASH_MANIFEST_FILENAME = "pdf_input_hashes.json"
@@ -245,11 +246,11 @@ def _load_pdf_hashes(folder_pdf: str) -> dict[str, str]:
     except FileNotFoundError:
         return {}
     except json.JSONDecodeError as error:
-        print(f"警告：PDF hash缓存文件无效，按空缓存处理：{manifest_path}: {error}")
+        report_warning(f"PDF hash缓存文件无效，按空缓存处理：{manifest_path}: {error}")
         return {}
 
     if not isinstance(raw_data, dict):
-        print(f"警告：PDF hash缓存文件格式无效，按空缓存处理：{manifest_path}")
+        report_warning(f"PDF hash缓存文件格式无效，按空缓存处理：{manifest_path}")
         return {}
 
     data = cast(dict[object, object], raw_data)
@@ -260,7 +261,7 @@ def _load_pdf_hashes(folder_pdf: str) -> dict[str, str]:
 
     raw_files = data.get("files")
     if not isinstance(raw_files, dict):
-        print(f"警告：PDF hash缓存文件缺少files对象，按空缓存处理：{manifest_path}")
+        report_warning(f"PDF hash缓存文件缺少files对象，按空缓存处理：{manifest_path}")
         return {}
 
     files = cast(dict[object, object], raw_files)
@@ -268,7 +269,7 @@ def _load_pdf_hashes(folder_pdf: str) -> dict[str, str]:
         isinstance(key, str) and isinstance(value, str)
         for key, value in files.items()
     ):
-        print(f"警告：PDF hash缓存文件files格式无效，按空缓存处理：{manifest_path}")
+        report_warning(f"PDF hash缓存文件files格式无效，按空缓存处理：{manifest_path}")
         return {}
 
     return cast(dict[str, str], files)
@@ -435,7 +436,7 @@ def _read_pdf_html(
         floor_labels,
     )
     if overlays_by_lou:
-        print(f"应用{len(overlays_by_lou)}个post overlay。")
+        report_info(f"应用{len(overlays_by_lou)}个post overlay。")
         overlay_folder = Path(utils.get_folder(tid, aid, "overlay"))
         for lou, overlay_html in overlays_by_lou.items():
             html_sources_by_lou[lou] = PdfHtmlSource(
@@ -469,8 +470,8 @@ def _read_pdf_html(
             try:
                 width, height = _get_image_size(str(image_path), image_size_cache)
             except OSError as error:
-                print(
-                    f"警告：{floor_labels.label(lou)}跳过无法识别尺寸的图片 "
+                report_warning(
+                    f"{floor_labels.label(lou)}跳过无法识别尺寸的图片 "
                     f"{image_path}: {error}"
                 )
                 continue
@@ -519,11 +520,11 @@ def generate_pdf(
     render_tasks = render_plan.render_tasks
     worker_desc = pdf_workers if pdf_workers is not None else "默认"
     if render_plan.skipped_count:
-        print(f"跳过{render_plan.skipped_count}个输入HTML未变化的PDF。")
+        report_info(f"跳过{render_plan.skipped_count}个输入HTML未变化的PDF。")
     if render_plan.cleaned_count:
-        print(f"删除{render_plan.cleaned_count}个旧PDF分段文件。")
+        report_info(f"删除{render_plan.cleaned_count}个旧PDF分段文件。")
 
-    print(f"开始生成{len(render_tasks)}个PDF，worker数量：{worker_desc}")
+    report_info(f"开始生成{len(render_tasks)}个PDF，worker数量：{worker_desc}")
     if render_tasks:
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=pdf_workers
@@ -536,4 +537,4 @@ def generate_pdf(
     if failed_count:
         raise RuntimeError(f"{failed_count}个PDF生成任务失败。")
     _write_pdf_hashes(folder_pdf, render_plan.input_hashes)
-    print("PDF生成完成。")
+    report_info("PDF生成完成。")

@@ -25,7 +25,7 @@ from nga_tools.forum_export import (
     unique_fids,
 )
 from nga_tools.forum_threads_db import ForumThreadStore
-from nga_tools.console import InlineProgress
+from nga_tools.console import InlineProgress, report_info
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import ForumThread
 from nga_tools.thread_configs import NGAThreadConfigs
@@ -41,14 +41,14 @@ def handle_forum_list(args: CommandArgs) -> None:
     for page in range(1, pages + 1):
         threads = client.get_forum_threads(fid, page)
         total_threads += len(threads)
-        print(f"第{page}页：{len(threads)}个主题")
+        report_info(f"第{page}页：{len(threads)}个主题")
         for thread in threads:
-            print(
+            report_info(
                 f"tid: {thread['tid']}, aid: {thread['authorid']}, "
                 f"replies: {thread['replies']}, title: {thread['subject']}"
             )
 
-    print(f"共扫描{total_threads}个主题。")
+    report_info(f"共扫描{total_threads}个主题。")
 
 
 def _postdate_scan_fids(args: CommandArgs) -> list[int]:
@@ -102,14 +102,14 @@ def _handle_forum_sync_full_postdate(args: CommandArgs) -> None:
         progress_display.finish()
 
     fid_text = ", ".join(str(fid) for fid in result.fids)
-    print(
+    report_info(
         f"发布时间扫描完成：fid={fid_text}，扫描{result.page_count}页，"
         f"保存{result.thread_count}个主题；"
         f"新增{result.inserted_count}个，更新{result.updated_count}个。"
     )
     if result.stopped_existing_count > 0:
-        print(f"遇到{result.stopped_existing_count}个数据库已有主题，已停止后续扫描。")
-    print(f"数据库：{result.db_path}")
+        report_info(f"遇到{result.stopped_existing_count}个数据库已有主题，已停止后续扫描。")
+    report_info(f"数据库：{result.db_path}")
 
 
 def _max_default_pages_by_fid(
@@ -167,7 +167,7 @@ def handle_forum_sync(args: CommandArgs) -> None:
     watch_config_path = optional_str(args, "watch_config") or DEFAULT_WATCH_CONFIG_PATH
     watch_configs = load_forum_watch_configs(watch_config_path)
     if not watch_configs:
-        print("没有找到任何版面监控配置。")
+        report_info("没有找到任何版面监控配置。")
         return
 
     configure_network_limits_from_args(args)
@@ -216,21 +216,21 @@ def handle_forum_sync(args: CommandArgs) -> None:
     if status_counts["added"] > 0 or status_counts["updated"] > 0:
         thread_configs.save_configs()
 
-    print(
+    report_info(
         f"远端抓取{fetched_count}个主题，"
         f"数据库新增{db_inserted_count}个，更新{db_updated_count}个。"
     )
-    print(
+    report_info(
         f"数据库筛查{scanned_count}个主题，匹配{len(matches)}个；"
         f"新增{status_counts['added']}个，更新{status_counts['updated']}个，"
         f"跳过{status_counts['skipped']}个，冲突{status_counts['conflict']}个。"
     )
-    print(f"主题数据库：路径：{forum_store.db_path}")
+    report_info(f"主题数据库：路径：{forum_store.db_path}")
     for outcome in outcomes:
         if outcome.status == "skipped":
             continue
         thread = outcome.match.thread
-        print(
+        report_info(
             f"[{outcome.status}] {outcome.match.thread_name} "
             f"(tid={thread['tid']}, aid={thread['authorid']}) - {outcome.message}"
         )

@@ -531,7 +531,10 @@ class FillMissingLouTest(unittest.TestCase):
                     recovered_posts,
                 )
 
-            with patch("builtins.print"):
+            with (
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
                 _fill_missing_lou(htmls, [94, 95], floor_labels, recovered_html)
 
             recovered_file = Path(temp_dir) / "post_94.html"
@@ -557,6 +560,7 @@ class BackupFloorMapFallbackTest(unittest.TestCase):
                 side_effect=RuntimeError("no map"),
             ),
             patch("builtins.print"),
+            patch("sys.stdout", new_callable=io.StringIO),
         ):
             result = _build_floor_map_for_backup(
                 cast(NGAClient, object()),

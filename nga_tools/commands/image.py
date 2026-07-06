@@ -6,8 +6,10 @@ from nga_tools.backup.images import (
     verify_all_downloaded_images,
     verify_downloaded_images,
 )
+from nga_tools.console import report_info, use_warning_log
 from nga_tools.commands.resolve import resolve_command_thread_target
 from nga_tools.commands.types import CommandArgs, optional_int, optional_str
+from nga_tools.commands.warning_log import warning_log_path
 
 
 def image_verify(args: CommandArgs) -> None:
@@ -21,13 +23,14 @@ def image_verify(args: CommandArgs) -> None:
         return
 
     thread_tid, thread_aid = resolve_command_thread_target(args)
-    verify_downloaded_images(thread_tid, thread_aid)
+    with use_warning_log(warning_log_path(thread_tid, thread_aid)):
+        verify_downloaded_images(thread_tid, thread_aid)
 
 
 def image_migrate(args: CommandArgs) -> None:
     del args
     result = migrate_image_index()
-    print(
+    report_info(
         "图片索引迁移完成："
         f"写入映射{result.mappings}条，"
         f"跳过损坏软链接{result.broken_links}个，"
@@ -41,9 +44,9 @@ def image_prune_links(args: CommandArgs) -> None:
     del args
     result = prune_legacy_image_links()
     if result.removed_directory is None:
-        print("旧图片软链接目录不存在，无需清理。")
+        report_info("旧图片软链接目录不存在，无需清理。")
         return
-    print(
+    report_info(
         "旧图片软链接目录清理完成："
         f"删除软链接{result.removed_links}个，"
         f"删除目录：{result.removed_directory}"

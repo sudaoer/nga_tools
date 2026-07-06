@@ -119,7 +119,6 @@ class NGAThreadConfigs:
                 thread_config_tid(existing) == tid
                 and thread_config_aid(existing) == aid
             ):
-                print("该帖子配置已存在，跳过添加。")
                 return False
         self.ThreadList.append(thread_config)
         return True
@@ -142,7 +141,6 @@ def resolve_thread_target(
         for thread in NGAThreadConfigs().get_thread_configs():
             if thread_config_name(thread) == name:
                 return thread_config_tid(thread), thread_config_aid(thread)
-        print(f"未找到名称为{name}的帖子配置。")
         raise ValueError(f"未找到名称为{name}的帖子配置。")
 
     if tid is not None:

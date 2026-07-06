@@ -19,6 +19,7 @@ from nga_tools.commands.backup import (
     backup_configs,
     backup_floors,
     backup_sub,
+    pdf_generate,
 )
 from nga_tools.thread_configs import ThreadConfig
 
@@ -153,7 +154,7 @@ class BackupWarningLogTest(unittest.TestCase):
                             return_value=(101, None),
                         ),
                         patch(
-                            "nga_tools.commands.backup.utils.get_folder",
+                            "nga_tools.commands.warning_log.utils.get_folder",
                             side_effect=_fake_get_folder(base_dir),
                         ),
                         patch(implementation_path, side_effect=implementation),
@@ -200,7 +201,7 @@ class BackupWarningLogTest(unittest.TestCase):
                     return_value=_backup_config_app_config(workers=2),
                 ),
                 patch(
-                    "nga_tools.commands.backup.utils.get_folder",
+                    "nga_tools.commands.warning_log.utils.get_folder",
                     side_effect=_fake_get_folder(base_dir),
                 ),
                 _captured_reporter(),
@@ -221,6 +222,50 @@ class BackupWarningLogTest(unittest.TestCase):
                 ),
                 "警告：warning 102 None\n",
             )
+
+    def test_pdf_generate_writes_thread_warning_log(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            base_dir = Path(temp_dir_name)
+            thread_dir = base_dir / "101_201"
+            thread_dir.mkdir()
+            log_path = thread_dir / "warnings.log"
+            log_path.write_text("旧日志\n", encoding="utf-8")
+
+            def generate_pdf_side_effect(
+                *,
+                tid: int,
+                aid: int | None,
+                lou_per_pdf: int,
+                pdf_workers: int | None,
+            ) -> None:
+                self.assertEqual(
+                    (tid, aid, lou_per_pdf, pdf_workers),
+                    (101, 201, 50, 2),
+                )
+                report_warning("PDF告警")
+
+            with (
+                patch(
+                    "nga_tools.commands.backup.resolve_command_thread_target",
+                    return_value=(101, 201),
+                ),
+                patch(
+                    "nga_tools.commands.backup.generate_pdf",
+                    side_effect=generate_pdf_side_effect,
+                ),
+                patch(
+                    "nga_tools.commands.warning_log.utils.get_folder",
+                    side_effect=_fake_get_folder(base_dir),
+                ),
+                _captured_reporter() as output,
+            ):
+                pdf_generate({"lou_per_pdf": 50, "pdf_workers": 2})
+
+            self.assertEqual(
+                log_path.read_text(encoding="utf-8"),
+                "警告：PDF告警\n",
+            )
+            self.assertIn("警告：PDF告警", output.getvalue())
 
 
 class BackupConfigsHandlerTest(unittest.TestCase):
