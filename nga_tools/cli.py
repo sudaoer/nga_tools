@@ -138,6 +138,12 @@ ARG_DEFS: dict[str, ArgDef] = {
         "metavar": "N",
         "help": "发布时间全版面扫描每页请求后的等待秒数",
     },
+    "start_page": {
+        "flags": ("--start_page",),
+        "type": int,
+        "metavar": "N",
+        "help": "发布时间全版面扫描起始页",
+    },
 }
 
 
@@ -193,8 +199,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} forum sync [--watch_config PATH] "
                 "[--api_concurrency N]\n"
                 f"       {PROGRAM_USAGE} forum sync --full_postdate "
-                "[--fid FID] [--scan_output PATH] [--page_delay_seconds N] "
-                "[--api_concurrency N]"
+                "[--fid FID] [--scan_output PATH] [--start_page N] "
+                "[--page_delay_seconds N] [--api_concurrency N]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} forum sync",
@@ -203,6 +209,10 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 (
                     f"{PROGRAM_USAGE} forum sync --full_postdate --fid 784 "
                     "--page_delay_seconds 5"
+                ),
+                (
+                    f"{PROGRAM_USAGE} forum sync --full_postdate --fid 784 "
+                    "--start_page 544"
                 ),
             ],
             "notes": [
@@ -216,11 +226,12 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "fid",
                 "full_postdate",
                 "scan_output",
+                "start_page",
                 "page_delay_seconds",
                 "api_concurrency",
             ],
             "defaults": {"page_delay_seconds": 3},
-            "positive": ["page_delay_seconds", "api_concurrency"],
+            "positive": ["start_page", "page_delay_seconds", "api_concurrency"],
         },
     },
     "backup": {
@@ -610,7 +621,7 @@ def _validate_args(
 
     if command == "forum" and action == "sync" and not args.get("full_postdate"):
         postdate_only_args = sorted(
-            provided_args & {"fid", "page_delay_seconds", "scan_output"}
+            provided_args & {"fid", "page_delay_seconds", "scan_output", "start_page"}
         )
         if postdate_only_args:
             parser.error(

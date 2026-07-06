@@ -53,7 +53,21 @@ def _required_str(data: dict[str, object], key: str, source: object) -> str:
     raise ValueError(f"NGA forum thread has invalid {key}: {source!r}")
 
 
-def _parse_forum_thread(raw_thread: object) -> ForumThread:
+def _forum_thread_forumname(
+    thread: dict[str, object],
+    *,
+    default_forumname: str,
+    source: object,
+) -> str:
+    value = thread.get("forumname")
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return default_forumname
+    raise ValueError(f"NGA forum thread has invalid forumname: {source!r}")
+
+
+def _parse_forum_thread(raw_thread: object, *, default_forumname: str) -> ForumThread:
     if not isinstance(raw_thread, dict):
         raise ValueError(f"NGA forum thread is not an object: {raw_thread!r}")
 
@@ -68,7 +82,11 @@ def _parse_forum_thread(raw_thread: object) -> ForumThread:
         "postdate": _required_int(thread, "postdate", source),
         "lastpost": _required_int(thread, "lastpost", source),
         "replies": _required_int(thread, "replies", source),
-        "forumname": _required_str(thread, "forumname", source),
+        "forumname": _forum_thread_forumname(
+            thread,
+            default_forumname=default_forumname,
+            source=source,
+        ),
     }
 
 
@@ -176,16 +194,18 @@ class NGAClient:
         if not isinstance(raw_threads, list):
             raise ValueError("NGA forum response is missing thread list.")
 
+        forumname = _required_str(page_data, "forumname", page_data)
         thread_items = cast(list[object], raw_threads)
         return {
             "fid": _required_int(page_data, "fid", page_data),
-            "forumname": _required_str(page_data, "forumname", page_data),
+            "forumname": forumname,
             "current_page": _required_int(page_data, "currentPage", page_data),
             "total_page": _required_int(page_data, "totalPage", page_data),
             "per_page": _required_int(page_data, "perPage", page_data),
             "total": _required_int(page_data, "total", page_data),
             "threads": [
-                _parse_forum_thread(raw_thread) for raw_thread in thread_items
+                _parse_forum_thread(raw_thread, default_forumname=forumname)
+                for raw_thread in thread_items
             ],
         }
 

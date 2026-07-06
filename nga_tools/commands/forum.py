@@ -79,6 +79,8 @@ def _handle_forum_sync_full_postdate(args: CommandArgs) -> None:
     page_delay_seconds = (
         DEFAULT_PAGE_DELAY_SECONDS if page_delay_arg is None else page_delay_arg
     )
+    start_page_arg = optional_int(args, "start_page")
+    start_page = 1 if start_page_arg is None else start_page_arg
     progress_display = InlineProgress()
 
     def update_progress(progress: ForumPostdateScanProgress) -> None:
@@ -94,6 +96,7 @@ def _handle_forum_sync_full_postdate(args: CommandArgs) -> None:
             client,
             fids=fids,
             output_path=output_path,
+            start_page=start_page,
             page_delay_seconds=page_delay_seconds,
             progress_callback=update_progress,
         )
@@ -113,8 +116,12 @@ def handle_forum_sync(args: CommandArgs) -> None:
         _handle_forum_sync_full_postdate(args)
         return
 
-    if optional_int(args, "fid") is not None or optional_str(args, "scan_output"):
-        raise ValueError("--fid和--scan_output仅在--full_postdate模式下可用。")
+    if (
+        optional_int(args, "fid") is not None
+        or optional_str(args, "scan_output")
+        or optional_int(args, "start_page") is not None
+    ):
+        raise ValueError("--fid、--scan_output和--start_page仅在--full_postdate模式下可用。")
 
     watch_config_path = optional_str(args, "watch_config") or DEFAULT_WATCH_CONFIG_PATH
     watch_configs = load_forum_watch_configs(watch_config_path)

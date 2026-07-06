@@ -158,6 +158,8 @@ class ForumWatchCliTest(unittest.TestCase):
                 "784",
                 "--scan_output",
                 "threads.jsonl",
+                "--start_page",
+                "544",
                 "--page_delay_seconds",
                 "5",
             ]
@@ -166,6 +168,7 @@ class ForumWatchCliTest(unittest.TestCase):
         self.assertEqual(args["full_postdate"], True)
         self.assertEqual(args["fid"], 784)
         self.assertEqual(args["scan_output"], "threads.jsonl")
+        self.assertEqual(args["start_page"], 544)
         self.assertEqual(args["page_delay_seconds"], 5)
 
     def test_forum_sync_defaults_postdate_delay(self) -> None:
@@ -186,6 +189,23 @@ class ForumWatchCliTest(unittest.TestCase):
                     "--fid",
                     "784",
                     "--page_delay_seconds",
+                    "0",
+                ]
+            )
+
+    def test_forum_sync_rejects_non_positive_start_page(self) -> None:
+        with (
+            patch("sys.stderr", new_callable=io.StringIO),
+            self.assertRaises(SystemExit),
+        ):
+            args_parse(
+                [
+                    "forum",
+                    "sync",
+                    "--full_postdate",
+                    "--fid",
+                    "784",
+                    "--start_page",
                     "0",
                 ]
             )
@@ -640,6 +660,41 @@ class ForumPostdateScanTest(unittest.TestCase):
         self.assertEqual(records[0]["postdate"], 1000)
         self.assertIsInstance(records[0]["postdate_text"], str)
 
+    def test_scan_starts_from_requested_page(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 2): _forum_page(
+                    page=2,
+                    total_page=3,
+                    threads=[_thread(tid=102, subject="第二页", authorid=202)],
+                ),
+                (784, 3): _forum_page(
+                    page=3,
+                    total_page=3,
+                    threads=[_thread(tid=103, subject="第三页", authorid=203)],
+                ),
+            }
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = scan_postdate_forum_threads(
+                client,
+                fids=[784],
+                output_path=Path(tmp_dir) / "threads.jsonl",
+                start_page=2,
+                page_delay_seconds=3,
+                sleep_func=sleeps.append,
+            )
+
+        self.assertEqual(result.page_count, 2)
+        self.assertEqual(result.thread_count, 2)
+        self.assertEqual(
+            client.thread_page_fetches,
+            [(784, 2, "postdatedesc"), (784, 3, "postdatedesc")],
+        )
+        self.assertEqual(sleeps, [3])
+
     def test_scan_deduplicates_fids_in_order(self) -> None:
         client = _FakePostdateClient(
             {
@@ -752,6 +807,7 @@ class ForumWatchCommandTest(unittest.TestCase):
                         "full_postdate": True,
                         "fid": 784,
                         "scan_output": str(output_path),
+                        "start_page": 1,
                         "page_delay_seconds": 3,
                     }
                 )
@@ -767,6 +823,42 @@ class ForumWatchCommandTest(unittest.TestCase):
         output_text = output.getvalue()
         self.assertIn("发布时间扫描完成：fid=784，扫描1页，写入1个主题。", output_text)
         self.assertIn(str(output_path), output_text)
+
+    def test_forum_sync_full_postdate_accepts_start_page(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 2): _forum_page(
+                    page=2,
+                    total_page=2,
+                    threads=[_thread(tid=102, subject="第二页", authorid=202)],
+                ),
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "threads.jsonl"
+            with (
+                patch("nga_tools.commands.forum.configure_network_limits_from_args"),
+                patch("nga_tools.commands.forum.NGAClient", return_value=client),
+                patch(
+                    "nga_tools.commands.forum.NGAThreadConfigs",
+                    side_effect=AssertionError(
+                        "full_postdate should not save thread configs"
+                    ),
+                ),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                handle_forum_sync(
+                    {
+                        "full_postdate": True,
+                        "fid": 784,
+                        "scan_output": str(output_path),
+                        "start_page": 2,
+                        "page_delay_seconds": 3,
+                    }
+                )
+
+        self.assertEqual(client.thread_page_fetches, [(784, 2, "postdatedesc")])
 
     def test_forum_sync_prints_progress_and_summary(self) -> None:
         watch = _watch(keywords=["安价"])

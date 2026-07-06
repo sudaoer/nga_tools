@@ -220,10 +220,13 @@ def scan_postdate_forum_threads(
     *,
     fids: Sequence[int],
     output_path: Path,
+    start_page: int = 1,
     page_delay_seconds: int = DEFAULT_PAGE_DELAY_SECONDS,
     sleep_func: SleepFunc = time.sleep,
     progress_callback: ForumPostdateScanProgressCallback | None = None,
 ) -> ForumPostdateScanResult:
+    if start_page <= 0:
+        raise ValueError("start_page必须大于0。")
     if page_delay_seconds <= 0:
         raise ValueError("page_delay_seconds必须大于0。")
 
@@ -238,7 +241,7 @@ def scan_postdate_forum_threads(
     with output_path.open("w", encoding="utf-8") as output_file:
         for fid_index, fid in enumerate(scan_fids, start=1):
             total_pages: int | None = None
-            page = 1
+            page = start_page
             while total_pages is None or page <= total_pages:
                 page_data = _fetch_postdate_page_with_retry(
                     client,
