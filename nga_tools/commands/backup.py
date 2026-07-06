@@ -17,7 +17,7 @@ from nga_tools.backup.pdf import generate_pdf
 from nga_tools.commands.network import configure_network_limits_from_args
 from nga_tools.commands.resolve import resolve_command_thread_target
 from nga_tools.commands.types import CommandArgs, optional_int, required_int
-from nga_tools.commands.warning_log import warning_log_path
+from nga_tools.utils import warning_log_path
 from nga_tools.thread_configs import (
     NGAThreadConfigs,
     ThreadConfig,

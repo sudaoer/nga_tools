@@ -8,6 +8,7 @@ import re
 import sys
 import traceback
 from collections.abc import Callable
+from pathlib import Path
 from typing import NoReturn, NotRequired, Optional, TypedDict
 from urllib.parse import urlsplit
 
@@ -58,6 +59,13 @@ def _effective_download_concurrency(max_concurrency: int | None) -> int:
     if max_concurrency <= 0:
         raise ValueError("max_concurrency must be greater than 0.")
     return min(max_concurrency, image_concurrency)
+
+
+WARNING_LOG_FILENAME = "warnings.log"
+
+
+def warning_log_path(tid: int, aid: int | None) -> Path:
+    return Path(get_folder(tid, aid)) / WARNING_LOG_FILENAME
 
 
 def sha256(filepath: str) -> str:

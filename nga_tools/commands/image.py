@@ -9,7 +9,7 @@ from nga_tools.backup.images import (
 from nga_tools.console import report_info, use_warning_log
 from nga_tools.commands.resolve import resolve_command_thread_target
 from nga_tools.commands.types import CommandArgs, optional_int, optional_str
-from nga_tools.commands.warning_log import warning_log_path
+from nga_tools.utils import warning_log_path
 
 
 def image_verify(args: CommandArgs) -> None:
