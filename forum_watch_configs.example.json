@@ -14,8 +14,7 @@
         "公告"
       ],
       "include_tids": [],
-      "name_template": "{watch_name}-{tid}",
-      "description_template": "{forumname} | {author}: {subject}"
+      "name_template": "{watch_name}-{tid}"
     }
   ]
 }

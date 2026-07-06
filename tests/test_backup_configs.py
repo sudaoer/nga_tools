@@ -22,12 +22,10 @@ def _thread_config(
     tid: int,
     aid: int | None,
 ) -> ThreadConfig:
-    return {
-        "thread_name": name,
-        "tid": tid,
-        "aid": aid,
-        "description": "",
-    }
+    thread_config: ThreadConfig = {"thread_name": name, "tid": tid}
+    if aid is not None:
+        thread_config["aid"] = aid
+    return thread_config
 
 
 class BackupConfigsCliTest(unittest.TestCase):

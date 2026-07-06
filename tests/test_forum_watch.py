@@ -24,6 +24,7 @@ from nga_tools.forum_threads_db import (
 from nga_tools.forum_watch import (
     ForumWatchConfig,
     MatchedForumThread,
+    build_thread_link,
     build_matched_thread,
     collect_matching_threads,
     collect_matching_threads_from_thread_source,
@@ -80,7 +81,6 @@ def _watch(
         "exclude_keywords": [] if exclude_keywords is None else exclude_keywords,
         "include_tids": [] if include_tids is None else include_tids,
         "name_template": "{watch_name}-{tid}",
-        "description_template": "{forumname} | {author}: {subject}",
     }
 
 
@@ -95,6 +95,7 @@ class _FakeForumClient:
         self._pages = pages
         self._author_pages = {} if author_pages is None else author_pages
         self._fail_on = fail_on
+        self.base_url = "https://bbs.nga.cn"
         self.forum_fetches: list[tuple[int, int]] = []
         self.page_fetches: list[tuple[int, int | None, int]] = []
 
@@ -391,6 +392,28 @@ class ForumWatchConfigTest(unittest.TestCase):
 
         self.assertEqual(configs[0]["min_author_lous"], 35)
 
+    def test_ignores_legacy_description_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "forum_watch_configs.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "ForumWatchList": [
+                            {
+                                "watch_name": "rp784",
+                                "fid": 784,
+                                "description_template": "{forumname}/{subject}",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            configs = load_forum_watch_configs(config_path)
+
+        self.assertEqual(configs[0]["name_template"], "{watch_name}-{tid}")
+
     def test_rejects_invalid_min_replies(self) -> None:
         for min_replies in [0, "500"]:
             with self.subTest(min_replies=min_replies):
@@ -474,18 +497,16 @@ class ForumWatchMatchTest(unittest.TestCase):
 
         self.assertTrue(matched)
 
-    def test_build_matched_thread_renders_templates(self) -> None:
+    def test_build_matched_thread_renders_name_template(self) -> None:
         matched = build_matched_thread(
             {
                 **_watch(),
                 "name_template": "{watch_name}-{tid}-{authorid}",
-                "description_template": "{forumname}/{author}/{subject}",
             },
             _thread(tid=321, authorid=654, subject="安科测试帖"),
         )
 
         self.assertEqual(matched.thread_name, "rp784-321-654")
-        self.assertEqual(matched.description, "二次元跑团综合/楼主/安科测试帖")
 
 
 class ForumWatchCollectTest(unittest.TestCase):
@@ -676,13 +697,66 @@ class ForumWatchCollectTest(unittest.TestCase):
 
 
 class ForumWatchSyncTest(unittest.TestCase):
-    def test_sync_adds_new_thread_and_skips_existing_exact_match(self) -> None:
+    def test_sync_adds_new_thread_and_updates_existing_metadata(self) -> None:
         thread_list: list[ThreadConfig] = [
             {
                 "thread_name": "old",
                 "tid": 100,
                 "aid": 200,
-                "description": "",
+                "subject": "旧标题",
+                "custom_note": "keep me",
+            }
+        ]
+        matches = [
+            MatchedForumThread(
+                watch_name="rp784",
+                thread=_thread(tid=100, authorid=200, subject="新标题", replies=700),
+                thread_name="rp784-100",
+            ),
+            MatchedForumThread(
+                watch_name="rp784",
+                thread=_thread(tid=101, authorid=201),
+                thread_name="rp784-101",
+            ),
+        ]
+
+        outcomes = sync_matches_to_thread_list(
+            thread_list,
+            matches,
+            base_url="https://bbs.nga.cn",
+        )
+
+        self.assertEqual([outcome.status for outcome in outcomes], ["updated", "added"])
+        self.assertEqual(len(thread_list), 2)
+        self.assertEqual(thread_list[0]["thread_name"], "old")
+        self.assertEqual(thread_list[0]["subject"], "新标题")
+        self.assertEqual(thread_list[0]["replies"], 700)
+        self.assertEqual(thread_list[0]["custom_note"], "keep me")
+        self.assertEqual(
+            thread_list[0]["link"],
+            build_thread_link("https://bbs.nga.cn", 100),
+        )
+        self.assertEqual(thread_list[1]["thread_name"], "rp784-101")
+        self.assertEqual(thread_list[1]["aid"], 201)
+        self.assertEqual(
+            thread_list[1]["link"],
+            build_thread_link("https://bbs.nga.cn", 101),
+        )
+
+    def test_sync_skips_existing_exact_match_when_metadata_is_current(self) -> None:
+        thread_list: list[ThreadConfig] = [
+            {
+                "thread_name": "existing",
+                "tid": 100,
+                "aid": 200,
+                "link": build_thread_link("https://bbs.nga.cn", 100),
+                "subject": "安价测试帖",
+                "author": "楼主",
+                "fid": 784,
+                "forumname": "二次元跑团综合",
+                "replies": 600,
+                "postdate": 1000,
+                "lastpost": 2000,
             }
         ]
         matches = [
@@ -690,22 +764,17 @@ class ForumWatchSyncTest(unittest.TestCase):
                 watch_name="rp784",
                 thread=_thread(tid=100, authorid=200),
                 thread_name="rp784-100",
-                description="existing",
-            ),
-            MatchedForumThread(
-                watch_name="rp784",
-                thread=_thread(tid=101, authorid=201),
-                thread_name="rp784-101",
-                description="new",
-            ),
+            )
         ]
 
-        outcomes = sync_matches_to_thread_list(thread_list, matches)
+        outcomes = sync_matches_to_thread_list(
+            thread_list,
+            matches,
+            base_url="https://bbs.nga.cn",
+        )
 
-        self.assertEqual([outcome.status for outcome in outcomes], ["skipped", "added"])
-        self.assertEqual(len(thread_list), 2)
-        self.assertEqual(thread_list[1]["thread_name"], "rp784-101")
-        self.assertEqual(thread_list[1]["aid"], 201)
+        self.assertEqual([outcome.status for outcome in outcomes], ["skipped"])
+        self.assertEqual(thread_list[0]["thread_name"], "existing")
 
     def test_sync_reports_tid_or_name_conflicts_without_adding(self) -> None:
         thread_list: list[ThreadConfig] = [
@@ -721,19 +790,24 @@ class ForumWatchSyncTest(unittest.TestCase):
                 watch_name="rp784",
                 thread=_thread(tid=100, authorid=201),
                 thread_name="rp784-100",
-                description="tid conflict",
             ),
             MatchedForumThread(
                 watch_name="rp784",
                 thread=_thread(tid=101, authorid=201),
                 thread_name="same-name",
-                description="name conflict",
             ),
         ]
 
-        outcomes = sync_matches_to_thread_list(thread_list, matches)
+        outcomes = sync_matches_to_thread_list(
+            thread_list,
+            matches,
+            base_url="https://bbs.nga.cn",
+        )
 
-        self.assertEqual([outcome.status for outcome in outcomes], ["conflict", "conflict"])
+        self.assertEqual(
+            [outcome.status for outcome in outcomes],
+            ["conflict", "conflict"],
+        )
         self.assertEqual(len(thread_list), 1)
 
 
@@ -1218,7 +1292,10 @@ class ForumWatchCommandTest(unittest.TestCase):
             output_text,
         )
         self.assertIn("远端抓取1个主题，数据库新增1个，更新0个。", output_text)
-        self.assertIn("数据库筛查2个主题，匹配2个；新增2个，跳过0个，冲突0个。", output_text)
+        self.assertIn(
+            "数据库筛查2个主题，匹配2个；新增2个，更新0个，跳过0个，冲突0个。",
+            output_text,
+        )
         self.assertIn("主题数据库：路径：fake_forum_threads.sqlite3", output_text)
         self.assertIn("[added] rp784-102 (tid=102, aid=456) - 已添加配置", output_text)
         self.assertIn("[added] rp784-101 (tid=101, aid=456) - 已添加配置", output_text)
@@ -1235,7 +1312,14 @@ class ForumWatchCommandTest(unittest.TestCase):
                     "thread_name": "existing",
                     "tid": 101,
                     "aid": 456,
-                    "description": "",
+                    "link": build_thread_link("https://bbs.nga.cn", 101),
+                    "subject": "安价一号",
+                    "author": "楼主",
+                    "fid": 784,
+                    "forumname": "rp784",
+                    "replies": 600,
+                    "postdate": 1000,
+                    "lastpost": 2000,
                 }
             ]
         )
@@ -1261,12 +1345,65 @@ class ForumWatchCommandTest(unittest.TestCase):
 
         output_text = output.getvalue()
         self.assertIn("远端抓取1个主题，数据库新增1个，更新0个。", output_text)
-        self.assertIn("数据库筛查1个主题，匹配1个；新增0个，跳过1个，冲突0个。", output_text)
+        self.assertIn(
+            "数据库筛查1个主题，匹配1个；新增0个，更新0个，跳过1个，冲突0个。",
+            output_text,
+        )
         self.assertNotIn("[skipped]", output_text)
         self.assertNotIn("已存在配置：existing", output_text)
         self.assertEqual(forum_store.upserts, [(784, [101])])
         self.assertEqual(client.page_fetches, [])
         self.assertFalse(thread_configs.saved)
+
+    def test_forum_sync_updates_existing_metadata_and_saves(self) -> None:
+        watch = _watch(keywords=["安价"])
+        client = _FakeForumClient({(784, 1): [_thread(tid=101, subject="安价一号")]})
+        forum_store = _FakeForumThreadStore()
+        thread_configs = _FakeThreadConfigs(
+            [
+                {
+                    "thread_name": "custom-name",
+                    "tid": 101,
+                    "aid": 456,
+                    "custom_note": "keep me",
+                }
+            ]
+        )
+
+        with (
+            patch(
+                "nga_tools.commands.forum.load_forum_watch_configs",
+                return_value=[watch],
+            ),
+            patch("nga_tools.commands.forum.configure_network_limits_from_args"),
+            patch("nga_tools.commands.forum.NGAClient", return_value=client),
+            patch(
+                "nga_tools.commands.forum.ForumThreadStore",
+                return_value=forum_store,
+            ),
+            patch(
+                "nga_tools.commands.forum.NGAThreadConfigs",
+                return_value=thread_configs,
+            ),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            handle_forum_sync({})
+
+        output_text = output.getvalue()
+        self.assertIn(
+            "数据库筛查1个主题，匹配1个；新增0个，更新1个，跳过0个，冲突0个。",
+            output_text,
+        )
+        self.assertIn("已更新帖子数据：custom-name", output_text)
+        self.assertEqual(thread_configs.ThreadList[0]["thread_name"], "custom-name")
+        self.assertEqual(thread_configs.ThreadList[0]["custom_note"], "keep me")
+        self.assertEqual(thread_configs.ThreadList[0]["subject"], "安价一号")
+        self.assertEqual(
+            thread_configs.ThreadList[0]["link"],
+            build_thread_link("https://bbs.nga.cn", 101),
+        )
+        self.assertEqual(client.page_fetches, [])
+        self.assertTrue(thread_configs.saved)
 
     def test_forum_sync_fetches_max_pages_once_per_fid(self) -> None:
         watches = [

@@ -7,7 +7,12 @@ from nga_tools.commands.types import (
     required_int,
     required_str,
 )
-from nga_tools.thread_configs import NGAThreadConfigs
+from nga_tools.thread_configs import (
+    NGAThreadConfigs,
+    thread_config_aid,
+    thread_config_name,
+    thread_config_tid,
+)
 
 
 def handle_thread_add(args: CommandArgs) -> None:
@@ -36,7 +41,10 @@ def handle_thread_list(args: CommandArgs) -> None:
         return
 
     for thread in thread_configs:
+        description = thread.get("description", "")
+        link = thread.get("link")
+        link_text = f", 链接: {link}" if isinstance(link, str) else ""
         print(
-            f"名称: {thread['thread_name']}, tid: {thread['tid']}, "
-            f"aid: {thread.get('aid')}, 描述: {thread.get('description','')}"
+            f"名称: {thread_config_name(thread)}, tid: {thread_config_tid(thread)}, "
+            f"aid: {thread_config_aid(thread)}, 描述: {description}{link_text}"
         )

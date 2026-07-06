@@ -8,16 +8,20 @@ from typing import Literal, Optional, TypeAlias, TypedDict, cast
 
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import ForumThread
-from nga_tools.thread_configs import ThreadConfig
+from nga_tools.thread_configs import (
+    ThreadConfig,
+    thread_config_aid,
+    thread_config_name,
+    thread_config_tid,
+)
 
 DEFAULT_WATCH_CONFIG_PATH = "forum_watch_configs.json"
 DEFAULT_NAME_TEMPLATE = "{watch_name}-{tid}"
-DEFAULT_DESCRIPTION_TEMPLATE = "{forumname} | {author}: {subject}"
 DEFAULT_MIN_REPLIES = 500
 DEFAULT_MIN_AUTHOR_LOUS = 20
 
 JsonObject: TypeAlias = dict[str, object]
-SyncStatus: TypeAlias = Literal["added", "skipped", "conflict"]
+SyncStatus: TypeAlias = Literal["added", "updated", "skipped", "conflict"]
 ForumScanProgressCallback: TypeAlias = Callable[["ForumScanProgress"], None]
 ForumPageCallback: TypeAlias = Callable[[int, list[ForumThread]], None]
 ForumDatabaseScanProgressCallback: TypeAlias = Callable[
@@ -37,7 +41,6 @@ class ForumWatchConfig(TypedDict):
     exclude_keywords: list[str]
     include_tids: list[int]
     name_template: str
-    description_template: str
 
 
 @dataclass(frozen=True)
@@ -45,7 +48,6 @@ class MatchedForumThread:
     watch_name: str
     thread: ForumThread
     thread_name: str
-    description: str
 
 
 @dataclass(frozen=True)
@@ -181,12 +183,6 @@ def _parse_watch_config(item: object) -> ForumWatchConfig:
             DEFAULT_NAME_TEMPLATE,
             source,
         ),
-        "description_template": _optional_str(
-            data,
-            "description_template",
-            DEFAULT_DESCRIPTION_TEMPLATE,
-            source,
-        ),
     }
 
 
@@ -285,11 +281,6 @@ def build_matched_thread(
         watch_name=watch_config["watch_name"],
         thread=thread,
         thread_name=thread_name,
-        description=_render_template(
-            watch_config["description_template"],
-            watch_config,
-            thread,
-        ),
     )
 
 
@@ -400,7 +391,10 @@ def _find_exact_thread(
     aid: Optional[int],
 ) -> Optional[ThreadConfig]:
     for thread_config in thread_list:
-        if thread_config["tid"] == tid and thread_config.get("aid") == aid:
+        if (
+            thread_config_tid(thread_config) == tid
+            and thread_config_aid(thread_config) == aid
+        ):
             return thread_config
     return None
 
@@ -411,7 +405,10 @@ def _find_tid_conflict(
     aid: Optional[int],
 ) -> Optional[ThreadConfig]:
     for thread_config in thread_list:
-        if thread_config["tid"] == tid and thread_config.get("aid") != aid:
+        if (
+            thread_config_tid(thread_config) == tid
+            and thread_config_aid(thread_config) != aid
+        ):
             return thread_config
     return None
 
@@ -423,9 +420,12 @@ def _find_name_conflict(
     aid: Optional[int],
 ) -> Optional[ThreadConfig]:
     for thread_config in thread_list:
-        if thread_config["thread_name"] != thread_name:
+        if thread_config_name(thread_config) != thread_name:
             continue
-        if thread_config["tid"] == tid and thread_config.get("aid") == aid:
+        if (
+            thread_config_tid(thread_config) == tid
+            and thread_config_aid(thread_config) == aid
+        ):
             continue
         return thread_config
     return None
@@ -444,23 +444,72 @@ def _match_would_not_add(
     )
 
 
+def build_thread_link(base_url: str, tid: int) -> str:
+    return f"{base_url.rstrip('/')}/read.php?tid={tid}"
+
+
+def _managed_thread_fields(
+    match: MatchedForumThread,
+    *,
+    base_url: str,
+) -> ThreadConfig:
+    thread = match.thread
+    return {
+        "tid": thread["tid"],
+        "aid": thread["authorid"],
+        "link": build_thread_link(base_url, thread["tid"]),
+        "subject": thread["subject"],
+        "author": thread["author"],
+        "fid": thread["fid"],
+        "forumname": thread["forumname"],
+        "replies": thread["replies"],
+        "postdate": thread["postdate"],
+        "lastpost": thread["lastpost"],
+    }
+
+
+def _update_thread_fields(
+    thread_config: ThreadConfig,
+    fields: ThreadConfig,
+) -> bool:
+    changed = False
+    for key, value in fields.items():
+        if thread_config.get(key) == value:
+            continue
+        thread_config[key] = value
+        changed = True
+    return changed
+
+
 def sync_matches_to_thread_list(
     thread_list: list[ThreadConfig],
     matches: list[MatchedForumThread],
+    *,
+    base_url: str,
 ) -> list[SyncOutcome]:
     outcomes: list[SyncOutcome] = []
 
     for match in matches:
         tid = match.thread["tid"]
         aid = match.thread["authorid"]
+        managed_fields = _managed_thread_fields(match, base_url=base_url)
 
         exact_thread = _find_exact_thread(thread_list, tid, aid)
         if exact_thread is not None:
+            if _update_thread_fields(exact_thread, managed_fields):
+                outcomes.append(
+                    SyncOutcome(
+                        match=match,
+                        status="updated",
+                        message=f"已更新帖子数据：{thread_config_name(exact_thread)}",
+                    )
+                )
+                continue
             outcomes.append(
                 SyncOutcome(
                     match=match,
                     status="skipped",
-                    message=f"已存在配置：{exact_thread['thread_name']}",
+                    message=f"已是最新配置：{thread_config_name(exact_thread)}",
                 )
             )
             continue
@@ -472,8 +521,8 @@ def sync_matches_to_thread_list(
                     match=match,
                     status="conflict",
                     message=(
-                        f"tid已存在但aid不同：{tid_conflict['thread_name']} "
-                        f"(aid={tid_conflict.get('aid')})"
+                        f"tid已存在但aid不同：{thread_config_name(tid_conflict)} "
+                        f"(aid={thread_config_aid(tid_conflict)})"
                     ),
                 )
             )
@@ -486,8 +535,9 @@ def sync_matches_to_thread_list(
                     match=match,
                     status="conflict",
                     message=(
-                        f"名称已被占用：{name_conflict['thread_name']} "
-                        f"(tid={name_conflict['tid']}, aid={name_conflict.get('aid')})"
+                        f"名称已被占用：{thread_config_name(name_conflict)} "
+                        f"(tid={thread_config_tid(name_conflict)}, "
+                        f"aid={thread_config_aid(name_conflict)})"
                     ),
                 )
             )
@@ -496,9 +546,7 @@ def sync_matches_to_thread_list(
         thread_list.append(
             {
                 "thread_name": match.thread_name,
-                "tid": tid,
-                "aid": aid,
-                "description": match.description,
+                **managed_fields,
             }
         )
         outcomes.append(

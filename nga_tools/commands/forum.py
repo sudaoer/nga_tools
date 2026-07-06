@@ -207,9 +207,13 @@ def handle_forum_sync(args: CommandArgs) -> None:
     finally:
         progress_display.finish()
 
-    outcomes = sync_matches_to_thread_list(thread_configs.ThreadList, matches)
+    outcomes = sync_matches_to_thread_list(
+        thread_configs.ThreadList,
+        matches,
+        base_url=client.base_url,
+    )
     status_counts = Counter(outcome.status for outcome in outcomes)
-    if status_counts["added"] > 0:
+    if status_counts["added"] > 0 or status_counts["updated"] > 0:
         thread_configs.save_configs()
 
     print(
@@ -218,8 +222,8 @@ def handle_forum_sync(args: CommandArgs) -> None:
     )
     print(
         f"数据库筛查{scanned_count}个主题，匹配{len(matches)}个；"
-        f"新增{status_counts['added']}个，跳过{status_counts['skipped']}个，"
-        f"冲突{status_counts['conflict']}个。"
+        f"新增{status_counts['added']}个，更新{status_counts['updated']}个，"
+        f"跳过{status_counts['skipped']}个，冲突{status_counts['conflict']}个。"
     )
     print(f"主题数据库：路径：{forum_store.db_path}")
     for outcome in outcomes:

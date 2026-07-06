@@ -16,7 +16,13 @@ from nga_tools.backup.pdf import generate_pdf
 from nga_tools.commands.network import configure_network_limits_from_args
 from nga_tools.commands.resolve import resolve_command_thread_target
 from nga_tools.commands.types import CommandArgs, optional_int, required_int
-from nga_tools.thread_configs import NGAThreadConfigs, ThreadConfig
+from nga_tools.thread_configs import (
+    NGAThreadConfigs,
+    ThreadConfig,
+    thread_config_aid,
+    thread_config_name,
+    thread_config_tid,
+)
 
 
 def backup_all(args: CommandArgs) -> None:
@@ -32,14 +38,19 @@ def backup_sub(args: CommandArgs) -> None:
 
 
 def _thread_config_label(thread_config: ThreadConfig) -> str:
+    tid = thread_config_tid(thread_config)
+    aid = thread_config_aid(thread_config)
     return (
-        f"{thread_config['thread_name']} "
-        f"(tid: {thread_config['tid']}, aid: {thread_config.get('aid')})"
+        f"{thread_config_name(thread_config)} "
+        f"(tid: {tid}, aid: {aid})"
     )
 
 
 def _backup_single_thread_config(thread_config: ThreadConfig) -> None:
-    backup_thread_sub(thread_config["tid"], thread_config.get("aid"))
+    backup_thread_sub(
+        thread_config_tid(thread_config),
+        thread_config_aid(thread_config),
+    )
 
 
 def _backup_thread_config_with_progress(

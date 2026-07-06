@@ -87,6 +87,15 @@ pixi run python main.py forum sync
 包含主楼。`min_replies` 未配置时默认为 500，`min_author_lous` 未配置时
 默认为 20。保存时会把主题楼主 `authorid` 写为 `aid`，后续使用
 `backup all/sub --name 帖子名` 会默认只看楼主。
+
+`thread_configs.json` 中每项必须包含 `thread_name` 和 `tid`；可额外保存任意
+标量字段（字符串、数字、布尔值或 `null`），但不能保存数组或对象。
+`description` 只是可选自定义字段，不再强制存在。`forum sync` 会为匹配主题
+写入或刷新 `aid`、`link`、标题、作者、版面、回复数和发帖/回复时间等主题
+列表元数据，其中 `link` 形如 `https://bbs.nga.cn/read.php?tid=12345678`，
+便于在编辑器中直接跳转到原帖；已存在的配置会保留 `thread_name` 和其他
+自定义标量字段。
+
 每次 `forum sync` 会先按监控配置里的 `pages` 从远端默认排序抓取对应页数，
 并写入 `output/forum_sync/forum_threads.sqlite3`；每个 fid 使用一张表，按
 `tid` 去重并更新标题、最后回复时间、回复数等主题列表字段。之后的筛查从
