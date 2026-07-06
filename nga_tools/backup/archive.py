@@ -942,7 +942,7 @@ def _download_images(
         f"失败{len(download_result['failed'])}个文件。"
     )
     for failed in download_result["failed"]:
-        report_warning(f"下载失败：{failed['url']}，保存为：{failed['save_path']}")
+        report_warning(f"下载失败：{failed['url']}")
     return download_result
 
 
