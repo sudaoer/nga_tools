@@ -14,6 +14,7 @@ DEFAULT_WATCH_CONFIG_PATH = "forum_watch_configs.json"
 DEFAULT_NAME_TEMPLATE = "{watch_name}-{tid}"
 DEFAULT_DESCRIPTION_TEMPLATE = "{forumname} | {author}: {subject}"
 DEFAULT_MIN_REPLIES = 500
+DEFAULT_MIN_AUTHOR_LOUS = 20
 
 JsonObject: TypeAlias = dict[str, object]
 SyncStatus: TypeAlias = Literal["added", "skipped", "conflict"]
@@ -25,6 +26,7 @@ class ForumWatchConfig(TypedDict):
     fid: int
     pages: int
     min_replies: int
+    min_author_lous: int
     keywords: list[str]
     exclude_keywords: list[str]
     include_tids: list[int]
@@ -150,6 +152,12 @@ def _parse_watch_config(item: object) -> ForumWatchConfig:
             DEFAULT_MIN_REPLIES,
             source,
         ),
+        "min_author_lous": _optional_positive_int(
+            data,
+            "min_author_lous",
+            DEFAULT_MIN_AUTHOR_LOUS,
+            source,
+        ),
         "keywords": _optional_str_list(data, "keywords", source),
         "exclude_keywords": _optional_str_list(data, "exclude_keywords", source),
         "include_tids": _optional_int_list(data, "include_tids", source),
@@ -182,8 +190,12 @@ def _contains_any(text: str, needles: list[str]) -> bool:
     return any(needle.casefold() in normalized_text for needle in needles if needle)
 
 
+def _thread_is_forced(thread: ForumThread, watch_config: ForumWatchConfig) -> bool:
+    return thread["tid"] in watch_config["include_tids"]
+
+
 def thread_matches_watch(thread: ForumThread, watch_config: ForumWatchConfig) -> bool:
-    if thread["tid"] in watch_config["include_tids"]:
+    if _thread_is_forced(thread, watch_config):
         return True
 
     subject = thread["subject"]
@@ -191,6 +203,28 @@ def thread_matches_watch(thread: ForumThread, watch_config: ForumWatchConfig) ->
     has_excluded_keyword = _contains_any(subject, watch_config["exclude_keywords"])
     has_enough_replies = thread["replies"] >= watch_config["min_replies"]
     return has_keyword and not has_excluded_keyword and has_enough_replies
+
+
+def _author_lou_count_for_thread(client: NGAClient, thread: ForumThread) -> int:
+    page_data = client.get_page(thread["tid"], thread["authorid"], 1)
+    author_lous = page_data.get("vrows")
+    if type(author_lous) is int:
+        return author_lous
+    raise ValueError(
+        "NGA只看作者页缺少有效vrows："
+        f"tid={thread['tid']}, aid={thread['authorid']}, vrows={author_lous!r}"
+    )
+
+
+def _thread_has_enough_author_lous(
+    client: NGAClient,
+    thread: ForumThread,
+    watch_config: ForumWatchConfig,
+) -> bool:
+    return (
+        _author_lou_count_for_thread(client, thread)
+        >= watch_config["min_author_lous"]
+    )
 
 
 def _template_values(
@@ -249,6 +283,7 @@ def collect_matching_threads(
     client: NGAClient,
     watch_configs: list[ForumWatchConfig],
     progress_callback: ForumScanProgressCallback | None = None,
+    existing_thread_list: list[ThreadConfig] | None = None,
 ) -> tuple[int, list[MatchedForumThread]]:
     scanned_count = 0
     matched_threads: list[MatchedForumThread] = []
@@ -258,8 +293,23 @@ def collect_matching_threads(
             page_threads = client.get_forum_threads(watch_config["fid"], page)
             scanned_count += len(page_threads)
             for thread in page_threads:
-                if thread_matches_watch(thread, watch_config):
-                    matched_threads.append(build_matched_thread(watch_config, thread))
+                if not thread_matches_watch(thread, watch_config):
+                    continue
+                matched_thread = build_matched_thread(watch_config, thread)
+                if (
+                    existing_thread_list is not None
+                    and _match_would_not_add(existing_thread_list, matched_thread)
+                ):
+                    matched_threads.append(matched_thread)
+                    continue
+                if not _thread_is_forced(thread, watch_config):
+                    if not _thread_has_enough_author_lous(
+                        client,
+                        thread,
+                        watch_config,
+                    ):
+                        continue
+                matched_threads.append(matched_thread)
             if progress_callback is not None:
                 progress_callback(
                     ForumScanProgress(
@@ -310,6 +360,19 @@ def _find_name_conflict(
             continue
         return thread_config
     return None
+
+
+def _match_would_not_add(
+    thread_list: list[ThreadConfig],
+    match: MatchedForumThread,
+) -> bool:
+    tid = match.thread["tid"]
+    aid = match.thread["authorid"]
+    return (
+        _find_exact_thread(thread_list, tid, aid) is not None
+        or _find_tid_conflict(thread_list, tid, aid) is not None
+        or _find_name_conflict(thread_list, match.thread_name, tid, aid) is not None
+    )
 
 
 def sync_matches_to_thread_list(

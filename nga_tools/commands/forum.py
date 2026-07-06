@@ -49,6 +49,7 @@ def handle_forum_sync(args: CommandArgs) -> None:
 
     configure_network_limits_from_args(args)
     client = NGAClient()
+    thread_configs = NGAThreadConfigs()
     progress_display = InlineProgress()
 
     def update_progress(progress: ForumScanProgress) -> None:
@@ -63,11 +64,11 @@ def handle_forum_sync(args: CommandArgs) -> None:
             client,
             watch_configs,
             progress_callback=update_progress,
+            existing_thread_list=thread_configs.ThreadList,
         )
     finally:
         progress_display.finish()
 
-    thread_configs = NGAThreadConfigs()
     outcomes = sync_matches_to_thread_list(thread_configs.ThreadList, matches)
     status_counts = Counter(outcome.status for outcome in outcomes)
     if status_counts["added"] > 0:

@@ -82,8 +82,10 @@ pixi run python main.py forum sync
 
 规则文件默认读取 `forum_watch_configs.json`。匹配规则为：`include_tids`
 中的 tid 会强制保存；否则标题包含任一 `keywords`、不包含
-`exclude_keywords`，且回复数达到 `min_replies` 时保存。`min_replies`
-未配置时默认为 500。保存时会把主题楼主 `authorid` 写为 `aid`，后续使用
+`exclude_keywords`，主题回复数达到 `min_replies`，且 NGA 只看作者页的
+`vrows` 达到 `min_author_lous` 时保存；`vrows` 按 NGA 只看作者楼数计数，
+包含主楼。`min_replies` 未配置时默认为 500，`min_author_lous` 未配置时
+默认为 20。保存时会把主题楼主 `authorid` 写为 `aid`，后续使用
 `backup all/sub --name 帖子名` 会默认只看楼主。
 
 抓取整帖并下载图片：

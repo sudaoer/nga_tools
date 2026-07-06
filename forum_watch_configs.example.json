@@ -5,6 +5,7 @@
       "fid": 784,
       "pages": 2,
       "min_replies": 500,
+      "min_author_lous": 20,
       "keywords": [
         "安价",
         "安科"

@@ -47,6 +47,7 @@ def _watch(
     exclude_keywords: list[str] | None = None,
     include_tids: list[int] | None = None,
     min_replies: int = 500,
+    min_author_lous: int = 20,
     pages: int = 1,
 ) -> ForumWatchConfig:
     return {
@@ -54,6 +55,7 @@ def _watch(
         "fid": 784,
         "pages": pages,
         "min_replies": min_replies,
+        "min_author_lous": min_author_lous,
         "keywords": [] if keywords is None else keywords,
         "exclude_keywords": [] if exclude_keywords is None else exclude_keywords,
         "include_tids": [] if include_tids is None else include_tids,
@@ -67,15 +69,24 @@ class _FakeForumClient:
         self,
         pages: dict[tuple[int, int], list[ForumThread]],
         *,
+        author_pages: dict[tuple[int, int], dict[str, object]] | None = None,
         fail_on: tuple[int, int] | None = None,
     ) -> None:
         self._pages = pages
+        self._author_pages = {} if author_pages is None else author_pages
         self._fail_on = fail_on
+        self.page_fetches: list[tuple[int, int | None, int]] = []
 
     def get_forum_threads(self, fid: int, page: int) -> list[ForumThread]:
         if self._fail_on == (fid, page):
             raise RuntimeError("forum fetch failed")
         return self._pages[(fid, page)]
+
+    def get_page(self, tid: int, aid: int | None, page: int) -> dict[str, object]:
+        self.page_fetches.append((tid, aid, page))
+        if aid is None:
+            raise AssertionError("forum sync should fetch author-only pages")
+        return self._author_pages.get((tid, aid), {"totalPage": 1, "vrows": 20})
 
 
 class _FakeThreadConfigs:
@@ -103,6 +114,7 @@ class ForumWatchConfigTest(unittest.TestCase):
         self.assertEqual(len(configs), 1)
         self.assertEqual(configs[0]["pages"], 1)
         self.assertEqual(configs[0]["min_replies"], 500)
+        self.assertEqual(configs[0]["min_author_lous"], 20)
         self.assertEqual(configs[0]["keywords"], [])
         self.assertEqual(configs[0]["name_template"], "{watch_name}-{tid}")
 
@@ -128,6 +140,28 @@ class ForumWatchConfigTest(unittest.TestCase):
 
         self.assertEqual(configs[0]["min_replies"], 120)
 
+    def test_loads_custom_min_author_lous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "forum_watch_configs.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "ForumWatchList": [
+                            {
+                                "watch_name": "rp784",
+                                "fid": 784,
+                                "min_author_lous": 35,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            configs = load_forum_watch_configs(config_path)
+
+        self.assertEqual(configs[0]["min_author_lous"], 35)
+
     def test_rejects_invalid_min_replies(self) -> None:
         for min_replies in [0, "500"]:
             with self.subTest(min_replies=min_replies):
@@ -149,6 +183,29 @@ class ForumWatchConfigTest(unittest.TestCase):
                     )
 
                     with self.assertRaisesRegex(ValueError, "min_replies"):
+                        load_forum_watch_configs(config_path)
+
+    def test_rejects_invalid_min_author_lous(self) -> None:
+        for min_author_lous in [0, -1, True, "20"]:
+            with self.subTest(min_author_lous=min_author_lous):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    config_path = Path(tmp_dir) / "forum_watch_configs.json"
+                    config_path.write_text(
+                        json.dumps(
+                            {
+                                "ForumWatchList": [
+                                    {
+                                        "watch_name": "rp784",
+                                        "fid": 784,
+                                        "min_author_lous": min_author_lous,
+                                    }
+                                ]
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(ValueError, "min_author_lous"):
                         load_forum_watch_configs(config_path)
 
 
@@ -250,6 +307,128 @@ class ForumWatchCollectTest(unittest.TestCase):
 
         self.assertEqual(scanned_count, 1)
         self.assertEqual([match.thread["tid"] for match in matches], [101])
+
+    def test_collect_filters_keyword_matches_by_min_author_lous(self) -> None:
+        watch = _watch(keywords=["安价"], min_author_lous=20)
+        client = _FakeForumClient(
+            {
+                (784, 1): [
+                    _thread(tid=101, subject="安价一号"),
+                    _thread(tid=102, subject="安价二号"),
+                ]
+            },
+            author_pages={
+                (101, 456): {"totalPage": 1, "vrows": 19},
+                (102, 456): {"totalPage": 1, "vrows": 20},
+            },
+        )
+
+        scanned_count, matches = collect_matching_threads(client, [watch])
+
+        self.assertEqual(scanned_count, 2)
+        self.assertEqual([match.thread["tid"] for match in matches], [102])
+        self.assertEqual(client.page_fetches, [(101, 456, 1), (102, 456, 1)])
+
+    def test_collect_only_fetches_author_page_after_listing_rules_match(self) -> None:
+        watch = _watch(keywords=["安价"], min_replies=500)
+        client = _FakeForumClient(
+            {
+                (784, 1): [
+                    _thread(tid=101, subject="闲聊", replies=600),
+                    _thread(tid=102, subject="安价低回复", replies=499),
+                ]
+            }
+        )
+
+        scanned_count, matches = collect_matching_threads(client, [watch])
+
+        self.assertEqual(scanned_count, 2)
+        self.assertEqual(matches, [])
+        self.assertEqual(client.page_fetches, [])
+
+    def test_include_tid_bypasses_min_author_lous(self) -> None:
+        watch = _watch(keywords=["安价"], include_tids=[101], min_author_lous=20)
+        client = _FakeForumClient(
+            {
+                (784, 1): [
+                    _thread(tid=101, subject="[公告] 强制保存", replies=1),
+                ]
+            },
+            author_pages={(101, 456): {"totalPage": 1, "vrows": 1}},
+        )
+
+        scanned_count, matches = collect_matching_threads(client, [watch])
+
+        self.assertEqual(scanned_count, 1)
+        self.assertEqual([match.thread["tid"] for match in matches], [101])
+        self.assertEqual(client.page_fetches, [])
+
+    def test_collect_rejects_invalid_author_lou_count(self) -> None:
+        for page_data in [{"totalPage": 1}, {"totalPage": 1, "vrows": "20"}]:
+            with self.subTest(page_data=page_data):
+                watch = _watch(keywords=["安价"])
+                client = _FakeForumClient(
+                    {(784, 1): [_thread(tid=101, subject="安价一号")]},
+                    author_pages={(101, 456): page_data},
+                )
+
+                with self.assertRaisesRegex(ValueError, "tid=101.*vrows"):
+                    collect_matching_threads(client, [watch])
+
+    def test_collect_skips_author_page_for_existing_thread_configs(self) -> None:
+        watch = _watch(keywords=["安价"])
+        client = _FakeForumClient(
+            {
+                (784, 1): [
+                    _thread(tid=101, subject="安价已保存", authorid=456),
+                    _thread(tid=102, subject="安价新主题", authorid=789),
+                ]
+            },
+            author_pages={(102, 789): {"totalPage": 1, "vrows": 20}},
+        )
+        thread_list: list[ThreadConfig] = [
+            {
+                "thread_name": "existing",
+                "tid": 101,
+                "aid": 456,
+                "description": "",
+            }
+        ]
+
+        scanned_count, matches = collect_matching_threads(
+            client,
+            [watch],
+            existing_thread_list=thread_list,
+        )
+
+        self.assertEqual(scanned_count, 2)
+        self.assertEqual([match.thread["tid"] for match in matches], [101, 102])
+        self.assertEqual(client.page_fetches, [(102, 789, 1)])
+
+    def test_collect_skips_author_page_for_name_conflicts(self) -> None:
+        watch: ForumWatchConfig = {**_watch(keywords=["安价"]), "name_template": "same"}
+        client = _FakeForumClient(
+            {(784, 1): [_thread(tid=101, subject="安价冲突", authorid=456)]},
+            author_pages={(101, 456): {"totalPage": 1, "vrows": 20}},
+        )
+        thread_list: list[ThreadConfig] = [
+            {
+                "thread_name": "same",
+                "tid": 999,
+                "aid": 999,
+                "description": "",
+            }
+        ]
+
+        scanned_count, matches = collect_matching_threads(
+            client,
+            [watch],
+            existing_thread_list=thread_list,
+        )
+
+        self.assertEqual(scanned_count, 1)
+        self.assertEqual([match.thread["tid"] for match in matches], [101])
+        self.assertEqual(client.page_fetches, [])
 
 
 class ForumWatchSyncTest(unittest.TestCase):
@@ -377,6 +556,7 @@ class ForumWatchCommandTest(unittest.TestCase):
         self.assertIn("扫描1个主题，匹配1个；新增0个，跳过1个，冲突0个。", output_text)
         self.assertNotIn("[skipped]", output_text)
         self.assertNotIn("已存在配置：existing", output_text)
+        self.assertEqual(client.page_fetches, [])
         self.assertFalse(thread_configs.saved)
 
     def test_forum_sync_finishes_progress_line_when_scan_fails(self) -> None:
