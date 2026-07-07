@@ -11,7 +11,6 @@ from nga_tools.config import get_config
 from nga_tools.ngaclient.client import ForumThread
 
 FORUM_THREAD_DB_FILENAME = "forum_threads.sqlite3"
-FORUM_THREAD_DB_DIRNAME = "forum_sync"
 _SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
 _SQLITE_BUSY_TIMEOUT_MILLISECONDS = int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)
 
@@ -27,11 +26,7 @@ class ForumThreadUpsertResult:
 
 
 def forum_thread_db_path() -> Path:
-    return (
-        Path(get_config().output_dir)
-        / FORUM_THREAD_DB_DIRNAME
-        / FORUM_THREAD_DB_FILENAME
-    )
+    return Path(get_config().output_dir) / FORUM_THREAD_DB_FILENAME
 
 
 def forum_thread_table_name(fid: int) -> str:

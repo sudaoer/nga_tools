@@ -79,7 +79,7 @@ pixi run python main.py forum sync
 自定义标量字段。
 
 每次 `forum sync` 会先按监控配置里的 `pages` 从远端默认排序抓取对应页数，
-并写入 `output/forum_sync/forum_threads.sqlite3`；每个 fid 使用一张表，按
+并写入 `output/forum_threads.sqlite3`；每个 fid 使用一张表，按
 `tid` 去重并更新标题、最后回复时间、回复数等主题列表字段。之后的筛查从
 SQLite 中读取该 fid 已保存的主题数据，`pages` 不限制数据库筛查范围。
 

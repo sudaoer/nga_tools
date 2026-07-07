@@ -205,7 +205,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "同步会保存普通主题link，方便在编辑器里直接跳转原帖。",
                 "此命令只保存配置，不自动下载帖子内容。",
                 "pages只限制远端默认排序抓取页数，筛查从主题数据库读取。",
-                "抓到的版面主题列表会写入output_dir/forum_sync/forum_threads.sqlite3。",
+                "抓到的版面主题列表会写入output_dir/forum_threads.sqlite3。",
                 "--full_postdate默认遇到数据库已有tid后停止；--refresh会刷新到远端末页。",
             ],
             "args": [

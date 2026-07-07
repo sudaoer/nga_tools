@@ -19,6 +19,7 @@ from nga_tools.forum.export import (
 from nga_tools.forum.thread_store import (
     ForumThreadStore,
     ForumThreadUpsertResult,
+    forum_thread_db_path,
     forum_thread_table_name,
 )
 from nga_tools.forum.watch import (
@@ -812,6 +813,15 @@ class ForumWatchSyncTest(unittest.TestCase):
 
 
 class ForumThreadStoreTest(unittest.TestCase):
+    def test_default_forum_thread_db_path_is_under_output_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = type("Config", (), {"output_dir": tmp_dir})()
+
+            with patch("nga_tools.forum.thread_store.get_config", return_value=config):
+                db_path = forum_thread_db_path()
+
+        self.assertEqual(db_path, Path(tmp_dir) / "forum_threads.sqlite3")
+
     def test_upsert_uses_tid_primary_key_and_updates_thread_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = Path(tmp_dir) / "forum_threads.sqlite3"
