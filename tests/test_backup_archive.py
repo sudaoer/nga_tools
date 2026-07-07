@@ -971,6 +971,30 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
             stack.enter_context(patch("sys.stdout", new_callable=io.StringIO))
             backup_thread(123, 456)
 
+    def test_backup_sub_requires_migration_for_legacy_json_without_archive(
+        self,
+    ) -> None:
+        class FakeClient:
+            def get_page(self, tid: int, aid: int | None, page: int) -> dict[str, object]:
+                del tid, aid, page
+                return {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "remote"},
+                    ],
+                }
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            json_dir = temp_dir / "json"
+            json_dir.mkdir()
+            (json_dir / "page_1.json").write_text("{not json", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "正常备份不再读取旧JSON"):
+                self._run_backup_sub(temp_dir, FakeClient())
+
+            self.assertFalse((temp_dir / "archive.sqlite3").exists())
+
     def test_backup_sub_skips_completed_html_modified_lous(self) -> None:
         client = self.MutableFakeClient()
         captured_lous: list[int] = []

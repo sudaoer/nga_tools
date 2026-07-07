@@ -13,8 +13,8 @@ from nga_tools.backup.floor_map import (
     build_and_save_floor_map,
     find_missing_author_lous,
     load_floor_map_build_result_if_current,
-    read_author_posts_from_json,
-    _page_post_refs,
+    read_author_posts_from_archive,
+    _page_post_dicts,
     _scan_original_pages,
 )
 from nga_tools.backup.archive_store import ThreadArchiveStore
@@ -40,11 +40,11 @@ class FakeClient:
 class FloorMapPagePostRefsTest(unittest.TestCase):
     def test_missing_result_remains_strict_by_default(self) -> None:
         with self.assertRaisesRegex(ValueError, "缺少帖子列表"):
-            _page_post_refs({"result": None}, "作者页")
+            _page_post_dicts({"result": None}, "作者页")
 
     def test_missing_result_can_be_treated_as_empty_page(self) -> None:
         with patch("sys.stdout", new_callable=io.StringIO) as output:
-            refs = _page_post_refs(
+            refs = _page_post_dicts(
                 {"result": None},
                 "原帖第2538页",
                 allow_missing_posts=True,
@@ -55,7 +55,7 @@ class FloorMapPagePostRefsTest(unittest.TestCase):
 
 
 class FloorMapBackupSourceTest(unittest.TestCase):
-    def test_read_author_posts_prefers_archive_store(self) -> None:
+    def test_read_author_posts_uses_archive_store(self) -> None:
         with TemporaryDirectory() as temp_dir:
             ThreadArchiveStore(Path(temp_dir)).upsert_page(
                 1,
@@ -68,9 +68,19 @@ class FloorMapBackupSourceTest(unittest.TestCase):
             )
 
             with patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir):
-                author_posts = read_author_posts_from_json(123, 456)
+                author_posts = read_author_posts_from_archive(123, 456)
 
         self.assertEqual(author_posts, [{"pid": 1001, "author_lou": 1}])
+
+    def test_read_author_posts_requires_archive_store(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            json_dir = Path(temp_dir) / "json"
+            json_dir.mkdir()
+            (json_dir / "page_1.json").write_text("{not json", encoding="utf-8")
+
+            with patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir):
+                with self.assertRaisesRegex(RuntimeError, "缺少archive.sqlite3"):
+                    read_author_posts_from_archive(123, 456)
 
 
 class FloorMapOriginalScanTest(unittest.TestCase):

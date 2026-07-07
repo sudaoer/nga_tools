@@ -103,6 +103,13 @@ class ThreadArchiveStore:
     def exists(self) -> bool:
         return self.db_path.is_file()
 
+    def require_exists(self) -> None:
+        if not self.exists():
+            raise RuntimeError(
+                f"缺少archive.sqlite3：{self.db_path}。"
+                "请先运行 backup migrate-store 或重新运行备份初始化。"
+            )
+
     def _connect(self) -> sqlite3.Connection:
         self.thread_folder.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(
@@ -425,8 +432,7 @@ class ThreadArchiveStore:
         )
 
     def read_latest_post_records(self) -> list[PostRecord]:
-        if not self.exists():
-            return []
+        self.require_exists()
 
         with closing(self._connect()) as connection:
             rows = cast(
@@ -479,8 +485,7 @@ class ThreadArchiveStore:
         ]
 
     def page_count(self) -> int:
-        if not self.exists():
-            return 0
+        self.require_exists()
         with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT COUNT(DISTINCT page_number) FROM page_snapshots"
@@ -491,6 +496,24 @@ class ThreadArchiveStore:
         if type(value) is int:
             return value
         raise ValueError(f"archive page count字段无效：{value!r}")
+
+    def read_page_numbers(self) -> set[int]:
+        if not self.exists():
+            return set()
+        with closing(self._connect()) as connection:
+            rows = cast(
+                list[tuple[int]],
+                connection.execute(
+                    "SELECT DISTINCT page_number FROM page_snapshots"
+                ).fetchall(),
+            )
+
+        page_numbers: set[int] = set()
+        for (page_number,) in rows:
+            if type(page_number) is not int:
+                raise ValueError(f"archive page_number字段无效：{page_number!r}")
+            page_numbers.add(page_number)
+        return page_numbers
 
     def migrate_json_pages(self) -> ArchiveMigrationResult:
         folder_json = self.thread_folder / "json"

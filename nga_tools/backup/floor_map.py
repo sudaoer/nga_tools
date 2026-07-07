@@ -18,7 +18,6 @@ from nga_tools.backup.floor_models import (
     FLOOR_MAP_VERSION,
     MISSING_POST_HTML,
     ORIGINAL_POSTS_PER_PAGE,
-    PAGE_JSON_RE,
     AuthorPostRef,
     FloorLabels,
     FloorMapBuildResult,
@@ -90,34 +89,6 @@ def _optional_int_list(
     return result
 
 
-def _page_post_refs(
-    page_data: PageData,
-    source: str,
-    *,
-    allow_missing_posts: bool = False,
-) -> list[tuple[int, int]]:
-    raw_posts = page_data.get("result")
-    if raw_posts is None and allow_missing_posts:
-        report_warning(f"{source} 缺少帖子列表，按空页处理。")
-        return []
-
-    if not isinstance(raw_posts, list):
-        raise ValueError(f"{source} 缺少帖子列表。")
-
-    posts: list[tuple[int, int]] = []
-    for raw_post in cast(list[object], raw_posts):
-        if not isinstance(raw_post, dict):
-            raise ValueError(f"{source} 中的帖子不是对象：{raw_post!r}")
-        post = cast(dict[str, object], raw_post)
-        pid = post.get("pid")
-        lou = post.get("lou")
-        if type(pid) is not int or type(lou) is not int:
-            raise ValueError(f"{source} 中的帖子pid/lou字段无效：{raw_post!r}")
-        posts.append((pid, lou))
-
-    return posts
-
-
 def _page_post_dicts(
     page_data: PageData,
     source: str,
@@ -163,44 +134,9 @@ def _post_content(post: dict[str, object]) -> str:
     return ""
 
 
-def _page_json_sort_key(path: Path) -> int:
-    match = PAGE_JSON_RE.fullmatch(path.name)
-    if not match:
-        return 0
-    return int(match.group(1))
-
-
-def read_author_posts_from_json(tid: int, aid: int) -> list[AuthorPostRef]:
+def read_author_posts_from_archive(tid: int, aid: int) -> list[AuthorPostRef]:
     thread_folder = Path(utils.get_folder(tid, aid, create=False))
-    archive_posts = ThreadArchiveStore(thread_folder).read_latest_author_post_refs()
-    if archive_posts:
-        return archive_posts
-
-    folder_json = Path(utils.get_folder(tid, aid, "json", create=False))
-    if not folder_json.exists():
-        raise RuntimeError(
-            f"缺少只看作者JSON备份：{folder_json}。请先运行 backup all。"
-        )
-    page_paths = sorted(
-        (
-            path
-            for path in folder_json.iterdir()
-            if path.is_file() and PAGE_JSON_RE.fullmatch(path.name)
-        ),
-        key=_page_json_sort_key,
-    )
-    if not page_paths:
-        raise RuntimeError(
-            f"缺少只看作者JSON备份：{folder_json}。请先运行 backup all。"
-        )
-
-    author_posts: list[AuthorPostRef] = []
-    for path in page_paths:
-        page_data = cast(PageData, _read_json_object(path))
-        for pid, author_lou in _page_post_refs(page_data, str(path)):
-            author_posts.append({"pid": pid, "author_lou": author_lou})
-
-    return author_posts
+    return ThreadArchiveStore(thread_folder).read_latest_author_post_refs()
 
 
 def read_missing_author_lous_from_html_modified(tid: int, aid: int) -> list[int]:
@@ -928,7 +864,7 @@ def generate_floor_map_from_backup(tid: int, aid: Optional[int]) -> None:
         report_info("未指定aid，原帖楼层与当前楼层一致，无需生成floor_map.json。")
         return
 
-    author_posts = read_author_posts_from_json(tid, aid)
+    author_posts = read_author_posts_from_archive(tid, aid)
     missing_author_lous = sorted(
         {
             *find_missing_author_lous(author_posts),

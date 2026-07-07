@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,9 +11,7 @@ from bs4 import BeautifulSoup, Tag
 from nga_tools import utils
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.bbcode_convert import strip_bbcode_tags
-from nga_tools.ngaclient.client import PageData
 
-PAGE_JSON_RE = re.compile(r"^page_(\d+)\.json$")
 BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 IMG_BBCODE_RE = re.compile(r"\[img\].*?\[/img\]", re.IGNORECASE | re.DOTALL)
 REPLY_HEADER_RE = re.compile(
@@ -55,7 +52,7 @@ class TextWordCount:
 class WordCountSummary:
     tid: int
     aid: Optional[int]
-    json_folder: Path
+    archive_path: Path
     page_count: int
     total_posts: int
     body_posts: int
@@ -148,64 +145,6 @@ def clean_post_content(content: str) -> str:
     return text.strip()
 
 
-def _page_json_sort_key(path: Path) -> int:
-    match = PAGE_JSON_RE.fullmatch(path.name)
-    if match is None:
-        return 0
-    return int(match.group(1))
-
-
-def _read_json_object(path: Path) -> dict[str, object]:
-    try:
-        raw_data: object = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as error:
-        raise FileNotFoundError(f"JSON备份文件不存在：{path}") from error
-    except json.JSONDecodeError as error:
-        raise ValueError(f"JSON备份文件不是有效JSON：{path}") from error
-
-    if not isinstance(raw_data, dict):
-        raise ValueError(f"JSON备份文件顶层必须是对象：{path}")
-    return cast(dict[str, object], raw_data)
-
-
-def _page_posts(page_data: PageData, source: Path) -> list[dict[str, object]]:
-    raw_posts = page_data.get("result")
-    if not isinstance(raw_posts, list):
-        raise ValueError(f"{source} 缺少帖子列表。")
-
-    posts: list[dict[str, object]] = []
-    for raw_post in cast(list[object], raw_posts):
-        if not isinstance(raw_post, dict):
-            raise ValueError(f"{source} 中的帖子不是对象：{raw_post!r}")
-        post = cast(dict[str, object], raw_post)
-        lou = post.get("lou")
-        content = post.get("content")
-        if type(lou) is not int or not isinstance(content, str):
-            raise ValueError(f"{source} 中的帖子lou/content字段无效：{raw_post!r}")
-        posts.append(post)
-
-    return posts
-
-
-def _page_paths(folder_json: Path) -> list[Path]:
-    if not folder_json.exists():
-        raise RuntimeError(f"缺少JSON备份目录：{folder_json}。请先运行 backup all。")
-    if not folder_json.is_dir():
-        raise RuntimeError(f"JSON备份路径不是目录：{folder_json}")
-
-    paths = sorted(
-        (
-            path
-            for path in folder_json.iterdir()
-            if path.is_file() and PAGE_JSON_RE.fullmatch(path.name)
-        ),
-        key=_page_json_sort_key,
-    )
-    if not paths:
-        raise RuntimeError(f"缺少JSON备份文件：{folder_json}/page_*.json")
-    return paths
-
-
 def count_backup_words(
     tid: int,
     aid: Optional[int],
@@ -215,68 +154,33 @@ def count_backup_words(
         raise ValueError("--min_body_chars必须大于0。")
 
     thread_folder = Path(utils.get_folder(tid, aid, create=False))
-    folder_json = Path(utils.get_folder(tid, aid, "json", create=False))
     archive_store = ThreadArchiveStore(thread_folder)
     archive_records = archive_store.read_latest_post_records()
-    if archive_records:
-        total_posts = 0
-        body_posts = 0
-        chinese_chars = 0
-        chinese_with_punctuation = 0
-
-        for record in archive_records:
-            post = record["post"]
-            if post is None:
-                continue
-            total_posts += 1
-            cleaned_content = clean_post_content(post["content"])
-            count = count_chinese_text(cleaned_content)
-            if count.chinese_with_punctuation < min_body_chars:
-                continue
-
-            body_posts += 1
-            chinese_chars += count.chinese_chars
-            chinese_with_punctuation += count.chinese_with_punctuation
-
-        return WordCountSummary(
-            tid=tid,
-            aid=aid,
-            json_folder=folder_json,
-            page_count=archive_store.page_count(),
-            total_posts=total_posts,
-            body_posts=body_posts,
-            excluded_posts=total_posts - body_posts,
-            min_body_chars=min_body_chars,
-            chinese_chars=chinese_chars,
-            chinese_with_punctuation=chinese_with_punctuation,
-        )
-
-    page_paths = _page_paths(folder_json)
 
     total_posts = 0
     body_posts = 0
     chinese_chars = 0
     chinese_with_punctuation = 0
 
-    for path in page_paths:
-        page_data = cast(PageData, _read_json_object(path))
-        for post in sorted(_page_posts(page_data, path), key=lambda item: cast(int, item["lou"])):
-            total_posts += 1
-            content = cast(str, post["content"])
-            cleaned_content = clean_post_content(content)
-            count = count_chinese_text(cleaned_content)
-            if count.chinese_with_punctuation < min_body_chars:
-                continue
+    for record in archive_records:
+        post = record["post"]
+        if post is None:
+            continue
+        total_posts += 1
+        cleaned_content = clean_post_content(post["content"])
+        count = count_chinese_text(cleaned_content)
+        if count.chinese_with_punctuation < min_body_chars:
+            continue
 
-            body_posts += 1
-            chinese_chars += count.chinese_chars
-            chinese_with_punctuation += count.chinese_with_punctuation
+        body_posts += 1
+        chinese_chars += count.chinese_chars
+        chinese_with_punctuation += count.chinese_with_punctuation
 
     return WordCountSummary(
         tid=tid,
         aid=aid,
-        json_folder=folder_json,
-        page_count=len(page_paths),
+        archive_path=archive_store.db_path,
+        page_count=archive_store.page_count(),
         total_posts=total_posts,
         body_posts=body_posts,
         excluded_posts=total_posts - body_posts,

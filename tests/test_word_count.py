@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -111,18 +110,16 @@ class WordCountCleaningTest(unittest.TestCase):
 class BackupWordCountTest(unittest.TestCase):
     def test_counts_only_posts_above_body_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            json_dir = Path(tmp_dir) / "123_456" / "json"
-            json_dir.mkdir(parents=True)
+            thread_dir = Path(tmp_dir) / "123_456"
             body_text = "正文，" * 40
-            page_data = {
-                "result": [
-                    {"lou": 1, "content": "今日无更。"},
-                    {"lou": 2, "content": body_text},
-                ]
-            }
-            (json_dir / "page_1.json").write_text(
-                json.dumps(page_data, ensure_ascii=False),
-                encoding="utf-8",
+            ThreadArchiveStore(thread_dir).upsert_page(
+                1,
+                {
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "今日无更。"},
+                        {"lou": 2, "pid": 1002, "content": body_text},
+                    ]
+                },
             )
 
             with patch(
@@ -132,28 +129,19 @@ class BackupWordCountTest(unittest.TestCase):
                 summary = count_backup_words(123, 456, min_body_chars=120)
 
         self.assertEqual(summary.page_count, 1)
+        self.assertEqual(summary.archive_path, Path(tmp_dir) / "123_456" / "archive.sqlite3")
         self.assertEqual(summary.total_posts, 2)
         self.assertEqual(summary.body_posts, 1)
         self.assertEqual(summary.excluded_posts, 1)
         self.assertEqual(summary.chinese_chars, 80)
         self.assertEqual(summary.chinese_with_punctuation, 120)
 
-    def test_prefers_archive_store_over_latest_json_page(self) -> None:
+    def test_uses_archive_store_even_when_latest_json_page_differs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             thread_dir = Path(tmp_dir) / "123_456"
             json_dir = thread_dir / "json"
             json_dir.mkdir(parents=True)
-            (json_dir / "page_1.json").write_text(
-                json.dumps(
-                    {
-                        "result": [
-                            {"lou": 2, "pid": 1002, "content": "新楼，"},
-                        ]
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
+            (json_dir / "page_1.json").write_text("{not json", encoding="utf-8")
             store = ThreadArchiveStore(thread_dir)
             store.upsert_page(
                 1,
@@ -183,6 +171,19 @@ class BackupWordCountTest(unittest.TestCase):
         self.assertEqual(summary.page_count, 1)
         self.assertEqual(summary.total_posts, 2)
         self.assertEqual(summary.body_posts, 2)
+
+    def test_requires_archive_store_instead_of_falling_back_to_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            json_dir = Path(tmp_dir) / "123_456" / "json"
+            json_dir.mkdir(parents=True)
+            (json_dir / "page_1.json").write_text("{not json", encoding="utf-8")
+
+            with patch(
+                "nga_tools.core.paths.get_config",
+                return_value=SimpleNamespace(output_dir=tmp_dir),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "缺少archive.sqlite3"):
+                    count_backup_words(123, 456, min_body_chars=1)
 
 
 if __name__ == "__main__":

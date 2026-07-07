@@ -2,64 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional, cast
+from typing import Optional
 
 from nga_tools import utils
-from nga_tools.backup.floor_models import PAGE_JSON_RE
 from nga_tools.console import report_progress, report_warning
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import NGAPageError, PageData
 
 _AUTHOR_EMPTY_PAGE_MESSAGE = "找不到内容 或 没有更多页了"
-
-
-def _read_page_json(path: Path) -> PageData:
-    try:
-        raw_data: object = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as error:
-        raise FileNotFoundError(f"JSON备份文件不存在：{path}") from error
-    except json.JSONDecodeError as error:
-        raise ValueError(f"JSON备份文件不是有效JSON：{path}") from error
-
-    if not isinstance(raw_data, dict):
-        raise ValueError(f"JSON备份文件顶层必须是对象：{path}")
-    return cast(PageData, raw_data)
-
-
-def _page_json_sort_key(path: Path) -> int:
-    match = PAGE_JSON_RE.fullmatch(path.name)
-    if not match:
-        return 0
-    return int(match.group(1))
-
-
-def existing_page_numbers(folder_json: Path) -> set[int]:
-    page_numbers: set[int] = set()
-    for path in folder_json.iterdir():
-        if not path.is_file():
-            continue
-        match = PAGE_JSON_RE.fullmatch(path.name)
-        if match:
-            page_numbers.add(int(match.group(1)))
-    return page_numbers
-
-
-def read_pages_json(folder_json: Path) -> dict[int, PageData]:
-    page_data_by_page: dict[int, PageData] = {}
-    page_paths = sorted(
-        (
-            path
-            for path in folder_json.iterdir()
-            if path.is_file() and PAGE_JSON_RE.fullmatch(path.name)
-        ),
-        key=_page_json_sort_key,
-    )
-    for path in page_paths:
-        match = PAGE_JSON_RE.fullmatch(path.name)
-        if match is None:
-            continue
-        page_data_by_page[int(match.group(1))] = _read_page_json(path)
-    return page_data_by_page
 
 
 def write_page_json(folder_json: Path, page_number: int, page_data: PageData) -> None:

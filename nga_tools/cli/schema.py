@@ -283,7 +283,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} backup floors --tid 12345678 --aid 987654",
             ],
             "notes": [
-                "此命令会读取已有json备份并联网扫描原帖，增量刷新floor_map.json。",
+                "此命令会读取archive.sqlite3并联网扫描原帖，增量刷新floor_map.json。",
                 "author-only备份生成PDF前必须先有floor_map.json。",
                 "缺失楼无法唯一确定原楼层时，会在floor_map.json中记录候选原楼层。",
             ],
@@ -388,7 +388,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} stats words --name 帖子名 --min_body_chars 80",
             ],
             "notes": [
-                "此命令只读取本地json备份，不联网、不生成统计文件。",
+                "此命令只读取本地archive.sqlite3，不联网、不生成统计文件。",
                 "会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子标记。",
                 "默认只纳入清洗后中文+中文标点数达到120的正文楼层。",
             ],

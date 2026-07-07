@@ -17,8 +17,8 @@ def stats_words(args: CommandArgs) -> None:
 
     aid_text = summary.aid if summary.aid is not None else "all"
     report_info(f"统计目标：tid={summary.tid}, aid={aid_text}")
-    report_info(f"JSON目录：{summary.json_folder}")
-    report_info(f"JSON页数：{summary.page_count}")
+    report_info(f"Archive库：{summary.archive_path}")
+    report_info(f"快照页数：{summary.page_count}")
     report_info(f"总楼层数：{summary.total_posts}")
     report_info(f"正文楼层数：{summary.body_posts}")
     report_info(f"排除楼层数：{summary.excluded_posts}")

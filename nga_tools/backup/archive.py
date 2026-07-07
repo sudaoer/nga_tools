@@ -32,10 +32,8 @@ from nga_tools.backup.models import (
 )
 from nga_tools.backup.page_store import (
     author_total_lou_count_from_page_data as _author_total_lou_count_from_page_data,
-    existing_page_numbers as _existing_page_numbers,
     fetch_backup_page as _fetch_backup_page,
     page_count_from_page_data as _page_count_from_page_data,
-    read_pages_json as _read_pages_json,
     write_page_json as _write_page_json,
     write_pages_json as _write_pages_json,
 )
@@ -46,24 +44,14 @@ from nga_tools.backup.post_html import (
     merge_missing_lou as _merge_missing_lou,
     post_refs_from_htmls as _post_refs_from_htmls,
     post_refs_from_posts as _post_refs_from_posts,
-    prepare_post_records as _prepare_post_records,
     recovered_missing_post_htmls as _recovered_missing_post_htmls,
     source_hashes_by_lou as _source_hashes_by_lou,
     unresolved_missing_placeholder_lous as _unresolved_missing_placeholder_lous,
 )
+from nga_tools.backup.floor_models import PAGE_JSON_RE
 from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
-
-
-def _read_post_records_from_archive_or_json(
-    store: ThreadArchiveStore,
-    page_data_by_page: dict[int, PageData],
-) -> list[PostRecord]:
-    records = store.read_latest_post_records()
-    if records:
-        return records
-    return _prepare_post_records(page_data_by_page)
 
 
 def _upsert_archive_pages(
@@ -74,12 +62,55 @@ def _upsert_archive_pages(
         store.upsert_page(page_number, page_data_by_page[page_number])
 
 
+def _legacy_page_numbers(folder_json: Path) -> set[int]:
+    if not folder_json.is_dir():
+        return set()
+    page_numbers: set[int] = set()
+    for path in folder_json.iterdir():
+        if not path.is_file():
+            continue
+        match = PAGE_JSON_RE.fullmatch(path.name)
+        if match is not None:
+            page_numbers.add(int(match.group(1)))
+    return page_numbers
+
+
+def _archive_migration_command(tid: int, aid: Optional[int]) -> str:
+    command = f"backup migrate-store --tid {tid}"
+    if aid is not None:
+        command += f" --aid {aid}"
+    return command
+
+
+def _ensure_legacy_json_is_migrated(
+    tid: int,
+    aid: Optional[int],
+    archive_store: ThreadArchiveStore,
+    archive_page_numbers: set[int],
+) -> None:
+    folder_json = archive_store.thread_folder / "json"
+    legacy_page_numbers = _legacy_page_numbers(folder_json)
+    unmigrated_page_numbers = legacy_page_numbers - archive_page_numbers
+    if not unmigrated_page_numbers:
+        return
+
+    raise RuntimeError(
+        f"{archive_store.db_path} 未覆盖旧JSON页："
+        f"{', '.join(str(item) for item in sorted(unmigrated_page_numbers))}。"
+        "正常备份不再读取旧JSON；请先运行 "
+        f"{_archive_migration_command(tid, aid)}。"
+    )
+
+
 def _can_fast_skip_author_backup(
     tid: int,
     aid: Optional[int],
     author_total_lou_count: int | None,
+    archive_page_numbers: set[int],
 ) -> bool:
     if aid is None or author_total_lou_count is None:
+        return False
+    if not archive_page_numbers:
         return False
 
     thread_folder = Path(utils.get_folder(tid, aid))
@@ -89,9 +120,8 @@ def _can_fast_skip_author_backup(
     if state["author_total_lou_count"] != author_total_lou_count:
         return False
 
-    folder_json = Path(utils.get_folder(tid, aid, "json"))
     expected_pages = set(range(1, state["page_count"] + 1))
-    if not expected_pages <= _existing_page_numbers(folder_json):
+    if not expected_pages <= archive_page_numbers:
         return False
 
     folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
@@ -232,10 +262,7 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
 
     report_info("开始处理")
 
-    records = _read_post_records_from_archive_or_json(
-        archive_store,
-        page_data_by_page,
-    )
+    records = archive_store.read_latest_post_records()
     missing_lou = _find_missing_lou(records)
     floor_map_result = _build_floor_map_for_post_refs(
         client,
@@ -303,19 +330,23 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
     client = NGAClient()
     thread_folder = Path(utils.get_folder(tid, aid))
     archive_store = ThreadArchiveStore(thread_folder)
-    archive_store_exists = archive_store.exists()
+    existing_page_numbers = archive_store.read_page_numbers()
+    _ensure_legacy_json_is_migrated(tid, aid, archive_store, existing_page_numbers)
+
     first_page_data = client.get_page(tid, aid, 1)
     page_count = _page_count_from_page_data(first_page_data)
     author_total_lou_count = _author_total_lou_count_from_page_data(
         first_page_data,
         aid,
     )
-    if _can_fast_skip_author_backup(tid, aid, author_total_lou_count):
+    if _can_fast_skip_author_backup(
+        tid,
+        aid,
+        author_total_lou_count,
+        existing_page_numbers,
+    ):
         report_info("只看楼主总楼数未变化，跳过增量处理。")
         return
-
-    folder_json = Path(utils.get_folder(tid, aid, "json"))
-    existing_page_numbers = _existing_page_numbers(folder_json)
 
     if existing_page_numbers:
         tail_start = min(max(existing_page_numbers), page_count)
@@ -323,13 +354,7 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         tail_start = 1
     missing_page_numbers = set(range(1, page_count + 1)) - existing_page_numbers
     refresh_page_numbers = set(range(tail_start, page_count + 1)) | missing_page_numbers
-    all_page_numbers = set(range(1, page_count + 1))
-    write_archive_store = archive_store_exists or all_page_numbers <= refresh_page_numbers
-    if not write_archive_store:
-        report_warning(
-            "未找到archive.sqlite3，增量备份继续使用旧JSON存储；"
-            "运行 backup migrate-store 后启用历史楼层保留。"
-        )
+    folder_json = Path(utils.get_folder(tid, aid, "json"))
 
     report_progress(
         f"准备增量备份：远端{page_count}页，本地{len(existing_page_numbers)}页，"
@@ -353,27 +378,16 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
             first_page_data,
         )
         _write_page_json(folder_json, page_number, page_data)
-        if write_archive_store:
-            archive_store.upsert_page(page_number, page_data)
+        archive_store.upsert_page(page_number, page_data)
     report_progress(
         "页面获取完成",
         completed=len(sorted_refresh_page_numbers),
         total=len(sorted_refresh_page_numbers),
     )
 
-    page_data_by_page = _read_pages_json(folder_json)
-    if not page_data_by_page:
-        raise RuntimeError("没有可处理的JSON备份。")
-
     report_info("开始处理")
 
-    if write_archive_store:
-        records = _read_post_records_from_archive_or_json(
-            archive_store,
-            page_data_by_page,
-        )
-    else:
-        records = _prepare_post_records(page_data_by_page)
+    records = archive_store.read_latest_post_records()
     missing_lou = _find_missing_lou(records)
     if aid is not None:
         present_lou = {item["lou"] for item in records}
