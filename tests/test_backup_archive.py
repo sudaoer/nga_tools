@@ -15,23 +15,26 @@ from PIL import Image
 from nga_tools import utils
 from nga_tools.backup import html_modified_manifest, image_store
 from nga_tools.backup.archive import (
-    ParsedPostHtml,
-    PostHtml,
     backup_thread,
     backup_thread_sub,
     _build_floor_map_for_backup,
-    _collect_image_download_tasks_from_parsed,
-    _collect_image_download_tasks,
-    _download_images,
-    _fill_missing_lou,
-    _merge_missing_lou,
-    _parse_post_htmls_for_images,
-    _prepare_post_records,
-    _rewrite_parsed_image_links,
-    _rewrite_image_links,
-    _write_html_manifest_for_records,
-    _write_post_htmls,
-    _write_recovered_missing_post_htmls,
+)
+from nga_tools.backup.image_pipeline import (
+    collect_image_download_tasks as _collect_image_download_tasks,
+    collect_image_download_tasks_from_parsed as _collect_image_download_tasks_from_parsed,
+    download_images as _download_images,
+    parse_post_htmls_for_images as _parse_post_htmls_for_images,
+    rewrite_image_links as _rewrite_image_links,
+    rewrite_parsed_image_links as _rewrite_parsed_image_links,
+)
+from nga_tools.backup.models import ParsedPostHtml, PostHtml
+from nga_tools.backup.post_html import (
+    fill_missing_lou as _fill_missing_lou,
+    merge_missing_lou as _merge_missing_lou,
+    prepare_post_records as _prepare_post_records,
+    write_html_manifest_for_records as _write_html_manifest_for_records,
+    write_post_htmls as _write_post_htmls,
+    write_recovered_missing_post_htmls as _write_recovered_missing_post_htmls,
 )
 from nga_tools.backup.floor_map import (
     MISSING_POST_HTML,
@@ -89,7 +92,7 @@ class RewriteImageLinksTest(unittest.TestCase):
                 image_store.upsert_image_mapping(image_url, unique_path)
                 image_lookup = image_store.ImageLookupCache.for_tasks(tasks)
                 with patch(
-                    "nga_tools.backup.archive.image_store.unique_image_src_from_html_dir",
+                    "nga_tools.backup.image_pipeline.image_store.unique_image_src_from_html_dir",
                     side_effect=AssertionError("unexpected per-image lookup"),
                 ):
                     completed_lous = _rewrite_image_links(
@@ -342,7 +345,7 @@ class WritePostHtmlsImageRepairTest(unittest.TestCase):
                     return "second rebuilt"
 
                 with patch(
-                    "nga_tools.backup.archive._post_html_from_content",
+                    "nga_tools.backup.post_html.post_html_from_content",
                     side_effect=fake_convert,
                 ):
                     refreshed_records = _prepare_post_records(
@@ -1376,7 +1379,7 @@ class DownloadImagesTest(unittest.TestCase):
                     return_value=type("Config", (), {"output_dir": str(temp_dir)})(),
                 ),
                 patch(
-                    "nga_tools.backup.archive.image_store.download_image_tasks",
+                    "nga_tools.backup.image_pipeline.image_store.download_image_tasks",
                     side_effect=fake_download_image_tasks,
                 ),
                 redirect_stdout(output),
@@ -1411,7 +1414,7 @@ class DownloadImagesTest(unittest.TestCase):
                     return_value=type("Config", (), {"output_dir": str(temp_dir)})(),
                 ),
                 patch(
-                    "nga_tools.backup.archive.image_store.download_image_tasks",
+                    "nga_tools.backup.image_pipeline.image_store.download_image_tasks",
                     return_value={"succeeded": [], "failed": []},
                 ) as download_image_tasks,
                 redirect_stdout(output),

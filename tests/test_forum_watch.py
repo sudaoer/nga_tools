@@ -12,16 +12,16 @@ from unittest.mock import patch
 
 from nga_tools.cli import args_parse
 from nga_tools.commands.forum import handle_forum_sync
-from nga_tools.forum_export import (
+from nga_tools.forum.export import (
     scan_postdate_forum_threads,
     sync_postdate_forum_threads_to_db,
 )
-from nga_tools.forum_threads_db import (
+from nga_tools.forum.thread_store import (
     ForumThreadStore,
     ForumThreadUpsertResult,
     forum_thread_table_name,
 )
-from nga_tools.forum_watch import (
+from nga_tools.forum.watch import (
     ForumWatchConfig,
     MatchedForumThread,
     build_thread_link,
@@ -33,7 +33,7 @@ from nga_tools.forum_watch import (
     thread_matches_watch,
 )
 from nga_tools.ngaclient.client import ForumThread, ForumThreadPage, NGAForumPageError
-from nga_tools.thread_configs import ThreadConfig
+from nga_tools.forum.thread_configs import ThreadConfig
 
 
 def _thread(

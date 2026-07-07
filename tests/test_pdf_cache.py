@@ -10,12 +10,12 @@ from unittest.mock import patch
 from PIL import Image
 
 from nga_tools.backup.floor_map import FloorLabels
-from nga_tools.backup.pdf import (
+from nga_tools.backup.pdf import _read_pdf_html
+from nga_tools.backup.pdf_plan import (
     PDF_HASH_MANIFEST_FILENAME,
     PdfRenderPlan,
-    _build_render_tasks,
-    _read_pdf_html,
-    _write_pdf_hashes,
+    build_render_tasks,
+    write_pdf_hashes,
 )
 
 
@@ -30,8 +30,8 @@ class PdfHashCacheTest(unittest.TestCase):
             html_pre='<div class="bbcode_container">',
             html_post="</div>",
         )
-        with patch("nga_tools.backup.pdf.get_config", return_value=app_config):
-            return _build_render_tasks(
+        with patch("nga_tools.backup.pdf_plan.get_config", return_value=app_config):
+            return build_render_tasks(
                 html_content_by_lou,
                 str(folder_pdf),
                 2,
@@ -65,7 +65,7 @@ class PdfHashCacheTest(unittest.TestCase):
                 folder_pdf,
                 {0: "<p>zero</p>"},
             )
-            _write_pdf_hashes(str(folder_pdf), original_plan.input_hashes)
+            write_pdf_hashes(str(folder_pdf), original_plan.input_hashes)
             (folder_pdf / "part_0_1.pdf").write_bytes(b"%PDF-1.7\n")
             (folder_pdf / "part_0_1.html").unlink()
 
@@ -83,7 +83,7 @@ class PdfHashCacheTest(unittest.TestCase):
                 folder_pdf,
                 {0: "<p>zero</p>"},
             )
-            _write_pdf_hashes(str(folder_pdf), original_plan.input_hashes)
+            write_pdf_hashes(str(folder_pdf), original_plan.input_hashes)
             (folder_pdf / "part_0_1.pdf").write_bytes(b"%PDF-1.7\n")
 
             plan = self._build_plan(folder_pdf, {0: "<p>changed</p>"})
@@ -99,7 +99,7 @@ class PdfHashCacheTest(unittest.TestCase):
                 folder_pdf,
                 {0: "<p>zero</p>"},
             )
-            _write_pdf_hashes(str(folder_pdf), original_plan.input_hashes)
+            write_pdf_hashes(str(folder_pdf), original_plan.input_hashes)
             (folder_pdf / "part_0_1.pdf").unlink(missing_ok=True)
 
             plan = self._build_plan(folder_pdf, {0: "<p>zero</p>"})
@@ -192,7 +192,7 @@ class PdfImageSourceTest(unittest.TestCase):
 
             with (
                 patch(
-                    "nga_tools.utils.get_config",
+                    "nga_tools.core.paths.get_config",
                     return_value=SimpleNamespace(output_dir=str(output_dir)),
                 ),
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),

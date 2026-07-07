@@ -125,7 +125,7 @@ class BackupWordCountTest(unittest.TestCase):
             )
 
             with patch(
-                "nga_tools.utils.get_config",
+                "nga_tools.core.paths.get_config",
                 return_value=SimpleNamespace(output_dir=tmp_dir),
             ):
                 summary = count_backup_words(123, 456, min_body_chars=120)

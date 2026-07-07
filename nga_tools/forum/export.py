@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal, Protocol, TypedDict
 
 from nga_tools.config import get_config
-from nga_tools.forum_threads_db import ForumThreadStore, timestamp_text
+from nga_tools.forum.thread_store import ForumThreadStore, timestamp_text
 from nga_tools.ngaclient.client import ForumThread, ForumThreadPage, NGAForumPageError
 
 POSTDATE_ORDER = "postdatedesc"

@@ -21,7 +21,7 @@ from nga_tools.commands.backup import (
     backup_sub,
     pdf_generate,
 )
-from nga_tools.thread_configs import ThreadConfig
+from nga_tools.forum.thread_configs import ThreadConfig
 
 
 def _thread_config(
@@ -154,7 +154,7 @@ class BackupWarningLogTest(unittest.TestCase):
                             return_value=(101, None),
                         ),
                         patch(
-                            "nga_tools.commands.warning_log.utils.get_folder",
+                            "nga_tools.core.paths.get_folder",
                             side_effect=_fake_get_folder(base_dir),
                         ),
                         patch(implementation_path, side_effect=implementation),
@@ -201,7 +201,7 @@ class BackupWarningLogTest(unittest.TestCase):
                     return_value=_backup_config_app_config(workers=2),
                 ),
                 patch(
-                    "nga_tools.commands.warning_log.utils.get_folder",
+                    "nga_tools.core.paths.get_folder",
                     side_effect=_fake_get_folder(base_dir),
                 ),
                 _captured_reporter(),
@@ -254,7 +254,7 @@ class BackupWarningLogTest(unittest.TestCase):
                     side_effect=generate_pdf_side_effect,
                 ),
                 patch(
-                    "nga_tools.commands.warning_log.utils.get_folder",
+                    "nga_tools.core.paths.get_folder",
                     side_effect=_fake_get_folder(base_dir),
                 ),
                 _captured_reporter() as output,

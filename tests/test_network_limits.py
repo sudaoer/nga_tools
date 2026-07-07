@@ -115,9 +115,9 @@ class NetworkLimitsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir_name:
             target_path = Path(temp_dir_name) / "image"
             with (
-                patch("nga_tools.utils.aiohttp.ClientSession", _ClientSession),
+                patch("nga_tools.core.downloads.aiohttp.ClientSession", _ClientSession),
                 patch(
-                    "nga_tools.utils.network_limits.image_download_slot",
+                    "nga_tools.core.downloads.network_limits.image_download_slot",
                     side_effect=_AsyncSlot,
                 ),
             ):

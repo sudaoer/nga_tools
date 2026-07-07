@@ -8,7 +8,7 @@ from typing import Literal, Optional, TypeAlias, TypedDict, cast
 
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import ForumThread
-from nga_tools.thread_configs import (
+from nga_tools.forum.thread_configs import (
     ThreadConfig,
     thread_config_aid,
     thread_config_name,

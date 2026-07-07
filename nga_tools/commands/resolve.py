@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from nga_tools.commands.types import CommandArgs, optional_int, optional_str
-from nga_tools.thread_configs import resolve_thread_target
+from nga_tools.forum.thread_configs import resolve_thread_target
 
 
 def resolve_command_thread_target(args: CommandArgs) -> tuple[int, Optional[int]]:

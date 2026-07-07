@@ -10,7 +10,7 @@ from nga_tools.commands.types import (
     required_int,
 )
 from nga_tools.commands.network import configure_network_limits_from_args
-from nga_tools.forum_watch import (
+from nga_tools.forum.watch import (
     DEFAULT_WATCH_CONFIG_PATH,
     ForumDatabaseScanProgress,
     ForumWatchConfig,
@@ -18,17 +18,17 @@ from nga_tools.forum_watch import (
     load_forum_watch_configs,
     sync_matches_to_thread_list,
 )
-from nga_tools.forum_export import (
+from nga_tools.forum.export import (
     DEFAULT_PAGE_DELAY_SECONDS,
     ForumPostdateScanProgress,
     sync_postdate_forum_threads_to_db,
     unique_fids,
 )
-from nga_tools.forum_threads_db import ForumThreadStore
+from nga_tools.forum.thread_store import ForumThreadStore
 from nga_tools.console import InlineProgress, report_info
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import ForumThread
-from nga_tools.thread_configs import NGAThreadConfigs
+from nga_tools.forum.thread_configs import NGAThreadConfigs
 
 
 def handle_forum_list(args: CommandArgs) -> None:

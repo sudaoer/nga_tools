@@ -3,13 +3,15 @@ from __future__ import annotations
 from nga_tools.backup.images import (
     migrate_image_index,
     prune_legacy_image_links,
+)
+from nga_tools.backup.image_verify import (
     verify_all_downloaded_images,
     verify_downloaded_images,
 )
 from nga_tools.console import report_info, use_warning_log
 from nga_tools.commands.resolve import resolve_command_thread_target
 from nga_tools.commands.types import CommandArgs, optional_int, optional_str
-from nga_tools.utils import warning_log_path
+from nga_tools.core.paths import warning_log_path
 
 
 def image_verify(args: CommandArgs) -> None:

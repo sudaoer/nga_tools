@@ -1,94 +1,31 @@
 from __future__ import annotations
 
 import json
-import re
 import hashlib
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
-from typing import NotRequired, Optional, TypedDict, cast
+from typing import Optional, cast
 
 from nga_tools import utils
 from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
-
-FLOOR_MAP_FILENAME = "floor_map.json"
-FLOOR_MAP_VERSION = 1
-FLOOR_MAP_GENERATION_VERSION = 1
-FLOOR_MAP_HASH_ALGORITHM = "sha256"
-PAGE_JSON_RE = re.compile(r"^page_(\d+)\.json$")
-MISSING_POST_HTML = "<p><em>本楼层内容缺失。</em></p>"
-ORIGINAL_POSTS_PER_PAGE = 20
-
-
-class AuthorPostRef(TypedDict):
-    pid: int
-    author_lou: int
-
-
-class FloorMapEntry(TypedDict):
-    pid: Optional[int]
-    author_lou: int
-    original_lou: Optional[int]
-    original_pid: NotRequired[int]
-    candidate_original_lous: NotRequired[list[int]]
-
-
-class OriginalPostSnapshot(TypedDict):
-    pid: int
-    lou: int
-    author_uid: Optional[int]
-    content: str
-
-
-class RecoveredMissingPost(TypedDict):
-    original_pid: int
-    original_lou: int
-    content: str
-
-
-@dataclass(frozen=True)
-class FloorLabels:
-    original_lou_by_author_lou: dict[int, int]
-    candidate_original_lous_by_author_lou: dict[int, list[int]]
-    show_original: bool
-
-    @classmethod
-    def plain(cls) -> "FloorLabels":
-        return cls(
-            original_lou_by_author_lou={},
-            candidate_original_lous_by_author_lou={},
-            show_original=False,
-        )
-
-    def label(self, author_lou: int) -> str:
-        if not self.show_original:
-            return f"第{author_lou}楼"
-
-        original_lou = self.original_lou_by_author_lou.get(author_lou)
-        if original_lou is None:
-            candidates = self.candidate_original_lous_by_author_lou.get(author_lou)
-            if candidates:
-                candidate_text = _format_candidate_lous(candidates)
-                return f"第{author_lou}楼（原楼层候选：{candidate_text}）"
-            return f"第{author_lou}楼（原楼层未知）"
-
-        return f"第{author_lou}楼（原{original_lou}楼）"
-
-
-@dataclass(frozen=True)
-class FloorMapBuildResult:
-    floor_labels: FloorLabels
-    recovered_missing_posts_by_author_lou: dict[int, RecoveredMissingPost]
-
-
-def _format_candidate_lous(candidates: Sequence[int]) -> str:
-    if len(candidates) <= 5:
-        return ", ".join(str(lou) for lou in candidates)
-
-    preview = ", ".join(str(lou) for lou in candidates[:5])
-    return f"{preview} 等{len(candidates)}个"
+from nga_tools.backup.floor_models import (
+    FLOOR_MAP_FILENAME,
+    FLOOR_MAP_GENERATION_VERSION,
+    FLOOR_MAP_HASH_ALGORITHM,
+    FLOOR_MAP_VERSION,
+    MISSING_POST_HTML,
+    ORIGINAL_POSTS_PER_PAGE,
+    PAGE_JSON_RE,
+    AuthorPostRef,
+    FloorLabels,
+    FloorMapBuildResult,
+    FloorMapEntry,
+    MissingOriginalInference,
+    OriginalPostSnapshot,
+    RecoveredMissingPost,
+)
 
 
 def get_floor_map_path(tid: int, aid: int) -> Path:
@@ -847,12 +784,6 @@ def _recover_missing_posts_from_original_pages(
     if recovered:
         report_info(f"已从匿名原帖恢复{len(recovered)}个缺失楼内容。")
     return recovered
-
-
-@dataclass(frozen=True)
-class MissingOriginalInference:
-    exact_original_by_author_lou: dict[int, int]
-    candidate_originals_by_author_lou: dict[int, list[int]]
 
 
 def _possible_candidates_by_position(

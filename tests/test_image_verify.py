@@ -12,13 +12,15 @@ from rich.console import Console
 
 from nga_tools.backup import image_store
 from nga_tools.backup.images import (
+    migrate_image_index,
+    prune_legacy_image_links,
+)
+from nga_tools.backup.image_verify import (
     ImageVerifyResult,
     _image_verify_worker_count,
     _list_downloaded_image_folders,
     _list_thread_referenced_image_paths,
     _verify_images_in_folder,
-    migrate_image_index,
-    prune_legacy_image_links,
     verify_all_downloaded_images,
 )
 from nga_tools.cli import args_parse
@@ -128,7 +130,7 @@ class ImageVerifyHandlerTest(unittest.TestCase):
                     side_effect=verify_side_effect,
                 ),
                 patch(
-                    "nga_tools.commands.warning_log.utils.get_folder",
+                    "nga_tools.core.paths.get_folder",
                     side_effect=fake_get_folder,
                 ),
                 use_reporter(ConsoleReporter(console)),
@@ -160,7 +162,7 @@ class ImageVerifyAllTest(unittest.TestCase):
             (output_dir / "101_201" / "pdf" / "long_image_slices").mkdir(parents=True)
 
             with patch(
-                "nga_tools.backup.images.get_config",
+                "nga_tools.backup.image_verify.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
                 folders = _list_downloaded_image_folders()
@@ -178,11 +180,11 @@ class ImageVerifyAllTest(unittest.TestCase):
         ]
         with (
             patch(
-                "nga_tools.backup.images._list_downloaded_image_folders",
+                "nga_tools.backup.image_verify._list_downloaded_image_folders",
                 return_value=["output/images_unique"],
             ),
             patch(
-                "nga_tools.backup.images._verify_images_in_folder",
+                "nga_tools.backup.image_verify._verify_images_in_folder",
                 side_effect=results,
             ) as verify_mock,
             patch("builtins.print"),

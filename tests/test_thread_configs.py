@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from nga_tools.thread_configs import NGAThreadConfigs
+from nga_tools.forum.thread_configs import NGAThreadConfigs
 
 
 def _app_config(config_path: Path) -> SimpleNamespace:
@@ -39,7 +39,7 @@ class ThreadConfigsTest(unittest.TestCase):
             )
 
             with patch(
-                "nga_tools.thread_configs.get_config",
+                "nga_tools.forum.thread_configs.get_config",
                 return_value=_app_config(config_path),
             ):
                 configs = NGAThreadConfigs().get_thread_configs()
@@ -72,7 +72,7 @@ class ThreadConfigsTest(unittest.TestCase):
 
                     with (
                         patch(
-                            "nga_tools.thread_configs.get_config",
+                            "nga_tools.forum.thread_configs.get_config",
                             return_value=_app_config(config_path),
                         ),
                         self.assertRaisesRegex(ValueError, "不能是数组或对象"),
@@ -98,7 +98,7 @@ class ThreadConfigsTest(unittest.TestCase):
 
                     with (
                         patch(
-                            "nga_tools.thread_configs.get_config",
+                            "nga_tools.forum.thread_configs.get_config",
                             return_value=_app_config(config_path),
                         ),
                         self.assertRaises(ValueError),
@@ -109,7 +109,7 @@ class ThreadConfigsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_path = Path(tmp_dir) / "thread_configs.json"
             with patch(
-                "nga_tools.thread_configs.get_config",
+                "nga_tools.forum.thread_configs.get_config",
                 return_value=_app_config(config_path),
             ):
                 configs = NGAThreadConfigs()
