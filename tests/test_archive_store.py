@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import unittest
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,7 +9,7 @@ from tempfile import TemporaryDirectory
 from nga_tools.backup.archive_store import ThreadArchiveStore
 
 
-class ThreadArchiveStoreTest(unittest.TestCase):
+class ThreadArchiveStoreTest:
     def test_page_refresh_preserves_posts_missing_from_new_response(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
@@ -38,9 +37,9 @@ class ThreadArchiveStoreTest(unittest.TestCase):
 
             records = store.read_latest_post_records()
 
-        self.assertEqual([record["lou"] for record in records], [1, 2])
-        self.assertEqual(records[0]["post"]["content"], "old visible")
-        self.assertEqual(records[1]["post"]["content"], "new visible")
+        assert [record['lou'] for record in records] == [1, 2]
+        assert records[0]['post']['content'] == 'old visible'
+        assert records[1]['post']['content'] == 'new visible'
 
     def test_same_lou_uses_latest_version_but_keeps_old_version(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -73,9 +72,9 @@ class ThreadArchiveStoreTest(unittest.TestCase):
                     "SELECT COUNT(*) FROM post_versions WHERE pid = 1001 AND lou = 1"
                 ).fetchone()[0]
 
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["post"]["content"], "after edit")
-        self.assertEqual(version_count, 2)
+        assert len(records) == 1
+        assert records[0]['post']['content'] == 'after edit'
+        assert version_count == 2
 
     def test_migrate_json_pages_is_repeatable_and_keeps_json_files(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -101,13 +100,10 @@ class ThreadArchiveStoreTest(unittest.TestCase):
             second = store.migrate_json_pages()
             json_still_exists = page_path.is_file()
 
-        self.assertTrue(json_still_exists)
-        self.assertEqual(first.page_files, 1)
-        self.assertEqual(first.page_snapshots_inserted, 1)
-        self.assertEqual(first.post_versions_inserted, 1)
-        self.assertEqual(second.page_snapshots_inserted, 0)
-        self.assertEqual(second.post_versions_inserted, 0)
+        assert json_still_exists
+        assert first.page_files == 1
+        assert first.page_snapshots_inserted == 1
+        assert first.post_versions_inserted == 1
+        assert second.page_snapshots_inserted == 0
+        assert second.post_versions_inserted == 0
 
-
-if __name__ == "__main__":
-    unittest.main()

@@ -3,14 +3,13 @@ from __future__ import annotations
 import io
 import json
 import tempfile
-import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from nga_tools.backup import html_modified_manifest
 
 
-class HtmlModifiedManifestTest(unittest.TestCase):
+class HtmlModifiedManifestTest:
     def test_completed_post_lous_require_matching_source_hash_and_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             html_dir = Path(tmp_dir)
@@ -43,8 +42,8 @@ class HtmlModifiedManifestTest(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(completed_lous, {1})
-        self.assertEqual(completed_lous_after_missing_file, set())
+        assert completed_lous == {1}
+        assert completed_lous_after_missing_file == set()
 
     def test_generation_version_mismatch_is_empty_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -69,7 +68,7 @@ class HtmlModifiedManifestTest(unittest.TestCase):
 
             entries = html_modified_manifest.load_manifest(html_dir)
 
-        self.assertEqual(entries, {})
+        assert entries == {}
 
     def test_invalid_manifest_is_empty_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -85,8 +84,5 @@ class HtmlModifiedManifestTest(unittest.TestCase):
             ):
                 entries = html_modified_manifest.load_manifest(html_dir)
 
-        self.assertEqual(entries, {})
+        assert entries == {}
 
-
-if __name__ == "__main__":
-    unittest.main()

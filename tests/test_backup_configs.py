@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import pytest
 import io
 from pathlib import Path
 import threading
-import unittest
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from tempfile import TemporaryDirectory
@@ -36,12 +36,12 @@ def _thread_config(
     return thread_config
 
 
-class BackupConfigsCliTest(unittest.TestCase):
+class BackupConfigsCliTest:
     def test_backup_configs_parses_without_thread_target(self) -> None:
         args = args_parse(["backup", "configs"])
 
-        self.assertEqual(args["command"], "backup")
-        self.assertEqual(args["action"], "configs")
+        assert args['command'] == 'backup'
+        assert args['action'] == 'configs'
 
     def test_backup_configs_parses_parallel_limits(self) -> None:
         args = args_parse(
@@ -57,68 +57,81 @@ class BackupConfigsCliTest(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(args["workers"], 2)
-        self.assertEqual(args["api_concurrency"], 3)
-        self.assertEqual(args["image_concurrency"], 20)
+        assert args['workers'] == 2
+        assert args['api_concurrency'] == 3
+        assert args['image_concurrency'] == 20
 
-    def test_backup_write_json_parses_for_fetch_commands(self) -> None:
-        for argv in (
+    @pytest.mark.parametrize(
+        "argv",
+        [
             ["backup", "all", "--tid", "123", "--write_json"],
             ["backup", "sub", "--tid", "123", "--write_json"],
             ["backup", "configs", "--write_json"],
-        ):
-            with self.subTest(argv=argv):
-                args = args_parse(argv)
+        ],
+    )
+    def test_backup_write_json_parses_for_fetch_commands(
+        self,
+        argv: list[str],
+    ) -> None:
+        args = args_parse(argv)
 
-                self.assertIs(args["write_json"], True)
+        assert args['write_json'] is True
 
-    def test_backup_write_json_is_rejected_for_non_fetch_commands(self) -> None:
-        for argv in (
+    @pytest.mark.parametrize(
+        "argv",
+        [
             ["backup", "floors", "--tid", "123", "--write_json"],
             ["backup", "migrate-store", "--tid", "123", "--write_json"],
             ["backup", "pdf", "--tid", "123", "--write_json"],
-        ):
-            with self.subTest(argv=argv):
-                with patch("sys.stderr", new_callable=io.StringIO):
-                    with self.assertRaises(SystemExit) as context:
-                        args_parse(argv)
+        ],
+    )
+    def test_backup_write_json_is_rejected_for_non_fetch_commands(
+        self,
+        argv: list[str],
+    ) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(argv)
 
-                self.assertEqual(context.exception.code, 2)
+        assert context.value.code == 2
 
-    def test_backup_configs_rejects_non_positive_parallel_limits(self) -> None:
-        invalid_args = [
+    @pytest.mark.parametrize(
+        "argv",
+        [
             ["backup", "configs", "--workers", "0"],
             ["backup", "configs", "--api_concurrency", "0"],
             ["backup", "configs", "--image_concurrency", "0"],
-        ]
-
-        for argv in invalid_args:
-            with self.subTest(argv=argv):
-                with patch("sys.stderr", new_callable=io.StringIO):
-                    with self.assertRaises(SystemExit) as context:
-                        args_parse(argv)
-                self.assertEqual(context.exception.code, 2)
+        ],
+    )
+    def test_backup_configs_rejects_non_positive_parallel_limits(
+        self,
+        argv: list[str],
+    ) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(argv)
+        assert context.value.code == 2
 
     def test_backup_configs_rejects_single_thread_arguments(self) -> None:
         with patch("sys.stderr", new_callable=io.StringIO):
-            with self.assertRaises(SystemExit) as context:
+            with pytest.raises(SystemExit) as context:
                 args_parse(["backup", "configs", "--name", "帖子名"])
 
-        self.assertEqual(context.exception.code, 2)
+        assert context.value.code == 2
 
     def test_backup_migrate_store_parses_all(self) -> None:
         args = args_parse(["backup", "migrate-store", "--all"])
 
-        self.assertEqual(args["command"], "backup")
-        self.assertEqual(args["action"], "migrate-store")
-        self.assertIs(args["all"], True)
+        assert args['command'] == 'backup'
+        assert args['action'] == 'migrate-store'
+        assert args['all'] is True
 
     def test_backup_migrate_store_rejects_all_with_thread_target(self) -> None:
         with patch("sys.stderr", new_callable=io.StringIO):
-            with self.assertRaises(SystemExit) as context:
+            with pytest.raises(SystemExit) as context:
                 args_parse(["backup", "migrate-store", "--all", "--tid", "123"])
 
-        self.assertEqual(context.exception.code, 2)
+        assert context.value.code == 2
 
 
 def _backup_config_app_config(workers: int = 4) -> SimpleNamespace:
@@ -158,96 +171,101 @@ def _captured_reporter() -> Iterator[io.StringIO]:
         yield output
 
 
-class BackupWarningLogTest(unittest.TestCase):
-    def test_single_thread_backup_passes_write_json_flag(self) -> None:
-        handlers = [
+class BackupWarningLogTest:
+    @pytest.mark.parametrize(
+        ("handler", "implementation_path"),
+        [
             (backup_all, "nga_tools.commands.backup.backup_thread"),
             (backup_sub, "nga_tools.commands.backup.backup_thread_sub"),
-        ]
+        ],
+    )
+    def test_single_thread_backup_passes_write_json_flag(
+        self,
+        handler: Callable[[dict[str, object]], None],
+        implementation_path: str,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            base_dir = Path(temp_dir_name)
 
-        for handler, implementation_path in handlers:
-            with self.subTest(handler=handler.__name__):
-                with TemporaryDirectory() as temp_dir_name:
-                    base_dir = Path(temp_dir_name)
+            with (
+                patch(
+                    "nga_tools.commands.backup.configure_network_limits_from_args",
+                    return_value=_backup_config_app_config(),
+                ),
+                patch(
+                    "nga_tools.commands.backup.resolve_command_thread_target",
+                    return_value=(101, None),
+                ),
+                patch(
+                    "nga_tools.core.paths.get_folder",
+                    side_effect=_fake_get_folder(base_dir),
+                ),
+                patch(implementation_path) as implementation_mock,
+                _captured_reporter(),
+            ):
+                handler({"write_json": True})
 
-                    with (
-                        patch(
-                            "nga_tools.commands.backup.configure_network_limits_from_args",
-                            return_value=_backup_config_app_config(),
-                        ),
-                        patch(
-                            "nga_tools.commands.backup.resolve_command_thread_target",
-                            return_value=(101, None),
-                        ),
-                        patch(
-                            "nga_tools.core.paths.get_folder",
-                            side_effect=_fake_get_folder(base_dir),
-                        ),
-                        patch(implementation_path) as implementation_mock,
-                        _captured_reporter(),
-                    ):
-                        handler({"write_json": True})
+            implementation_mock.assert_called_once_with(
+                101,
+                None,
+                write_json=True,
+            )
 
-                    implementation_mock.assert_called_once_with(
-                        101,
-                        None,
-                        write_json=True,
-                    )
-
-    def test_single_thread_backup_commands_write_warning_log(self) -> None:
-        handlers = [
+    @pytest.mark.parametrize(
+        ("handler", "implementation_path"),
+        [
             (backup_all, "nga_tools.commands.backup.backup_thread"),
             (backup_sub, "nga_tools.commands.backup.backup_thread_sub"),
             (
                 backup_floors,
                 "nga_tools.commands.backup.generate_floor_map_from_backup",
             ),
-        ]
+        ],
+    )
+    def test_single_thread_backup_commands_write_warning_log(
+        self,
+        handler: Callable[[dict[str, object]], None],
+        implementation_path: str,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            base_dir = Path(temp_dir_name)
+            thread_dir = base_dir / "101_all"
+            thread_dir.mkdir()
+            log_path = thread_dir / "warnings.log"
+            log_path.write_text("旧日志\n", encoding="utf-8")
 
-        for handler, implementation_path in handlers:
-            with self.subTest(handler=handler.__name__):
-                with TemporaryDirectory() as temp_dir_name:
-                    base_dir = Path(temp_dir_name)
-                    thread_dir = base_dir / "101_all"
-                    thread_dir.mkdir()
-                    log_path = thread_dir / "warnings.log"
-                    log_path.write_text("旧日志\n", encoding="utf-8")
+            def implementation(
+                tid: int,
+                aid: int | None,
+                **kwargs: object,
+            ) -> None:
+                assert (tid, aid) == (101, None)
+                if handler is backup_floors:
+                    assert kwargs == {}
+                else:
+                    assert kwargs == {'write_json': False}
+                report_warning("单帖警告")
 
-                    def implementation(
-                        tid: int,
-                        aid: int | None,
-                        **kwargs: object,
-                    ) -> None:
-                        self.assertEqual((tid, aid), (101, None))
-                        if handler is backup_floors:
-                            self.assertEqual(kwargs, {})
-                        else:
-                            self.assertEqual(kwargs, {"write_json": False})
-                        report_warning("单帖警告")
+            with (
+                patch(
+                    "nga_tools.commands.backup.configure_network_limits_from_args",
+                    return_value=_backup_config_app_config(),
+                ),
+                patch(
+                    "nga_tools.commands.backup.resolve_command_thread_target",
+                    return_value=(101, None),
+                ),
+                patch(
+                    "nga_tools.core.paths.get_folder",
+                    side_effect=_fake_get_folder(base_dir),
+                ),
+                patch(implementation_path, side_effect=implementation),
+                _captured_reporter() as output,
+            ):
+                handler({})
 
-                    with (
-                        patch(
-                            "nga_tools.commands.backup.configure_network_limits_from_args",
-                            return_value=_backup_config_app_config(),
-                        ),
-                        patch(
-                            "nga_tools.commands.backup.resolve_command_thread_target",
-                            return_value=(101, None),
-                        ),
-                        patch(
-                            "nga_tools.core.paths.get_folder",
-                            side_effect=_fake_get_folder(base_dir),
-                        ),
-                        patch(implementation_path, side_effect=implementation),
-                        _captured_reporter() as output,
-                    ):
-                        handler({})
-
-                    self.assertEqual(
-                        log_path.read_text(encoding="utf-8"),
-                        "警告：单帖警告\n",
-                    )
-                    self.assertIn("警告：单帖警告", output.getvalue())
+            assert log_path.read_text(encoding='utf-8') == '警告：单帖警告\n'
+            assert '警告：单帖警告' in output.getvalue()
 
     def test_backup_configs_writes_per_thread_warning_logs(self) -> None:
         thread_configs = [
@@ -274,7 +292,7 @@ class BackupWarningLogTest(unittest.TestCase):
                 *,
                 write_json: bool,
             ) -> None:
-                self.assertIs(write_json, False)
+                assert write_json is False
                 report_warning(f"warning {tid} {aid}")
 
             with (
@@ -297,18 +315,8 @@ class BackupWarningLogTest(unittest.TestCase):
 
                 backup_configs({})
 
-            self.assertEqual(
-                (base_dir / "101_201" / "warnings.log").read_text(
-                    encoding="utf-8"
-                ),
-                "警告：warning 101 201\n",
-            )
-            self.assertEqual(
-                (base_dir / "102_all" / "warnings.log").read_text(
-                    encoding="utf-8"
-                ),
-                "警告：warning 102 None\n",
-            )
+            assert (base_dir / '101_201' / 'warnings.log').read_text(encoding='utf-8') == '警告：warning 101 201\n'
+            assert (base_dir / '102_all' / 'warnings.log').read_text(encoding='utf-8') == '警告：warning 102 None\n'
 
     def test_pdf_generate_writes_thread_warning_log(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -325,10 +333,7 @@ class BackupWarningLogTest(unittest.TestCase):
                 lou_per_pdf: int,
                 pdf_workers: int | None,
             ) -> None:
-                self.assertEqual(
-                    (tid, aid, lou_per_pdf, pdf_workers),
-                    (101, 201, 50, 2),
-                )
+                assert (tid, aid, lou_per_pdf, pdf_workers) == (101, 201, 50, 2)
                 report_warning("PDF告警")
 
             with (
@@ -348,14 +353,11 @@ class BackupWarningLogTest(unittest.TestCase):
             ):
                 pdf_generate({"lou_per_pdf": 50, "pdf_workers": 2})
 
-            self.assertEqual(
-                log_path.read_text(encoding="utf-8"),
-                "警告：PDF告警\n",
-            )
-            self.assertIn("警告：PDF告警", output.getvalue())
+            assert log_path.read_text(encoding='utf-8') == '警告：PDF告警\n'
+            assert '警告：PDF告警' in output.getvalue()
 
 
-class BackupConfigsHandlerTest(unittest.TestCase):
+class BackupConfigsHandlerTest:
     def test_runs_sub_backup_for_each_thread_config_in_order_with_one_worker(
         self,
     ) -> None:
@@ -377,13 +379,7 @@ class BackupConfigsHandlerTest(unittest.TestCase):
 
             backup_configs({"workers": 1})
 
-        self.assertEqual(
-            backup_mock.call_args_list,
-            [
-                call(101, 201, write_json=False),
-                call(102, None, write_json=False),
-            ],
-        )
+        assert backup_mock.call_args_list == [call(101, 201, write_json=False), call(102, None, write_json=False)]
 
     def test_backup_configs_passes_write_json_to_each_thread(self) -> None:
         thread_configs = [
@@ -404,13 +400,7 @@ class BackupConfigsHandlerTest(unittest.TestCase):
 
             backup_configs({"workers": 1, "write_json": True})
 
-        self.assertEqual(
-            backup_mock.call_args_list,
-            [
-                call(101, 201, write_json=True),
-                call(102, None, write_json=True),
-            ],
-        )
+        assert backup_mock.call_args_list == [call(101, 201, write_json=True), call(102, None, write_json=True)]
 
     def test_empty_thread_config_list_does_not_run_backup(self) -> None:
         with (
@@ -427,7 +417,7 @@ class BackupConfigsHandlerTest(unittest.TestCase):
             backup_configs({})
 
         backup_mock.assert_not_called()
-        self.assertIn("没有找到任何帖子配置。", output.getvalue())
+        assert '没有找到任何帖子配置。' in output.getvalue()
 
     def test_continues_after_failure_and_exits_nonzero(self) -> None:
         thread_configs = [
@@ -453,28 +443,28 @@ class BackupConfigsHandlerTest(unittest.TestCase):
                 *,
                 write_json: bool,
             ) -> None:
-                self.assertIs(write_json, False)
+                assert write_json is False
                 del aid
                 if tid == 102:
                     raise RuntimeError("boom")
 
             backup_mock.side_effect = backup_side_effect
 
-            with self.assertRaises(SystemExit) as context:
+            with pytest.raises(SystemExit) as context:
                 backup_configs({})
 
-        self.assertEqual(context.exception.code, 1)
-        self.assertCountEqual(
-            backup_mock.call_args_list,
-            [
-                call(101, 201, write_json=False),
-                call(102, 202, write_json=False),
-                call(103, None, write_json=False),
-            ],
-        )
+        assert context.value.code == 1
+        expected_calls = [
+            call(101, 201, write_json=False),
+            call(102, 202, write_json=False),
+            call(103, None, write_json=False),
+        ]
+        assert len(backup_mock.call_args_list) == len(expected_calls)
+        for expected_call in expected_calls:
+            assert expected_call in backup_mock.call_args_list
         output_text = output.getvalue()
-        self.assertIn("批量备份完成：成功2个，失败1个。", output_text)
-        self.assertIn("失败：broken (tid: 102, aid: 202)：boom", output_text)
+        assert '批量备份完成：成功2个，失败1个。' in output_text
+        assert '失败：broken (tid: 102, aid: 202)：boom' in output_text
 
     def test_default_workers_run_backups_in_parallel(self) -> None:
         thread_configs = [
@@ -493,14 +483,14 @@ class BackupConfigsHandlerTest(unittest.TestCase):
             write_json: bool,
         ) -> None:
             nonlocal active_count, max_active_count
-            self.assertIs(write_json, False)
+            assert write_json is False
             del tid, aid
             with lock:
                 active_count += 1
                 max_active_count = max(max_active_count, active_count)
                 if active_count == 2:
                     release_event.set()
-            self.assertTrue(release_event.wait(timeout=2))
+            assert release_event.wait(timeout=2)
             with lock:
                 active_count -= 1
 
@@ -520,8 +510,4 @@ class BackupConfigsHandlerTest(unittest.TestCase):
 
             backup_configs({})
 
-        self.assertEqual(max_active_count, 2)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert max_active_count == 2

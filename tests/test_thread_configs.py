@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import pytest
 import json
 import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -14,7 +14,7 @@ def _app_config(config_path: Path) -> SimpleNamespace:
     return SimpleNamespace(thread_config_file=str(config_path))
 
 
-class ThreadConfigsTest(unittest.TestCase):
+class ThreadConfigsTest:
     def test_loads_required_fields_and_arbitrary_scalar_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_path = Path(tmp_dir) / "thread_configs.json"
@@ -44,66 +44,66 @@ class ThreadConfigsTest(unittest.TestCase):
             ):
                 configs = NGAThreadConfigs().get_thread_configs()
 
-        self.assertEqual(configs[0]["thread_name"], "name")
-        self.assertEqual(configs[0]["tid"], 101)
-        self.assertEqual(configs[0]["description"], None)
+        assert configs[0]['thread_name'] == 'name'
+        assert configs[0]['tid'] == 101
+        assert configs[0]['description'] == None
 
-    def test_rejects_nested_thread_config_values(self) -> None:
-        invalid_values: list[object] = [["tag"], {"nested": True}]
-
-        for value in invalid_values:
-            with self.subTest(value=value):
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    config_path = Path(tmp_dir) / "thread_configs.json"
-                    config_path.write_text(
-                        json.dumps(
+    @pytest.mark.parametrize("value", [["tag"], {"nested": True}])
+    def test_rejects_nested_thread_config_values(self, value: object) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "thread_configs.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "ThreadList": [
                             {
-                                "ThreadList": [
-                                    {
-                                        "thread_name": "name",
-                                        "tid": 101,
-                                        "extra": value,
-                                    }
-                                ]
+                                "thread_name": "name",
+                                "tid": 101,
+                                "extra": value,
                             }
-                        ),
-                        encoding="utf-8",
-                    )
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
 
-                    with (
-                        patch(
-                            "nga_tools.forum.thread_configs.get_config",
-                            return_value=_app_config(config_path),
-                        ),
-                        self.assertRaisesRegex(ValueError, "不能是数组或对象"),
-                    ):
-                        NGAThreadConfigs()
+            with (
+                patch(
+                    "nga_tools.forum.thread_configs.get_config",
+                    return_value=_app_config(config_path),
+                ),
+                pytest.raises(ValueError, match='不能是数组或对象'),
+            ):
+                NGAThreadConfigs()
 
-    def test_rejects_missing_required_thread_fields(self) -> None:
-        invalid_items = [
+    @pytest.mark.parametrize(
+        "item",
+        [
             {"tid": 101},
             {"thread_name": "name"},
             {"thread_name": "name", "tid": True},
             {"thread_name": "name", "tid": 101, "aid": "201"},
-        ]
+        ],
+    )
+    def test_rejects_missing_required_thread_fields(
+        self,
+        item: dict[str, object],
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "thread_configs.json"
+            config_path.write_text(
+                json.dumps({"ThreadList": [item]}),
+                encoding="utf-8",
+            )
 
-        for item in invalid_items:
-            with self.subTest(item=item):
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    config_path = Path(tmp_dir) / "thread_configs.json"
-                    config_path.write_text(
-                        json.dumps({"ThreadList": [item]}),
-                        encoding="utf-8",
-                    )
-
-                    with (
-                        patch(
-                            "nga_tools.forum.thread_configs.get_config",
-                            return_value=_app_config(config_path),
-                        ),
-                        self.assertRaises(ValueError),
-                    ):
-                        NGAThreadConfigs()
+            with (
+                patch(
+                    "nga_tools.forum.thread_configs.get_config",
+                    return_value=_app_config(config_path),
+                ),
+                pytest.raises(ValueError),
+            ):
+                NGAThreadConfigs()
 
     def test_add_thread_omits_optional_empty_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -118,8 +118,4 @@ class ThreadConfigsTest(unittest.TestCase):
 
             data = json.loads(config_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(data["ThreadList"], [{"thread_name": "name", "tid": 101}])
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert data['ThreadList'] == [{'thread_name': 'name', 'tid': 101}]

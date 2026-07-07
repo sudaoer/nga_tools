@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import io
 import json
 import sqlite3
@@ -7,7 +8,6 @@ from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
-import unittest
 from unittest.mock import patch
 
 from PIL import Image
@@ -51,7 +51,7 @@ from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import NGAPageError
 
 
-class RewriteImageLinksTest(unittest.TestCase):
+class RewriteImageLinksTest:
     def test_collects_valid_image_and_rewrites_after_download(self) -> None:
         image_url = (
             "https://img.nga.178.com/attachments/"
@@ -103,19 +103,9 @@ class RewriteImageLinksTest(unittest.TestCase):
                         image_lookup=image_lookup,
                     )
 
-        self.assertEqual(
-            tasks,
-            [
-                {
-                    "url": image_url,
-                }
-            ],
-        )
-        self.assertEqual(completed_lous, {1})
-        self.assertIn(
-            'src="../../images_unique/hash.png"',
-            htmls[0]["html"],
-        )
+        assert tasks == [{'url': image_url}]
+        assert completed_lous == {1}
+        assert 'src="../../images_unique/hash.png"' in htmls[0]['html']
 
     def test_collects_and_rewrites_from_preparsed_htmls(self) -> None:
         image_url = (
@@ -168,9 +158,9 @@ class RewriteImageLinksTest(unittest.TestCase):
                     image_lookup=image_lookup,
                 )
 
-        self.assertEqual(tasks, [{"url": image_url}])
-        self.assertEqual(completed_lous, {1})
-        self.assertIn('src="../../images_unique/hash.png"', htmls[0]["html"])
+        assert tasks == [{'url': image_url}]
+        assert completed_lous == {1}
+        assert 'src="../../images_unique/hash.png"' in htmls[0]['html']
 
     def test_removes_comma_before_validating_and_downloading_image(self) -> None:
         image_url = (
@@ -201,8 +191,8 @@ class RewriteImageLinksTest(unittest.TestCase):
             ):
                 tasks = _collect_image_download_tasks(htmls, FloorLabels.plain())
 
-        self.assertEqual(tasks[0]["url"], normalized_url)
-        self.assertIn("lsQkle-,552eXuT3cS10p-7f7.png", htmls[0]["html"])
+        assert tasks[0]['url'] == normalized_url
+        assert 'lsQkle-,552eXuT3cS10p-7f7.png' in htmls[0]['html']
 
     def test_skips_invalid_image_download_task(self) -> None:
         invalid_url = "./mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png[/img</span></div>]"
@@ -219,8 +209,8 @@ class RewriteImageLinksTest(unittest.TestCase):
         ):
             tasks = _collect_image_download_tasks(htmls, FloorLabels.plain())
 
-        self.assertEqual(tasks, [])
-        self.assertIn("警告：第3095楼的第1张图片链接无效", output.getvalue())
+        assert tasks == []
+        assert '警告：第3095楼的第1张图片链接无效' in output.getvalue()
 
     def test_rewrites_failed_download_to_placeholder_without_mapping(self) -> None:
         image_url = (
@@ -283,15 +273,12 @@ class RewriteImageLinksTest(unittest.TestCase):
                 finally:
                     connection.close()
 
-        self.assertIn(
-            f'src="../../images_unique/{image_store.PLACEHOLDER_IMAGE_FILENAME}"',
-            htmls[0]["html"],
-        )
-        self.assertEqual(completed_lous, set())
-        self.assertEqual(placeholder_mappings, 0)
+        assert f'src="../../images_unique/{image_store.PLACEHOLDER_IMAGE_FILENAME}"' in htmls[0]['html']
+        assert completed_lous == set()
+        assert placeholder_mappings == 0
 
 
-class WritePostHtmlsImageRepairTest(unittest.TestCase):
+class WritePostHtmlsImageRepairTest:
     def test_prepare_records_does_not_render_html_until_needed(self) -> None:
         page_one = {
             "result": [
@@ -321,7 +308,7 @@ class WritePostHtmlsImageRepairTest(unittest.TestCase):
             records = _prepare_post_records({1: page_one, 2: page_two})
 
         html_by_lou = {record["lou"]: record["html"] for record in records}
-        self.assertEqual(html_by_lou, {1: None, 2: None})
+        assert html_by_lou == {1: None, 2: None}
 
         def fake_convert(post: object) -> str:
             post_data = cast(dict[str, object], post)
@@ -333,9 +320,9 @@ class WritePostHtmlsImageRepairTest(unittest.TestCase):
         ):
             htmls = _load_post_htmls_for_records([records[1]])
 
-        self.assertEqual(htmls, [{"lou": 2, "pid": 1002, "html": "2 rendered"}])
-        self.assertIsNone(records[0]["html"])
-        self.assertEqual(records[1]["html"], "2 rendered")
+        assert htmls == [{'lou': 2, 'pid': 1002, 'html': '2 rendered'}]
+        assert records[0]['html'] is None
+        assert records[1]['html'] == '2 rendered'
 
     def test_repairs_bad_img_from_attches_before_writing_html(self) -> None:
         page_data = {
@@ -367,13 +354,9 @@ class WritePostHtmlsImageRepairTest(unittest.TestCase):
         htmls = _build_post_htmls({155: page_data})
         html = htmls[0]["html"]
 
-        self.assertEqual(html.count("<img"), 2)
-        self.assertIn(
-            "https://img.nga.178.com/attachments/"
-            "mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png",
-            html,
-        )
-        self.assertNotIn("./mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png[/img", html)
+        assert html.count('<img') == 2
+        assert 'https://img.nga.178.com/attachments/mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png' in html
+        assert './mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png[/img' not in html
 
     def test_unrepairable_bad_img_is_preserved_as_text_not_img(self) -> None:
         page_data = {
@@ -389,12 +372,12 @@ class WritePostHtmlsImageRepairTest(unittest.TestCase):
 
         htmls = _build_post_htmls({1: page_data})
 
-        self.assertNotIn("<img", htmls[0]["html"])
-        self.assertIn("[img]./broken.png", htmls[0]["html"])
-        self.assertIn("&lt;/span&gt;", htmls[0]["html"])
+        assert '<img' not in htmls[0]['html']
+        assert '[img]./broken.png' in htmls[0]['html']
+        assert '&lt;/span&gt;' in htmls[0]['html']
 
 
-class FillMissingLouTest(unittest.TestCase):
+class FillMissingLouTest:
     def test_recovered_missing_post_uses_original_content_html(self) -> None:
         recovered_posts: dict[int, RecoveredMissingPost] = {
             94: {
@@ -418,11 +401,11 @@ class FillMissingLouTest(unittest.TestCase):
             _fill_missing_lou(htmls, [94, 95], floor_labels, recovered_html)
 
         html_by_lou = {item["lou"]: item["html"] for item in htmls}
-        self.assertIn("anonymous body", html_by_lou[94])
-        self.assertEqual(html_by_lou[95], "<p><em>本楼层内容缺失。</em></p>")
+        assert 'anonymous body' in html_by_lou[94]
+        assert html_by_lou[95] == '<p><em>本楼层内容缺失。</em></p>'
 
 
-class BackupFloorMapFallbackTest(unittest.TestCase):
+class BackupFloorMapFallbackTest:
     def test_floor_map_failure_falls_back_to_plain_labels(self) -> None:
         htmls: list[PostHtml] = [{"lou": 1, "pid": 1001, "html": "body"}]
 
@@ -446,13 +429,13 @@ class BackupFloorMapFallbackTest(unittest.TestCase):
                 [],
             )
 
-        self.assertFalse(result.floor_labels.show_original)
-        self.assertEqual(result.recovered_missing_posts_by_author_lou, {})
+        assert not result.floor_labels.show_original
+        assert result.recovered_missing_posts_by_author_lou == {}
 
 
-class BackupThreadSubMissingLouTest(unittest.TestCase):
+class BackupThreadSubMissingLouTest:
     def test_merge_missing_lou_sorts_and_deduplicates(self) -> None:
-        self.assertEqual(_merge_missing_lou([4, 2], [2, 3], []), [2, 3, 4])
+        assert _merge_missing_lou([4, 2], [2, 3], []) == [2, 3, 4]
 
     def test_author_empty_page_is_written_and_later_pages_continue(self) -> None:
         class SparseAuthorClient:
@@ -527,11 +510,11 @@ class BackupThreadSubMissingLouTest(unittest.TestCase):
                 (temp_dir / "json" / "page_3.json").read_text(encoding="utf-8")
             )
 
-        self.assertEqual(client.page_calls, [1, 1, 2, 3])
-        self.assertEqual(empty_page["currentPage"], 2)
-        self.assertEqual(empty_page["msg"], "作者筛选空页")
-        self.assertEqual(empty_page["result"], [])
-        self.assertEqual(page_three["result"][0]["lou"], 3)
+        assert client.page_calls == [1, 1, 2, 3]
+        assert empty_page['currentPage'] == 2
+        assert empty_page['msg'] == '作者筛选空页'
+        assert empty_page['result'] == []
+        assert page_three['result'][0]['lou'] == 3
 
     def test_original_empty_page_error_still_fails(self) -> None:
         class OriginalClient:
@@ -582,10 +565,7 @@ class BackupThreadSubMissingLouTest(unittest.TestCase):
                 patch("builtins.print"),
                 patch("sys.stdout", new_callable=io.StringIO),
             ):
-                with self.assertRaisesRegex(
-                    NGAPageError,
-                    "找不到内容 或 没有更多页了",
-                ):
+                with pytest.raises(NGAPageError, match='找不到内容 或 没有更多页了'):
                     backup_thread_sub(123, None)
 
     def test_author_non_empty_page_error_still_fails(self) -> None:
@@ -637,7 +617,7 @@ class BackupThreadSubMissingLouTest(unittest.TestCase):
                 patch("builtins.print"),
                 patch("sys.stdout", new_callable=io.StringIO),
             ):
-                with self.assertRaisesRegex(NGAPageError, "权限不足"):
+                with pytest.raises(NGAPageError, match='权限不足'):
                     backup_thread_sub(123, 456)
 
     def test_backup_sub_retries_previous_missing_author_lous(self) -> None:
@@ -716,7 +696,7 @@ class BackupThreadSubMissingLouTest(unittest.TestCase):
             ):
                 backup_thread_sub(123, 456)
 
-        self.assertEqual(captured_missing_lou, [2, 4])
+        assert captured_missing_lou == [2, 4]
 
     def test_backup_sub_does_not_retry_restored_previous_missing_lou(self) -> None:
         captured_missing_lou: list[int] = []
@@ -791,12 +771,12 @@ class BackupThreadSubMissingLouTest(unittest.TestCase):
                 encoding="utf-8"
             )
 
-        self.assertEqual(captured_missing_lou, [])
-        self.assertIn("second restored", restored_html)
-        self.assertNotIn("本楼层内容缺失", restored_html)
+        assert captured_missing_lou == []
+        assert 'second restored' in restored_html
+        assert '本楼层内容缺失' not in restored_html
 
 
-class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
+class BackupThreadSubHtmlModifiedManifestTest:
     class MutableFakeClient:
         def __init__(self) -> None:
             self.second_content = "second"
@@ -980,9 +960,9 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
 
             self._run_backup_sub(temp_dir, self.MutableFakeClient())
 
-            self.assertTrue((temp_dir / "archive.sqlite3").is_file())
-            self.assertTrue((temp_dir / "html_modified").is_dir())
-            self.assertFalse((temp_dir / "json").exists())
+            assert (temp_dir / 'archive.sqlite3').is_file()
+            assert (temp_dir / 'html_modified').is_dir()
+            assert not (temp_dir / 'json').exists()
 
     def test_backup_all_defaults_to_archive_without_json_output(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -990,9 +970,9 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
 
             self._run_backup_all(temp_dir, self.MutableFakeClient())
 
-            self.assertTrue((temp_dir / "archive.sqlite3").is_file())
-            self.assertTrue((temp_dir / "html_modified").is_dir())
-            self.assertFalse((temp_dir / "json").exists())
+            assert (temp_dir / 'archive.sqlite3').is_file()
+            assert (temp_dir / 'html_modified').is_dir()
+            assert not (temp_dir / 'json').exists()
 
     def test_backup_sub_writes_json_when_enabled(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1004,7 +984,7 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
                 write_json=True,
             )
 
-            self.assertTrue((temp_dir / "json" / "page_1.json").is_file())
+            assert (temp_dir / 'json' / 'page_1.json').is_file()
 
     def test_backup_all_writes_json_when_enabled(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1016,7 +996,7 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
                 write_json=True,
             )
 
-            self.assertTrue((temp_dir / "json" / "page_1.json").is_file())
+            assert (temp_dir / 'json' / 'page_1.json').is_file()
 
     def test_backup_sub_requires_migration_for_legacy_json_without_archive(
         self,
@@ -1037,10 +1017,10 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
             json_dir.mkdir()
             (json_dir / "page_1.json").write_text("{not json", encoding="utf-8")
 
-            with self.assertRaisesRegex(RuntimeError, "正常备份不再读取旧JSON"):
+            with pytest.raises(RuntimeError, match='正常备份不再读取旧JSON'):
                 self._run_backup_sub(temp_dir, FakeClient())
 
-            self.assertFalse((temp_dir / "archive.sqlite3").exists())
+            assert not (temp_dir / 'archive.sqlite3').exists()
 
     def test_backup_sub_skips_completed_html_modified_lous(self) -> None:
         client = self.MutableFakeClient()
@@ -1061,7 +1041,7 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             self._run_backup_sub(temp_dir, client)
-            self.assertFalse((temp_dir / "html").exists())
+            assert not (temp_dir / 'html').exists()
             entries = html_modified_manifest.load_manifest(
                 temp_dir / "html_modified"
             )
@@ -1072,8 +1052,8 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
                 rewrite_side_effect=fake_rewrite,
             )
 
-        self.assertEqual(set(entries), {"post_1.html", "post_2.html"})
-        self.assertEqual(captured_lous, [])
+        assert set(entries) == {'post_1.html', 'post_2.html'}
+        assert captured_lous == []
 
     def test_backup_all_manifest_makes_following_sub_skip_completed_lous(self) -> None:
         client = self.MutableFakeClient()
@@ -1094,7 +1074,7 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             self._run_backup_all(temp_dir, client)
-            self.assertFalse((temp_dir / "html").exists())
+            assert not (temp_dir / 'html').exists()
             entries = html_modified_manifest.load_manifest(
                 temp_dir / "html_modified"
             )
@@ -1105,8 +1085,8 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
                 rewrite_side_effect=fake_rewrite,
             )
 
-        self.assertEqual(set(entries), {"post_1.html", "post_2.html"})
-        self.assertEqual(captured_lous, [])
+        assert set(entries) == {'post_1.html', 'post_2.html'}
+        assert captured_lous == []
 
     def test_backup_all_state_makes_following_sub_fast_skip_by_author_lou_count(
         self,
@@ -1121,8 +1101,8 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
             temp_dir = Path(temp_dir_name)
             self._write_current_floor_map(temp_dir, author_posts)
             self._run_backup_all(temp_dir, client)
-            self.assertFalse((temp_dir / "html").exists())
-            self.assertTrue((temp_dir / "backup_state.json").is_file())
+            assert not (temp_dir / 'html').exists()
+            assert (temp_dir / 'backup_state.json').is_file()
 
             def fake_get_folder(
                 tid: int,
@@ -1196,9 +1176,9 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
             )
             backup_state_exists = (temp_dir / "backup_state.json").exists()
 
-        self.assertFalse(backup_state_exists)
-        self.assertEqual(missing_html, MISSING_POST_HTML)
-        self.assertEqual(set(entries), {"post_1.html", "post_3.html"})
+        assert not backup_state_exists
+        assert missing_html == MISSING_POST_HTML
+        assert set(entries) == {'post_1.html', 'post_3.html'}
 
     def test_backup_sub_rebuilds_only_changed_source_hash_lous(self) -> None:
         client = self.MutableFakeClient()
@@ -1227,7 +1207,7 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
                 rewrite_side_effect=fake_rewrite,
             )
 
-        self.assertEqual(captured_lous, [2])
+        assert captured_lous == [2]
 
     def test_failed_placeholder_html_modified_is_not_marked_complete(self) -> None:
         image_url = (
@@ -1282,8 +1262,8 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
                 encoding="utf-8"
             )
 
-        self.assertEqual(entries, {})
-        self.assertIn(image_store.PLACEHOLDER_IMAGE_FILENAME, html)
+        assert entries == {}
+        assert image_store.PLACEHOLDER_IMAGE_FILENAME in html
 
     def test_backup_sub_keeps_historical_lou_when_refreshed_page_loses_it(
         self,
@@ -1326,9 +1306,9 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
                 (temp_dir / "json" / "page_1.json").read_text(encoding="utf-8")
             )
 
-        self.assertIn("old visible", old_html)
-        self.assertIn("new visible", new_html)
-        self.assertEqual([post["lou"] for post in latest_json["result"]], [2])
+        assert 'old visible' in old_html
+        assert 'new visible' in new_html
+        assert [post['lou'] for post in latest_json['result']] == [2]
 
     def test_backup_all_keeps_historical_lou_when_full_refresh_loses_it(
         self,
@@ -1368,11 +1348,11 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
                 encoding="utf-8"
             )
 
-        self.assertIn("old visible", old_html)
-        self.assertIn("new visible", new_html)
+        assert 'old visible' in old_html
+        assert 'new visible' in new_html
 
 
-class DownloadImagesTest(unittest.TestCase):
+class DownloadImagesTest:
     def test_reports_existing_pending_and_completion_progress(self) -> None:
         with TemporaryDirectory() as temp_dir:
             unique_dir = Path(temp_dir) / "images_unique"
@@ -1396,7 +1376,7 @@ class DownloadImagesTest(unittest.TestCase):
                 *,
                 on_progress: utils.DownloadProgressCallback | None = None,
             ) -> utils.DownloadSummary:
-                self.assertEqual(pending_downloads, [files_to_download[1]])
+                assert pending_downloads == [files_to_download[1]]
                 result: utils.DownloadFileResult = {
                     "url": files_to_download[1]["url"],
                     "save_path": str(unique_dir / "pending.png"),
@@ -1421,11 +1401,11 @@ class DownloadImagesTest(unittest.TestCase):
                 _download_images(123, None, files_to_download)
 
         output_text = output.getvalue()
-        self.assertIn("共2张图片，已存在1张，本次下载1张", output_text)
-        self.assertIn("本次下载1张 (0/1)", output_text)
-        self.assertIn("图片下载进度 (1/1)", output_text)
-        self.assertIn("图片下载完成。", output_text)
-        self.assertIn("成功下载1个文件，失败0个文件。", output_text)
+        assert '共2张图片，已存在1张，本次下载1张' in output_text
+        assert '本次下载1张 (0/1)' in output_text
+        assert '图片下载进度 (1/1)' in output_text
+        assert '图片下载完成。' in output_text
+        assert '成功下载1个文件，失败0个文件。' in output_text
 
     def test_reports_zero_progress_when_all_images_exist(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1458,10 +1438,7 @@ class DownloadImagesTest(unittest.TestCase):
             download_image_tasks.assert_not_called()
 
         output_text = output.getvalue()
-        self.assertIn("共1张图片，已存在1张，本次下载0张", output_text)
-        self.assertIn("图片下载进度 (0/0)", output_text)
-        self.assertIn("成功下载0个文件，失败0个文件。", output_text)
+        assert '共1张图片，已存在1张，本次下载0张' in output_text
+        assert '图片下载进度 (0/0)' in output_text
+        assert '成功下载0个文件，失败0个文件。' in output_text
 
-
-if __name__ == "__main__":
-    unittest.main()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import pytest
 import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -14,12 +14,12 @@ from nga_tools.stats.word_count import (
 )
 
 
-class WordCountCleaningTest(unittest.TestCase):
+class WordCountCleaningTest:
     def test_count_chinese_and_chinese_punctuation_separately(self) -> None:
         count = count_chinese_text("中文，test123。全角Ａ１！々")
 
-        self.assertEqual(count.chinese_chars, 4)
-        self.assertEqual(count.chinese_with_punctuation, 7)
+        assert count.chinese_chars == 4
+        assert count.chinese_with_punctuation == 7
 
     def test_removes_bbcode_html_images_links_mentions_and_emotes(self) -> None:
         content = (
@@ -31,12 +31,12 @@ class WordCountCleaningTest(unittest.TestCase):
 
         cleaned = clean_post_content(content)
 
-        self.assertIn("链接文本", cleaned)
-        self.assertIn("正文", cleaned)
-        self.assertNotIn("https", cleaned)
-        self.assertNotIn("哭笑", cleaned)
-        self.assertNotIn("某人", cleaned)
-        self.assertNotIn("用户名", cleaned)
+        assert '链接文本' in cleaned
+        assert '正文' in cleaned
+        assert 'https' not in cleaned
+        assert '哭笑' not in cleaned
+        assert '某人' not in cleaned
+        assert '用户名' not in cleaned
 
     def test_removes_reply_quote_but_keeps_author_answer(self) -> None:
         content = (
@@ -48,16 +48,16 @@ class WordCountCleaningTest(unittest.TestCase):
 
         cleaned = clean_post_content(content)
 
-        self.assertNotIn("被引用的问题", cleaned)
-        self.assertIn("楼主自己的回答，应该保留。", cleaned)
+        assert '被引用的问题' not in cleaned
+        assert '楼主自己的回答，应该保留。' in cleaned
 
     def test_keeps_visible_text_in_regular_quote(self) -> None:
         content = "[quote]<br/><b>[序章设定]</b><br/>这里是正文设定。[/quote]"
 
         cleaned = clean_post_content(content)
 
-        self.assertIn("[序章设定]", cleaned)
-        self.assertIn("这里是正文设定。", cleaned)
+        assert '[序章设定]' in cleaned
+        assert '这里是正文设定。' in cleaned
 
     def test_removes_html_reply_header_only(self) -> None:
         content = (
@@ -68,8 +68,8 @@ class WordCountCleaningTest(unittest.TestCase):
 
         cleaned = clean_post_content(content)
 
-        self.assertNotIn("读者", cleaned)
-        self.assertIn("地点什么的不要细想", cleaned)
+        assert '读者' not in cleaned
+        assert '地点什么的不要细想' in cleaned
 
     def test_removes_dice_expressions(self) -> None:
         content = (
@@ -80,9 +80,9 @@ class WordCountCleaningTest(unittest.TestCase):
 
         cleaned = clean_post_content(content)
 
-        self.assertNotIn("1d100", cleaned)
-        self.assertNotIn("r1d50", cleaned)
-        self.assertIn("骰子后面的剧情正文", cleaned)
+        assert '1d100' not in cleaned
+        assert 'r1d50' not in cleaned
+        assert '骰子后面的剧情正文' in cleaned
 
     def test_strips_bbcode_tags_with_library_parser(self) -> None:
         content = (
@@ -95,19 +95,19 @@ class WordCountCleaningTest(unittest.TestCase):
 
         cleaned = clean_post_content(content)
 
-        self.assertIn("字号正文", cleaned)
-        self.assertIn("字体正文", cleaned)
-        self.assertIn("居中正文", cleaned)
-        self.assertIn("折叠正文", cleaned)
-        self.assertIn("链接文本", cleaned)
-        self.assertNotIn("[size", cleaned)
-        self.assertNotIn("[font", cleaned)
-        self.assertNotIn("[align", cleaned)
-        self.assertNotIn("[collapse", cleaned)
-        self.assertNotIn("https://example.com", cleaned)
+        assert '字号正文' in cleaned
+        assert '字体正文' in cleaned
+        assert '居中正文' in cleaned
+        assert '折叠正文' in cleaned
+        assert '链接文本' in cleaned
+        assert '[size' not in cleaned
+        assert '[font' not in cleaned
+        assert '[align' not in cleaned
+        assert '[collapse' not in cleaned
+        assert 'https://example.com' not in cleaned
 
 
-class BackupWordCountTest(unittest.TestCase):
+class BackupWordCountTest:
     def test_counts_only_posts_above_body_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             thread_dir = Path(tmp_dir) / "123_456"
@@ -128,13 +128,13 @@ class BackupWordCountTest(unittest.TestCase):
             ):
                 summary = count_backup_words(123, 456, min_body_chars=120)
 
-        self.assertEqual(summary.page_count, 1)
-        self.assertEqual(summary.archive_path, Path(tmp_dir) / "123_456" / "archive.sqlite3")
-        self.assertEqual(summary.total_posts, 2)
-        self.assertEqual(summary.body_posts, 1)
-        self.assertEqual(summary.excluded_posts, 1)
-        self.assertEqual(summary.chinese_chars, 80)
-        self.assertEqual(summary.chinese_with_punctuation, 120)
+        assert summary.page_count == 1
+        assert summary.archive_path == Path(tmp_dir) / '123_456' / 'archive.sqlite3'
+        assert summary.total_posts == 2
+        assert summary.body_posts == 1
+        assert summary.excluded_posts == 1
+        assert summary.chinese_chars == 80
+        assert summary.chinese_with_punctuation == 120
 
     def test_uses_archive_store_even_when_latest_json_page_differs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -168,9 +168,9 @@ class BackupWordCountTest(unittest.TestCase):
             ):
                 summary = count_backup_words(123, 456, min_body_chars=1)
 
-        self.assertEqual(summary.page_count, 1)
-        self.assertEqual(summary.total_posts, 2)
-        self.assertEqual(summary.body_posts, 2)
+        assert summary.page_count == 1
+        assert summary.total_posts == 2
+        assert summary.body_posts == 2
 
     def test_requires_archive_store_instead_of_falling_back_to_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -182,9 +182,6 @@ class BackupWordCountTest(unittest.TestCase):
                 "nga_tools.core.paths.get_config",
                 return_value=SimpleNamespace(output_dir=tmp_dir),
             ):
-                with self.assertRaisesRegex(RuntimeError, "缺少archive.sqlite3"):
+                with pytest.raises(RuntimeError, match='缺少archive.sqlite3'):
                     count_backup_words(123, 456, min_body_chars=1)
 
-
-if __name__ == "__main__":
-    unittest.main()

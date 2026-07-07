@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,7 +18,7 @@ from nga_tools.backup.pdf_plan import (
 )
 
 
-class PdfHashCacheTest(unittest.TestCase):
+class PdfHashCacheTest:
     def _build_plan(
         self,
         folder_pdf: Path,
@@ -44,19 +43,13 @@ class PdfHashCacheTest(unittest.TestCase):
 
             plan = self._build_plan(folder_pdf, {0: "<p>zero</p>"})
 
-            self.assertEqual(plan.skipped_count, 0)
-            self.assertEqual(plan.cleaned_count, 0)
-            self.assertEqual(len(plan.render_tasks), 1)
-            self.assertEqual(
-                plan.render_tasks[0].html_path,
-                str(folder_pdf / "part_0_1.html"),
-            )
-            self.assertTrue((folder_pdf / "part_0_1.html").exists())
-            self.assertIn(
-                "zero",
-                (folder_pdf / "part_0_1.html").read_text(encoding="utf-8"),
-            )
-            self.assertIn("part_0_1.html", plan.input_hashes)
+            assert plan.skipped_count == 0
+            assert plan.cleaned_count == 0
+            assert len(plan.render_tasks) == 1
+            assert plan.render_tasks[0].html_path == str(folder_pdf / 'part_0_1.html')
+            assert (folder_pdf / 'part_0_1.html').exists()
+            assert 'zero' in (folder_pdf / 'part_0_1.html').read_text(encoding='utf-8')
+            assert 'part_0_1.html' in plan.input_hashes
 
     def test_matching_hash_and_existing_pdf_skips_render(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -71,10 +64,10 @@ class PdfHashCacheTest(unittest.TestCase):
 
             plan = self._build_plan(folder_pdf, {0: "<p>zero</p>"})
 
-            self.assertEqual(plan.skipped_count, 1)
-            self.assertEqual(plan.cleaned_count, 0)
-            self.assertEqual(plan.render_tasks, [])
-            self.assertTrue((folder_pdf / "part_0_1.html").exists())
+            assert plan.skipped_count == 1
+            assert plan.cleaned_count == 0
+            assert plan.render_tasks == []
+            assert (folder_pdf / 'part_0_1.html').exists()
 
     def test_changed_html_schedules_render_even_when_pdf_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -88,9 +81,9 @@ class PdfHashCacheTest(unittest.TestCase):
 
             plan = self._build_plan(folder_pdf, {0: "<p>changed</p>"})
 
-            self.assertEqual(plan.skipped_count, 0)
-            self.assertEqual(plan.cleaned_count, 0)
-            self.assertEqual(len(plan.render_tasks), 1)
+            assert plan.skipped_count == 0
+            assert plan.cleaned_count == 0
+            assert len(plan.render_tasks) == 1
 
     def test_missing_pdf_schedules_render_even_when_hash_matches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -104,9 +97,9 @@ class PdfHashCacheTest(unittest.TestCase):
 
             plan = self._build_plan(folder_pdf, {0: "<p>zero</p>"})
 
-            self.assertEqual(plan.skipped_count, 0)
-            self.assertEqual(plan.cleaned_count, 0)
-            self.assertEqual(len(plan.render_tasks), 1)
+            assert plan.skipped_count == 0
+            assert plan.cleaned_count == 0
+            assert len(plan.render_tasks) == 1
 
     def test_invalid_manifest_is_treated_as_empty_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -123,9 +116,9 @@ class PdfHashCacheTest(unittest.TestCase):
             ):
                 plan = self._build_plan(folder_pdf, {0: "<p>zero</p>"})
 
-            self.assertEqual(plan.skipped_count, 0)
-            self.assertEqual(plan.cleaned_count, 0)
-            self.assertEqual(len(plan.render_tasks), 1)
+            assert plan.skipped_count == 0
+            assert plan.cleaned_count == 0
+            assert len(plan.render_tasks) == 1
 
     def test_removes_stale_tail_pdf_and_html_parts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -135,10 +128,10 @@ class PdfHashCacheTest(unittest.TestCase):
 
             plan = self._build_plan(folder_pdf, {0: "<p>zero</p>"})
 
-            self.assertEqual(plan.cleaned_count, 2)
-            self.assertFalse((folder_pdf / "part_2_3.html").exists())
-            self.assertFalse((folder_pdf / "part_2_3.pdf").exists())
-            self.assertTrue((folder_pdf / "part_0_1.html").exists())
+            assert plan.cleaned_count == 2
+            assert not (folder_pdf / 'part_2_3.html').exists()
+            assert not (folder_pdf / 'part_2_3.pdf').exists()
+            assert (folder_pdf / 'part_0_1.html').exists()
 
     def test_removes_stale_parts_after_segment_range_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -148,9 +141,9 @@ class PdfHashCacheTest(unittest.TestCase):
 
             plan = self._build_plan(folder_pdf, {0: "<p>zero</p>"})
 
-            self.assertEqual(plan.cleaned_count, 2)
-            self.assertFalse((folder_pdf / "part_0_3.html").exists())
-            self.assertFalse((folder_pdf / "part_0_3.pdf").exists())
+            assert plan.cleaned_count == 2
+            assert not (folder_pdf / 'part_0_3.html').exists()
+            assert not (folder_pdf / 'part_0_3.pdf').exists()
 
     def test_keeps_non_part_files_and_slice_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -164,14 +157,14 @@ class PdfHashCacheTest(unittest.TestCase):
 
             plan = self._build_plan(folder_pdf, {0: "<p>zero</p>"})
 
-            self.assertEqual(plan.cleaned_count, 0)
-            self.assertTrue((slice_dir / "part_2_3.pdf").exists())
-            self.assertTrue((folder_pdf / "manual.pdf").exists())
-            self.assertTrue((folder_pdf / "notes.html").exists())
-            self.assertTrue((folder_pdf / "part_draft_2_3.pdf").exists())
+            assert plan.cleaned_count == 0
+            assert (slice_dir / 'part_2_3.pdf').exists()
+            assert (folder_pdf / 'manual.pdf').exists()
+            assert (folder_pdf / 'notes.html').exists()
+            assert (folder_pdf / 'part_draft_2_3.pdf').exists()
 
 
-class PdfImageSourceTest(unittest.TestCase):
+class PdfImageSourceTest:
     def test_read_pdf_html_resolves_global_image_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir) / "output"
@@ -203,11 +196,5 @@ class PdfImageSourceTest(unittest.TestCase):
                     None,
                 )
 
-        self.assertIn(
-            'src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"',
-            html_content_by_lou[1],
-        )
+        assert 'src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"' in html_content_by_lou[1]
 
-
-if __name__ == "__main__":
-    unittest.main()

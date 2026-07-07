@@ -1,21 +1,23 @@
 from __future__ import annotations
 
+import re
 import io
 import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from PIL import Image
 
 from nga_tools import utils
 from nga_tools.backup import image_store
 
 
-class NgaImageLinkVerifyTest(unittest.TestCase):
-    def test_accepts_current_nga_image_filename_formats(self) -> None:
-        valid_urls = [
+class NgaImageLinkVerifyTest:
+    @pytest.mark.parametrize(
+        "url",
+        [
             "https://img.nga.178.com/attachments/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png",
             "https://img.nga.178.com/attachments/mon_202506/06/lsQ2w-aygqK1nT3cSl9-sg.jpg.thumb.jpg",
             "https://img.nga.178.com/attachments/mon_202506/06/lsQ2w-8fvtK7ToS5w-5y.jpg.thumb_s.jpg",
@@ -24,14 +26,14 @@ class NgaImageLinkVerifyTest(unittest.TestCase):
             "https://img.nga.178.com/attachments/mon_202506/06/lsQ2w-8o79K8ToS5k-5k.webp",
             "https://img.nga.178.com/attachments/mon_202506/06/lsQktk-gl8gZgT3cSqo-wf.jpeg",
             "https://img.nga.178.com/attachments/mon_202506/06/-9lddQ0-f0a0Z1tT3cSdc-7i.gif.medium.jpg",
-        ]
+        ],
+    )
+    def test_accepts_current_nga_image_filename_formats(self, url: str) -> None:
+        assert utils.NGA_img_link_verify(url)
 
-        for url in valid_urls:
-            with self.subTest(url=url):
-                self.assertTrue(utils.NGA_img_link_verify(url))
-
-    def test_rejects_non_image_or_malformed_nga_links(self) -> None:
-        invalid_urls = [
+    @pytest.mark.parametrize(
+        "url",
+        [
             "http://img.nga.178.com/attachments/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png",
             "https://example.com/attachments/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png",
             "https://img.nga.178.com/attachments/mon_202513/06/lsQkle-552eXuT3cS10p-7f7.png",
@@ -39,14 +41,13 @@ class NgaImageLinkVerifyTest(unittest.TestCase):
             "https://img.nga.178.com/attachments/mon_202506/06/nested/lsQkle.png",
             "https://img.nga.178.com/attachments/mon_202506/06/lsQ1ah-kopmZ2p.mp3",
             "https://img.nga.178.com/attachments/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png#frag",
-        ]
+        ],
+    )
+    def test_rejects_non_image_or_malformed_nga_links(self, url: str) -> None:
+        assert not utils.NGA_img_link_verify(url)
 
-        for url in invalid_urls:
-            with self.subTest(url=url):
-                self.assertFalse(utils.NGA_img_link_verify(url))
 
-
-class ImageStoreTest(unittest.TestCase):
+class ImageStoreTest:
     def test_placeholder_image_path_creates_valid_png_without_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             output_dir = Path(temp_dir_name) / "output"
@@ -62,17 +63,9 @@ class ImageStoreTest(unittest.TestCase):
 
             with Image.open(placeholder_path) as image:
                 image.verify()
-            self.assertEqual(
-                placeholder_path,
-                output_dir
-                / "images_unique"
-                / image_store.PLACEHOLDER_IMAGE_FILENAME,
-            )
-            self.assertEqual(
-                placeholder_src,
-                f"../../images_unique/{image_store.PLACEHOLDER_IMAGE_FILENAME}",
-            )
-            self.assertFalse((output_dir / "image_index.sqlite3").exists())
+            assert placeholder_path == output_dir / 'images_unique' / image_store.PLACEHOLDER_IMAGE_FILENAME
+            assert placeholder_src == f'../../images_unique/{image_store.PLACEHOLDER_IMAGE_FILENAME}'
+            assert not (output_dir / 'image_index.sqlite3').exists()
 
     def test_store_downloaded_image_uses_hash_name_and_sqlite_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -95,17 +88,14 @@ class ImageStoreTest(unittest.TestCase):
                 mapping = image_store.image_mapping_for_url(image_url)
 
             unique_path = Path(result["unique_path"])
-            self.assertTrue(unique_path.exists())
-            self.assertTrue(unique_path.parent.samefile(output_dir / "images_unique"))
-            self.assertRegex(unique_path.name, r"^[0-9a-f]{64}\.png$")
-            self.assertIsNotNone(mapping)
+            assert unique_path.exists()
+            assert unique_path.parent.samefile(output_dir / 'images_unique')
+            assert re.search('^[0-9a-f]{64}\\.png$', unique_path.name) is not None
             assert mapping is not None
-            self.assertEqual(
-                mapping.unique_rel_path,
-                f"images_unique/{unique_path.name}",
-            )
-            self.assertFalse((output_dir / "images").exists())
-            self.assertTrue((output_dir / "image_index.sqlite3").exists())
+            assert mapping is not None
+            assert mapping.unique_rel_path == f'images_unique/{unique_path.name}'
+            assert not (output_dir / 'images').exists()
+            assert (output_dir / 'image_index.sqlite3').exists()
 
     def test_pending_image_download_tasks_uses_batched_index_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -137,8 +127,8 @@ class ImageStoreTest(unittest.TestCase):
                     [{"url": existing_url_with_comma}, {"url": missing_url}]
                 )
 
-            self.assertEqual(set(mappings), {existing_url})
-            self.assertEqual(pending_tasks, [{"url": missing_url}])
+            assert set(mappings) == {existing_url}
+            assert pending_tasks == [{'url': missing_url}]
 
     def test_store_downloaded_image_preserves_hash_collision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -170,13 +160,6 @@ class ImageStoreTest(unittest.TestCase):
                     {"url": image_url},
                 )
 
-            self.assertEqual(Path(first["unique_path"]).name, f"{'a' * 64}.png")
-            self.assertEqual(
-                Path(second["unique_path"]).name,
-                f"{'a' * 64}-collision-1.png",
-            )
-            self.assertTrue(second.get("collision"))
-
-
-if __name__ == "__main__":
-    unittest.main()
+            assert Path(first['unique_path']).name == f"{'a' * 64}.png"
+            assert Path(second['unique_path']).name == f"{'a' * 64}-collision-1.png"
+            assert second.get('collision')

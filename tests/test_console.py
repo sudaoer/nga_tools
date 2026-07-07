@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 
 from rich.console import Console
 
@@ -18,7 +17,7 @@ from nga_tools.console import (
 )
 
 
-class InlineProgressTest(unittest.TestCase):
+class InlineProgressTest:
     def test_updates_reuse_current_line_and_finish_once(self) -> None:
         output = io.StringIO()
         progress = InlineProgress(output)
@@ -28,7 +27,7 @@ class InlineProgressTest(unittest.TestCase):
         progress.finish()
         progress.finish()
 
-        self.assertEqual(output.getvalue(), "\rabcdef\rxy    \rxy\n")
+        assert output.getvalue() == '\rabcdef\rxy    \rxy\n'
 
     def test_finish_without_update_is_noop(self) -> None:
         output = io.StringIO()
@@ -36,10 +35,10 @@ class InlineProgressTest(unittest.TestCase):
 
         progress.finish()
 
-        self.assertEqual(output.getvalue(), "")
+        assert output.getvalue() == ''
 
 
-class ConsoleReporterTest(unittest.TestCase):
+class ConsoleReporterTest:
     def test_plain_messages_are_written_without_markup_parsing(self) -> None:
         output = io.StringIO()
         console = Console(
@@ -53,10 +52,7 @@ class ConsoleReporterTest(unittest.TestCase):
         reporter.info("[攻略] foo [/x]")
         reporter.warning("[公告] bar [/b]")
 
-        self.assertEqual(
-            output.getvalue(),
-            "[攻略] foo [/x]\n警告：[公告] bar [/b]\n",
-        )
+        assert output.getvalue() == '[攻略] foo [/x]\n警告：[公告] bar [/b]\n'
 
     def test_warning_log_mirrors_warnings_and_overwrites_file(self) -> None:
         output = io.StringIO()
@@ -79,18 +75,12 @@ class ConsoleReporterTest(unittest.TestCase):
                 report_info("[攻略] foo [/x]")
                 report_warning("[公告] bar [/b]")
 
-            self.assertEqual(
-                log_path.read_text(encoding="utf-8"),
-                "警告：[公告] bar [/b]\n",
-            )
+            assert log_path.read_text(encoding='utf-8') == '警告：[公告] bar [/b]\n'
 
-        self.assertEqual(
-            output.getvalue(),
-            "[攻略] foo [/x]\n警告：[公告] bar [/b]\n",
-        )
+        assert output.getvalue() == '[攻略] foo [/x]\n警告：[公告] bar [/b]\n'
 
 
-class BackupConfigsProgressDisplayTest(unittest.TestCase):
+class BackupConfigsProgressDisplayTest:
     def test_finished_thread_task_is_hidden_and_warning_is_written(self) -> None:
         output = io.StringIO()
         console = Console(
@@ -107,8 +97,8 @@ class BackupConfigsProgressDisplayTest(unittest.TestCase):
             display.finish_thread(reporter, status="完成")
             visible_tasks = display.visible_task_descriptions()
 
-        self.assertEqual(visible_tasks, ["总进度"])
-        self.assertIn("警告：first：图片链接无效", output.getvalue())
+        assert visible_tasks == ['总进度']
+        assert '警告：first：图片链接无效' in output.getvalue()
 
     def test_progress_runtime_text_is_rendered_without_markup_parsing(
         self,
@@ -132,8 +122,8 @@ class BackupConfigsProgressDisplayTest(unittest.TestCase):
             visible_tasks = display.visible_task_descriptions()
 
         output_text = output.getvalue()
-        self.assertIn("[1/1] [攻] foo [/x]", visible_tasks)
-        self.assertIn("警告：[攻] foo [/x]：坏 [b] [/x]", output_text)
+        assert '[1/1] [攻] foo [/x]' in visible_tasks
+        assert '警告：[攻] foo [/x]：坏 [b] [/x]' in output_text
 
     def test_long_task_label_stays_on_one_named_progress_row(self) -> None:
         output = io.StringIO()
@@ -157,10 +147,7 @@ class BackupConfigsProgressDisplayTest(unittest.TestCase):
             )
 
         output_text = output.getvalue()
-        self.assertIn("[12/235]", output_text)
-        self.assertIn("这是一个非常长的NGA主题标题", output_text)
-        self.assertNotIn("\n  …", output_text)
+        assert '[12/235]' in output_text
+        assert '这是一个非常长的NGA主题标题' in output_text
+        assert '\n  …' not in output_text
 
-
-if __name__ == "__main__":
-    unittest.main()

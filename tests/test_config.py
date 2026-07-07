@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import pytest
 import json
 import tempfile
-import unittest
 from pathlib import Path
 
 from nga_tools.config import (
@@ -42,7 +42,7 @@ def _secrets_data() -> dict[str, object]:
     }
 
 
-class ConfigConcurrencyTest(unittest.TestCase):
+class ConfigConcurrencyTest:
     def _write_config_files(
         self,
         temp_dir: Path,
@@ -63,12 +63,9 @@ class ConfigConcurrencyTest(unittest.TestCase):
 
             app_config = load_config(config_path, secrets_path)
 
-        self.assertEqual(app_config.api_concurrency, DEFAULT_API_CONCURRENCY)
-        self.assertEqual(app_config.image_concurrency, DEFAULT_IMAGE_CONCURRENCY)
-        self.assertEqual(
-            app_config.backup_configs_workers,
-            DEFAULT_BACKUP_CONFIGS_WORKERS,
-        )
+        assert app_config.api_concurrency == DEFAULT_API_CONCURRENCY
+        assert app_config.image_concurrency == DEFAULT_IMAGE_CONCURRENCY
+        assert app_config.backup_configs_workers == DEFAULT_BACKUP_CONFIGS_WORKERS
 
     def test_load_config_accepts_custom_concurrency_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -83,28 +80,27 @@ class ConfigConcurrencyTest(unittest.TestCase):
 
             app_config = load_config(config_path, secrets_path)
 
-        self.assertEqual(app_config.api_concurrency, 2)
-        self.assertEqual(app_config.image_concurrency, 20)
-        self.assertEqual(app_config.backup_configs_workers, 3)
+        assert app_config.api_concurrency == 2
+        assert app_config.image_concurrency == 20
+        assert app_config.backup_configs_workers == 3
 
-    def test_load_config_rejects_non_positive_concurrency_values(self) -> None:
-        invalid_configs = [
+    @pytest.mark.parametrize(
+        "config_overrides",
+        [
             {"api_concurrency": 0},
             {"image_concurrency": 0},
             {"backup_configs_workers": 0},
-        ]
+        ],
+    )
+    def test_load_config_rejects_non_positive_concurrency_values(
+        self,
+        config_overrides: dict[str, object],
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            config_path, secrets_path = self._write_config_files(
+                Path(temp_dir_name),
+                config_overrides,
+            )
 
-        for config_overrides in invalid_configs:
-            with self.subTest(config_overrides=config_overrides):
-                with tempfile.TemporaryDirectory() as temp_dir_name:
-                    config_path, secrets_path = self._write_config_files(
-                        Path(temp_dir_name),
-                        config_overrides,
-                    )
-
-                    with self.assertRaises(ValueError):
-                        load_config(config_path, secrets_path)
-
-
-if __name__ == "__main__":
-    unittest.main()
+            with pytest.raises(ValueError):
+                load_config(config_path, secrets_path)

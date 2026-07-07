@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import unittest
+import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -50,7 +50,7 @@ class _ForumThreadPageResponse:
         }
 
 
-class NGAClientForumThreadPageTest(unittest.TestCase):
+class NGAClientForumThreadPageTest:
     def test_forum_thread_uses_page_forumname_when_thread_forumname_is_null(
         self,
     ) -> None:
@@ -71,12 +71,12 @@ class NGAClientForumThreadPageTest(unittest.TestCase):
                 order_by="postdatedesc",
             )
 
-        self.assertEqual(page["forumname"], "二次元跑团综合")
-        self.assertEqual(page["threads"][0]["forumname"], "二次元跑团综合")
-        self.assertEqual(page["threads"][0]["tid"], 35411723)
+        assert page['forumname'] == '二次元跑团综合'
+        assert page['threads'][0]['forumname'] == '二次元跑团综合'
+        assert page['threads'][0]['tid'] == 35411723
 
 
-class NGAClientPageErrorTest(unittest.TestCase):
+class NGAClientPageErrorTest:
     def test_page_error_exposes_code_and_message(self) -> None:
         config = SimpleNamespace(
             base_url="https://bbs.nga.cn",
@@ -89,16 +89,10 @@ class NGAClientPageErrorTest(unittest.TestCase):
             client = NGAClient()
             client.session.post = MagicMock(return_value=_PageErrorResponse())
 
-            with self.assertRaises(NGAPageError) as context:
+            with pytest.raises(NGAPageError) as context:
                 client.get_page(123, 456, 6)
 
-        self.assertEqual(context.exception.code, 35)
-        self.assertEqual(context.exception.message, "找不到内容 或 没有更多页了")
-        self.assertEqual(
-            str(context.exception),
-            "Error fetching page: 找不到内容 或 没有更多页了",
-        )
+        assert context.value.code == 35
+        assert context.value.message == '找不到内容 或 没有更多页了'
+        assert str(context.value) == 'Error fetching page: 找不到内容 或 没有更多页了'
 
-
-if __name__ == "__main__":
-    unittest.main()

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import pytest
 import io
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 from unittest.mock import patch
 
 from nga_tools.backup.floor_map import (
@@ -37,9 +37,9 @@ class FakeClient:
         return self.pages[page]
 
 
-class FloorMapPagePostRefsTest(unittest.TestCase):
+class FloorMapPagePostRefsTest:
     def test_missing_result_remains_strict_by_default(self) -> None:
-        with self.assertRaisesRegex(ValueError, "缺少帖子列表"):
+        with pytest.raises(ValueError, match='缺少帖子列表'):
             _page_post_dicts({"result": None}, "作者页")
 
     def test_missing_result_can_be_treated_as_empty_page(self) -> None:
@@ -50,11 +50,11 @@ class FloorMapPagePostRefsTest(unittest.TestCase):
                 allow_missing_posts=True,
             )
 
-        self.assertEqual(refs, [])
-        self.assertIn("警告：原帖第2538页 缺少帖子列表", output.getvalue())
+        assert refs == []
+        assert '警告：原帖第2538页 缺少帖子列表' in output.getvalue()
 
 
-class FloorMapBackupSourceTest(unittest.TestCase):
+class FloorMapBackupSourceTest:
     def test_read_author_posts_uses_archive_store(self) -> None:
         with TemporaryDirectory() as temp_dir:
             ThreadArchiveStore(Path(temp_dir)).upsert_page(
@@ -70,7 +70,7 @@ class FloorMapBackupSourceTest(unittest.TestCase):
             with patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir):
                 author_posts = read_author_posts_from_archive(123, 456)
 
-        self.assertEqual(author_posts, [{"pid": 1001, "author_lou": 1}])
+        assert author_posts == [{'pid': 1001, 'author_lou': 1}]
 
     def test_read_author_posts_requires_archive_store(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -79,11 +79,11 @@ class FloorMapBackupSourceTest(unittest.TestCase):
             (json_dir / "page_1.json").write_text("{not json", encoding="utf-8")
 
             with patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir):
-                with self.assertRaisesRegex(RuntimeError, "缺少archive.sqlite3"):
+                with pytest.raises(RuntimeError, match='缺少archive.sqlite3'):
                     read_author_posts_from_archive(123, 456)
 
 
-class FloorMapOriginalScanTest(unittest.TestCase):
+class FloorMapOriginalScanTest:
     def test_scan_original_pages_continues_after_null_result_page(self) -> None:
         client = FakeClient(
             {
@@ -109,12 +109,12 @@ class FloorMapOriginalScanTest(unittest.TestCase):
                 2,
             )
 
-        self.assertEqual(scanned_pages, {1, 2, 3})
-        self.assertEqual(seen_original_lous, {1, 3})
-        self.assertEqual(original_lou_by_author_lou, {1: 1, 2: 3})
+        assert scanned_pages == {1, 2, 3}
+        assert seen_original_lous == {1, 3}
+        assert original_lou_by_author_lou == {1: 1, 2: 3}
 
 
-class FloorMapMissingInferenceTest(unittest.TestCase):
+class FloorMapMissingInferenceTest:
     def _build_floor_map(
         self,
         page_result: list[dict[str, object]],
@@ -172,20 +172,9 @@ class FloorMapMissingInferenceTest(unittest.TestCase):
             [2],
         )
 
-        self.assertEqual(result.floor_labels.original_lou_by_author_lou[2], 11)
-        self.assertEqual(
-            result.recovered_missing_posts_by_author_lou[2],
-            {"original_pid": 2002, "original_lou": 11, "content": "anonymous body"},
-        )
-        self.assertIn(
-            {
-                "pid": None,
-                "author_lou": 2,
-                "original_lou": 11,
-                "original_pid": 2002,
-            },
-            floor_map["entries"],
-        )
+        assert result.floor_labels.original_lou_by_author_lou[2] == 11
+        assert result.recovered_missing_posts_by_author_lou[2] == {'original_pid': 2002, 'original_lou': 11, 'content': 'anonymous body'}
+        assert {'pid': None, 'author_lou': 2, 'original_lou': 11, 'original_pid': 2002} in floor_map['entries']
 
     def test_deleted_original_post_still_maps_without_recovered_content(self) -> None:
         _floor_map, result = self._build_floor_map(
@@ -206,8 +195,8 @@ class FloorMapMissingInferenceTest(unittest.TestCase):
             [2],
         )
 
-        self.assertEqual(result.floor_labels.original_lou_by_author_lou[2], 11)
-        self.assertEqual(result.recovered_missing_posts_by_author_lou, {})
+        assert result.floor_labels.original_lou_by_author_lou[2] == 11
+        assert result.recovered_missing_posts_by_author_lou == {}
 
     def test_ambiguous_anonymous_candidates_are_not_exactly_mapped(self) -> None:
         _floor_map, result = self._build_floor_map(
@@ -240,14 +229,11 @@ class FloorMapMissingInferenceTest(unittest.TestCase):
             [2],
         )
 
-        self.assertNotIn(2, result.floor_labels.original_lou_by_author_lou)
-        self.assertEqual(
-            result.floor_labels.candidate_original_lous_by_author_lou[2],
-            [11, 12],
-        )
+        assert 2 not in result.floor_labels.original_lou_by_author_lou
+        assert result.floor_labels.candidate_original_lous_by_author_lou[2] == [11, 12]
 
 
-class FloorMapSignatureCacheTest(unittest.TestCase):
+class FloorMapSignatureCacheTest:
     def test_current_input_signature_loads_cached_floor_map(self) -> None:
         author_posts: list[AuthorPostRef] = [
             {"pid": 1001, "author_lou": 1},
@@ -291,12 +277,12 @@ class FloorMapSignatureCacheTest(unittest.TestCase):
                     [3],
                 )
 
-        self.assertIsNotNone(cached)
-        self.assertEqual(cached.floor_labels.original_lou_by_author_lou[1], 10)
-        self.assertIsNone(changed)
+        assert cached is not None
+        assert cached.floor_labels.original_lou_by_author_lou[1] == 10
+        assert changed is None
 
 
-class FloorMapMissingAuthorLousTest(unittest.TestCase):
+class FloorMapMissingAuthorLousTest:
     def test_finds_gaps_while_accepting_zero_floor(self) -> None:
         author_posts: list[AuthorPostRef] = [
             {"pid": 0, "author_lou": 0},
@@ -304,8 +290,5 @@ class FloorMapMissingAuthorLousTest(unittest.TestCase):
             {"pid": 1003, "author_lou": 3},
         ]
 
-        self.assertEqual(find_missing_author_lous(author_posts), [2])
+        assert find_missing_author_lous(author_posts) == [2]
 
-
-if __name__ == "__main__":
-    unittest.main()

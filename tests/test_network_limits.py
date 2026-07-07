@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -76,12 +75,12 @@ class _ClientSession:
         return _DownloadResponse()
 
 
-class NetworkLimitsTest(unittest.TestCase):
+class NetworkLimitsTest:
     def test_configure_network_limits_sets_separate_limits(self) -> None:
         configure_network_limits(api_concurrency=2, image_concurrency=7)
 
-        self.assertEqual(get_api_concurrency(), 2)
-        self.assertEqual(get_image_concurrency(), 7)
+        assert get_api_concurrency() == 2
+        assert get_image_concurrency() == 7
 
     def test_nga_client_uses_api_request_slot(self) -> None:
         config = SimpleNamespace(
@@ -130,15 +129,12 @@ class NetworkLimitsTest(unittest.TestCase):
                     ]
                 )
 
-        self.assertEqual(len(result["succeeded"]), 1)
-        self.assertEqual(_AsyncSlot.entered_count, 1)
+        assert len(result['succeeded']) == 1
+        assert _AsyncSlot.entered_count == 1
 
     def test_default_download_concurrency_uses_configured_image_limit(self) -> None:
         configure_network_limits(api_concurrency=4, image_concurrency=100)
 
-        self.assertEqual(utils._effective_download_concurrency(None), 100)
-        self.assertEqual(utils._effective_download_concurrency(50), 50)
+        assert utils._effective_download_concurrency(None) == 100
+        assert utils._effective_download_concurrency(50) == 50
 
-
-if __name__ == "__main__":
-    unittest.main()

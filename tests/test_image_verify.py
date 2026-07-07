@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import pytest
 import io
 import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import call, patch
@@ -28,37 +28,37 @@ from nga_tools.console import ConsoleReporter, report_warning, use_reporter
 from nga_tools.commands.image import image_verify
 
 
-class ImageVerifyCliTest(unittest.TestCase):
+class ImageVerifyCliTest:
     def test_image_verify_parses_without_thread_target(self) -> None:
         args = args_parse(["image", "verify"])
 
-        self.assertEqual(args["command"], "image")
-        self.assertEqual(args["action"], "verify")
-        self.assertIsNone(args["name"])
-        self.assertIsNone(args["tid"])
-        self.assertIsNone(args["aid"])
+        assert args['command'] == 'image'
+        assert args['action'] == 'verify'
+        assert args['name'] is None
+        assert args['tid'] is None
+        assert args['aid'] is None
 
     def test_image_verify_still_parses_single_thread_target(self) -> None:
         args = args_parse(["image", "verify", "--name", "帖子名"])
 
-        self.assertEqual(args["command"], "image")
-        self.assertEqual(args["action"], "verify")
-        self.assertEqual(args["name"], "帖子名")
+        assert args['command'] == 'image'
+        assert args['action'] == 'verify'
+        assert args['name'] == '帖子名'
 
     def test_image_migrate_parses_without_arguments(self) -> None:
         args = args_parse(["image", "migrate"])
 
-        self.assertEqual(args["command"], "image")
-        self.assertEqual(args["action"], "migrate")
+        assert args['command'] == 'image'
+        assert args['action'] == 'migrate'
 
     def test_image_prune_links_parses_without_arguments(self) -> None:
         args = args_parse(["image", "prune-links"])
 
-        self.assertEqual(args["command"], "image")
-        self.assertEqual(args["action"], "prune-links")
+        assert args['command'] == 'image'
+        assert args['action'] == 'prune-links'
 
 
-class ImageVerifyHandlerTest(unittest.TestCase):
+class ImageVerifyHandlerTest:
     def test_without_thread_target_verifies_all_downloaded_images(self) -> None:
         with (
             patch("nga_tools.commands.image.verify_all_downloaded_images") as all_mock,
@@ -109,7 +109,7 @@ class ImageVerifyHandlerTest(unittest.TestCase):
                 aid: int | None,
                 subfolder: str | None = None,
             ) -> str:
-                self.assertEqual((tid, aid), (101, 201))
+                assert (tid, aid) == (101, 201)
                 path = thread_dir
                 if subfolder is not None:
                     path = path / subfolder
@@ -117,7 +117,7 @@ class ImageVerifyHandlerTest(unittest.TestCase):
                 return str(path)
 
             def verify_side_effect(tid: int, aid: int | None) -> None:
-                self.assertEqual((tid, aid), (101, 201))
+                assert (tid, aid) == (101, 201)
                 report_warning("单帖图片告警")
 
             with (
@@ -137,21 +137,18 @@ class ImageVerifyHandlerTest(unittest.TestCase):
             ):
                 image_verify(args)
 
-            self.assertEqual(
-                log_path.read_text(encoding="utf-8"),
-                "警告：单帖图片告警\n",
-            )
-            self.assertIn("警告：单帖图片告警", output.getvalue())
+            assert log_path.read_text(encoding='utf-8') == '警告：单帖图片告警\n'
+            assert '警告：单帖图片告警' in output.getvalue()
 
     def test_aid_without_thread_target_is_rejected(self) -> None:
         with patch("nga_tools.commands.image.verify_all_downloaded_images") as all_mock:
-            with self.assertRaises(ValueError):
+            with pytest.raises(ValueError):
                 image_verify({"name": None, "tid": None, "aid": 201})
 
         all_mock.assert_not_called()
 
 
-class ImageVerifyAllTest(unittest.TestCase):
+class ImageVerifyAllTest:
     def test_lists_global_unique_image_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
@@ -167,12 +164,7 @@ class ImageVerifyAllTest(unittest.TestCase):
             ):
                 folders = _list_downloaded_image_folders()
 
-        self.assertEqual(
-            folders,
-            [
-                str(unique_images),
-            ],
-        )
+        assert folders == [str(unique_images)]
 
     def test_verify_all_reports_global_unique_image_directory(self) -> None:
         results = [
@@ -192,12 +184,7 @@ class ImageVerifyAllTest(unittest.TestCase):
         ):
             verify_all_downloaded_images()
 
-        self.assertEqual(
-            verify_mock.call_args_list,
-            [
-                call("output/images_unique"),
-            ],
-        )
+        assert verify_mock.call_args_list == [call('output/images_unique')]
 
     def test_thread_reference_listing_resolves_global_image_link(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -219,7 +206,7 @@ class ImageVerifyAllTest(unittest.TestCase):
 
             paths = _list_thread_referenced_image_paths(html_dir)
 
-        self.assertEqual(paths, [unique_image])
+        assert paths == [unique_image]
 
     def test_thread_reference_listing_resolves_direct_unique_image_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -237,7 +224,7 @@ class ImageVerifyAllTest(unittest.TestCase):
 
             paths = _list_thread_referenced_image_paths(html_dir)
 
-        self.assertEqual(paths, [unique_image])
+        assert paths == [unique_image]
 
     def test_migrate_image_index_rewrites_legacy_html_and_preserves_links(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -272,11 +259,11 @@ class ImageVerifyAllTest(unittest.TestCase):
             migrated_html = (html_dir / "post_1.html").read_text(encoding="utf-8")
             legacy_link_survived = link_path.is_symlink()
 
-        self.assertEqual(result.mappings, 1)
-        self.assertEqual(result.updated_image_refs, 1)
-        self.assertIsNotNone(mapping)
-        self.assertIn('src="../../images_unique/abc.png"', migrated_html)
-        self.assertTrue(legacy_link_survived)
+        assert result.mappings == 1
+        assert result.updated_image_refs == 1
+        assert mapping is not None
+        assert 'src="../../images_unique/abc.png"' in migrated_html
+        assert legacy_link_survived
 
     def test_prune_legacy_image_links_removes_only_after_html_migrated(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -305,8 +292,8 @@ class ImageVerifyAllTest(unittest.TestCase):
                 result = prune_legacy_image_links()
             images_dir_exists = (output_dir / "images").exists()
 
-        self.assertEqual(result.removed_links, 1)
-        self.assertFalse(images_dir_exists)
+        assert result.removed_links == 1
+        assert not images_dir_exists
 
     def test_parallel_folder_verify_removes_broken_images(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -322,17 +309,14 @@ class ImageVerifyAllTest(unittest.TestCase):
             ):
                 result = _verify_images_in_folder(str(image_dir))
 
-            self.assertEqual(result.total, 2)
-            self.assertEqual(result.removed, 1)
-            self.assertTrue(valid_image.exists())
-            self.assertFalse(broken_image.exists())
+            assert result.total == 2
+            assert result.removed == 1
+            assert valid_image.exists()
+            assert not broken_image.exists()
 
     def test_worker_count_is_bounded(self) -> None:
-        self.assertEqual(_image_verify_worker_count(0), 1)
-        self.assertEqual(_image_verify_worker_count(1), 1)
-        self.assertEqual(_image_verify_worker_count(10), 10)
-        self.assertEqual(_image_verify_worker_count(100), 32)
+        assert _image_verify_worker_count(0) == 1
+        assert _image_verify_worker_count(1) == 1
+        assert _image_verify_worker_count(10) == 10
+        assert _image_verify_worker_count(100) == 32
 
-
-if __name__ == "__main__":
-    unittest.main()
