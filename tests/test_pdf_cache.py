@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from nga_tools.backup import image_store
 from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.backup.pdf import _read_pdf_html
 from nga_tools.backup.pdf_plan import (
@@ -198,3 +199,70 @@ class PdfImageSourceTest:
 
         assert 'src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"' in html_content_by_lou[1]
 
+    def test_read_pdf_html_keeps_hidden_about_blank_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir) / "output"
+            html_dir = output_dir / "101_all" / "html_modified"
+            html_dir.mkdir(parents=True)
+            (html_dir / "post_1.html").write_text(
+                (
+                    '<p>初始<span style="font-size: 50%;">5楼</span>'
+                    '<img src="about:blank" style="display:none" /></p>'
+                ),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "nga_tools.core.paths.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                html_content_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+
+        assert 'src="about:blank"' in html_content_by_lou[1]
+        assert "display:none" in html_content_by_lou[1]
+
+    def test_read_pdf_html_uses_lazy_about_blank_data_srcorg(self) -> None:
+        image_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202604/24/lsQ2x-ji3jKnT3cS14u-c3.webp"
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir) / "output"
+            html_dir = output_dir / "101_all" / "html_modified"
+            unique_dir = output_dir / "images_unique"
+            html_dir.mkdir(parents=True)
+            unique_dir.mkdir(parents=True)
+            unique_image = unique_dir / "hash.png"
+            Image.new("RGB", (2, 2), color="white").save(unique_image)
+            (html_dir / "post_1.html").write_text(
+                (
+                    '<p><img src="about:blank" '
+                    f'data-srcorg="{image_url}" '
+                    'style="max-height: 1em; min-height: 130px;" /></p>'
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch(
+                    "nga_tools.core.paths.get_config",
+                    return_value=SimpleNamespace(output_dir=str(output_dir)),
+                ),
+                patch(
+                    "nga_tools.backup.image_store.get_config",
+                    return_value=SimpleNamespace(output_dir=str(output_dir)),
+                ),
+                patch("nga_tools.backup.pdf._is_long_image", return_value=False),
+                patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
+            ):
+                image_store.upsert_image_mapping(image_url, unique_image)
+                html_content_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+
+        assert 'src="../../images_unique/hash.png"' in html_content_by_lou[1]
+        assert f'data-srcorg="{image_url}"' in html_content_by_lou[1]

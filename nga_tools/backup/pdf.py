@@ -19,6 +19,7 @@ from nga_tools.backup.floor_map import (
     validate_floor_labels,
 )
 from nga_tools.backup import image_store
+from nga_tools.backup.html_images import effective_image_src
 from nga_tools.backup.overlay import load_post_overlays
 from nga_tools.backup.pdf_plan import (
     PdfRenderTask,
@@ -278,8 +279,8 @@ def _read_pdf_html(
 
         images = cast(list[Tag], soup.find_all("img"))
         for image in images:
-            image_src = _tag_attr_str(image, "src")
-            if not image_src:
+            image_src = effective_image_src(image)
+            if image_src is None:
                 continue
 
             image_path = _image_path_for_pdf(image_src, source.source_dir)

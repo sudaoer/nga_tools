@@ -212,6 +212,105 @@ class RewriteImageLinksTest:
         assert tasks == []
         assert '警告：第3095楼的第1张图片链接无效' in output.getvalue()
 
+    def test_skips_hidden_about_blank_image_marker(self) -> None:
+        htmls: list[PostHtml] = [
+            {
+                "lou": 1,
+                "pid": 1001,
+                "html": (
+                    '<a href="https://ngabbs.com/read.php?pid=1">'
+                    '初始<span style="font-size: 50%;">5楼</span>'
+                    '<img src="about:blank" style="display:none" '
+                    'onerror="this.previousSibling.style.fontSize=&quot;50%&quot;" />'
+                    "</a>"
+                ),
+            }
+        ]
+
+        with (
+            patch(
+                "nga_tools.backup.image_pipeline.utils.get_folder",
+                return_value="/tmp/html_modified",
+            ),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            tasks = _collect_image_download_tasks(htmls, FloorLabels.plain())
+            completed_lous = _rewrite_image_links(
+                htmls,
+                123,
+                None,
+                FloorLabels.plain(),
+            )
+
+        assert tasks == []
+        assert output.getvalue() == ""
+        assert completed_lous == {1}
+        assert 'src="about:blank"' in htmls[0]['html']
+        assert "display:none" in htmls[0]['html']
+
+    def test_uses_lazy_about_blank_data_srcorg_for_download_and_rewrite(self) -> None:
+        image_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202604/24/lsQ2x-ji3jKnT3cS14u-c3.webp"
+        )
+        thumb_url = f"{image_url}.thumb_s.jpg"
+        htmls: list[PostHtml] = [
+            {
+                "lou": 1,
+                "pid": 1001,
+                "html": (
+                    '<img src="about:blank" data-srcorg="'
+                    f"{image_url}"
+                    '" data-srclazy="'
+                    f"{thumb_url}"
+                    '" style="max-height: 1em; min-height: 130px;" />'
+                ),
+            }
+        ]
+
+        with TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+            thread_dir = output_dir / "123_all"
+            unique_dir = output_dir / "images_unique"
+            unique_dir.mkdir(parents=True)
+            unique_path = unique_dir / "hash.webp"
+            unique_path.write_bytes(b"image")
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                path = thread_dir if subfolder is None else thread_dir / subfolder
+                path.mkdir(parents=True, exist_ok=True)
+                return str(path)
+
+            with (
+                patch(
+                    "nga_tools.backup.image_pipeline.utils.get_folder",
+                    side_effect=fake_get_folder,
+                ),
+                patch(
+                    "nga_tools.backup.image_store.get_config",
+                    return_value=type("Config", (), {"output_dir": str(output_dir)})(),
+                ),
+            ):
+                tasks = _collect_image_download_tasks(htmls, FloorLabels.plain())
+                image_store.upsert_image_mapping(image_url, unique_path)
+                image_lookup = image_store.ImageLookupCache.for_tasks(tasks)
+                completed_lous = _rewrite_image_links(
+                    htmls,
+                    123,
+                    None,
+                    FloorLabels.plain(),
+                    image_lookup=image_lookup,
+                )
+
+        assert tasks == [{'url': image_url}]
+        assert completed_lous == {1}
+        assert 'src="../../images_unique/hash.webp"' in htmls[0]['html']
+        assert f'data-srcorg="{image_url}"' in htmls[0]['html']
+
     def test_rewrites_failed_download_to_placeholder_without_mapping(self) -> None:
         image_url = (
             "https://img.nga.178.com/attachments/"
@@ -1441,4 +1540,3 @@ class DownloadImagesTest:
         assert '共1张图片，已存在1张，本次下载0张' in output_text
         assert '图片下载进度 (0/0)' in output_text
         assert '成功下载0个文件，失败0个文件。' in output_text
-

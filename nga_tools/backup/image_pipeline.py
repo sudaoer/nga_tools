@@ -10,16 +10,10 @@ from nga_tools import utils
 from nga_tools.backup import html_modified_manifest, image_store
 from nga_tools.backup.files import write_text_atomically
 from nga_tools.backup.floor_map import FloorLabels
+from nga_tools.backup.html_images import effective_image_src
 from nga_tools.backup.models import ParsedPostHtml, PostHtml, PostRecord
 from nga_tools.backup.post_html import source_hashes_by_lou
 from nga_tools.console import report_info, report_progress, report_warning
-
-
-def tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
-    value = tag.get(attr_name)
-    if isinstance(value, str):
-        return value
-    return None
 
 
 def parse_post_htmls_for_images(htmls: Sequence[PostHtml]) -> list[ParsedPostHtml]:
@@ -40,11 +34,10 @@ def collect_image_download_tasks_from_parsed(
 
     for parsed_html in parsed_htmls:
         for index, image in enumerate(parsed_html.images):
-            image_url = tag_attr_str(image, "src")
-            if not image_url:
+            normalized_image_url = effective_image_src(image)
+            if normalized_image_url is None:
                 continue
 
-            normalized_image_url = image_store.normalize_nga_image_url(image_url)
             if not utils.NGA_img_link_verify(normalized_image_url):
                 report_warning(
                     f"{floor_labels.label(parsed_html.post_html['lou'])}的"
@@ -86,11 +79,10 @@ def rewrite_parsed_image_links(
         item = parsed_html.post_html
         item_complete = True
         for index, image in enumerate(parsed_html.images):
-            image_url = tag_attr_str(image, "src")
-            if not image_url:
+            normalized_image_url = effective_image_src(image)
+            if normalized_image_url is None:
                 continue
 
-            normalized_image_url = image_store.normalize_nga_image_url(image_url)
             if not utils.NGA_img_link_verify(normalized_image_url):
                 item_complete = False
                 continue
