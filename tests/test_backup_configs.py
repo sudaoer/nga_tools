@@ -61,6 +61,30 @@ class BackupConfigsCliTest(unittest.TestCase):
         self.assertEqual(args["api_concurrency"], 3)
         self.assertEqual(args["image_concurrency"], 20)
 
+    def test_backup_write_json_parses_for_fetch_commands(self) -> None:
+        for argv in (
+            ["backup", "all", "--tid", "123", "--write_json"],
+            ["backup", "sub", "--tid", "123", "--write_json"],
+            ["backup", "configs", "--write_json"],
+        ):
+            with self.subTest(argv=argv):
+                args = args_parse(argv)
+
+                self.assertIs(args["write_json"], True)
+
+    def test_backup_write_json_is_rejected_for_non_fetch_commands(self) -> None:
+        for argv in (
+            ["backup", "floors", "--tid", "123", "--write_json"],
+            ["backup", "migrate-store", "--tid", "123", "--write_json"],
+            ["backup", "pdf", "--tid", "123", "--write_json"],
+        ):
+            with self.subTest(argv=argv):
+                with patch("sys.stderr", new_callable=io.StringIO):
+                    with self.assertRaises(SystemExit) as context:
+                        args_parse(argv)
+
+                self.assertEqual(context.exception.code, 2)
+
     def test_backup_configs_rejects_non_positive_parallel_limits(self) -> None:
         invalid_args = [
             ["backup", "configs", "--workers", "0"],
@@ -135,6 +159,41 @@ def _captured_reporter() -> Iterator[io.StringIO]:
 
 
 class BackupWarningLogTest(unittest.TestCase):
+    def test_single_thread_backup_passes_write_json_flag(self) -> None:
+        handlers = [
+            (backup_all, "nga_tools.commands.backup.backup_thread"),
+            (backup_sub, "nga_tools.commands.backup.backup_thread_sub"),
+        ]
+
+        for handler, implementation_path in handlers:
+            with self.subTest(handler=handler.__name__):
+                with TemporaryDirectory() as temp_dir_name:
+                    base_dir = Path(temp_dir_name)
+
+                    with (
+                        patch(
+                            "nga_tools.commands.backup.configure_network_limits_from_args",
+                            return_value=_backup_config_app_config(),
+                        ),
+                        patch(
+                            "nga_tools.commands.backup.resolve_command_thread_target",
+                            return_value=(101, None),
+                        ),
+                        patch(
+                            "nga_tools.core.paths.get_folder",
+                            side_effect=_fake_get_folder(base_dir),
+                        ),
+                        patch(implementation_path) as implementation_mock,
+                        _captured_reporter(),
+                    ):
+                        handler({"write_json": True})
+
+                    implementation_mock.assert_called_once_with(
+                        101,
+                        None,
+                        write_json=True,
+                    )
+
     def test_single_thread_backup_commands_write_warning_log(self) -> None:
         handlers = [
             (backup_all, "nga_tools.commands.backup.backup_thread"),
@@ -154,8 +213,16 @@ class BackupWarningLogTest(unittest.TestCase):
                     log_path = thread_dir / "warnings.log"
                     log_path.write_text("旧日志\n", encoding="utf-8")
 
-                    def implementation(tid: int, aid: int | None) -> None:
+                    def implementation(
+                        tid: int,
+                        aid: int | None,
+                        **kwargs: object,
+                    ) -> None:
                         self.assertEqual((tid, aid), (101, None))
+                        if handler is backup_floors:
+                            self.assertEqual(kwargs, {})
+                        else:
+                            self.assertEqual(kwargs, {"write_json": False})
                         report_warning("单帖警告")
 
                     with (
@@ -201,7 +268,13 @@ class BackupWarningLogTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def backup_side_effect(tid: int, aid: int | None) -> None:
+            def backup_side_effect(
+                tid: int,
+                aid: int | None,
+                *,
+                write_json: bool,
+            ) -> None:
+                self.assertIs(write_json, False)
                 report_warning(f"warning {tid} {aid}")
 
             with (
@@ -306,7 +379,37 @@ class BackupConfigsHandlerTest(unittest.TestCase):
 
         self.assertEqual(
             backup_mock.call_args_list,
-            [call(101, 201), call(102, None)],
+            [
+                call(101, 201, write_json=False),
+                call(102, None, write_json=False),
+            ],
+        )
+
+    def test_backup_configs_passes_write_json_to_each_thread(self) -> None:
+        thread_configs = [
+            _thread_config(name="first", tid=101, aid=201),
+            _thread_config(name="second", tid=102, aid=None),
+        ]
+
+        with (
+            patch("nga_tools.commands.backup.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.commands.backup.backup_thread_sub") as backup_mock,
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(),
+            ),
+            _captured_reporter(),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+
+            backup_configs({"workers": 1, "write_json": True})
+
+        self.assertEqual(
+            backup_mock.call_args_list,
+            [
+                call(101, 201, write_json=True),
+                call(102, None, write_json=True),
+            ],
         )
 
     def test_empty_thread_config_list_does_not_run_backup(self) -> None:
@@ -344,7 +447,13 @@ class BackupConfigsHandlerTest(unittest.TestCase):
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
 
-            def backup_side_effect(tid: int, aid: int | None) -> None:
+            def backup_side_effect(
+                tid: int,
+                aid: int | None,
+                *,
+                write_json: bool,
+            ) -> None:
+                self.assertIs(write_json, False)
                 del aid
                 if tid == 102:
                     raise RuntimeError("boom")
@@ -357,7 +466,11 @@ class BackupConfigsHandlerTest(unittest.TestCase):
         self.assertEqual(context.exception.code, 1)
         self.assertCountEqual(
             backup_mock.call_args_list,
-            [call(101, 201), call(102, 202), call(103, None)],
+            [
+                call(101, 201, write_json=False),
+                call(102, 202, write_json=False),
+                call(103, None, write_json=False),
+            ],
         )
         output_text = output.getvalue()
         self.assertIn("批量备份完成：成功2个，失败1个。", output_text)
@@ -373,8 +486,14 @@ class BackupConfigsHandlerTest(unittest.TestCase):
         lock = threading.Lock()
         release_event = threading.Event()
 
-        def backup_side_effect(tid: int, aid: int | None) -> None:
+        def backup_side_effect(
+            tid: int,
+            aid: int | None,
+            *,
+            write_json: bool,
+        ) -> None:
             nonlocal active_count, max_active_count
+            self.assertIs(write_json, False)
             del tid, aid
             with lock:
                 active_count += 1

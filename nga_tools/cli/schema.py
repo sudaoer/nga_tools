@@ -146,6 +146,11 @@ ARG_DEFS: dict[str, ArgDef] = {
         "action": "store_true",
         "help": "处理所有已有备份目录",
     },
+    "write_json": {
+        "flags": ("--write_json",),
+        "action": "store_true",
+        "help": "备份时额外输出json/page_*.json最近响应缓存",
+    },
 }
 
 
@@ -222,13 +227,20 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "summary": "抓取帖子内容并下载图片",
             "usage": (
                 f"{PROGRAM_USAGE} backup all (--name NAME | --tid TID) [--aid AID] "
-                "[--api_concurrency N] [--image_concurrency N]"
+                "[--api_concurrency N] [--image_concurrency N] [--write_json]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} backup all --name 帖子名",
                 f"{PROGRAM_USAGE} backup all --tid 12345678 --aid 987654",
             ],
-            "args": ["name", "tid", "aid", "api_concurrency", "image_concurrency"],
+            "args": [
+                "name",
+                "tid",
+                "aid",
+                "api_concurrency",
+                "image_concurrency",
+                "write_json",
+            ],
             "required_any": ["name", "tid"],
             "positive": ["api_concurrency", "image_concurrency"],
         },
@@ -237,18 +249,26 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "summary": "增量补充本地缺失内容和远端新增内容",
             "usage": (
                 f"{PROGRAM_USAGE} backup sub (--name NAME | --tid TID) [--aid AID] "
-                "[--api_concurrency N] [--image_concurrency N]"
+                "[--api_concurrency N] [--image_concurrency N] [--write_json]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} backup sub --name 帖子名",
                 f"{PROGRAM_USAGE} backup sub --tid 12345678 --aid 987654",
             ],
             "notes": [
-                "此命令会补抓缺失JSON页，并刷新本地尾页到远端最后一页。",
+                "此命令会补抓缺失页，并刷新本地尾页到远端最后一页。",
+                "默认只写archive.sqlite3；加--write_json才输出json/page_*.json。",
                 "随后会补齐缺失或新增的html_modified和图片文件。",
                 "author-only备份会增量刷新floor_map.json。",
             ],
-            "args": ["name", "tid", "aid", "api_concurrency", "image_concurrency"],
+            "args": [
+                "name",
+                "tid",
+                "aid",
+                "api_concurrency",
+                "image_concurrency",
+                "write_json",
+            ],
             "required_any": ["name", "tid"],
             "positive": ["api_concurrency", "image_concurrency"],
         },
@@ -257,7 +277,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "summary": "增量备份thread_configs.json中的所有帖子",
             "usage": (
                 f"{PROGRAM_USAGE} backup configs [--workers N] "
-                "[--api_concurrency N] [--image_concurrency N]"
+                "[--api_concurrency N] [--image_concurrency N] [--write_json]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} backup configs",
@@ -265,10 +285,11 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "notes": [
                 "此命令按thread_configs.json中的ThreadList批量执行增量备份。",
+                "默认只写archive.sqlite3；加--write_json才输出json/page_*.json。",
                 "不会修改thread_configs.json，也不会生成PDF。",
                 "单个帖子失败时会继续处理后续配置，最后以非零退出码报告失败。",
             ],
-            "args": ["workers", "api_concurrency", "image_concurrency"],
+            "args": ["workers", "api_concurrency", "image_concurrency", "write_json"],
             "positive": ["workers", "api_concurrency", "image_concurrency"],
         },
         "floors": {

@@ -32,10 +32,10 @@ from nga_tools.backup.models import (
 )
 from nga_tools.backup.page_store import (
     author_total_lou_count_from_page_data as _author_total_lou_count_from_page_data,
+    fetch_backup_pages as _fetch_backup_pages,
     fetch_backup_page as _fetch_backup_page,
     page_count_from_page_data as _page_count_from_page_data,
     write_page_json as _write_page_json,
-    write_pages_json as _write_pages_json,
 )
 from nga_tools.backup.post_html import (
     fill_missing_post_records as _fill_missing_post_records,
@@ -240,7 +240,12 @@ def _build_floor_map_for_post_refs(
         return FloorMapBuildResult(floor_labels, {})
 
 
-def backup_thread(tid: int, aid: Optional[int]) -> None:
+def backup_thread(
+    tid: int,
+    aid: Optional[int],
+    *,
+    write_json: bool = False,
+) -> None:
     client = NGAClient()
     thread_folder = Path(utils.get_folder(tid, aid))
     archive_store = ThreadArchiveStore(thread_folder)
@@ -251,12 +256,13 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
         aid,
     )
 
-    page_data_by_page = _write_pages_json(
+    page_data_by_page = _fetch_backup_pages(
         client,
         tid,
         aid,
         page_count,
         first_page_data,
+        write_json=write_json,
     )
     _upsert_archive_pages(archive_store, page_data_by_page)
 
@@ -326,7 +332,12 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
     )
 
 
-def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
+def backup_thread_sub(
+    tid: int,
+    aid: Optional[int],
+    *,
+    write_json: bool = False,
+) -> None:
     client = NGAClient()
     thread_folder = Path(utils.get_folder(tid, aid))
     archive_store = ThreadArchiveStore(thread_folder)
@@ -354,7 +365,7 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         tail_start = 1
     missing_page_numbers = set(range(1, page_count + 1)) - existing_page_numbers
     refresh_page_numbers = set(range(tail_start, page_count + 1)) | missing_page_numbers
-    folder_json = Path(utils.get_folder(tid, aid, "json"))
+    folder_json = Path(utils.get_folder(tid, aid, "json")) if write_json else None
 
     report_progress(
         f"准备增量备份：远端{page_count}页，本地{len(existing_page_numbers)}页，"
@@ -377,7 +388,8 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
             page_count,
             first_page_data,
         )
-        _write_page_json(folder_json, page_number, page_data)
+        if folder_json is not None:
+            _write_page_json(folder_json, page_number, page_data)
         archive_store.upsert_page(page_number, page_data)
     report_progress(
         "页面获取完成",

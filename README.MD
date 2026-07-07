@@ -1,6 +1,6 @@
 # NGA 帖子备份器
 
-把 NGA 帖子通过接口抓取到本地，保存原始 JSON、本地图片路径 HTML、图片文件，并可按楼层分段生成 PDF。
+把 NGA 帖子通过接口抓取到本地，保存楼层历史、本地图片路径 HTML、图片文件，并可按楼层分段生成 PDF。
 
 ## 配置
 
@@ -105,7 +105,7 @@ pixi run python main.py backup all --name 帖子名
 ```
 
 图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在 `output/image_index.sqlite3`。下载失败的图片会在 `html_modified` 中指向 `images_unique/download_failed_placeholder.png` 占位图，不写入 SQLite 映射，后续增量备份仍会继续重试原图。
-帖子内容会写入每个备份目录自己的 `archive.sqlite3`。分页 JSON 仍会保存在 `json/page_*.json`，作为最近响应缓存和回滚参考；生成 HTML、楼层映射和统计只读取 `archive.sqlite3`。
+帖子内容会写入每个备份目录自己的 `archive.sqlite3`。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write_json` 会额外写入 `json/page_*.json`。生成 HTML、楼层映射和统计只读取 `archive.sqlite3`。
 
 补充本地缺失内容和远端新增内容：
 
@@ -122,6 +122,7 @@ pixi run python main.py backup sub --name 帖子名
 pixi run python main.py backup all --tid 12345678
 pixi run python main.py backup all --tid 12345678 --aid 987654
 pixi run python main.py backup sub --tid 12345678 --aid 987654
+pixi run python main.py backup sub --tid 12345678 --aid 987654 --write_json
 ```
 
 批量增量备份 `thread_configs.json` 中的所有帖子：
@@ -129,6 +130,7 @@ pixi run python main.py backup sub --tid 12345678 --aid 987654
 ```powershell
 pixi run python main.py backup configs
 pixi run python main.py backup configs --workers 4 --api_concurrency 4 --image_concurrency 50
+pixi run python main.py backup configs --write_json
 ```
 
 已有只看作者备份缺少楼层映射时，可以单独生成映射：
@@ -210,7 +212,7 @@ PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会�
 
 默认输出到 `output/<tid>_<aid|all>/`：
 
-- `json/`：接口返回的原始分页数据
+- `json/`：加 `--write_json` 时输出的接口最近响应分页数据
 - `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照和帖子版本
 - `html_modified/`：替换为本地 `images_unique` 图片路径后的 HTML
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件

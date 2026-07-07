@@ -62,14 +62,16 @@ def fetch_backup_page(
         return _empty_author_page_data(first_page_data, page_number)
 
 
-def write_pages_json(
+def fetch_backup_pages(
     client: NGAClient,
     tid: int,
     aid: Optional[int],
     page_count: int,
     first_page_data: PageData,
+    *,
+    write_json: bool = False,
 ) -> dict[int, PageData]:
-    folder_json = Path(utils.get_folder(tid, aid, "json"))
+    folder_json = Path(utils.get_folder(tid, aid, "json")) if write_json else None
     page_data_by_page: dict[int, PageData] = {}
     for page_number in range(1, page_count + 1):
         report_progress(
@@ -85,7 +87,8 @@ def write_pages_json(
             page_count,
             first_page_data,
         )
-        write_page_json(folder_json, page_number, page_data)
+        if folder_json is not None:
+            write_page_json(folder_json, page_number, page_data)
         page_data_by_page[page_number] = page_data
     report_progress(
         "页面获取完成",

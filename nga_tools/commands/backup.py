@@ -38,15 +38,17 @@ from nga_tools.forum.thread_configs import (
 def backup_all(args: CommandArgs) -> None:
     configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
+    write_json = optional_bool(args, "write_json")
     with use_warning_log(warning_log_path(thread_tid, thread_aid)):
-        backup_thread(thread_tid, thread_aid)
+        backup_thread(thread_tid, thread_aid, write_json=write_json)
 
 
 def backup_sub(args: CommandArgs) -> None:
     configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
+    write_json = optional_bool(args, "write_json")
     with use_warning_log(warning_log_path(thread_tid, thread_aid)):
-        backup_thread_sub(thread_tid, thread_aid)
+        backup_thread_sub(thread_tid, thread_aid, write_json=write_json)
 
 
 def _thread_config_label(thread_config: ThreadConfig) -> str:
@@ -58,10 +60,15 @@ def _thread_config_label(thread_config: ThreadConfig) -> str:
     )
 
 
-def _backup_single_thread_config(thread_config: ThreadConfig) -> None:
+def _backup_single_thread_config(
+    thread_config: ThreadConfig,
+    *,
+    write_json: bool,
+) -> None:
     backup_thread_sub(
         thread_config_tid(thread_config),
         thread_config_aid(thread_config),
+        write_json=write_json,
     )
 
 
@@ -71,6 +78,7 @@ def _backup_thread_config_with_progress(
     total: int,
     thread_config: ThreadConfig,
     progress: BackupConfigsProgressDisplay,
+    write_json: bool,
 ) -> None:
     thread_label = _thread_config_label(thread_config)
     task_reporter = progress.start_thread(
@@ -85,7 +93,7 @@ def _backup_thread_config_with_progress(
     with use_reporter(task_reporter), use_warning_log(log_path):
         report_progress("正在增量备份")
         try:
-            _backup_single_thread_config(thread_config)
+            _backup_single_thread_config(thread_config, write_json=write_json)
         except Exception as error:
             report_warning(f"备份失败：{error}")
             progress.finish_thread(task_reporter, status="失败")
@@ -96,6 +104,8 @@ def _backup_thread_config_with_progress(
 def _backup_configs_sequential(
     thread_configs: list[ThreadConfig],
     progress: BackupConfigsProgressDisplay,
+    *,
+    write_json: bool,
 ) -> list[tuple[ThreadConfig, Exception]]:
     failures: list[tuple[ThreadConfig, Exception]] = []
     total = len(thread_configs)
@@ -106,6 +116,7 @@ def _backup_configs_sequential(
                 total=total,
                 thread_config=thread_config,
                 progress=progress,
+                write_json=write_json,
             )
         except Exception as error:
             failures.append((thread_config, error))
@@ -118,6 +129,8 @@ def _backup_configs_parallel(
     thread_configs: list[ThreadConfig],
     worker_count: int,
     progress: BackupConfigsProgressDisplay,
+    *,
+    write_json: bool,
 ) -> list[tuple[ThreadConfig, Exception]]:
     failures: list[tuple[int, ThreadConfig, Exception]] = []
     total = len(thread_configs)
@@ -130,6 +143,7 @@ def _backup_configs_parallel(
                 total=total,
                 thread_config=thread_config,
                 progress=progress,
+                write_json=write_json,
             )
             future_context[future] = (index, thread_config)
 
@@ -162,6 +176,7 @@ def _print_backup_configs_summary(
 
 def backup_configs(args: CommandArgs) -> None:
     app_config = configure_network_limits_from_args(args)
+    write_json = optional_bool(args, "write_json")
 
     thread_configs = NGAThreadConfigs().get_thread_configs()
     if not thread_configs:
@@ -180,12 +195,17 @@ def backup_configs(args: CommandArgs) -> None:
         console=get_reporter().console,
     ) as progress:
         if worker_count == 1 or len(thread_configs) == 1:
-            failures = _backup_configs_sequential(thread_configs, progress)
+            failures = _backup_configs_sequential(
+                thread_configs,
+                progress,
+                write_json=write_json,
+            )
         else:
             failures = _backup_configs_parallel(
                 thread_configs,
                 worker_count,
                 progress,
+                write_json=write_json,
             )
 
     _print_backup_configs_summary(len(thread_configs), failures)

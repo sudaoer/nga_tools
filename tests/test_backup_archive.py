@@ -518,7 +518,7 @@ class BackupThreadSubMissingLouTest(unittest.TestCase):
                 patch("builtins.print"),
                 patch("sys.stdout", new_callable=io.StringIO),
             ):
-                backup_thread_sub(123, 456)
+                backup_thread_sub(123, 456, write_json=True)
 
             empty_page = json.loads(
                 (temp_dir / "json" / "page_2.json").read_text(encoding="utf-8")
@@ -862,6 +862,7 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
         temp_dir: Path,
         client: object,
         *,
+        write_json: bool = False,
         rewrite_side_effect: object | None = None,
         download_return: utils.DownloadSummary | None = None,
     ) -> None:
@@ -929,12 +930,14 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
                 )
             stack.enter_context(patch("builtins.print"))
             stack.enter_context(patch("sys.stdout", new_callable=io.StringIO))
-            backup_thread_sub(123, 456)
+            backup_thread_sub(123, 456, write_json=write_json)
 
     def _run_backup_all(
         self,
         temp_dir: Path,
         client: object,
+        *,
+        write_json: bool = False,
     ) -> None:
         def fake_get_folder(
             tid: int,
@@ -969,7 +972,51 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
             )
             stack.enter_context(patch("builtins.print"))
             stack.enter_context(patch("sys.stdout", new_callable=io.StringIO))
-            backup_thread(123, 456)
+            backup_thread(123, 456, write_json=write_json)
+
+    def test_backup_sub_defaults_to_archive_without_json_output(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+
+            self._run_backup_sub(temp_dir, self.MutableFakeClient())
+
+            self.assertTrue((temp_dir / "archive.sqlite3").is_file())
+            self.assertTrue((temp_dir / "html_modified").is_dir())
+            self.assertFalse((temp_dir / "json").exists())
+
+    def test_backup_all_defaults_to_archive_without_json_output(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+
+            self._run_backup_all(temp_dir, self.MutableFakeClient())
+
+            self.assertTrue((temp_dir / "archive.sqlite3").is_file())
+            self.assertTrue((temp_dir / "html_modified").is_dir())
+            self.assertFalse((temp_dir / "json").exists())
+
+    def test_backup_sub_writes_json_when_enabled(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+
+            self._run_backup_sub(
+                temp_dir,
+                self.MutableFakeClient(),
+                write_json=True,
+            )
+
+            self.assertTrue((temp_dir / "json" / "page_1.json").is_file())
+
+    def test_backup_all_writes_json_when_enabled(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+
+            self._run_backup_all(
+                temp_dir,
+                self.MutableFakeClient(),
+                write_json=True,
+            )
+
+            self.assertTrue((temp_dir / "json" / "page_1.json").is_file())
 
     def test_backup_sub_requires_migration_for_legacy_json_without_archive(
         self,
@@ -1264,10 +1311,10 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             client = SwallowedPageClient()
-            self._run_backup_sub(temp_dir, client)
+            self._run_backup_sub(temp_dir, client, write_json=True)
             client.current_lou = 2
 
-            self._run_backup_sub(temp_dir, client)
+            self._run_backup_sub(temp_dir, client, write_json=True)
 
             old_html = (temp_dir / "html_modified" / "post_1.html").read_text(
                 encoding="utf-8"
