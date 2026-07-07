@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -12,9 +13,11 @@ from nga_tools.backup.floor_map import (
     build_and_save_floor_map,
     find_missing_author_lous,
     load_floor_map_build_result_if_current,
+    read_author_posts_from_json,
     _page_post_refs,
     _scan_original_pages,
 )
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.ngaclient.client import PageData
 
 
@@ -49,6 +52,25 @@ class FloorMapPagePostRefsTest(unittest.TestCase):
 
         self.assertEqual(refs, [])
         self.assertIn("警告：原帖第2538页 缺少帖子列表", output.getvalue())
+
+
+class FloorMapBackupSourceTest(unittest.TestCase):
+    def test_read_author_posts_prefers_archive_store(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            ThreadArchiveStore(Path(temp_dir)).upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"pid": 1001, "lou": 1, "content": "from archive"},
+                    ],
+                },
+            )
+
+            with patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir):
+                author_posts = read_author_posts_from_json(123, 456)
+
+        self.assertEqual(author_posts, [{"pid": 1001, "author_lou": 1}])
 
 
 class FloorMapOriginalScanTest(unittest.TestCase):

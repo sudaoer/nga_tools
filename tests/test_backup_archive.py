@@ -1214,6 +1214,92 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
         self.assertEqual(entries, {})
         self.assertIn(image_store.PLACEHOLDER_IMAGE_FILENAME, html)
 
+    def test_backup_sub_keeps_historical_lou_when_refreshed_page_loses_it(
+        self,
+    ) -> None:
+        class SwallowedPageClient:
+            def __init__(self) -> None:
+                self.current_lou = 1
+
+            def get_page(self, tid: int, aid: int | None, page: int) -> dict[str, object]:
+                del tid, aid, page
+                if self.current_lou == 1:
+                    return {
+                        "totalPage": 1,
+                        "result": [
+                            {"lou": 1, "pid": 1001, "content": "old visible"},
+                        ],
+                    }
+                return {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 2, "pid": 1002, "content": "new visible"},
+                    ],
+                }
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            client = SwallowedPageClient()
+            self._run_backup_sub(temp_dir, client)
+            client.current_lou = 2
+
+            self._run_backup_sub(temp_dir, client)
+
+            old_html = (temp_dir / "html_modified" / "post_1.html").read_text(
+                encoding="utf-8"
+            )
+            new_html = (temp_dir / "html_modified" / "post_2.html").read_text(
+                encoding="utf-8"
+            )
+            latest_json = json.loads(
+                (temp_dir / "json" / "page_1.json").read_text(encoding="utf-8")
+            )
+
+        self.assertIn("old visible", old_html)
+        self.assertIn("new visible", new_html)
+        self.assertEqual([post["lou"] for post in latest_json["result"]], [2])
+
+    def test_backup_all_keeps_historical_lou_when_full_refresh_loses_it(
+        self,
+    ) -> None:
+        class SwallowedPageClient:
+            def __init__(self) -> None:
+                self.current_lou = 1
+
+            def get_page(self, tid: int, aid: int | None, page: int) -> dict[str, object]:
+                del tid, aid, page
+                if self.current_lou == 1:
+                    return {
+                        "totalPage": 1,
+                        "result": [
+                            {"lou": 1, "pid": 1001, "content": "old visible"},
+                        ],
+                    }
+                return {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 2, "pid": 1002, "content": "new visible"},
+                    ],
+                }
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            client = SwallowedPageClient()
+            self._run_backup_sub(temp_dir, client)
+            client.current_lou = 2
+
+            self._run_backup_all(temp_dir, client)
+
+            old_html = (temp_dir / "html_modified" / "post_1.html").read_text(
+                encoding="utf-8"
+            )
+            new_html = (temp_dir / "html_modified" / "post_2.html").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertIn("old visible", old_html)
+        self.assertIn("new visible", new_html)
+
 
 class DownloadImagesTest(unittest.TestCase):
     def test_reports_existing_pending_and_completion_progress(self) -> None:

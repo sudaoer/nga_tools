@@ -105,6 +105,7 @@ pixi run python main.py backup all --name 帖子名
 ```
 
 图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在 `output/image_index.sqlite3`。下载失败的图片会在 `html_modified` 中指向 `images_unique/download_failed_placeholder.png` 占位图，不写入 SQLite 映射，后续增量备份仍会继续重试原图。
+帖子内容会写入每个备份目录自己的 `archive.sqlite3`。分页 JSON 仍会保存在 `json/page_*.json`，作为最近响应缓存和回滚参考；生成 HTML、楼层映射和统计时会优先读取 `archive.sqlite3`。
 
 补充本地缺失内容和远端新增内容：
 
@@ -113,6 +114,7 @@ pixi run python main.py backup sub --name 帖子名
 ```
 
 `backup sub` 会补抓缺失的 JSON 页，并刷新本地尾页到远端最后一页；随后补齐 `html_modified` 和缺失图片。只看作者备份还会重试恢复之前仍为占位的缺失楼内容。
+当 `archive.sqlite3` 已存在时，增量刷新到的新页会合并进历史楼层库；同一页新响应中消失的旧楼不会从库中删除。尚未迁移的旧备份目录会继续使用旧 JSON 流程，避免只刷新尾页时生成不完整的楼层库。
 
 也可以不使用保存的名称，直接指定 `tid` 和可选的 `aid`：
 
@@ -136,6 +138,13 @@ pixi run python main.py backup floors --name 帖子名
 ```
 
 楼层映射会增量刷新。缺失楼无法唯一确定原帖楼层时，`floor_map.json` 会记录 `candidate_original_lous` 候选列表。
+
+旧备份目录可以显式迁移到每帖 SQLite 存储。迁移不会删除或改写旧 `json/page_*.json`：
+
+```powershell
+pixi run python main.py backup migrate-store --name 帖子名
+pixi run python main.py backup migrate-store --all
+```
 
 并行校验所有本地备份中的已下载图片，损坏或无法打开的图片会被删除：
 
@@ -167,7 +176,7 @@ pixi run python main.py image prune-links
 pixi run python main.py stats words --name 帖子名
 ```
 
-统计命令只读取本地 `json/page_*.json`，不联网、不生成统计文件。默认会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子标记，并只纳入清洗后 `中文+中文标点数` 不低于 120 的正文楼层。阈值可以通过 `--min_body_chars` 调整：
+统计命令只读取本地备份，不联网、不生成统计文件；存在 `archive.sqlite3` 时优先统计 SQLite 中的历史楼层并集，否则回退到 `json/page_*.json`。默认会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子标记，并只纳入清洗后 `中文+中文标点数` 不低于 120 的正文楼层。阈值可以通过 `--min_body_chars` 调整：
 
 ```powershell
 pixi run python main.py stats words --name 帖子名 --min_body_chars 80
@@ -202,6 +211,7 @@ PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会�
 默认输出到 `output/<tid>_<aid|all>/`：
 
 - `json/`：接口返回的原始分页数据
+- `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照和帖子版本
 - `html_modified/`：替换为本地 `images_unique` 图片路径后的 HTML
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 - `floor_map.json`：只看作者楼层到原帖楼层的映射

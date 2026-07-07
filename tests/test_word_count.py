@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.stats.word_count import (
     clean_post_content,
     count_backup_words,
@@ -136,6 +137,52 @@ class BackupWordCountTest(unittest.TestCase):
         self.assertEqual(summary.excluded_posts, 1)
         self.assertEqual(summary.chinese_chars, 80)
         self.assertEqual(summary.chinese_with_punctuation, 120)
+
+    def test_prefers_archive_store_over_latest_json_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            thread_dir = Path(tmp_dir) / "123_456"
+            json_dir = thread_dir / "json"
+            json_dir.mkdir(parents=True)
+            (json_dir / "page_1.json").write_text(
+                json.dumps(
+                    {
+                        "result": [
+                            {"lou": 2, "pid": 1002, "content": "新楼，"},
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            store = ThreadArchiveStore(thread_dir)
+            store.upsert_page(
+                1,
+                {
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "旧楼，"},
+                    ]
+                },
+                observed_at="2026-07-07T01:00:00+00:00",
+            )
+            store.upsert_page(
+                1,
+                {
+                    "result": [
+                        {"lou": 2, "pid": 1002, "content": "新楼，"},
+                    ]
+                },
+                observed_at="2026-07-07T02:00:00+00:00",
+            )
+
+            with patch(
+                "nga_tools.core.paths.get_config",
+                return_value=SimpleNamespace(output_dir=tmp_dir),
+            ):
+                summary = count_backup_words(123, 456, min_body_chars=1)
+
+        self.assertEqual(summary.page_count, 1)
+        self.assertEqual(summary.total_posts, 2)
+        self.assertEqual(summary.body_posts, 2)
 
 
 if __name__ == "__main__":

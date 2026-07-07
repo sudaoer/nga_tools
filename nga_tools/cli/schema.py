@@ -6,6 +6,7 @@ from nga_tools.commands.backup import (
     backup_all,
     backup_configs,
     backup_floors,
+    backup_migrate_store,
     backup_sub,
     pdf_generate,
 )
@@ -139,6 +140,11 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": int,
         "metavar": "N",
         "help": "发布时间全版面扫描起始页",
+    },
+    "all": {
+        "flags": ("--all",),
+        "action": "store_true",
+        "help": "处理所有已有备份目录",
     },
 }
 
@@ -284,6 +290,26 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "args": ["name", "tid", "aid", "api_concurrency"],
             "required_any": ["name", "tid"],
             "positive": ["api_concurrency"],
+        },
+        "migrate-store": {
+            "handler": backup_migrate_store,
+            "summary": "把旧分页JSON迁移到每帖SQLite存储",
+            "usage": (
+                f"{PROGRAM_USAGE} backup migrate-store "
+                "((--name NAME | --tid TID [--aid AID]) | --all)"
+            ),
+            "examples": [
+                f"{PROGRAM_USAGE} backup migrate-store --name 帖子名",
+                f"{PROGRAM_USAGE} backup migrate-store --tid 12345678 --aid 987654",
+                f"{PROGRAM_USAGE} backup migrate-store --all",
+            ],
+            "notes": [
+                "每个帖子目录会生成或更新自己的archive.sqlite3。",
+                "迁移只读取旧json/page_*.json，不删除或改写旧JSON。",
+                "--all会扫描output_dir下已有备份目录。",
+            ],
+            "args": ["name", "tid", "aid", "all"],
+            "required_any": ["name", "tid", "all"],
         },
         "pdf": {
             "handler": pdf_generate,

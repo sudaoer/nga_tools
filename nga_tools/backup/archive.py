@@ -6,6 +6,7 @@ from typing import Optional
 
 from nga_tools import utils
 from nga_tools.backup import backup_state, html_modified_manifest
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_map import (
     AuthorPostRef,
     FloorMapBuildResult,
@@ -52,6 +53,25 @@ from nga_tools.backup.post_html import (
 )
 from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.ngaclient import NGAClient
+from nga_tools.ngaclient.client import PageData
+
+
+def _read_post_records_from_archive_or_json(
+    store: ThreadArchiveStore,
+    page_data_by_page: dict[int, PageData],
+) -> list[PostRecord]:
+    records = store.read_latest_post_records()
+    if records:
+        return records
+    return _prepare_post_records(page_data_by_page)
+
+
+def _upsert_archive_pages(
+    store: ThreadArchiveStore,
+    page_data_by_page: dict[int, PageData],
+) -> None:
+    for page_number in sorted(page_data_by_page):
+        store.upsert_page(page_number, page_data_by_page[page_number])
 
 
 def _can_fast_skip_author_backup(
@@ -192,6 +212,8 @@ def _build_floor_map_for_post_refs(
 
 def backup_thread(tid: int, aid: Optional[int]) -> None:
     client = NGAClient()
+    thread_folder = Path(utils.get_folder(tid, aid))
+    archive_store = ThreadArchiveStore(thread_folder)
     first_page_data = client.get_page(tid, aid, 1)
     page_count = _page_count_from_page_data(first_page_data)
     author_total_lou_count = _author_total_lou_count_from_page_data(
@@ -206,10 +228,14 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
         page_count,
         first_page_data,
     )
+    _upsert_archive_pages(archive_store, page_data_by_page)
 
     report_info("开始处理")
 
-    records = _prepare_post_records(page_data_by_page)
+    records = _read_post_records_from_archive_or_json(
+        archive_store,
+        page_data_by_page,
+    )
     missing_lou = _find_missing_lou(records)
     floor_map_result = _build_floor_map_for_post_refs(
         client,
@@ -275,6 +301,9 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
 
 def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
     client = NGAClient()
+    thread_folder = Path(utils.get_folder(tid, aid))
+    archive_store = ThreadArchiveStore(thread_folder)
+    archive_store_exists = archive_store.exists()
     first_page_data = client.get_page(tid, aid, 1)
     page_count = _page_count_from_page_data(first_page_data)
     author_total_lou_count = _author_total_lou_count_from_page_data(
@@ -294,6 +323,13 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         tail_start = 1
     missing_page_numbers = set(range(1, page_count + 1)) - existing_page_numbers
     refresh_page_numbers = set(range(tail_start, page_count + 1)) | missing_page_numbers
+    all_page_numbers = set(range(1, page_count + 1))
+    write_archive_store = archive_store_exists or all_page_numbers <= refresh_page_numbers
+    if not write_archive_store:
+        report_warning(
+            "未找到archive.sqlite3，增量备份继续使用旧JSON存储；"
+            "运行 backup migrate-store 后启用历史楼层保留。"
+        )
 
     report_progress(
         f"准备增量备份：远端{page_count}页，本地{len(existing_page_numbers)}页，"
@@ -317,6 +353,8 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
             first_page_data,
         )
         _write_page_json(folder_json, page_number, page_data)
+        if write_archive_store:
+            archive_store.upsert_page(page_number, page_data)
     report_progress(
         "页面获取完成",
         completed=len(sorted_refresh_page_numbers),
@@ -329,7 +367,13 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
 
     report_info("开始处理")
 
-    records = _prepare_post_records(page_data_by_page)
+    if write_archive_store:
+        records = _read_post_records_from_archive_or_json(
+            archive_store,
+            page_data_by_page,
+        )
+    else:
+        records = _prepare_post_records(page_data_by_page)
     missing_lou = _find_missing_lou(records)
     if aid is not None:
         present_lou = {item["lou"] for item in records}

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, cast
 
 from nga_tools import utils
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
@@ -170,7 +171,16 @@ def _page_json_sort_key(path: Path) -> int:
 
 
 def read_author_posts_from_json(tid: int, aid: int) -> list[AuthorPostRef]:
-    folder_json = Path(utils.get_folder(tid, aid, "json"))
+    thread_folder = Path(utils.get_folder(tid, aid, create=False))
+    archive_posts = ThreadArchiveStore(thread_folder).read_latest_author_post_refs()
+    if archive_posts:
+        return archive_posts
+
+    folder_json = Path(utils.get_folder(tid, aid, "json", create=False))
+    if not folder_json.exists():
+        raise RuntimeError(
+            f"缺少只看作者JSON备份：{folder_json}。请先运行 backup all。"
+        )
     page_paths = sorted(
         (
             path

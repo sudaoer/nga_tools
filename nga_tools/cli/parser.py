@@ -28,6 +28,8 @@ def _provided_arg_names(argv: list[str]) -> set[str]:
 
 
 def _has_arg_value(value: Optional[object]) -> bool:
+    if isinstance(value, bool):
+        return value
     return value is not None and value != ""
 
 
@@ -108,6 +110,14 @@ def _validate_args(
     ):
         parser.error("--start_page仅支持与--full_postdate --refresh一起使用。")
 
+    if command == "backup" and action == "migrate-store" and args.get("all"):
+        target_args = sorted(provided_args & {"aid", "name", "tid"})
+        if target_args:
+            parser.error(
+                "--all不能与以下单帖参数一起使用："
+                + ", ".join(f"--{name}" for name in target_args)
+            )
+
     for arg_name, default_value in action_config.get("defaults", {}).items():
         if args.get(arg_name) is None:
             args[arg_name] = default_value
@@ -174,4 +184,3 @@ def args_parse(argv: Optional[list[str]] = None) -> CommandArgs:
     args = cast(CommandArgs, vars(parser.parse_args(raw_args)))
     _validate_args(parser, args, _provided_arg_names(raw_args))
     return args
-

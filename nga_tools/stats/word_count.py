@@ -10,6 +10,7 @@ from typing import Optional, cast
 from bs4 import BeautifulSoup, Tag
 
 from nga_tools import utils
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.bbcode_convert import strip_bbcode_tags
 from nga_tools.ngaclient.client import PageData
 
@@ -213,7 +214,43 @@ def count_backup_words(
     if min_body_chars <= 0:
         raise ValueError("--min_body_chars必须大于0。")
 
+    thread_folder = Path(utils.get_folder(tid, aid, create=False))
     folder_json = Path(utils.get_folder(tid, aid, "json", create=False))
+    archive_store = ThreadArchiveStore(thread_folder)
+    archive_records = archive_store.read_latest_post_records()
+    if archive_records:
+        total_posts = 0
+        body_posts = 0
+        chinese_chars = 0
+        chinese_with_punctuation = 0
+
+        for record in archive_records:
+            post = record["post"]
+            if post is None:
+                continue
+            total_posts += 1
+            cleaned_content = clean_post_content(post["content"])
+            count = count_chinese_text(cleaned_content)
+            if count.chinese_with_punctuation < min_body_chars:
+                continue
+
+            body_posts += 1
+            chinese_chars += count.chinese_chars
+            chinese_with_punctuation += count.chinese_with_punctuation
+
+        return WordCountSummary(
+            tid=tid,
+            aid=aid,
+            json_folder=folder_json,
+            page_count=archive_store.page_count(),
+            total_posts=total_posts,
+            body_posts=body_posts,
+            excluded_posts=total_posts - body_posts,
+            min_body_chars=min_body_chars,
+            chinese_chars=chinese_chars,
+            chinese_with_punctuation=chinese_with_punctuation,
+        )
+
     page_paths = _page_paths(folder_json)
 
     total_posts = 0

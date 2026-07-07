@@ -82,6 +82,20 @@ class BackupConfigsCliTest(unittest.TestCase):
 
         self.assertEqual(context.exception.code, 2)
 
+    def test_backup_migrate_store_parses_all(self) -> None:
+        args = args_parse(["backup", "migrate-store", "--all"])
+
+        self.assertEqual(args["command"], "backup")
+        self.assertEqual(args["action"], "migrate-store")
+        self.assertIs(args["all"], True)
+
+    def test_backup_migrate_store_rejects_all_with_thread_target(self) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with self.assertRaises(SystemExit) as context:
+                args_parse(["backup", "migrate-store", "--all", "--tid", "123"])
+
+        self.assertEqual(context.exception.code, 2)
+
 
 def _backup_config_app_config(workers: int = 4) -> SimpleNamespace:
     return SimpleNamespace(
