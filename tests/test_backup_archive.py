@@ -29,12 +29,12 @@ from nga_tools.backup.image_pipeline import (
 )
 from nga_tools.backup.models import ParsedPostHtml, PostHtml
 from nga_tools.backup.post_html import (
+    build_post_htmls as _build_post_htmls,
     fill_missing_lou as _fill_missing_lou,
+    load_post_htmls_for_records as _load_post_htmls_for_records,
     merge_missing_lou as _merge_missing_lou,
     prepare_post_records as _prepare_post_records,
-    write_html_manifest_for_records as _write_html_manifest_for_records,
-    write_post_htmls as _write_post_htmls,
-    write_recovered_missing_post_htmls as _write_recovered_missing_post_htmls,
+    recovered_missing_post_htmls as _recovered_missing_post_htmls,
 )
 from nga_tools.backup.floor_map import (
     MISSING_POST_HTML,
@@ -292,7 +292,7 @@ class RewriteImageLinksTest(unittest.TestCase):
 
 
 class WritePostHtmlsImageRepairTest(unittest.TestCase):
-    def test_html_manifest_skips_unchanged_non_refreshed_page(self) -> None:
+    def test_prepare_records_does_not_render_html_until_needed(self) -> None:
         page_one = {
             "result": [
                 {
@@ -314,50 +314,28 @@ class WritePostHtmlsImageRepairTest(unittest.TestCase):
             ]
         }
 
-        with TemporaryDirectory() as temp_dir_name:
-            temp_dir = Path(temp_dir_name)
+        with patch(
+            "nga_tools.backup.post_html.post_html_from_content",
+            side_effect=AssertionError("prepare should not render HTML"),
+        ):
+            records = _prepare_post_records({1: page_one, 2: page_two})
 
-            def fake_get_folder(
-                tid: int,
-                aid: int | None,
-                subfolder: str | None = None,
-            ) -> str:
-                path = temp_dir if subfolder is None else temp_dir / subfolder
-                path.mkdir(exist_ok=True)
-                return str(path)
+        html_by_lou = {record["lou"]: record["html"] for record in records}
+        self.assertEqual(html_by_lou, {1: None, 2: None})
 
-            with patch(
-                "nga_tools.backup.archive.utils.get_folder",
-                side_effect=fake_get_folder,
-            ):
-                records = _prepare_post_records(
-                    {1: page_one, 2: page_two},
-                    123,
-                    None,
-                    None,
-                )
-                _write_html_manifest_for_records(records, 123, None)
+        def fake_convert(post: object) -> str:
+            post_data = cast(dict[str, object], post)
+            return f"{post_data['lou']} rendered"
 
-                def fake_convert(post: object) -> str:
-                    post_data = cast(dict[str, object], post)
-                    if post_data["lou"] == 1:
-                        raise AssertionError("unchanged page should use html manifest")
-                    return "second rebuilt"
+        with patch(
+            "nga_tools.backup.post_html.post_html_from_content",
+            side_effect=fake_convert,
+        ):
+            htmls = _load_post_htmls_for_records([records[1]])
 
-                with patch(
-                    "nga_tools.backup.post_html.post_html_from_content",
-                    side_effect=fake_convert,
-                ):
-                    refreshed_records = _prepare_post_records(
-                        {1: page_one, 2: page_two},
-                        123,
-                        None,
-                        {2},
-                    )
-
-        html_by_lou = {record["lou"]: record["html"] for record in refreshed_records}
-        self.assertIsNone(html_by_lou[1])
-        self.assertEqual(html_by_lou[2], "second rebuilt")
+        self.assertEqual(htmls, [{"lou": 2, "pid": 1002, "html": "2 rendered"}])
+        self.assertIsNone(records[0]["html"])
+        self.assertEqual(records[1]["html"], "2 rendered")
 
     def test_repairs_bad_img_from_attches_before_writing_html(self) -> None:
         page_data = {
@@ -386,28 +364,9 @@ class WritePostHtmlsImageRepairTest(unittest.TestCase):
             ]
         }
 
-        with TemporaryDirectory() as temp_dir_name:
-            temp_dir = Path(temp_dir_name)
+        htmls = _build_post_htmls({155: page_data})
+        html = htmls[0]["html"]
 
-            def fake_get_folder(
-                tid: int,
-                aid: int | None,
-                subfolder: str | None = None,
-            ) -> str:
-                path = temp_dir if subfolder is None else temp_dir / subfolder
-                path.mkdir(exist_ok=True)
-                return str(path)
-
-            with patch(
-                "nga_tools.backup.archive.utils.get_folder",
-                side_effect=fake_get_folder,
-            ):
-                htmls = _write_post_htmls({155: page_data}, 123, None, None)
-
-            html_path = temp_dir / "html" / "post_3095.html"
-            html = html_path.read_text(encoding="utf-8")
-
-        self.assertEqual(htmls[0]["html"], html)
         self.assertEqual(html.count("<img"), 2)
         self.assertIn(
             "https://img.nga.178.com/attachments/"
@@ -428,83 +387,11 @@ class WritePostHtmlsImageRepairTest(unittest.TestCase):
             ]
         }
 
-        with TemporaryDirectory() as temp_dir_name:
-            temp_dir = Path(temp_dir_name)
-
-            def fake_get_folder(
-                tid: int,
-                aid: int | None,
-                subfolder: str | None = None,
-            ) -> str:
-                path = temp_dir if subfolder is None else temp_dir / subfolder
-                path.mkdir(exist_ok=True)
-                return str(path)
-
-            with patch(
-                "nga_tools.backup.archive.utils.get_folder",
-                side_effect=fake_get_folder,
-            ):
-                htmls = _write_post_htmls({1: page_data}, 123, None, None)
+        htmls = _build_post_htmls({1: page_data})
 
         self.assertNotIn("<img", htmls[0]["html"])
         self.assertIn("[img]./broken.png", htmls[0]["html"])
         self.assertIn("&lt;/span&gt;", htmls[0]["html"])
-
-    def test_rebuilds_existing_html_cache_with_invalid_image_src(self) -> None:
-        page_data = {
-            "result": [
-                {
-                    "lou": 3095,
-                    "pid": 826501105,
-                    "content": (
-                        "[img]./mon_202506/06/"
-                        "lsQkle-8g6uXvT3cS10o-75l.png[/img</span></div>]"
-                    ),
-                    "attches": [
-                        {
-                            "type": "img",
-                            "attachurl": "mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png",
-                        }
-                    ],
-                }
-            ]
-        }
-
-        with TemporaryDirectory() as temp_dir_name:
-            temp_dir = Path(temp_dir_name)
-            html_dir = temp_dir / "html"
-            html_dir.mkdir()
-            html_path = html_dir / "post_3095.html"
-            html_path.write_text(
-                '<img src="./mon_202506/06/'
-                'lsQkle-8g6uXvT3cS10o-75l.png[/img</span></div>]" />',
-                encoding="utf-8",
-            )
-
-            def fake_get_folder(
-                tid: int,
-                aid: int | None,
-                subfolder: str | None = None,
-            ) -> str:
-                path = temp_dir if subfolder is None else temp_dir / subfolder
-                path.mkdir(exist_ok=True)
-                return str(path)
-
-            with patch(
-                "nga_tools.backup.archive.utils.get_folder",
-                side_effect=fake_get_folder,
-            ):
-                htmls = _write_post_htmls({155: page_data}, 123, None, set())
-
-            rebuilt_html = html_path.read_text(encoding="utf-8")
-
-        self.assertEqual(htmls[0]["html"], rebuilt_html)
-        self.assertIn(
-            "https://img.nga.178.com/attachments/"
-            "mon_202506/06/lsQkle-8g6uXvT3cS10o-75l.png",
-            rebuilt_html,
-        )
-        self.assertNotIn("[/img</span>", rebuilt_html)
 
 
 class FillMissingLouTest(unittest.TestCase):
@@ -523,26 +410,12 @@ class FillMissingLouTest(unittest.TestCase):
             show_original=True,
         )
 
-        with TemporaryDirectory() as temp_dir:
-            with patch(
-                "nga_tools.backup.archive.utils.get_folder",
-                return_value=temp_dir,
-            ):
-                recovered_html = _write_recovered_missing_post_htmls(
-                    123,
-                    456,
-                    recovered_posts,
-                )
-
-            with (
-                patch("builtins.print"),
-                patch("sys.stdout", new_callable=io.StringIO),
-            ):
-                _fill_missing_lou(htmls, [94, 95], floor_labels, recovered_html)
-
-            recovered_file = Path(temp_dir) / "post_94.html"
-            self.assertTrue(recovered_file.exists())
-            self.assertIn("anonymous body", recovered_file.read_text(encoding="utf-8"))
+        recovered_html = _recovered_missing_post_htmls(recovered_posts)
+        with (
+            patch("builtins.print"),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            _fill_missing_lou(htmls, [94, 95], floor_labels, recovered_html)
 
         html_by_lou = {item["lou"]: item["html"] for item in htmls}
         self.assertIn("anonymous body", html_by_lou[94])
@@ -1117,6 +990,7 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             self._run_backup_sub(temp_dir, client)
+            self.assertFalse((temp_dir / "html").exists())
             entries = html_modified_manifest.load_manifest(
                 temp_dir / "html_modified"
             )
@@ -1149,6 +1023,7 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             self._run_backup_all(temp_dir, client)
+            self.assertFalse((temp_dir / "html").exists())
             entries = html_modified_manifest.load_manifest(
                 temp_dir / "html_modified"
             )
@@ -1175,6 +1050,7 @@ class BackupThreadSubHtmlModifiedManifestTest(unittest.TestCase):
             temp_dir = Path(temp_dir_name)
             self._write_current_floor_map(temp_dir, author_posts)
             self._run_backup_all(temp_dir, client)
+            self.assertFalse((temp_dir / "html").exists())
             self.assertTrue((temp_dir / "backup_state.json").is_file())
 
             def fake_get_folder(

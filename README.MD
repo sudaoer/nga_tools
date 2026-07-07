@@ -1,6 +1,6 @@
 # NGA 帖子备份器
 
-把 NGA 帖子通过接口抓取到本地，保存原始 JSON、转换后的 HTML、图片文件，并可按楼层分段生成 PDF。
+把 NGA 帖子通过接口抓取到本地，保存原始 JSON、本地图片路径 HTML、图片文件，并可按楼层分段生成 PDF。
 
 ## 配置
 
@@ -112,7 +112,7 @@ pixi run python main.py backup all --name 帖子名
 pixi run python main.py backup sub --name 帖子名
 ```
 
-`backup sub` 会补抓缺失的 JSON 页，并刷新本地尾页到远端最后一页；随后补齐 HTML、`html_modified` 和缺失图片。只看作者备份还会重试恢复之前仍为占位的缺失楼内容。
+`backup sub` 会补抓缺失的 JSON 页，并刷新本地尾页到远端最后一页；随后补齐 `html_modified` 和缺失图片。只看作者备份还会重试恢复之前仍为占位的缺失楼内容。
 
 也可以不使用保存的名称，直接指定 `tid` 和可选的 `aid`：
 
@@ -175,7 +175,7 @@ pixi run python main.py stats words --name 帖子名 --min_body_chars 80
 
 ## 生成 PDF
 
-先运行 `backup all` 生成 HTML 和图片，再生成 PDF：
+先运行 `backup all` 生成 `html_modified` 和图片，再生成 PDF：
 
 ```powershell
 pixi run python main.py backup pdf --name 帖子名
@@ -202,7 +202,6 @@ PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会�
 默认输出到 `output/<tid>_<aid|all>/`：
 
 - `json/`：接口返回的原始分页数据
-- `html/`：由 BBCode 转换出的单楼 HTML
 - `html_modified/`：替换为本地 `images_unique` 图片路径后的 HTML
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 - `floor_map.json`：只看作者楼层到原帖楼层的映射

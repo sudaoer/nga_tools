@@ -28,9 +28,9 @@ class PostHtml(TypedDict):
 class PostRecord(TypedDict):
     lou: int
     pid: Optional[int]
+    post: Optional[PostData]
     html: Optional[str]
     source_hash: str
-    html_hash: str
 
 
 @dataclass(frozen=True)
@@ -38,4 +38,3 @@ class ParsedPostHtml:
     post_html: PostHtml
     soup: BeautifulSoup
     images: list[Tag]
-

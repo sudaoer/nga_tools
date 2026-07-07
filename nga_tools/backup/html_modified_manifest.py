@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import TypedDict, cast
 
+from nga_tools.core.hashing import hash_text as _hash_text
 from nga_tools.console import report_warning
 
 HTML_MODIFIED_MANIFEST_FILENAME = "html_modified_manifest.json"
 HTML_MODIFIED_MANIFEST_VERSION = 1
-HTML_MODIFIED_GENERATION_VERSION = 1
+HTML_MODIFIED_GENERATION_VERSION = 2
 HTML_MODIFIED_HASH_ALGORITHM = "sha256"
 
 
@@ -30,7 +30,7 @@ def post_html_filename(lou: int) -> str:
 
 
 def hash_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return _hash_text(text)
 
 
 def manifest_path(folder_html_modified: Path) -> Path:

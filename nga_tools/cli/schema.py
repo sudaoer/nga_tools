@@ -239,7 +239,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "notes": [
                 "此命令会补抓缺失JSON页，并刷新本地尾页到远端最后一页。",
-                "随后会补齐缺失或新增的HTML、html_modified和图片文件。",
+                "随后会补齐缺失或新增的html_modified和图片文件。",
                 "author-only备份会增量刷新floor_map.json。",
             ],
             "args": ["name", "tid", "aid", "api_concurrency", "image_concurrency"],
@@ -301,7 +301,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"如缺少floor_map.json，先运行 {PROGRAM_USAGE} backup floors --name 帖子名。",
                 "Overlay：创建 <output_dir>/<tid>_<aid>/overlay/post_<楼层>.html "
                 "可在生成PDF时覆盖对应楼层。",
-                "Overlay只影响PDF生成，不会改写json、html或html_modified备份内容。",
+                "Overlay只影响PDF生成，不会改写json或html_modified备份内容。",
             ],
             "args": ["name", "tid", "aid", "lou_per_pdf", "pdf_workers"],
             "required_any": ["name", "tid"],
@@ -380,4 +380,3 @@ def all_actions() -> list[str]:
         action for action_configs in COMMANDS.values() for action in action_configs
     }
     return sorted(actions)
-

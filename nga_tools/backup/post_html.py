@@ -2,15 +2,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Optional, cast
 from urllib.parse import urlsplit
 
-from bs4 import BeautifulSoup, Tag
-
 from nga_tools import utils
-from nga_tools.backup import html_manifest, image_store
-from nga_tools.backup.files import write_text_atomically
+from nga_tools.backup import image_store
 from nga_tools.backup.floor_map import (
     MISSING_POST_HTML,
     AuthorPostRef,
@@ -20,6 +16,7 @@ from nga_tools.backup.floor_map import (
 from nga_tools.backup.models import ImageAttachment, PostData, PostHtml, PostRecord
 from nga_tools.bbcode_convert import ImageSrcResolver, bbcode_to_html
 from nga_tools.console import report_info, report_warning
+from nga_tools.core.hashing import hash_object
 from nga_tools.ngaclient.client import PageData
 
 _NGA_IMAGE_BASE_URL = "https://img.nga.178.com/attachments/"
@@ -119,13 +116,6 @@ def post_image_attachments(post: dict[str, object]) -> list[ImageAttachment]:
     return image_attachments
 
 
-def tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
-    value = tag.get(attr_name)
-    if isinstance(value, str):
-        return value
-    return None
-
-
 def attachment_index_for_image_src(
     image_src: str,
     attachments: list[ImageAttachment],
@@ -205,21 +195,8 @@ def post_html_from_content(post: PostData) -> str:
     )
 
 
-def html_has_invalid_image_src(html: str) -> bool:
-    soup = BeautifulSoup(html, "html.parser")
-    images = cast(list[Tag], soup.find_all("img"))
-    for image in images:
-        image_src = tag_attr_str(image, "src")
-        if not image_src:
-            continue
-        normalized_image_src = image_store.normalize_nga_image_url(image_src)
-        if not utils.NGA_img_link_verify(normalized_image_src):
-            return True
-    return False
-
-
 def post_source_hash(post: PostData) -> str:
-    return html_manifest.hash_object(
+    return hash_object(
         {
             "content": post["content"],
             "image_attachments": post["image_attachments"],
@@ -227,91 +204,38 @@ def post_source_hash(post: PostData) -> str:
     )
 
 
-def prepare_post_records(
-    page_data_by_page: dict[int, PageData],
-    tid: int,
-    aid: Optional[int],
-    refresh_pages: Optional[set[int]],
-) -> list[PostRecord]:
-    folder_html = Path(utils.get_folder(tid, aid, "html"))
-    manifest_entries = html_manifest.load_manifest(folder_html)
+def missing_post_source_hash(post_html: str) -> str:
+    return hash_object({"missing_post_html": post_html})
+
+
+def prepare_post_records(page_data_by_page: dict[int, PageData]) -> list[PostRecord]:
     records: list[PostRecord] = []
 
-    for page_number, page_data in sorted(page_data_by_page.items()):
-        for post in page_posts(page_data):
-            filename = html_manifest.post_html_filename(post["lou"])
-            html_path = folder_html / filename
-            should_refresh = refresh_pages is None or page_number in refresh_pages
-            source_hash = post_source_hash(post)
-            manifest_entry = manifest_entries.get(filename)
-            post_html: str | None = None
-            html_hash: str
-
-            if (
-                not should_refresh
-                and manifest_entry is not None
-                and manifest_entry["source_hash"] == source_hash
-                and html_path.is_file()
-            ):
-                html_hash = manifest_entry["output_hash"]
-            elif not should_refresh and html_path.is_file():
-                cached_html = html_path.read_text(encoding="utf-8")
-                if html_has_invalid_image_src(cached_html):
-                    post_html = post_html_from_content(post)
-                    write_text_atomically(html_path, post_html)
-                else:
-                    post_html = cached_html
-                html_hash = html_manifest.hash_text(post_html)
-            else:
-                post_html = post_html_from_content(post)
-                write_text_atomically(html_path, post_html)
-                html_hash = html_manifest.hash_text(post_html)
-
+    for page_number in sorted(page_data_by_page):
+        for post in page_posts(page_data_by_page[page_number]):
             records.append(
                 {
                     "lou": post["lou"],
                     "pid": post["pid"],
-                    "html": post_html,
-                    "source_hash": source_hash,
-                    "html_hash": html_hash,
+                    "post": post,
+                    "html": None,
+                    "source_hash": post_source_hash(post),
                 }
             )
 
     return records
 
 
-def write_html_manifest_for_records(
-    records: Sequence[PostRecord],
-    tid: int,
-    aid: Optional[int],
-) -> dict[str, html_manifest.HtmlManifestEntry]:
-    folder_html = Path(utils.get_folder(tid, aid, "html"))
-    entries: dict[str, html_manifest.HtmlManifestEntry] = {}
-    for record in records:
-        filename = html_manifest.post_html_filename(record["lou"])
-        if not (folder_html / filename).is_file():
-            continue
-        entries[filename] = {
-            "source_hash": record["source_hash"],
-            "output_hash": record["html_hash"],
-        }
-    html_manifest.write_manifest(folder_html, entries)
-    return entries
-
-
-def load_post_htmls_for_records(
-    records: Sequence[PostRecord],
-    tid: int,
-    aid: Optional[int],
-) -> list[PostHtml]:
-    folder_html = Path(utils.get_folder(tid, aid, "html"))
+def load_post_htmls_for_records(records: list[PostRecord]) -> list[PostHtml]:
     htmls: list[PostHtml] = []
     for record in records:
         post_html = record["html"]
         if post_html is None:
-            post_html = (
-                folder_html / html_manifest.post_html_filename(record["lou"])
-            ).read_text(encoding="utf-8")
+            post = record["post"]
+            if post is None:
+                raise RuntimeError(f"缺少第{record['lou']}楼的可转换内容。")
+            post_html = post_html_from_content(post)
+            record["html"] = post_html
         htmls.append(
             {
                 "lou": record["lou"],
@@ -322,15 +246,9 @@ def load_post_htmls_for_records(
     return htmls
 
 
-def write_post_htmls(
-    page_data_by_page: dict[int, PageData],
-    tid: int,
-    aid: Optional[int],
-    refresh_pages: Optional[set[int]],
-) -> list[PostHtml]:
-    records = prepare_post_records(page_data_by_page, tid, aid, refresh_pages)
-    write_html_manifest_for_records(records, tid, aid)
-    return load_post_htmls_for_records(records, tid, aid)
+def build_post_htmls(page_data_by_page: dict[int, PageData]) -> list[PostHtml]:
+    records = prepare_post_records(page_data_by_page)
+    return load_post_htmls_for_records(records)
 
 
 def find_missing_lou(
@@ -396,48 +314,40 @@ def fill_missing_post_records(
 
     for lou in missing_lou:
         post_html = recovered_missing_html_by_lou.get(lou, MISSING_POST_HTML)
-        html_hash = html_manifest.hash_text(post_html)
         records.append(
             {
                 "lou": lou,
                 "pid": None,
+                "post": None,
                 "html": post_html,
-                "source_hash": html_manifest.hash_text(f"missing:{html_hash}"),
-                "html_hash": html_hash,
+                "source_hash": missing_post_source_hash(post_html),
             }
         )
 
     records.sort(key=lambda item: item["lou"])
 
 
-def write_recovered_missing_post_htmls(
-    tid: int,
-    aid: Optional[int],
+def recovered_missing_post_htmls(
     recovered_missing_posts: dict[int, RecoveredMissingPost],
 ) -> dict[int, str]:
     if not recovered_missing_posts:
         return {}
 
-    folder_html = Path(utils.get_folder(tid, aid, "html"))
     recovered_html_by_lou: dict[int, str] = {}
     for author_lou, recovered_post in sorted(recovered_missing_posts.items()):
-        post_html = bbcode_to_html(recovered_post["content"])
-        html_path = folder_html / f"post_{author_lou}.html"
-        html_path.write_text(post_html, encoding="utf-8")
-        recovered_html_by_lou[author_lou] = post_html
+        recovered_html_by_lou[author_lou] = bbcode_to_html(recovered_post["content"])
     return recovered_html_by_lou
 
 
-def html_hashes_by_lou(records: Sequence[PostRecord]) -> dict[int, str]:
-    return {record["lou"]: record["html_hash"] for record in records}
+def source_hashes_by_lou(records: Sequence[PostRecord]) -> dict[int, str]:
+    return {record["lou"]: record["source_hash"] for record in records}
 
 
 def unresolved_missing_placeholder_lous(records: Sequence[PostRecord]) -> set[int]:
-    missing_html_hash = html_manifest.hash_text(MISSING_POST_HTML)
     return {
         record["lou"]
         for record in records
-        if record["pid"] is None and record["html_hash"] == missing_html_hash
+        if record["pid"] is None and record["html"] == MISSING_POST_HTML
     }
 
 
@@ -455,4 +365,3 @@ def post_refs_from_posts(
 
 def post_refs_from_htmls(htmls: list[PostHtml]) -> list[AuthorPostRef]:
     return post_refs_from_posts(htmls)
-

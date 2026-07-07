@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from nga_tools import utils
-from nga_tools.backup import backup_state, html_manifest, html_modified_manifest
+from nga_tools.backup import backup_state, html_modified_manifest
 from nga_tools.backup.floor_map import (
     AuthorPostRef,
     FloorMapBuildResult,
@@ -41,15 +41,14 @@ from nga_tools.backup.page_store import (
 from nga_tools.backup.post_html import (
     fill_missing_post_records as _fill_missing_post_records,
     find_missing_lou as _find_missing_lou,
-    html_hashes_by_lou as _html_hashes_by_lou,
     load_post_htmls_for_records as _load_post_htmls_for_records,
     merge_missing_lou as _merge_missing_lou,
     post_refs_from_htmls as _post_refs_from_htmls,
     post_refs_from_posts as _post_refs_from_posts,
     prepare_post_records as _prepare_post_records,
+    recovered_missing_post_htmls as _recovered_missing_post_htmls,
+    source_hashes_by_lou as _source_hashes_by_lou,
     unresolved_missing_placeholder_lous as _unresolved_missing_placeholder_lous,
-    write_html_manifest_for_records as _write_html_manifest_for_records,
-    write_recovered_missing_post_htmls as _write_recovered_missing_post_htmls,
 )
 from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.ngaclient import NGAClient
@@ -75,13 +74,6 @@ def _can_fast_skip_author_backup(
     if not expected_pages <= _existing_page_numbers(folder_json):
         return False
 
-    folder_html = Path(utils.get_folder(tid, aid, "html"))
-    html_entries = html_manifest.load_manifest(folder_html)
-    if len(html_entries) != state["html_manifest_entry_count"]:
-        return False
-    if not html_manifest.manifest_files_exist(folder_html, html_entries):
-        return False
-
     folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
     html_modified_entries = html_modified_manifest.load_manifest(folder_html_modified)
     if len(html_modified_entries) != state["html_modified_manifest_entry_count"]:
@@ -102,7 +94,6 @@ def _write_backup_state_if_complete(
     author_total_lou_count: int | None,
     records: Sequence[PostRecord],
     missing_lou: Sequence[int],
-    html_entries: dict[str, html_manifest.HtmlManifestEntry],
     source_hash_by_lou: dict[int, str],
     skipped_lous: set[int],
     completed_lous: set[int],
@@ -125,10 +116,6 @@ def _write_backup_state_if_complete(
     ):
         return
 
-    folder_html = Path(utils.get_folder(tid, aid, "html"))
-    if not html_manifest.manifest_files_exist(folder_html, html_entries):
-        return
-
     folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
     html_modified_entries = html_modified_manifest.load_manifest(folder_html_modified)
     if len(html_modified_entries) != len(source_hash_by_lou):
@@ -143,7 +130,6 @@ def _write_backup_state_if_complete(
         Path(utils.get_folder(tid, aid)),
         author_total_lou_count=author_total_lou_count,
         page_count=page_count,
-        html_manifest_entry_count=len(html_entries),
         html_modified_manifest_entry_count=len(html_modified_entries),
         unresolved_missing_count=0,
     )
@@ -223,7 +209,7 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
 
     report_info("开始处理")
 
-    records = _prepare_post_records(page_data_by_page, tid, aid, None)
+    records = _prepare_post_records(page_data_by_page)
     missing_lou = _find_missing_lou(records)
     floor_map_result = _build_floor_map_for_post_refs(
         client,
@@ -233,9 +219,7 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
         missing_lou,
     )
     floor_labels = floor_map_result.floor_labels
-    recovered_missing_html_by_lou = _write_recovered_missing_post_htmls(
-        tid,
-        aid,
+    recovered_missing_html_by_lou = _recovered_missing_post_htmls(
         floor_map_result.recovered_missing_posts_by_author_lou,
     )
 
@@ -245,10 +229,9 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
         floor_labels,
         recovered_missing_html_by_lou,
     )
-    html_entries = _write_html_manifest_for_records(records, tid, aid)
     folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
-    source_hash_by_lou = _html_hashes_by_lou(records)
-    htmls = _load_post_htmls_for_records(records, tid, aid)
+    source_hash_by_lou = _source_hashes_by_lou(records)
+    htmls = _load_post_htmls_for_records(records)
     parsed_htmls = _parse_post_htmls_for_images(htmls)
     files_to_download = _collect_image_download_tasks_from_parsed(
         parsed_htmls,
@@ -284,7 +267,6 @@ def backup_thread(tid: int, aid: Optional[int]) -> None:
         author_total_lou_count,
         records,
         missing_lou,
-        html_entries,
         source_hash_by_lou,
         skipped_lous=set(),
         completed_lous=completed_lous,
@@ -347,12 +329,7 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
 
     report_info("开始处理")
 
-    records = _prepare_post_records(
-        page_data_by_page,
-        tid,
-        aid,
-        refresh_page_numbers,
-    )
+    records = _prepare_post_records(page_data_by_page)
     missing_lou = _find_missing_lou(records)
     if aid is not None:
         present_lou = {item["lou"] for item in records}
@@ -370,9 +347,7 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         missing_lou,
     )
     floor_labels = floor_map_result.floor_labels
-    recovered_missing_html_by_lou = _write_recovered_missing_post_htmls(
-        tid,
-        aid,
+    recovered_missing_html_by_lou = _recovered_missing_post_htmls(
         floor_map_result.recovered_missing_posts_by_author_lou,
     )
 
@@ -382,7 +357,6 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         floor_labels,
         recovered_missing_html_by_lou,
     )
-    html_entries = _write_html_manifest_for_records(records, tid, aid)
     (
         folder_html_modified,
         source_hash_by_lou,
@@ -392,7 +366,7 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
     unresolved_missing_lous = _unresolved_missing_placeholder_lous(records)
     skipped_lous -= unresolved_missing_lous
     active_records = [item for item in records if item["lou"] not in skipped_lous]
-    active_htmls = _load_post_htmls_for_records(active_records, tid, aid)
+    active_htmls = _load_post_htmls_for_records(active_records)
 
     parsed_htmls = _parse_post_htmls_for_images(active_htmls)
     files_to_download = _collect_image_download_tasks_from_parsed(
@@ -428,7 +402,6 @@ def backup_thread_sub(tid: int, aid: Optional[int]) -> None:
         author_total_lou_count,
         records,
         missing_lou,
-        html_entries,
         source_hash_by_lou,
         skipped_lous=skipped_lous,
         completed_lous=completed_lous,

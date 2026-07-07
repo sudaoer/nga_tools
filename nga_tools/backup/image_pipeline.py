@@ -11,7 +11,7 @@ from nga_tools.backup import html_modified_manifest, image_store
 from nga_tools.backup.files import write_text_atomically
 from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.backup.models import ParsedPostHtml, PostHtml, PostRecord
-from nga_tools.backup.post_html import html_hashes_by_lou
+from nga_tools.backup.post_html import source_hashes_by_lou
 from nga_tools.console import report_info, report_progress, report_warning
 
 
@@ -203,7 +203,7 @@ def completed_html_modified_lous_for_records(
     set[int],
 ]:
     folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
-    source_hash_by_lou = html_hashes_by_lou(records)
+    source_hash_by_lou = source_hashes_by_lou(records)
     manifest_entries = html_modified_manifest.load_manifest(folder_html_modified)
     skipped_lous = html_modified_manifest.completed_post_lous(
         folder_html_modified,
@@ -273,4 +273,3 @@ def failed_image_urls(download_result: utils.DownloadSummary) -> set[str]:
         for failed in download_result["failed"]
         if utils.NGA_img_link_verify(image_store.normalize_nga_image_url(failed["url"]))
     }
-

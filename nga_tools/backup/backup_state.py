@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import TypedDict, cast
 
-from nga_tools.backup import html_manifest, html_modified_manifest
+from nga_tools.backup import html_modified_manifest
 from nga_tools.backup.floor_map import (
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,
@@ -12,7 +12,7 @@ from nga_tools.backup.floor_map import (
 from nga_tools.console import report_warning
 
 BACKUP_STATE_FILENAME = "backup_state.json"
-BACKUP_STATE_VERSION = 2
+BACKUP_STATE_VERSION = 3
 
 
 class BackupState(TypedDict):
@@ -20,10 +20,8 @@ class BackupState(TypedDict):
     algorithm: str
     author_total_lou_count: int
     page_count: int
-    html_generation_version: int
     html_modified_generation_version: int
     floor_map_generation_version: int
-    html_manifest_entry_count: int
     html_modified_manifest_entry_count: int
     unresolved_missing_count: int
 
@@ -49,13 +47,9 @@ def load_state(thread_folder: Path) -> BackupState | None:
     data = cast(dict[object, object], raw_data)
     if data.get("version") != BACKUP_STATE_VERSION:
         return None
-    if data.get("algorithm") != html_manifest.HTML_HASH_ALGORITHM:
-        return None
     if data.get("algorithm") != html_modified_manifest.HTML_MODIFIED_HASH_ALGORITHM:
         return None
     if data.get("algorithm") != FLOOR_MAP_HASH_ALGORITHM:
-        return None
-    if data.get("html_generation_version") != html_manifest.HTML_GENERATION_VERSION:
         return None
     if (
         data.get("html_modified_generation_version")
@@ -68,7 +62,6 @@ def load_state(thread_folder: Path) -> BackupState | None:
     int_fields = (
         "author_total_lou_count",
         "page_count",
-        "html_manifest_entry_count",
         "html_modified_manifest_entry_count",
         "unresolved_missing_count",
     )
@@ -81,15 +74,13 @@ def load_state(thread_folder: Path) -> BackupState | None:
 
     return {
         "version": BACKUP_STATE_VERSION,
-        "algorithm": html_manifest.HTML_HASH_ALGORITHM,
+        "algorithm": html_modified_manifest.HTML_MODIFIED_HASH_ALGORITHM,
         "author_total_lou_count": cast(int, data["author_total_lou_count"]),
         "page_count": cast(int, data["page_count"]),
-        "html_generation_version": html_manifest.HTML_GENERATION_VERSION,
         "html_modified_generation_version": (
             html_modified_manifest.HTML_MODIFIED_GENERATION_VERSION
         ),
         "floor_map_generation_version": FLOOR_MAP_GENERATION_VERSION,
-        "html_manifest_entry_count": cast(int, data["html_manifest_entry_count"]),
         "html_modified_manifest_entry_count": cast(
             int,
             data["html_modified_manifest_entry_count"],
@@ -103,21 +94,18 @@ def write_state(
     *,
     author_total_lou_count: int,
     page_count: int,
-    html_manifest_entry_count: int,
     html_modified_manifest_entry_count: int,
     unresolved_missing_count: int,
 ) -> None:
     state: BackupState = {
         "version": BACKUP_STATE_VERSION,
-        "algorithm": html_manifest.HTML_HASH_ALGORITHM,
+        "algorithm": html_modified_manifest.HTML_MODIFIED_HASH_ALGORITHM,
         "author_total_lou_count": author_total_lou_count,
         "page_count": page_count,
-        "html_generation_version": html_manifest.HTML_GENERATION_VERSION,
         "html_modified_generation_version": (
             html_modified_manifest.HTML_MODIFIED_GENERATION_VERSION
         ),
         "floor_map_generation_version": FLOOR_MAP_GENERATION_VERSION,
-        "html_manifest_entry_count": html_manifest_entry_count,
         "html_modified_manifest_entry_count": html_modified_manifest_entry_count,
         "unresolved_missing_count": unresolved_missing_count,
     }
