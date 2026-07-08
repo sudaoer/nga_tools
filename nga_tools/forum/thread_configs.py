@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Optional, TypeAlias, cast
 
+from nga_tools.backup.files import write_text_atomically
 from nga_tools.config import get_config
 
 
@@ -125,8 +127,10 @@ class NGAThreadConfigs:
 
     def save_configs(self) -> None:
         data = {"ThreadList": self.ThreadList}
-        with open(self.config_file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+        write_text_atomically(
+            Path(self.config_file_path),
+            json.dumps(data, ensure_ascii=False, indent=4),
+        )
 
     def get_thread_configs(self) -> list[ThreadConfig]:
         return self.ThreadList
