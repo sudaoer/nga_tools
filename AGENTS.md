@@ -25,6 +25,7 @@
 - 共享依赖放在 `pixi.toml` 的 `[dependencies]` 中。
 - 平台特定依赖放在 `[target.<平台>.dependencies]` 下。
 - 不要假定 `weasyprint` 在 pixi 环境之外存在。
+- 如果某项任务有库可以使用，向用户建议添加依赖以避免编写复杂逻辑
 
 ## 配置与输出
 
