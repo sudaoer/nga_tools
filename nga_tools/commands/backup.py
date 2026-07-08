@@ -12,7 +12,7 @@ from nga_tools.console import (
     report_warning,
     use_warning_log,
 )
-from nga_tools.backup.pdf import generate_pdf
+from nga_tools.backup.pdf import PdfRenderPool, generate_pdf
 from nga_tools.commands.network import configure_network_limits_from_args
 from nga_tools.commands.resolve import resolve_command_thread_target
 from nga_tools.commands.thread_batch import run_thread_config_batch
@@ -195,21 +195,23 @@ def pdf_generate(args: CommandArgs) -> None:
         lou_per_pdf = required_int(args, "lou_per_pdf")
         pdf_workers = optional_int(args, "pdf_workers")
 
-        def action(thread_config: ThreadConfig) -> None:
-            generate_pdf(
-                tid=thread_config_tid(thread_config),
-                aid=thread_config_aid(thread_config),
-                lou_per_pdf=lou_per_pdf,
-                pdf_workers=pdf_workers,
-            )
+        with PdfRenderPool(pdf_workers) as pdf_renderer:
+            def action(thread_config: ThreadConfig) -> None:
+                generate_pdf(
+                    tid=thread_config_tid(thread_config),
+                    aid=thread_config_aid(thread_config),
+                    lou_per_pdf=lou_per_pdf,
+                    pdf_workers=pdf_workers,
+                    pdf_renderer=pdf_renderer,
+                )
 
-        run_thread_config_batch(
-            action=action,
-            progress_text="正在生成PDF",
-            failure_text="PDF生成失败",
-            summary_name="PDF生成",
-            worker_count=worker_count,
-        )
+            run_thread_config_batch(
+                action=action,
+                progress_text="正在生成PDF",
+                failure_text="PDF生成失败",
+                summary_name="PDF生成",
+                worker_count=worker_count,
+            )
         return
 
     thread_tid, thread_aid = resolve_command_thread_target(args)

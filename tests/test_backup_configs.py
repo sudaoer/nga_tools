@@ -12,6 +12,7 @@ from unittest.mock import call, patch
 
 from rich.console import Console
 
+from nga_tools.backup.pdf import PdfRenderPool
 from nga_tools.cli import args_parse
 from nga_tools.console import ConsoleReporter, report_warning, use_reporter
 from nga_tools.commands.backup import (
@@ -546,9 +547,25 @@ class BackupConfigsHandlerTest:
                 }
             )
 
+        first_renderer = pdf_mock.call_args_list[0].kwargs["pdf_renderer"]
+
+        assert isinstance(first_renderer, PdfRenderPool)
+        assert first_renderer.pdf_workers == 2
         assert pdf_mock.call_args_list == [
-            call(tid=101, aid=201, lou_per_pdf=50, pdf_workers=2),
-            call(tid=102, aid=None, lou_per_pdf=50, pdf_workers=2),
+            call(
+                tid=101,
+                aid=201,
+                lou_per_pdf=50,
+                pdf_workers=2,
+                pdf_renderer=first_renderer,
+            ),
+            call(
+                tid=102,
+                aid=None,
+                lou_per_pdf=50,
+                pdf_workers=2,
+                pdf_renderer=first_renderer,
+            ),
         ]
 
     def test_stats_words_all_threads_counts_each_archive(self) -> None:

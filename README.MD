@@ -203,12 +203,17 @@ pixi run python main.py backup pdf --name 帖子名
 pixi run python main.py backup pdf --name 帖子名 --lou-per-pdf 100
 ```
 
-可以通过 `--pdf-workers` 指定同时运行的 PDF 生成任务数：
+可以通过 `--pdf-workers` 指定整个命令中同时运行的 PDF 生成任务数：
 
 ```powershell
 pixi run python main.py backup pdf --name 帖子名 --pdf-workers 2
 pixi run python main.py backup pdf --all-threads
+pixi run python main.py backup pdf --all-threads --workers 4 --pdf-workers 2
 ```
+
+`--workers` 控制批量模式下同时处理的帖子数；`--pdf-workers` 控制全命令共享的
+WeasyPrint 并发数。上面的批量示例会同时处理最多 4 个帖子，但最多只有 2 个
+PDF 分段在生成。
 
 PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会使用 pixi 环境中的命令。
 生成后的 PDF 会记录输入中间 HTML 的 hash；后续运行时，如果对应 HTML 没有变化且 PDF 文件仍存在，会跳过该分段。需要强制重新生成时，删除 `pdf/` 下对应 PDF 或 `pdf_input_hashes.json`。

@@ -13,6 +13,7 @@ from rich.console import Console
 from nga_tools.backup import image_store
 from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.backup.pdf import (
+    PdfRenderPool,
     PdfRenderResult,
     _read_pdf_html,
     _report_weasyprint_output,
@@ -173,6 +174,59 @@ class PdfHashCacheTest:
             assert (folder_pdf / 'manual.pdf').exists()
             assert (folder_pdf / 'notes.html').exists()
             assert (folder_pdf / 'part_draft_2_3.pdf').exists()
+
+
+class _FakeProcessPoolExecutor:
+    instances: list["_FakeProcessPoolExecutor"] = []
+
+    def __init__(self, max_workers: int | None = None) -> None:
+        self.max_workers = max_workers
+        self.map_calls: list[list[PdfRenderTask]] = []
+        self.shutdown_count = 0
+        type(self).instances.append(self)
+
+    def map(
+        self,
+        func: object,
+        tasks: list[PdfRenderTask],
+    ) -> list[PdfRenderResult]:
+        del func
+        task_list = list(tasks)
+        self.map_calls.append(task_list)
+        return [
+            PdfRenderResult(task=task, returncode=0, output_lines=())
+            for task in task_list
+        ]
+
+    def shutdown(self) -> None:
+        self.shutdown_count += 1
+
+
+class PdfRenderPoolTest:
+    def test_reuses_single_executor_for_multiple_render_calls(self) -> None:
+        _FakeProcessPoolExecutor.instances = []
+        first_task = PdfRenderTask("/tmp/part_0_1.html", "/tmp/part_0_1.pdf")
+        second_task = PdfRenderTask("/tmp/part_2_3.html", "/tmp/part_2_3.pdf")
+
+        with patch(
+            "nga_tools.backup.pdf.concurrent.futures.ProcessPoolExecutor",
+            _FakeProcessPoolExecutor,
+        ):
+            with PdfRenderPool(2) as renderer:
+                first_result = renderer.render([first_task])
+                second_result = renderer.render([second_task])
+
+        executor = _FakeProcessPoolExecutor.instances[0]
+        assert len(_FakeProcessPoolExecutor.instances) == 1
+        assert executor.max_workers == 2
+        assert executor.map_calls == [[first_task], [second_task]]
+        assert first_result == [
+            PdfRenderResult(task=first_task, returncode=0, output_lines=())
+        ]
+        assert second_result == [
+            PdfRenderResult(task=second_task, returncode=0, output_lines=())
+        ]
+        assert executor.shutdown_count == 1
 
 
 class PdfWeasyPrintCaptureTest:

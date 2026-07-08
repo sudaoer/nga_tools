@@ -81,7 +81,7 @@ ARG_DEFS: dict[str, ArgDef] = {
         "flags": ("--pdf-workers", "--pdf_workers"),
         "type": int,
         "metavar": "N",
-        "help": "生成PDF时并行运行weasyprint的worker数量（仅pdf命令有效）",
+        "help": "整个pdf命令中并行运行weasyprint的全局worker数量",
     },
     "workers": {
         "flags": ("--workers",),
@@ -368,6 +368,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "author-only备份会读取floor_map.json，同时显示只看作者楼层和原帖楼层。",
                 f"如缺少floor_map.json，先运行 {PROGRAM_USAGE} backup floors --name 帖子名。",
                 "--all-threads会按thread_configs.json中的ThreadList批量生成PDF。",
+                "--workers控制并行处理的帖子数，--pdf-workers控制全命令共享的"
+                "WeasyPrint并发数。",
                 "Overlay：创建 <output_dir>/<tid>_<aid>/overlay/post_<楼层>.html "
                 "可在生成PDF时覆盖对应楼层。",
                 "Overlay只影响PDF生成，不会改写json或html_modified备份内容。",

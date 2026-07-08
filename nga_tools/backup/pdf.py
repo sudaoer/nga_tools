@@ -4,8 +4,10 @@ import concurrent.futures
 import os
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import Optional, cast
 
 from bs4 import BeautifulSoup, Tag
@@ -44,6 +46,64 @@ class PdfRenderResult:
     task: PdfRenderTask
     returncode: int
     output_lines: tuple[str, ...]
+
+
+class PdfRenderPool:
+    def __init__(self, pdf_workers: Optional[int]) -> None:
+        if pdf_workers is not None and pdf_workers <= 0:
+            raise ValueError("--pdf_workers必须大于0。")
+        self._pdf_workers = pdf_workers
+        self._executor: concurrent.futures.ProcessPoolExecutor | None = None
+        self._lock = threading.Lock()
+        self._closed = False
+
+    @property
+    def pdf_workers(self) -> Optional[int]:
+        return self._pdf_workers
+
+    @property
+    def worker_desc(self) -> str:
+        return _pdf_worker_desc(self._pdf_workers)
+
+    def _ensure_executor(self) -> concurrent.futures.ProcessPoolExecutor:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("PDF渲染池已关闭。")
+            if self._executor is None:
+                self._executor = concurrent.futures.ProcessPoolExecutor(
+                    max_workers=self._pdf_workers
+                )
+            return self._executor
+
+    def render(self, tasks: list[PdfRenderTask]) -> list[PdfRenderResult]:
+        if not tasks:
+            return []
+        executor = self._ensure_executor()
+        return list(executor.map(_run_weasyprint, tasks))
+
+    def close(self) -> None:
+        executor: concurrent.futures.ProcessPoolExecutor | None = None
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            executor = self._executor
+            self._executor = None
+
+        if executor is not None:
+            executor.shutdown()
+
+    def __enter__(self) -> "PdfRenderPool":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc, traceback
+        self.close()
 
 
 def _tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
@@ -216,6 +276,12 @@ def _split_weasyprint_output(output: str | None) -> tuple[str, ...]:
     return tuple(line.strip() for line in output.splitlines() if line.strip())
 
 
+def _pdf_worker_desc(pdf_workers: Optional[int]) -> str:
+    if pdf_workers is None:
+        return "默认"
+    return str(pdf_workers)
+
+
 def _run_weasyprint(task: PdfRenderTask) -> PdfRenderResult:
     result = subprocess.run(
         ["weasyprint", task.html_path, task.output_path],
@@ -354,6 +420,8 @@ def generate_pdf(
     aid: Optional[int],
     lou_per_pdf: int,
     pdf_workers: Optional[int],
+    *,
+    pdf_renderer: PdfRenderPool | None = None,
 ) -> None:
     if lou_per_pdf <= 0:
         raise ValueError("--lou_per_pdf必须大于0。")
@@ -369,20 +437,22 @@ def generate_pdf(
     )
 
     render_tasks = render_plan.render_tasks
-    worker_desc = pdf_workers if pdf_workers is not None else "默认"
+    worker_desc = (
+        pdf_renderer.worker_desc
+        if pdf_renderer is not None
+        else _pdf_worker_desc(pdf_workers)
+    )
     if render_plan.skipped_count:
         report_info(f"跳过{render_plan.skipped_count}个输入HTML未变化的PDF。")
     if render_plan.cleaned_count:
         report_info(f"删除{render_plan.cleaned_count}个旧PDF分段文件。")
 
     report_info(f"开始生成{len(render_tasks)}个PDF，worker数量：{worker_desc}")
-    if render_tasks:
-        with concurrent.futures.ProcessPoolExecutor(
-            max_workers=pdf_workers
-        ) as executor:
-            render_results = list(executor.map(_run_weasyprint, render_tasks))
+    if pdf_renderer is None:
+        with PdfRenderPool(pdf_workers) as render_pool:
+            render_results = render_pool.render(render_tasks)
     else:
-        render_results = []
+        render_results = pdf_renderer.render(render_tasks)
 
     _report_weasyprint_output(render_results)
     failed_count = sum(
