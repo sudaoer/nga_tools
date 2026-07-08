@@ -24,7 +24,6 @@
 
 - 共享依赖放在 `pixi.toml` 的 `[dependencies]` 中。
 - 平台特定依赖放在 `[target.<平台>.dependencies]` 下。
-- Linux 专属的 PDF 支持放在 `[target.linux.dependencies]` 下。
 - 不要假定 `weasyprint` 在 pixi 环境之外存在。
 
 ## 配置与输出

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,6 +154,7 @@ def build_render_tasks(
     floor_labels: FloorLabels,
 ) -> PdfRenderPlan:
     render_tasks: list[PdfRenderTask] = []
+    folder_pdf_path = Path(folder_pdf)
     cached_hashes = load_pdf_hashes(folder_pdf)
     input_hashes: dict[str, str] = {}
     expected_filenames: set[str] = set()
@@ -166,10 +166,10 @@ def build_render_tasks(
         if start_lou > end_lou:
             break
 
-        pdf_html_path = f"{folder_pdf}/part_{start_lou}_{end_lou}.html"
-        pdf_output_path = f"{folder_pdf}/part_{start_lou}_{end_lou}.pdf"
-        html_filename = os.path.basename(pdf_html_path)
-        pdf_filename = os.path.basename(pdf_output_path)
+        pdf_html_path = folder_pdf_path / f"part_{start_lou}_{end_lou}.html"
+        pdf_output_path = folder_pdf_path / f"part_{start_lou}_{end_lou}.pdf"
+        html_filename = pdf_html_path.name
+        pdf_filename = pdf_output_path.name
         expected_filenames.update({html_filename, pdf_filename})
         pdf_html = render_pdf_html(
             html_content_by_lou,
@@ -180,16 +180,13 @@ def build_render_tasks(
         html_hash = sha256_text(pdf_html)
         input_hashes[html_filename] = html_hash
 
-        if cached_hashes.get(html_filename) == html_hash and os.path.exists(
-            pdf_output_path
-        ):
-            write_text_if_changed(pdf_html_path, pdf_html)
+        if cached_hashes.get(html_filename) == html_hash and pdf_output_path.exists():
+            write_text_if_changed(str(pdf_html_path), pdf_html)
             skipped_count += 1
             continue
 
-        Path(pdf_html_path).write_text(pdf_html, encoding="utf-8")
-        render_tasks.append(PdfRenderTask(pdf_html_path, pdf_output_path))
+        pdf_html_path.write_text(pdf_html, encoding="utf-8")
+        render_tasks.append(PdfRenderTask(str(pdf_html_path), str(pdf_output_path)))
 
     cleaned_count = cleanup_stale_pdf_parts(folder_pdf, expected_filenames)
     return PdfRenderPlan(render_tasks, skipped_count, cleaned_count, input_hashes)
-

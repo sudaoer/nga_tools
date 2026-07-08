@@ -33,13 +33,14 @@ def get_folder(
         raise TypeError("aid must be int, str, or None")
 
     aid_part = aid_value if aid_value else "all"
-    folder = get_config().output_dir + "/" + tid_part + "_" + aid_part
+    folder_path = Path(get_config().output_dir) / f"{tid_part}_{aid_part}"
     if subfolder:
-        folder += "/" + subfolder
+        folder_path = folder_path / subfolder
 
+    folder = str(folder_path)
     if create and folder not in _CREATED_FOLDERS:
         _CREATED_FOLDERS.add(folder)
-        os.makedirs(folder, exist_ok=True)
+        folder_path.mkdir(parents=True, exist_ok=True)
 
     return folder
 
@@ -57,4 +58,3 @@ def list_files_in_folder(folder: str, ends_with: str = "") -> list[str]:
         if os.path.isfile(os.path.join(folder, filename))
         and filename.endswith(ends_with)
     ]
-

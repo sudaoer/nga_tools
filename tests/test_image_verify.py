@@ -186,19 +186,15 @@ class ImageVerifyAllTest:
 
         assert verify_mock.call_args_list == [call('output/images_unique')]
 
-    def test_thread_reference_listing_resolves_global_image_link(self) -> None:
+    def test_thread_reference_listing_resolves_legacy_image_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir) / "output"
             html_dir = output_dir / "101_201" / "html_modified"
             link_dir = output_dir / "images" / "mon_202506" / "06"
-            unique_dir = output_dir / "images_unique"
             html_dir.mkdir(parents=True)
             link_dir.mkdir(parents=True)
-            unique_dir.mkdir()
-            unique_image = unique_dir / "abc.png"
-            Image.new("RGB", (1, 1), color="white").save(unique_image)
             link_path = link_dir / "lsQkle-552eXuT3cS10p-7f7.png"
-            link_path.symlink_to(Path("../../..") / "images_unique" / "abc.png")
+            Image.new("RGB", (1, 1), color="white").save(link_path)
             (html_dir / "post_1.html").write_text(
                 '<img src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"/>',
                 encoding="utf-8",
@@ -206,7 +202,7 @@ class ImageVerifyAllTest:
 
             paths = _list_thread_referenced_image_paths(html_dir)
 
-        assert paths == [unique_image]
+        assert paths == [link_path]
 
     def test_thread_reference_listing_resolves_direct_unique_image_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -226,19 +222,15 @@ class ImageVerifyAllTest:
 
         assert paths == [unique_image]
 
-    def test_migrate_image_index_rewrites_legacy_html_and_preserves_links(self) -> None:
+    def test_migrate_image_index_rewrites_legacy_html_and_preserves_source_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir) / "output"
             html_dir = output_dir / "101_201" / "html_modified"
             link_dir = output_dir / "images" / "mon_202506" / "06"
-            unique_dir = output_dir / "images_unique"
             html_dir.mkdir(parents=True)
             link_dir.mkdir(parents=True)
-            unique_dir.mkdir()
-            unique_image = unique_dir / "abc.png"
-            Image.new("RGB", (1, 1), color="white").save(unique_image)
             link_path = link_dir / "lsQkle-552eXuT3cS10p-7f7.png"
-            link_path.symlink_to(Path("../../..") / "images_unique" / "abc.png")
+            Image.new("RGB", (1, 1), color="white").save(link_path)
             (html_dir / "post_1.html").write_text(
                 '<img src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"/>',
                 encoding="utf-8",
@@ -257,13 +249,19 @@ class ImageVerifyAllTest:
                 mapping = image_store.image_mapping_for_url(image_url)
 
             migrated_html = (html_dir / "post_1.html").read_text(encoding="utf-8")
-            legacy_link_survived = link_path.is_symlink()
+            legacy_file_survived = link_path.is_file()
+            unique_file_exists = (
+                (output_dir / mapping.unique_rel_path).exists()
+                if mapping is not None
+                else False
+            )
 
         assert result.mappings == 1
         assert result.updated_image_refs == 1
         assert mapping is not None
-        assert 'src="../../images_unique/abc.png"' in migrated_html
-        assert legacy_link_survived
+        assert unique_file_exists
+        assert 'src="../../images_unique/' in migrated_html
+        assert legacy_file_survived
 
     def test_prune_legacy_image_links_removes_only_after_html_migrated(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -276,9 +274,8 @@ class ImageVerifyAllTest:
             unique_dir.mkdir()
             unique_image = unique_dir / "abc.png"
             Image.new("RGB", (1, 1), color="white").save(unique_image)
-            (link_dir / "lsQkle-552eXuT3cS10p-7f7.png").symlink_to(
-                Path("../../..") / "images_unique" / "abc.png"
-            )
+            legacy_image = link_dir / "lsQkle-552eXuT3cS10p-7f7.png"
+            Image.new("RGB", (1, 1), color="white").save(legacy_image)
             (html_dir / "post_1.html").write_text(
                 '<img src="../../images_unique/abc.png"/>',
                 encoding="utf-8",
@@ -319,4 +316,3 @@ class ImageVerifyAllTest:
         assert _image_verify_worker_count(1) == 1
         assert _image_verify_worker_count(10) == 10
         assert _image_verify_worker_count(100) == 32
-

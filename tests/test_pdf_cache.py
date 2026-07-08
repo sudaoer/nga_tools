@@ -15,6 +15,7 @@ from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.backup.pdf import (
     PdfRenderPool,
     PdfRenderResult,
+    _image_path_for_pdf,
     _read_pdf_html,
     _report_weasyprint_output,
     _run_weasyprint,
@@ -261,6 +262,19 @@ class PdfWeasyPrintCaptureTest:
             output_lines=("WARNING: missing glyph", "INFO: done"),
         )
 
+    def test_run_weasyprint_reports_missing_command(self) -> None:
+        task = PdfRenderTask("/tmp/part_0_1.html", "/tmp/part_0_1.pdf")
+
+        with patch(
+            "nga_tools.backup.pdf.subprocess.run",
+            side_effect=FileNotFoundError("missing"),
+        ):
+            result = _run_weasyprint(task)
+
+        assert result.task == task
+        assert result.returncode == 1
+        assert "找不到weasyprint命令" in result.output_lines[0]
+
     def test_reports_weasyprint_output_through_warning_reporter(self) -> None:
         output = io.StringIO()
         console = Console(
@@ -293,6 +307,11 @@ class PdfWeasyPrintCaptureTest:
 
 
 class PdfImageSourceTest:
+    def test_image_path_for_pdf_allows_windows_drive_path(self) -> None:
+        assert _image_path_for_pdf("C:/nga/image.png", Path("html")) == Path(
+            "C:/nga/image.png"
+        )
+
     def test_read_pdf_html_resolves_global_image_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir) / "output"

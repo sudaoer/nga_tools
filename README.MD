@@ -164,13 +164,13 @@ pixi run python main.py image verify
 pixi run python main.py image verify --name 帖子名
 ```
 
-旧版本曾在 `output/images/` 下创建按 NGA 原路径组织的软链接。已有旧产物可以显式迁移到 SQLite 映射和 `images_unique` 引用：
+旧版本曾在 `output/images/` 下创建按 NGA 原路径组织的图片条目，通常是软链接，也可能是普通图片文件。已有旧产物可以显式迁移到 SQLite 映射和 `images_unique` 引用：
 
 ```powershell
 pixi run python main.py image migrate
 ```
 
-迁移命令会保留旧软链接目录。确认 `html_modified` 已不再引用旧软链接后，可以清理旧目录：
+迁移命令会保留旧图片目录。确认 `html_modified` 已不再引用旧目录后，可以清理它：
 
 ```powershell
 pixi run python main.py image prune-links
@@ -215,7 +215,7 @@ pixi run python main.py backup pdf --all-threads --workers 4 --pdf-workers 2
 WeasyPrint 并发数。上面的批量示例会同时处理最多 4 个帖子，但最多只有 2 个
 PDF 分段在生成。
 
-PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会使用 pixi 环境中的命令。
+PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会使用 pixi 环境中的 WeasyPrint、Poppler 和字体依赖，支持 Linux、macOS 和 Windows 的 Pixi 环境。
 生成后的 PDF 会记录输入中间 HTML 的 hash；后续运行时，如果对应 HTML 没有变化且 PDF 文件仍存在，会跳过该分段。需要强制重新生成时，删除 `pdf/` 下对应 PDF 或 `pdf_input_hashes.json`。
 只看作者备份会读取 `floor_map.json`，在 PDF 标题中显示只看作者楼层和原帖楼层，例如 `第12楼（原86楼）`。如果缺少映射，先运行 `backup floors`。
 
@@ -234,7 +234,7 @@ PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会�
 - `images_unique/`：按内容 hash 保存的实际图片文件
 - `images_unique/download_failed_placeholder.png`：下载失败图片的占位图，按需生成
 - `image_index.sqlite3`：原始 NGA 图片 URL 到 `images_unique` 文件的映射
-- `images/`：旧版本软链接目录，仅迁移前的历史产物会存在
+- `images/`：旧版本图片目录，仅迁移前的历史产物会存在
 
 ## 协议
 

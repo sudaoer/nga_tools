@@ -21,7 +21,7 @@ from nga_tools.backup.floor_map import (
     validate_floor_labels,
 )
 from nga_tools.backup import image_store
-from nga_tools.backup.html_images import effective_image_src
+from nga_tools.backup.html_images import effective_image_src, image_src_path
 from nga_tools.backup.overlay import load_post_overlays
 from nga_tools.backup.pdf_plan import (
     PdfRenderTask,
@@ -283,13 +283,20 @@ def _pdf_worker_desc(pdf_workers: Optional[int]) -> str:
 
 
 def _run_weasyprint(task: PdfRenderTask) -> PdfRenderResult:
-    result = subprocess.run(
-        ["weasyprint", task.html_path, task.output_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["weasyprint", task.html_path, task.output_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        return PdfRenderResult(
+            task=task,
+            returncode=1,
+            output_lines=(f"找不到weasyprint命令，请确认通过pixi环境运行：{error}",),
+        )
     return PdfRenderResult(
         task=task,
         returncode=result.returncode,
@@ -309,15 +316,11 @@ def _image_path_for_pdf(image_src: str, source_dir: Path) -> Path:
     if link_path is not None:
         return link_path
 
-    parsed_src = image_src.split("?", 1)[0]
-    src_parts = parsed_src.split(":", 1)
-    if len(src_parts) == 2 and src_parts[0].isalpha():
+    path = image_src_path(image_src, source_dir)
+    if path is None:
         raise RuntimeError(f"不支持的远程图片链接：{image_src}")
 
-    path = Path(parsed_src)
-    if path.is_absolute():
-        return path
-    return source_dir / path
+    return path
 
 
 def _read_pdf_html(

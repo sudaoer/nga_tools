@@ -11,6 +11,7 @@ from PIL import Image
 
 from nga_tools import utils
 from nga_tools.backup import image_store
+from nga_tools.backup.html_images import image_src_path
 from nga_tools.config import get_config
 from nga_tools.console import report_info, report_warning
 
@@ -83,10 +84,10 @@ def _tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
 
 
 def _path_from_src(image_src: str, source_dir: Path) -> Path:
-    path = Path(image_src.split("?", 1)[0])
-    if path.is_absolute():
-        return path
-    return source_dir / path
+    path = image_src_path(image_src, source_dir)
+    if path is None:
+        return source_dir / image_src
+    return path
 
 
 def _image_path_from_src(image_src: str, source_dir: Path) -> Path:
@@ -215,4 +216,3 @@ def _verify_image_path(image_path: Path) -> ImageFileVerifyResult:
 def _verify_image_file_task(task: tuple[str, str]) -> ImageFileVerifyResult:
     folder_images, image_file = task
     return _verify_image_file(folder_images, image_file)
-

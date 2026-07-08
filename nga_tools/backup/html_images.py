@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from bs4 import Tag
@@ -28,6 +29,28 @@ def _style_has_display_none(tag: Tag) -> bool:
 
 def _normalized_src(value: str) -> str:
     return image_store.normalize_nga_image_url(value.strip())
+
+
+def _is_windows_drive_path(value: str) -> bool:
+    return len(value) >= 2 and value[1] == ":" and value[0].isalpha()
+
+
+def _has_url_scheme(value: str) -> bool:
+    parts = value.split(":", 1)
+    return len(parts) == 2 and parts[0].isalpha() and not _is_windows_drive_path(value)
+
+
+def image_src_path(image_src: str, source_dir: Path) -> Path | None:
+    parsed_src = image_src.split("?", 1)[0].strip()
+    if _has_url_scheme(parsed_src):
+        return None
+
+    path = Path(parsed_src)
+    if _is_windows_drive_path(parsed_src):
+        return path
+    if path.is_absolute():
+        return path
+    return source_dir / path
 
 
 def _lazy_nga_image_src(tag: Tag) -> Optional[str]:

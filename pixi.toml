@@ -22,12 +22,10 @@ openpyxl = ">=3.1.5,<4"
 pyright = ">=1.1.411,<2"
 rich = ">=15.0.0,<16"
 pytest = ">=9.1.1,<10"
-
-[target.linux.dependencies]
-weasyprint = "*"
-font-ttf-noto-cjk = "*"
-font-ttf-noto-emoji = "*"
-poppler = "*"
+weasyprint = ">=69.0,<70"
+font-ttf-noto-cjk = ">=2.4,<3"
+font-ttf-noto-emoji = ">=2.34,<3"
+poppler = ">=26.7.0,<27"
 
 [pypi-dependencies]
 bbcode = ">=1.1.0, <2"

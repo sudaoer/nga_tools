@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup, Tag
 
 from nga_tools import utils
 from nga_tools.backup import image_store
+from nga_tools.backup.html_images import image_src_path
 from nga_tools.config import get_config
 
 
@@ -71,10 +72,10 @@ def _html_modified_files() -> list[Path]:
 
 
 def _path_from_src(image_src: str, source_dir: Path) -> Path:
-    path = Path(image_src.split("?", 1)[0])
-    if path.is_absolute():
-        return path
-    return source_dir / path
+    path = image_src_path(image_src, source_dir)
+    if path is None:
+        return source_dir / image_src
+    return path
 
 
 def _legacy_image_url_from_src(image_src: str, source_dir: Path) -> str | None:
@@ -165,39 +166,41 @@ def migrate_image_index() -> ImageMigrationResult:
     mappings = 0
     broken_links = 0
     unique_path_by_url: dict[str, Path] = {}
-    mapping_batch: list[tuple[str, Path]] = []
-
-    def flush_mapping_batch() -> None:
-        nonlocal mappings
-        if not mapping_batch:
-            return
-        image_store.upsert_image_mappings(mapping_batch)
-        mappings += len(mapping_batch)
-        mapping_batch.clear()
 
     if legacy_dir.is_dir():
         output_root = image_store.output_dir().resolve()
-        for link_path in sorted(legacy_dir.rglob("*")):
-            if not link_path.is_symlink():
+        for legacy_path in sorted(legacy_dir.rglob("*")):
+            if legacy_path.is_dir():
                 continue
-            image_url = _legacy_image_url_from_link_path(link_path)
-            if image_url is None or not link_path.exists():
+            image_url = _legacy_image_url_from_link_path(legacy_path)
+            if image_url is None:
                 broken_links += 1
                 continue
-            target_path = link_path.resolve()
-            try:
-                target_path.relative_to(output_root)
-            except ValueError:
+
+            if legacy_path.is_symlink():
+                if not legacy_path.exists():
+                    broken_links += 1
+                    continue
+                source_path = legacy_path.resolve()
+                try:
+                    source_path.relative_to(output_root)
+                except ValueError:
+                    broken_links += 1
+                    continue
+            elif legacy_path.is_file():
+                source_path = legacy_path
+            else:
                 broken_links += 1
                 continue
-            if not target_path.is_file():
+
+            if not source_path.is_file():
                 broken_links += 1
                 continue
-            unique_path_by_url[image_url] = target_path
-            mapping_batch.append((image_url, target_path))
-            if len(mapping_batch) >= 1000:
-                flush_mapping_batch()
-        flush_mapping_batch()
+
+            stored_image = image_store.store_existing_image(source_path, image_url)
+            unique_path = Path(stored_image["unique_path"])
+            unique_path_by_url[image_url] = unique_path
+            mappings += 1
 
     for url, mapping in image_store.image_mappings_by_url().items():
         unique_path = mapping.unique_path
@@ -226,7 +229,7 @@ def prune_legacy_image_links() -> ImagePruneResult:
     legacy_ref_count = _count_legacy_html_image_refs()
     if legacy_ref_count:
         raise RuntimeError(
-            "仍有html_modified图片引用指向旧软链接目录，"
+            "仍有html_modified图片引用指向旧图片目录，"
             f"请先运行 image migrate。引用数：{legacy_ref_count}"
         )
 
@@ -234,16 +237,18 @@ def prune_legacy_image_links() -> ImagePruneResult:
     if not legacy_dir.exists():
         return ImagePruneResult(removed_links=0, removed_directory=None)
     if not legacy_dir.is_dir():
-        raise RuntimeError(f"旧图片软链接路径不是目录：{legacy_dir}")
+        raise RuntimeError(f"旧图片路径不是目录：{legacy_dir}")
 
     removed_links = 0
     for path in legacy_dir.rglob("*"):
-        if path.is_symlink():
-            removed_links += 1
-            continue
         if path.is_dir():
             continue
-        raise RuntimeError(f"旧图片目录包含非软链接文件，拒绝删除：{path}")
+        if _legacy_image_url_from_link_path(path) is None:
+            raise RuntimeError(f"旧图片目录包含无法识别的文件，拒绝删除：{path}")
+        if path.is_symlink() or path.is_file():
+            removed_links += 1
+            continue
+        raise RuntimeError(f"旧图片目录包含无法处理的路径，拒绝删除：{path}")
 
     shutil.rmtree(legacy_dir)
     return ImagePruneResult(

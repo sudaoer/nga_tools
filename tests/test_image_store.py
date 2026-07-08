@@ -97,6 +97,30 @@ class ImageStoreTest:
             assert not (output_dir / 'images').exists()
             assert (output_dir / 'image_index.sqlite3').exists()
 
+    def test_store_existing_image_copies_without_removing_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+            legacy_image = Path(temp_dir_name) / "legacy.png"
+            Image.new("RGB", (1, 1), color="white").save(legacy_image)
+            image_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+            )
+
+            with patch(
+                "nga_tools.backup.image_store.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                result = image_store.store_existing_image(legacy_image, image_url)
+                mapping = image_store.image_mapping_for_url(image_url)
+
+            unique_path = Path(result["unique_path"])
+            assert legacy_image.exists()
+            assert unique_path.exists()
+            assert unique_path.parent.samefile(output_dir / 'images_unique')
+            assert mapping is not None
+            assert mapping.unique_rel_path == f'images_unique/{unique_path.name}'
+
     def test_pending_image_download_tasks_uses_batched_index_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             output_dir = Path(temp_dir_name) / "output"

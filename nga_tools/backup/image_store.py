@@ -401,17 +401,25 @@ def _target_path_for_download(
         collision_index += 1
 
 
-def store_downloaded_image(temp_path: Path, task: ImageDownloadTask) -> StoredImageResult:
-    image_hash = utils.sha256(str(temp_path))
-    extension = _image_extension_from_file(temp_path, task["url"])
+def _store_image_file(
+    source_path: Path,
+    task: ImageDownloadTask,
+    *,
+    move_source: bool,
+) -> StoredImageResult:
+    image_hash = utils.sha256(str(source_path))
+    extension = _image_extension_from_file(source_path, task["url"])
     with _IMAGE_STORE_LOCK:
         target_path, reused, collision = _target_path_for_download(
-            temp_path,
+            source_path,
             image_hash,
             extension,
         )
         if not reused:
-            shutil.move(str(temp_path), target_path)
+            if move_source:
+                shutil.move(str(source_path), target_path)
+            elif source_path.resolve() != target_path.resolve():
+                shutil.copy2(source_path, target_path)
 
         upsert_image_mapping(task["url"], target_path)
     result: StoredImageResult = {
@@ -422,6 +430,14 @@ def store_downloaded_image(temp_path: Path, task: ImageDownloadTask) -> StoredIm
     if collision:
         result["collision"] = True
     return result
+
+
+def store_downloaded_image(temp_path: Path, task: ImageDownloadTask) -> StoredImageResult:
+    return _store_image_file(temp_path, task, move_source=True)
+
+
+def store_existing_image(image_path: Path, url: str) -> StoredImageResult:
+    return _store_image_file(image_path, {"url": url}, move_source=False)
 
 
 def download_image_tasks(

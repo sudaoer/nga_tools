@@ -35,7 +35,7 @@ def image_migrate(args: CommandArgs) -> None:
     report_info(
         "图片索引迁移完成："
         f"写入映射{result.mappings}条，"
-        f"跳过损坏软链接{result.broken_links}个，"
+        f"跳过损坏旧图片条目{result.broken_links}个，"
         f"扫描HTML文件{result.html_files}个，"
         f"更新HTML文件{result.updated_html_files}个，"
         f"更新图片引用{result.updated_image_refs}处。"
@@ -46,10 +46,10 @@ def image_prune_links(args: CommandArgs) -> None:
     del args
     result = prune_legacy_image_links()
     if result.removed_directory is None:
-        report_info("旧图片软链接目录不存在，无需清理。")
+        report_info("旧图片目录不存在，无需清理。")
         return
     report_info(
-        "旧图片软链接目录清理完成："
-        f"删除软链接{result.removed_links}个，"
+        "旧图片目录清理完成："
+        f"删除旧图片条目{result.removed_links}个，"
         f"删除目录：{result.removed_directory}"
     )
