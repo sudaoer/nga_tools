@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import html
 import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, cast
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, Tag
 
 from nga_tools import utils
 from nga_tools.backup.archive_store import ThreadArchiveStore
@@ -115,7 +116,10 @@ def _replace_reply_quote(match: re.Match[str]) -> str:
 
 
 def _remove_html_noise(text: str) -> str:
-    soup = BeautifulSoup(text, "html.parser")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
+        soup = BeautifulSoup(text, "html.parser")
+
     for tag in cast(list[Tag], soup.find_all(["img", "script", "style"])):
         tag.decompose()
 

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import pytest
 import tempfile
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from bs4 import MarkupResemblesLocatorWarning
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.stats.word_count import (
@@ -106,6 +109,18 @@ class WordCountCleaningTest:
         assert '[collapse' not in cleaned
         assert 'https://example.com' not in cleaned
 
+    def test_plain_url_content_does_not_emit_markup_locator_warning(self) -> None:
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            warnings.simplefilter("always")
+
+            cleaned = clean_post_content("https://example.com/path")
+
+        assert cleaned == "https://example.com/path"
+        assert not any(
+            issubclass(warning.category, MarkupResemblesLocatorWarning)
+            for warning in caught_warnings
+        )
+
 
 class BackupWordCountTest:
     def test_counts_only_posts_above_body_threshold(self) -> None:
@@ -184,4 +199,3 @@ class BackupWordCountTest:
             ):
                 with pytest.raises(RuntimeError, match='缺少archive.sqlite3'):
                     count_backup_words(123, 456, min_body_chars=1)
-
