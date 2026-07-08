@@ -189,6 +189,27 @@ pixi run python main.py stats words --name 帖子名 --min-body-chars 80
 pixi run python main.py stats words --all-threads
 ```
 
+## Web 查看器
+
+安装并构建前端，然后启动本地只读查看器：
+
+```powershell
+pixi run web-serve
+```
+
+默认地址为 `http://127.0.0.1:18736/`。此服务只读取本地备份，不联网、
+不修改帖子配置或备份内容；默认只监听本机地址。需要临时换端口或允许局域网
+访问时，可直接运行：
+
+```powershell
+pixi run python main.py web serve --port 18737
+pixi run python main.py web serve --host 0.0.0.0 --port 18736
+```
+
+Web 查看器读取当前主线备份结构：每帖目录下的 `archive.sqlite3` 和
+`html_modified/post_*.html`。旧版只有 `json/page_*.json` 的目录会在页面中
+显示为“需迁移”，请先运行 `backup migrate-store`。
+
 ## 生成 PDF
 
 先运行 `backup all` 生成 `html_modified` 和图片，再生成 PDF：

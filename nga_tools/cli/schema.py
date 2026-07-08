@@ -14,6 +14,8 @@ from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
 from nga_tools.commands.image import image_migrate, image_prune_links, image_verify
 from nga_tools.commands.stats import stats_words
 from nga_tools.commands.types import CommandHandler
+from nga_tools.commands.web import web_serve
+from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 
 PROGRAM_USAGE = "python main.py"
 HELP_FLAGS = {"-h", "--help"}
@@ -36,7 +38,7 @@ class ActionConfig(TypedDict):
     notes: NotRequired[list[str]]
     required: NotRequired[list[str]]
     required_any: NotRequired[list[str]]
-    defaults: NotRequired[dict[str, int]]
+    defaults: NotRequired[dict[str, object]]
     positive: NotRequired[list[str]]
 
 
@@ -155,6 +157,24 @@ ARG_DEFS: dict[str, ArgDef] = {
         "flags": ("--write-json", "--write_json"),
         "action": "store_true",
         "help": "备份时额外输出json/page_*.json最近响应缓存",
+    },
+    "host": {
+        "flags": ("--host",),
+        "type": str,
+        "metavar": "HOST",
+        "help": "Web服务监听地址",
+    },
+    "port": {
+        "flags": ("--port",),
+        "type": int,
+        "metavar": "PORT",
+        "help": "Web服务监听端口",
+    },
+    "static_dir": {
+        "flags": ("--static-dir", "--static_dir"),
+        "type": str,
+        "metavar": "PATH",
+        "help": "前端dist目录",
     },
 }
 
@@ -451,6 +471,33 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "required_any": ["name", "tid", "all_threads"],
             "defaults": {"min_body_chars": 120},
             "positive": ["workers", "min_body_chars"],
+        },
+    },
+    "web": {
+        "serve": {
+            "handler": web_serve,
+            "summary": "启动本地只读Web查看器",
+            "usage": (
+                f"{PROGRAM_USAGE} web serve "
+                "[--host HOST] [--port PORT] [--static-dir PATH]"
+            ),
+            "examples": [
+                f"{PROGRAM_USAGE} web serve",
+                f"{PROGRAM_USAGE} web serve --port {DEFAULT_WEB_PORT}",
+                f"{PROGRAM_USAGE} web serve --host 0.0.0.0",
+            ],
+            "notes": [
+                "此命令只读取本地备份，不联网、不修改备份内容。",
+                "默认只监听本机地址，避免把本地备份暴露到局域网。",
+                "只支持当前archive.sqlite3和html_modified备份；旧JSON请先迁移。",
+            ],
+            "args": ["host", "port", "static_dir"],
+            "defaults": {
+                "host": DEFAULT_WEB_HOST,
+                "port": DEFAULT_WEB_PORT,
+                "static_dir": DEFAULT_WEB_STATIC_DIR,
+            },
+            "positive": ["port"],
         },
     },
 }

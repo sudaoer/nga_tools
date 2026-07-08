@@ -10,6 +10,10 @@ typecheck = "pyright -p pyrightconfig.strict.json"
 test = "pytest -q"
 main = "python main.py"
 ankebak = "python main.py forum sync && python main.py backup sub --all-threads"
+web-install = "pnpm --dir web install --frozen-lockfile"
+web-build = { depends-on = ["web-install"], cmd = "pnpm --dir web build" }
+web-typecheck = { depends-on = ["web-install"], cmd = "pnpm --dir web typecheck" }
+web-serve = { depends-on = ["web-build"], cmd = "python main.py web serve" }
 
 [dependencies]
 python = ">=3.14.4,<3.15"
@@ -26,6 +30,8 @@ weasyprint = ">=69.0,<70"
 font-ttf-noto-cjk = ">=2.4,<3"
 font-ttf-noto-emoji = ">=2.34,<3"
 poppler = ">=26.7.0,<27"
+nodejs = ">=26.4.0,<27"
+pnpm = ">=11.10.0,<12"
 
 [pypi-dependencies]
 bbcode = ">=1.1.0, <2"
