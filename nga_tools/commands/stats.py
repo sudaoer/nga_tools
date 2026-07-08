@@ -50,6 +50,7 @@ def stats_words(args: CommandArgs) -> None:
             failure_text="统计失败",
             summary_name="统计",
             worker_count=worker_count,
+            write_warning_log=False,
         )
         return
 

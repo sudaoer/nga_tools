@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import ExitStack
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
 from nga_tools.console import (
@@ -44,6 +45,7 @@ def _run_thread_config_with_progress(
     action: ThreadConfigAction,
     progress_text: str,
     failure_text: str,
+    write_warning_log: bool,
 ) -> str | None:
     label = thread_config_label(thread_config)
     task_reporter = progress.start_thread(
@@ -51,11 +53,14 @@ def _run_thread_config_with_progress(
         total=total,
         label=label,
     )
-    log_path = warning_log_path(
-        thread_config_tid(thread_config),
-        thread_config_aid(thread_config),
-    )
-    with use_reporter(task_reporter), use_warning_log(log_path):
+    with ExitStack() as stack:
+        stack.enter_context(use_reporter(task_reporter))
+        if write_warning_log:
+            log_path = warning_log_path(
+                thread_config_tid(thread_config),
+                thread_config_aid(thread_config),
+            )
+            stack.enter_context(use_warning_log(log_path))
         report_progress(progress_text)
         try:
             result = action(thread_config)
@@ -74,6 +79,7 @@ def _run_thread_configs_sequential(
     action: ThreadConfigAction,
     progress_text: str,
     failure_text: str,
+    write_warning_log: bool,
 ) -> tuple[list[ThreadBatchSuccess], list[ThreadBatchFailure]]:
     successes: list[ThreadBatchSuccess] = []
     failures: list[ThreadBatchFailure] = []
@@ -88,6 +94,7 @@ def _run_thread_configs_sequential(
                 action=action,
                 progress_text=progress_text,
                 failure_text=failure_text,
+                write_warning_log=write_warning_log,
             )
         except Exception as error:
             failures.append((thread_config, error))
@@ -106,6 +113,7 @@ def _run_thread_configs_parallel(
     action: ThreadConfigAction,
     progress_text: str,
     failure_text: str,
+    write_warning_log: bool,
 ) -> tuple[list[ThreadBatchSuccess], list[ThreadBatchFailure]]:
     successes: list[ThreadBatchSuccess] = []
     failures: list[tuple[int, ThreadConfig, Exception]] = []
@@ -122,6 +130,7 @@ def _run_thread_configs_parallel(
                 action=action,
                 progress_text=progress_text,
                 failure_text=failure_text,
+                write_warning_log=write_warning_log,
             )
             future_context[future] = (index, thread_config)
 
@@ -165,6 +174,7 @@ def run_thread_config_batch(
     failure_text: str,
     summary_name: str,
     worker_count: int,
+    write_warning_log: bool = True,
 ) -> None:
     if worker_count <= 0:
         raise ValueError("workers必须大于0。")
@@ -185,6 +195,7 @@ def run_thread_config_batch(
                 action=action,
                 progress_text=progress_text,
                 failure_text=failure_text,
+                write_warning_log=write_warning_log,
             )
         else:
             successes, failures = _run_thread_configs_parallel(
@@ -194,6 +205,7 @@ def run_thread_config_batch(
                 action=action,
                 progress_text=progress_text,
                 failure_text=failure_text,
+                write_warning_log=write_warning_log,
             )
 
     for _, message in sorted(successes, key=lambda item: item[0]):

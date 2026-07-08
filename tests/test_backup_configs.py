@@ -579,6 +579,7 @@ class BackupConfigsHandlerTest:
 
         with (
             patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.core.paths.get_folder") as get_folder_mock,
             patch(
                 "nga_tools.commands.stats.count_backup_words",
                 side_effect=count_side_effect,
@@ -590,6 +591,9 @@ class BackupConfigsHandlerTest:
             _captured_reporter() as output,
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
+            get_folder_mock.side_effect = AssertionError(
+                "stats batch must not resolve output folders"
+            )
 
             stats_words(
                 {
@@ -603,6 +607,7 @@ class BackupConfigsHandlerTest:
             call(tid=101, aid=201, min_body_chars=80),
             call(tid=102, aid=None, min_body_chars=80),
         ]
+        get_folder_mock.assert_not_called()
         output_text = output.getvalue()
         assert "first (tid: 101, aid: 201)：快照页数1" in output_text
         assert "批量统计完成：成功2个，失败0个。" in output_text
