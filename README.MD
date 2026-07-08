@@ -86,17 +86,17 @@ SQLite 中读取该 fid 已保存的主题数据，`pages` 不限制数据库筛
 按主题发布时间倒序扫描版面主题，并写入主题数据库：
 
 ```powershell
-pixi run python main.py forum sync --full_postdate --fid 784
-pixi run python main.py forum sync --full_postdate --fid 784 --page_delay_seconds 5
-pixi run python main.py forum sync --full_postdate --refresh --fid 784
+pixi run python main.py forum sync --full-postdate --fid 784
+pixi run python main.py forum sync --full-postdate --fid 784 --page-delay-seconds 5
+pixi run python main.py forum sync --full-postdate --refresh --fid 784
 ```
 
-`--full_postdate` 会调用版面主题列表接口并传入
+`--full-postdate` 会调用版面主题列表接口并传入
 `order_by=postdatedesc`，可翻阅超过 100 页；默认从远端第一页开始，遇到
 数据库中已有 `tid` 后停止后续扫描。加 `--refresh` 时会忽略已有 `tid`，
-刷新到远端末页；需要续扫时可与 `--refresh --start_page N` 一起使用。
+刷新到远端末页；需要续扫时可与 `--refresh --start-page N` 一起使用。
 此模式不修改 `thread_configs.json`，也不会额外请求单贴 API；默认每页请求后
-等待 3 秒，可用 `--page_delay_seconds` 调大以减少限流。
+等待 3 秒，可用 `--page-delay-seconds` 调大以减少限流。
 
 抓取整帖并下载图片：
 
@@ -105,7 +105,7 @@ pixi run python main.py backup all --name 帖子名
 ```
 
 图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在 `output/image_index.sqlite3`。下载失败的图片会在 `html_modified` 中指向 `images_unique/download_failed_placeholder.png` 占位图，不写入 SQLite 映射，后续增量备份仍会继续重试原图。
-帖子内容会写入每个备份目录自己的 `archive.sqlite3`。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write_json` 会额外写入 `json/page_*.json`。生成 HTML、楼层映射和统计只读取 `archive.sqlite3`。
+帖子内容会写入每个备份目录自己的 `archive.sqlite3`。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write-json` 会额外写入 `json/page_*.json`。生成 HTML、楼层映射和统计只读取 `archive.sqlite3`。
 
 补充本地缺失内容和远端新增内容：
 
@@ -122,21 +122,25 @@ pixi run python main.py backup sub --name 帖子名
 pixi run python main.py backup all --tid 12345678
 pixi run python main.py backup all --tid 12345678 --aid 987654
 pixi run python main.py backup sub --tid 12345678 --aid 987654
-pixi run python main.py backup sub --tid 12345678 --aid 987654 --write_json
+pixi run python main.py backup sub --tid 12345678 --aid 987654 --write-json
 ```
 
 批量增量备份 `thread_configs.json` 中的所有帖子：
 
 ```powershell
-pixi run python main.py backup configs
-pixi run python main.py backup configs --workers 4 --api_concurrency 4 --image_concurrency 50
-pixi run python main.py backup configs --write_json
+pixi run python main.py backup sub --all-threads
+pixi run python main.py backup sub --all-threads --workers 4 --api-concurrency 4 --image-concurrency 50
+pixi run python main.py backup sub --all-threads --write-json
 ```
+
+`backup configs` 暂时保留为兼容入口，等价于 `backup sub --all-threads`。
+需要批量完整刷新时，可运行 `backup all --all-threads`。
 
 已有只看作者备份缺少楼层映射时，可以单独生成映射：
 
 ```powershell
 pixi run python main.py backup floors --name 帖子名
+pixi run python main.py backup floors --all-threads
 ```
 
 楼层映射会增量刷新。缺失楼无法唯一确定原帖楼层时，`floor_map.json` 会记录 `candidate_original_lous` 候选列表。
@@ -178,10 +182,11 @@ pixi run python main.py image prune-links
 pixi run python main.py stats words --name 帖子名
 ```
 
-统计命令只读取本地 `archive.sqlite3`，不联网、不生成统计文件；旧 `json/page_*.json` 只会被 `backup migrate-store` 显式读取。默认会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子标记，并只纳入清洗后 `中文+中文标点数` 不低于 120 的正文楼层。阈值可以通过 `--min_body_chars` 调整：
+统计命令只读取本地 `archive.sqlite3`，不联网、不生成统计文件；旧 `json/page_*.json` 只会被 `backup migrate-store` 显式读取。默认会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子标记，并只纳入清洗后 `中文+中文标点数` 不低于 120 的正文楼层。阈值可以通过 `--min-body-chars` 调整：
 
 ```powershell
-pixi run python main.py stats words --name 帖子名 --min_body_chars 80
+pixi run python main.py stats words --name 帖子名 --min-body-chars 80
+pixi run python main.py stats words --all-threads
 ```
 
 ## 生成 PDF
@@ -192,16 +197,17 @@ pixi run python main.py stats words --name 帖子名 --min_body_chars 80
 pixi run python main.py backup pdf --name 帖子名
 ```
 
-默认每 200 楼生成一个 PDF，可以通过 `--lou_per_pdf` 修改：
+默认每 200 楼生成一个 PDF，可以通过 `--lou-per-pdf` 修改：
 
 ```powershell
-pixi run python main.py backup pdf --name 帖子名 --lou_per_pdf 100
+pixi run python main.py backup pdf --name 帖子名 --lou-per-pdf 100
 ```
 
-可以通过 `--pdf_workers` 指定同时运行的 PDF 生成任务数：
+可以通过 `--pdf-workers` 指定同时运行的 PDF 生成任务数：
 
 ```powershell
-pixi run python main.py backup pdf --name 帖子名 --pdf_workers 2
+pixi run python main.py backup pdf --name 帖子名 --pdf-workers 2
+pixi run python main.py backup pdf --all-threads
 ```
 
 PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会使用 pixi 环境中的命令。
@@ -212,7 +218,7 @@ PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会�
 
 默认输出到 `output/<tid>_<aid|all>/`：
 
-- `json/`：加 `--write_json` 时输出的接口最近响应分页数据
+- `json/`：加 `--write-json` 时输出的接口最近响应分页数据
 - `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照和帖子版本
 - `html_modified/`：替换为本地 `images_unique` 图片路径后的 HTML
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件

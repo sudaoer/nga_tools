@@ -9,7 +9,7 @@ version = "0.1.0"
 typecheck = "pyright -p pyrightconfig.strict.json"
 test = "pytest -q"
 main = "python main.py"
-ankebak = "python main.py forum sync && python main.py backup configs"
+ankebak = "python main.py forum sync && python main.py backup sub --all-threads"
 
 [dependencies]
 python = ">=3.14.4,<3.15"

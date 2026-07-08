@@ -72,13 +72,13 @@ ARG_DEFS: dict[str, ArgDef] = {
         "help": "帖子描述（可选）",
     },
     "lou_per_pdf": {
-        "flags": ("--lou_per_pdf",),
+        "flags": ("--lou-per-pdf", "--lou_per_pdf"),
         "type": int,
         "metavar": "N",
         "help": "每个PDF包含的楼层数（仅pdf命令有效）",
     },
     "pdf_workers": {
-        "flags": ("--pdf_workers",),
+        "flags": ("--pdf-workers", "--pdf_workers"),
         "type": int,
         "metavar": "N",
         "help": "生成PDF时并行运行weasyprint的worker数量（仅pdf命令有效）",
@@ -87,22 +87,22 @@ ARG_DEFS: dict[str, ArgDef] = {
         "flags": ("--workers",),
         "type": int,
         "metavar": "N",
-        "help": "批量备份帖子时的并行worker数量",
+        "help": "批量处理帖子时的并行worker数量",
     },
     "api_concurrency": {
-        "flags": ("--api_concurrency",),
+        "flags": ("--api-concurrency", "--api_concurrency"),
         "type": int,
         "metavar": "N",
         "help": "NGA API请求的全局并发上限",
     },
     "image_concurrency": {
-        "flags": ("--image_concurrency",),
+        "flags": ("--image-concurrency", "--image_concurrency"),
         "type": int,
         "metavar": "N",
         "help": "图片下载的全局并发上限",
     },
     "min_body_chars": {
-        "flags": ("--min_body_chars",),
+        "flags": ("--min-body-chars", "--min_body_chars"),
         "type": int,
         "metavar": "N",
         "help": "正文楼层判定阈值（中文+中文标点数）",
@@ -114,13 +114,13 @@ ARG_DEFS: dict[str, ArgDef] = {
         "help": "扫描版面页数",
     },
     "watch_config": {
-        "flags": ("--watch_config",),
+        "flags": ("--watch-config", "--watch_config"),
         "type": str,
         "metavar": "PATH",
         "help": "版面监控规则JSON路径",
     },
     "full_postdate": {
-        "flags": ("--full_postdate",),
+        "flags": ("--full-postdate", "--full_postdate"),
         "action": "store_true",
         "help": "按主题发布时间倒序扫描版面主题并写入数据库",
     },
@@ -130,13 +130,13 @@ ARG_DEFS: dict[str, ArgDef] = {
         "help": "刷新已有数据库数据，不因已有tid提前停止",
     },
     "page_delay_seconds": {
-        "flags": ("--page_delay_seconds",),
+        "flags": ("--page-delay-seconds", "--page_delay_seconds"),
         "type": int,
         "metavar": "N",
         "help": "发布时间全版面扫描每页请求后的等待秒数",
     },
     "start_page": {
-        "flags": ("--start_page",),
+        "flags": ("--start-page", "--start_page"),
         "type": int,
         "metavar": "N",
         "help": "发布时间全版面扫描起始页",
@@ -146,8 +146,13 @@ ARG_DEFS: dict[str, ArgDef] = {
         "action": "store_true",
         "help": "处理所有已有备份目录",
     },
+    "all_threads": {
+        "flags": ("--all-threads", "--all_threads"),
+        "action": "store_true",
+        "help": "处理thread_configs.json中的所有帖子配置",
+    },
     "write_json": {
-        "flags": ("--write_json",),
+        "flags": ("--write-json", "--write_json"),
         "action": "store_true",
         "help": "备份时额外输出json/page_*.json最近响应缓存",
     },
@@ -161,7 +166,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "summary": "列出版面主题",
             "usage": (
                 f"{PROGRAM_USAGE} forum list --fid FID [--pages N] "
-                "[--api_concurrency N]"
+                "[--api-concurrency N]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} forum list --fid 784",
@@ -180,23 +185,23 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "handler": handle_forum_sync,
             "summary": "根据版面监控规则保存匹配主题配置",
             "usage": (
-                f"{PROGRAM_USAGE} forum sync [--watch_config PATH] "
-                "[--api_concurrency N]\n"
-                f"       {PROGRAM_USAGE} forum sync --full_postdate "
-                "[--fid FID] [--refresh [--start_page N]] "
-                "[--page_delay_seconds N] [--api_concurrency N]"
+                f"{PROGRAM_USAGE} forum sync [--watch-config PATH] "
+                "[--api-concurrency N]\n"
+                f"       {PROGRAM_USAGE} forum sync --full-postdate "
+                "[--fid FID] [--refresh [--start-page N]] "
+                "[--page-delay-seconds N] [--api-concurrency N]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} forum sync",
-                f"{PROGRAM_USAGE} forum sync --watch_config forum_watch_configs.json",
-                f"{PROGRAM_USAGE} forum sync --full_postdate --fid 784",
+                f"{PROGRAM_USAGE} forum sync --watch-config forum_watch_configs.json",
+                f"{PROGRAM_USAGE} forum sync --full-postdate --fid 784",
                 (
-                    f"{PROGRAM_USAGE} forum sync --full_postdate --fid 784 "
-                    "--page_delay_seconds 5"
+                    f"{PROGRAM_USAGE} forum sync --full-postdate --fid 784 "
+                    "--page-delay-seconds 5"
                 ),
                 (
-                    f"{PROGRAM_USAGE} forum sync --full_postdate --refresh --fid 784 "
-                    "--start_page 544"
+                    f"{PROGRAM_USAGE} forum sync --full-postdate --refresh --fid 784 "
+                    "--start-page 544"
                 ),
             ],
             "notes": [
@@ -206,7 +211,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "此命令只保存配置，不自动下载帖子内容。",
                 "pages只限制远端默认排序抓取页数，筛查从主题数据库读取。",
                 "抓到的版面主题列表会写入output_dir/forum_threads.sqlite3。",
-                "--full_postdate默认遇到数据库已有tid后停止；--refresh会刷新到远端末页。",
+                "--full-postdate默认遇到数据库已有tid后停止；--refresh会刷新到远端末页。",
             ],
             "args": [
                 "watch_config",
@@ -226,66 +231,78 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "handler": backup_all,
             "summary": "抓取帖子内容并下载图片",
             "usage": (
-                f"{PROGRAM_USAGE} backup all (--name NAME | --tid TID) [--aid AID] "
-                "[--api_concurrency N] [--image_concurrency N] [--write_json]"
+                f"{PROGRAM_USAGE} backup all "
+                "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
+                "[--workers N] [--api-concurrency N] [--image-concurrency N] "
+                "[--write-json]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} backup all --name 帖子名",
                 f"{PROGRAM_USAGE} backup all --tid 12345678 --aid 987654",
+                f"{PROGRAM_USAGE} backup all --all-threads",
             ],
             "args": [
                 "name",
                 "tid",
                 "aid",
+                "all_threads",
+                "workers",
                 "api_concurrency",
                 "image_concurrency",
                 "write_json",
             ],
-            "required_any": ["name", "tid"],
-            "positive": ["api_concurrency", "image_concurrency"],
+            "required_any": ["name", "tid", "all_threads"],
+            "positive": ["workers", "api_concurrency", "image_concurrency"],
         },
         "sub": {
             "handler": backup_sub,
             "summary": "增量补充本地缺失内容和远端新增内容",
             "usage": (
-                f"{PROGRAM_USAGE} backup sub (--name NAME | --tid TID) [--aid AID] "
-                "[--api_concurrency N] [--image_concurrency N] [--write_json]"
+                f"{PROGRAM_USAGE} backup sub "
+                "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
+                "[--workers N] [--api-concurrency N] [--image-concurrency N] "
+                "[--write-json]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} backup sub --name 帖子名",
                 f"{PROGRAM_USAGE} backup sub --tid 12345678 --aid 987654",
+                f"{PROGRAM_USAGE} backup sub --all-threads",
             ],
             "notes": [
                 "此命令会补抓缺失页，并刷新本地尾页到远端最后一页。",
-                "默认只写archive.sqlite3；加--write_json才输出json/page_*.json。",
+                "默认只写archive.sqlite3；加--write-json才输出json/page_*.json。",
                 "随后会补齐缺失或新增的html_modified和图片文件。",
                 "author-only备份会增量刷新floor_map.json。",
+                "--all-threads会按thread_configs.json中的ThreadList批量执行增量备份。",
             ],
             "args": [
                 "name",
                 "tid",
                 "aid",
+                "all_threads",
+                "workers",
                 "api_concurrency",
                 "image_concurrency",
                 "write_json",
             ],
-            "required_any": ["name", "tid"],
-            "positive": ["api_concurrency", "image_concurrency"],
+            "required_any": ["name", "tid", "all_threads"],
+            "positive": ["workers", "api_concurrency", "image_concurrency"],
         },
         "configs": {
             "handler": backup_configs,
-            "summary": "增量备份thread_configs.json中的所有帖子",
+            "summary": "兼容入口：增量备份thread_configs.json中的所有帖子",
             "usage": (
                 f"{PROGRAM_USAGE} backup configs [--workers N] "
-                "[--api_concurrency N] [--image_concurrency N] [--write_json]"
+                "[--api-concurrency N] [--image-concurrency N] [--write-json]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} backup configs",
                 f"{PROGRAM_USAGE} backup configs --workers 4",
             ],
             "notes": [
+                "此命令是兼容入口，推荐使用 backup sub --all-threads。",
                 "此命令按thread_configs.json中的ThreadList批量执行增量备份。",
-                "默认只写archive.sqlite3；加--write_json才输出json/page_*.json。",
+                "默认只写archive.sqlite3；加--write-json才输出json/page_*.json。",
                 "不会修改thread_configs.json，也不会生成PDF。",
                 "单个帖子失败时会继续处理后续配置，最后以非零退出码报告失败。",
             ],
@@ -296,21 +313,23 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "handler": backup_floors,
             "summary": "根据已有备份生成只看作者楼层到原帖楼层的映射",
             "usage": (
-                f"{PROGRAM_USAGE} backup floors (--name NAME | --tid TID) [--aid AID] "
-                "[--api_concurrency N]"
+                f"{PROGRAM_USAGE} backup floors "
+                "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
+                "[--workers N] [--api-concurrency N]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} backup floors --name 帖子名",
                 f"{PROGRAM_USAGE} backup floors --tid 12345678 --aid 987654",
+                f"{PROGRAM_USAGE} backup floors --all-threads",
             ],
             "notes": [
                 "此命令会读取archive.sqlite3并联网扫描原帖，增量刷新floor_map.json。",
                 "author-only备份生成PDF前必须先有floor_map.json。",
                 "缺失楼无法唯一确定原楼层时，会在floor_map.json中记录候选原楼层。",
             ],
-            "args": ["name", "tid", "aid", "api_concurrency"],
-            "required_any": ["name", "tid"],
-            "positive": ["api_concurrency"],
+            "args": ["name", "tid", "aid", "all_threads", "workers", "api_concurrency"],
+            "required_any": ["name", "tid", "all_threads"],
+            "positive": ["workers", "api_concurrency"],
         },
         "migrate-store": {
             "handler": backup_migrate_store,
@@ -336,24 +355,35 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "handler": pdf_generate,
             "summary": "根据已备份的HTML和图片生成PDF",
             "usage": (
-                f"{PROGRAM_USAGE} backup pdf (--name NAME | --tid TID) [--aid AID] "
-                "[--lou_per_pdf N] [--pdf_workers N]"
+                f"{PROGRAM_USAGE} backup pdf "
+                "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
+                "[--workers N] [--lou-per-pdf N] [--pdf-workers N]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} backup pdf --name 帖子名",
-                f"{PROGRAM_USAGE} backup pdf --name 帖子名 --lou_per_pdf 100 --pdf_workers 2",
+                f"{PROGRAM_USAGE} backup pdf --name 帖子名 --lou-per-pdf 100 --pdf-workers 2",
+                f"{PROGRAM_USAGE} backup pdf --all-threads",
             ],
             "notes": [
                 "author-only备份会读取floor_map.json，同时显示只看作者楼层和原帖楼层。",
                 f"如缺少floor_map.json，先运行 {PROGRAM_USAGE} backup floors --name 帖子名。",
+                "--all-threads会按thread_configs.json中的ThreadList批量生成PDF。",
                 "Overlay：创建 <output_dir>/<tid>_<aid>/overlay/post_<楼层>.html "
                 "可在生成PDF时覆盖对应楼层。",
                 "Overlay只影响PDF生成，不会改写json或html_modified备份内容。",
             ],
-            "args": ["name", "tid", "aid", "lou_per_pdf", "pdf_workers"],
-            "required_any": ["name", "tid"],
+            "args": [
+                "name",
+                "tid",
+                "aid",
+                "all_threads",
+                "workers",
+                "lou_per_pdf",
+                "pdf_workers",
+            ],
+            "required_any": ["name", "tid", "all_threads"],
             "defaults": {"lou_per_pdf": 200},
-            "positive": ["lou_per_pdf", "pdf_workers"],
+            "positive": ["workers", "lou_per_pdf", "pdf_workers"],
         },
     },
     "image": {
@@ -400,23 +430,25 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "handler": stats_words,
             "summary": "统计已有备份的正文中文字数",
             "usage": (
-                f"{PROGRAM_USAGE} stats words (--name NAME | --tid TID) [--aid AID] "
-                "[--min_body_chars N]"
+                f"{PROGRAM_USAGE} stats words "
+                "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
+                "[--workers N] [--min-body-chars N]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} stats words --name 帖子名",
                 f"{PROGRAM_USAGE} stats words --tid 12345678 --aid 987654",
-                f"{PROGRAM_USAGE} stats words --name 帖子名 --min_body_chars 80",
+                f"{PROGRAM_USAGE} stats words --name 帖子名 --min-body-chars 80",
+                f"{PROGRAM_USAGE} stats words --all-threads",
             ],
             "notes": [
                 "此命令只读取本地archive.sqlite3，不联网、不生成统计文件。",
                 "会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子标记。",
                 "默认只纳入清洗后中文+中文标点数达到120的正文楼层。",
             ],
-            "args": ["name", "tid", "aid", "min_body_chars"],
-            "required_any": ["name", "tid"],
+            "args": ["name", "tid", "aid", "all_threads", "workers", "min_body_chars"],
+            "required_any": ["name", "tid", "all_threads"],
             "defaults": {"min_body_chars": 120},
-            "positive": ["min_body_chars"],
+            "positive": ["workers", "min_body_chars"],
         },
     },
 }

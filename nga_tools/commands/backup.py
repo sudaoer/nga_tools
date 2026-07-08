@@ -1,24 +1,21 @@
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Protocol
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.archive import backup_thread, backup_thread_sub
 from nga_tools.backup.floor_map import generate_floor_map_from_backup
 from nga_tools.config import get_config
 from nga_tools.console import (
-    BackupConfigsProgressDisplay,
-    get_reporter,
     report_info,
-    report_progress,
     report_warning,
     use_warning_log,
-    use_reporter,
 )
 from nga_tools.backup.pdf import generate_pdf
 from nga_tools.commands.network import configure_network_limits_from_args
 from nga_tools.commands.resolve import resolve_command_thread_target
+from nga_tools.commands.thread_batch import run_thread_config_batch
 from nga_tools.commands.types import (
     CommandArgs,
     optional_bool,
@@ -27,15 +24,61 @@ from nga_tools.commands.types import (
 )
 from nga_tools.core.paths import warning_log_path
 from nga_tools.forum.thread_configs import (
-    NGAThreadConfigs,
     ThreadConfig,
     thread_config_aid,
-    thread_config_name,
     thread_config_tid,
 )
 
 
+class BackupFetchFunc(Protocol):
+    def __call__(
+        self,
+        tid: int,
+        aid: int | None,
+        *,
+        write_json: bool,
+    ) -> None:
+        raise NotImplementedError
+
+
+def _batch_worker_count(args: CommandArgs, default_worker_count: int) -> int:
+    worker_arg = optional_int(args, "workers")
+    return default_worker_count if worker_arg is None else worker_arg
+
+
+def _run_backup_fetch_batch(
+    args: CommandArgs,
+    *,
+    backup_func: BackupFetchFunc,
+    progress_text: str,
+) -> None:
+    app_config = configure_network_limits_from_args(args)
+    write_json = optional_bool(args, "write_json")
+    worker_count = _batch_worker_count(args, app_config.backup_configs_workers)
+
+    def action(thread_config: ThreadConfig) -> None:
+        tid = thread_config_tid(thread_config)
+        aid = thread_config_aid(thread_config)
+        backup_func(tid, aid, write_json=write_json)
+
+    run_thread_config_batch(
+        action=action,
+        progress_text=progress_text,
+        failure_text="备份失败",
+        summary_name="备份",
+        worker_count=worker_count,
+    )
+
+
 def backup_all(args: CommandArgs) -> None:
+    if optional_bool(args, "all_threads"):
+        _run_backup_fetch_batch(
+            args,
+            backup_func=backup_thread,
+            progress_text="正在完整备份",
+        )
+        return
+
     configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
     write_json = optional_bool(args, "write_json")
@@ -44,6 +87,14 @@ def backup_all(args: CommandArgs) -> None:
 
 
 def backup_sub(args: CommandArgs) -> None:
+    if optional_bool(args, "all_threads"):
+        _run_backup_fetch_batch(
+            args,
+            backup_func=backup_thread_sub,
+            progress_text="正在增量备份",
+        )
+        return
+
     configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
     write_json = optional_bool(args, "write_json")
@@ -51,168 +102,34 @@ def backup_sub(args: CommandArgs) -> None:
         backup_thread_sub(thread_tid, thread_aid, write_json=write_json)
 
 
-def _thread_config_label(thread_config: ThreadConfig) -> str:
-    tid = thread_config_tid(thread_config)
-    aid = thread_config_aid(thread_config)
-    return (
-        f"{thread_config_name(thread_config)} "
-        f"(tid: {tid}, aid: {aid})"
-    )
-
-
-def _backup_single_thread_config(
-    thread_config: ThreadConfig,
-    *,
-    write_json: bool,
-) -> None:
-    backup_thread_sub(
-        thread_config_tid(thread_config),
-        thread_config_aid(thread_config),
-        write_json=write_json,
-    )
-
-
-def _backup_thread_config_with_progress(
-    *,
-    index: int,
-    total: int,
-    thread_config: ThreadConfig,
-    progress: BackupConfigsProgressDisplay,
-    write_json: bool,
-) -> None:
-    thread_label = _thread_config_label(thread_config)
-    task_reporter = progress.start_thread(
-        index=index,
-        total=total,
-        label=thread_label,
-    )
-    log_path = warning_log_path(
-        thread_config_tid(thread_config),
-        thread_config_aid(thread_config),
-    )
-    with use_reporter(task_reporter), use_warning_log(log_path):
-        report_progress("正在增量备份")
-        try:
-            _backup_single_thread_config(thread_config, write_json=write_json)
-        except Exception as error:
-            report_warning(f"备份失败：{error}")
-            progress.finish_thread(task_reporter, status="失败")
-            raise
-        progress.finish_thread(task_reporter, status="完成")
-
-
-def _backup_configs_sequential(
-    thread_configs: list[ThreadConfig],
-    progress: BackupConfigsProgressDisplay,
-    *,
-    write_json: bool,
-) -> list[tuple[ThreadConfig, Exception]]:
-    failures: list[tuple[ThreadConfig, Exception]] = []
-    total = len(thread_configs)
-    for index, thread_config in enumerate(thread_configs, start=1):
-        try:
-            _backup_thread_config_with_progress(
-                index=index,
-                total=total,
-                thread_config=thread_config,
-                progress=progress,
-                write_json=write_json,
-            )
-        except Exception as error:
-            failures.append((thread_config, error))
-            continue
-
-    return failures
-
-
-def _backup_configs_parallel(
-    thread_configs: list[ThreadConfig],
-    worker_count: int,
-    progress: BackupConfigsProgressDisplay,
-    *,
-    write_json: bool,
-) -> list[tuple[ThreadConfig, Exception]]:
-    failures: list[tuple[int, ThreadConfig, Exception]] = []
-    total = len(thread_configs)
-    with ThreadPoolExecutor(max_workers=min(worker_count, total)) as executor:
-        future_context: dict[Future[None], tuple[int, ThreadConfig]] = {}
-        for index, thread_config in enumerate(thread_configs, start=1):
-            future = executor.submit(
-                _backup_thread_config_with_progress,
-                index=index,
-                total=total,
-                thread_config=thread_config,
-                progress=progress,
-                write_json=write_json,
-            )
-            future_context[future] = (index, thread_config)
-
-        for future in as_completed(future_context):
-            index, thread_config = future_context[future]
-            try:
-                future.result()
-            except Exception as error:
-                failures.append((index, thread_config, error))
-                continue
-
-    ordered_failures = [
-        (thread_config, error)
-        for _, thread_config, error in sorted(failures, key=lambda item: item[0])
-    ]
-    return ordered_failures
-
-
-def _print_backup_configs_summary(
-    total: int,
-    failures: list[tuple[ThreadConfig, Exception]],
-) -> None:
-    success_count = total - len(failures)
-    report_info(f"批量备份完成：成功{success_count}个，失败{len(failures)}个。")
-    if failures:
-        for thread_config, error in failures:
-            report_info(f"失败：{_thread_config_label(thread_config)}：{error}")
-        raise SystemExit(1)
-
-
 def backup_configs(args: CommandArgs) -> None:
-    app_config = configure_network_limits_from_args(args)
-    write_json = optional_bool(args, "write_json")
-
-    thread_configs = NGAThreadConfigs().get_thread_configs()
-    if not thread_configs:
-        report_info("没有找到任何帖子配置。")
-        return
-
-    worker_arg = optional_int(args, "workers")
-    worker_count = (
-        app_config.backup_configs_workers if worker_arg is None else worker_arg
+    _run_backup_fetch_batch(
+        args,
+        backup_func=backup_thread_sub,
+        progress_text="正在增量备份",
     )
-    if worker_count <= 0:
-        raise ValueError("workers必须大于0。")
-
-    with BackupConfigsProgressDisplay(
-        len(thread_configs),
-        console=get_reporter().console,
-    ) as progress:
-        if worker_count == 1 or len(thread_configs) == 1:
-            failures = _backup_configs_sequential(
-                thread_configs,
-                progress,
-                write_json=write_json,
-            )
-        else:
-            failures = _backup_configs_parallel(
-                thread_configs,
-                worker_count,
-                progress,
-                write_json=write_json,
-            )
-
-    _print_backup_configs_summary(len(thread_configs), failures)
 
 
 def backup_floors(args: CommandArgs) -> None:
-    configure_network_limits_from_args(args)
+    app_config = configure_network_limits_from_args(args)
+    if optional_bool(args, "all_threads"):
+        worker_count = _batch_worker_count(args, app_config.backup_configs_workers)
+
+        def action(thread_config: ThreadConfig) -> None:
+            generate_floor_map_from_backup(
+                thread_config_tid(thread_config),
+                thread_config_aid(thread_config),
+            )
+
+        run_thread_config_batch(
+            action=action,
+            progress_text="正在生成楼层映射",
+            failure_text="楼层映射失败",
+            summary_name="楼层映射",
+            worker_count=worker_count,
+        )
+        return
+
     thread_tid, thread_aid = resolve_command_thread_target(args)
     with use_warning_log(warning_log_path(thread_tid, thread_aid)):
         generate_floor_map_from_backup(thread_tid, thread_aid)
@@ -270,6 +187,31 @@ def backup_migrate_store(args: CommandArgs) -> None:
 
 
 def pdf_generate(args: CommandArgs) -> None:
+    if optional_bool(args, "all_threads"):
+        worker_count = _batch_worker_count(
+            args,
+            get_config().backup_configs_workers,
+        )
+        lou_per_pdf = required_int(args, "lou_per_pdf")
+        pdf_workers = optional_int(args, "pdf_workers")
+
+        def action(thread_config: ThreadConfig) -> None:
+            generate_pdf(
+                tid=thread_config_tid(thread_config),
+                aid=thread_config_aid(thread_config),
+                lou_per_pdf=lou_per_pdf,
+                pdf_workers=pdf_workers,
+            )
+
+        run_thread_config_batch(
+            action=action,
+            progress_text="正在生成PDF",
+            failure_text="PDF生成失败",
+            summary_name="PDF生成",
+            worker_count=worker_count,
+        )
+        return
+
     thread_tid, thread_aid = resolve_command_thread_target(args)
     with use_warning_log(warning_log_path(thread_tid, thread_aid)):
         generate_pdf(

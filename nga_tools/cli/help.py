@@ -8,6 +8,10 @@ def _arg_flags(arg_name: str) -> str:
     return ", ".join(arg_config["flags"])
 
 
+def _arg_flag(arg_name: str) -> str:
+    return ARG_DEFS[arg_name]["flags"][0]
+
+
 def _format_arg_help(arg_name: str, action_config: ActionConfig) -> str:
     arg_config = ARG_DEFS[arg_name]
     flags = _arg_flags(arg_name)
@@ -31,10 +35,12 @@ def _required_help(action_config: ActionConfig) -> list[str]:
     required_args = action_config.get("required", [])
     required_any_args = action_config.get("required_any", [])
     if required_args:
-        required = ", ".join(f"--{arg_name}" for arg_name in required_args)
+        required = ", ".join(_arg_flag(arg_name) for arg_name in required_args)
         lines.append(f"  必须提供：{required}")
     if required_any_args:
-        required_any = " 或 ".join(f"--{arg_name}" for arg_name in required_any_args)
+        required_any = " 或 ".join(
+            _arg_flag(arg_name) for arg_name in required_any_args
+        )
         lines.append(f"  必须提供其中之一：{required_any}")
     if not lines:
         lines.append("  无")
@@ -81,8 +87,8 @@ def format_global_help() -> str:
             f"  {PROGRAM_USAGE} forum list --fid 784",
             f"  {PROGRAM_USAGE} forum sync",
             f"  {PROGRAM_USAGE} backup all --name 帖子名",
-            f"  {PROGRAM_USAGE} backup configs",
-            f"  {PROGRAM_USAGE} backup pdf --name 帖子名 --pdf_workers 2",
+            f"  {PROGRAM_USAGE} backup sub --all-threads",
+            f"  {PROGRAM_USAGE} backup pdf --name 帖子名 --pdf-workers 2",
             f"  {PROGRAM_USAGE} image migrate",
             f"  {PROGRAM_USAGE} stats words --name 帖子名",
         ]
@@ -137,4 +143,3 @@ def format_action_help(command: str, action: str) -> str:
     lines.extend(_format_examples(action_config.get("examples", [])))
     lines.extend(_format_notes(action_config.get("notes", [])))
     return "\n".join(lines)
-

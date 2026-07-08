@@ -21,7 +21,9 @@ from nga_tools.commands.backup import (
     backup_sub,
     pdf_generate,
 )
+from nga_tools.commands.stats import stats_words
 from nga_tools.forum.thread_configs import ThreadConfig
+from nga_tools.stats.word_count import WordCountSummary
 
 
 def _thread_config(
@@ -64,6 +66,87 @@ class BackupConfigsCliTest:
     @pytest.mark.parametrize(
         "argv",
         [
+            ["backup", "all", "--all-threads"],
+            ["backup", "sub", "--all-threads"],
+            ["backup", "floors", "--all-threads"],
+            ["backup", "pdf", "--all-threads"],
+            ["stats", "words", "--all-threads"],
+        ],
+    )
+    def test_all_threads_parses_for_batch_thread_commands(
+        self,
+        argv: list[str],
+    ) -> None:
+        args = args_parse(argv)
+
+        assert args['all_threads'] is True
+
+    def test_all_threads_accepts_underscore_compat_alias(self) -> None:
+        args = args_parse(["backup", "sub", "--all_threads"])
+
+        assert args['all_threads'] is True
+
+    def test_hyphenated_fetch_options_parse_to_existing_internal_names(self) -> None:
+        args = args_parse(
+            [
+                "backup",
+                "sub",
+                "--all-threads",
+                "--api-concurrency",
+                "3",
+                "--image-concurrency",
+                "20",
+                "--write-json",
+            ]
+        )
+
+        assert args['api_concurrency'] == 3
+        assert args['image_concurrency'] == 20
+        assert args['write_json'] is True
+
+    def test_hyphenated_pdf_and_stats_options_parse(self) -> None:
+        pdf_args = args_parse(
+            [
+                "backup",
+                "pdf",
+                "--all-threads",
+                "--lou-per-pdf",
+                "50",
+                "--pdf-workers",
+                "2",
+            ]
+        )
+        stats_args = args_parse(
+            ["stats", "words", "--all-threads", "--min-body-chars", "80"]
+        )
+
+        assert pdf_args['lou_per_pdf'] == 50
+        assert pdf_args['pdf_workers'] == 2
+        assert stats_args['min_body_chars'] == 80
+
+    def test_hyphenated_forum_full_postdate_options_parse(self) -> None:
+        args = args_parse(
+            [
+                "forum",
+                "sync",
+                "--full-postdate",
+                "--refresh",
+                "--fid",
+                "784",
+                "--start-page",
+                "544",
+                "--page-delay-seconds",
+                "5",
+            ]
+        )
+
+        assert args['full_postdate'] is True
+        assert args['start_page'] == 544
+        assert args['page_delay_seconds'] == 5
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
             ["backup", "all", "--tid", "123", "--write_json"],
             ["backup", "sub", "--tid", "123", "--write_json"],
             ["backup", "configs", "--write_json"],
@@ -92,6 +175,20 @@ class BackupConfigsCliTest:
         with patch("sys.stderr", new_callable=io.StringIO):
             with pytest.raises(SystemExit) as context:
                 args_parse(argv)
+
+        assert context.value.code == 2
+
+    def test_all_threads_rejects_single_thread_arguments(self) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(["backup", "sub", "--all-threads", "--tid", "123"])
+
+        assert context.value.code == 2
+
+    def test_all_threads_is_rejected_for_unsupported_commands(self) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(["image", "migrate", "--all-threads"])
 
         assert context.value.code == 2
 
@@ -296,7 +393,7 @@ class BackupWarningLogTest:
                 report_warning(f"warning {tid} {aid}")
 
             with (
-                patch("nga_tools.commands.backup.NGAThreadConfigs") as configs_cls,
+                patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
                 patch(
                     "nga_tools.commands.backup.backup_thread_sub",
                     side_effect=backup_side_effect,
@@ -358,6 +455,158 @@ class BackupWarningLogTest:
 
 
 class BackupConfigsHandlerTest:
+    def test_backup_sub_all_threads_uses_batch_sub_backup(self) -> None:
+        thread_configs = [
+            _thread_config(name="first", tid=101, aid=201),
+            _thread_config(name="second", tid=102, aid=None),
+        ]
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.commands.backup.backup_thread_sub") as backup_mock,
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(),
+            ),
+            _captured_reporter(),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+
+            backup_sub({"all_threads": True, "workers": 1})
+
+        assert backup_mock.call_args_list == [call(101, 201, write_json=False), call(102, None, write_json=False)]
+
+    def test_backup_all_all_threads_uses_batch_full_backup(self) -> None:
+        thread_configs = [
+            _thread_config(name="first", tid=101, aid=201),
+            _thread_config(name="second", tid=102, aid=None),
+        ]
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.commands.backup.backup_thread") as backup_mock,
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(),
+            ),
+            _captured_reporter(),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+
+            backup_all({"all_threads": True, "workers": 1, "write_json": True})
+
+        assert backup_mock.call_args_list == [call(101, 201, write_json=True), call(102, None, write_json=True)]
+
+    def test_backup_floors_all_threads_generates_each_floor_map(self) -> None:
+        thread_configs = [
+            _thread_config(name="first", tid=101, aid=201),
+            _thread_config(name="second", tid=102, aid=None),
+        ]
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch(
+                "nga_tools.commands.backup.generate_floor_map_from_backup",
+            ) as floor_map_mock,
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(),
+            ),
+            _captured_reporter(),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+
+            backup_floors({"all_threads": True, "workers": 1})
+
+        assert floor_map_mock.call_args_list == [call(101, 201), call(102, None)]
+
+    def test_backup_pdf_all_threads_generates_each_pdf(self) -> None:
+        thread_configs = [
+            _thread_config(name="first", tid=101, aid=201),
+            _thread_config(name="second", tid=102, aid=None),
+        ]
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.commands.backup.generate_pdf") as pdf_mock,
+            patch(
+                "nga_tools.commands.backup.get_config",
+                return_value=_backup_config_app_config(),
+            ),
+            _captured_reporter(),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+
+            pdf_generate(
+                {
+                    "all_threads": True,
+                    "workers": 1,
+                    "lou_per_pdf": 50,
+                    "pdf_workers": 2,
+                }
+            )
+
+        assert pdf_mock.call_args_list == [
+            call(tid=101, aid=201, lou_per_pdf=50, pdf_workers=2),
+            call(tid=102, aid=None, lou_per_pdf=50, pdf_workers=2),
+        ]
+
+    def test_stats_words_all_threads_counts_each_archive(self) -> None:
+        thread_configs = [
+            _thread_config(name="first", tid=101, aid=201),
+            _thread_config(name="second", tid=102, aid=None),
+        ]
+
+        def count_side_effect(
+            *,
+            tid: int,
+            aid: int | None,
+            min_body_chars: int,
+        ) -> WordCountSummary:
+            assert min_body_chars == 80
+            return WordCountSummary(
+                tid=tid,
+                aid=aid,
+                archive_path=Path(f"/tmp/{tid}.sqlite3"),
+                page_count=1,
+                total_posts=10,
+                body_posts=2,
+                excluded_posts=8,
+                min_body_chars=min_body_chars,
+                chinese_chars=100,
+                chinese_with_punctuation=120,
+            )
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch(
+                "nga_tools.commands.stats.count_backup_words",
+                side_effect=count_side_effect,
+            ) as count_mock,
+            patch(
+                "nga_tools.commands.stats.get_config",
+                return_value=_backup_config_app_config(),
+            ),
+            _captured_reporter() as output,
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+
+            stats_words(
+                {
+                    "all_threads": True,
+                    "workers": 1,
+                    "min_body_chars": 80,
+                }
+            )
+
+        assert count_mock.call_args_list == [
+            call(tid=101, aid=201, min_body_chars=80),
+            call(tid=102, aid=None, min_body_chars=80),
+        ]
+        output_text = output.getvalue()
+        assert "first (tid: 101, aid: 201)：快照页数1" in output_text
+        assert "批量统计完成：成功2个，失败0个。" in output_text
+
     def test_runs_sub_backup_for_each_thread_config_in_order_with_one_worker(
         self,
     ) -> None:
@@ -367,7 +616,7 @@ class BackupConfigsHandlerTest:
         ]
 
         with (
-            patch("nga_tools.commands.backup.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
             patch("nga_tools.commands.backup.backup_thread_sub") as backup_mock,
             patch(
                 "nga_tools.commands.backup.configure_network_limits_from_args",
@@ -388,7 +637,7 @@ class BackupConfigsHandlerTest:
         ]
 
         with (
-            patch("nga_tools.commands.backup.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
             patch("nga_tools.commands.backup.backup_thread_sub") as backup_mock,
             patch(
                 "nga_tools.commands.backup.configure_network_limits_from_args",
@@ -404,7 +653,7 @@ class BackupConfigsHandlerTest:
 
     def test_empty_thread_config_list_does_not_run_backup(self) -> None:
         with (
-            patch("nga_tools.commands.backup.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
             patch("nga_tools.commands.backup.backup_thread_sub") as backup_mock,
             patch(
                 "nga_tools.commands.backup.configure_network_limits_from_args",
@@ -427,7 +676,7 @@ class BackupConfigsHandlerTest:
         ]
 
         with (
-            patch("nga_tools.commands.backup.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
             patch("nga_tools.commands.backup.backup_thread_sub") as backup_mock,
             patch(
                 "nga_tools.commands.backup.configure_network_limits_from_args",
@@ -495,7 +744,7 @@ class BackupConfigsHandlerTest:
                 active_count -= 1
 
         with (
-            patch("nga_tools.commands.backup.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
             patch(
                 "nga_tools.commands.backup.backup_thread_sub",
                 side_effect=backup_side_effect,

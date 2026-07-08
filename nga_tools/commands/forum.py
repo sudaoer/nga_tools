@@ -76,7 +76,7 @@ def _handle_forum_sync_full_postdate(args: CommandArgs) -> None:
     start_page_arg = optional_int(args, "start_page")
     start_page = 1 if start_page_arg is None else start_page_arg
     if start_page_arg is not None and not refresh:
-        raise ValueError("--start_page仅支持与--full_postdate --refresh一起使用。")
+        raise ValueError("--start-page仅支持与--full-postdate --refresh一起使用。")
     forum_store = ForumThreadStore()
     progress_display = InlineProgress()
 
@@ -162,7 +162,7 @@ def handle_forum_sync(args: CommandArgs) -> None:
         or optional_int(args, "start_page") is not None
         or optional_bool(args, "refresh")
     ):
-        raise ValueError("--fid、--refresh和--start_page仅在--full_postdate模式下可用。")
+        raise ValueError("--fid、--refresh和--start-page仅在--full-postdate模式下可用。")
 
     watch_config_path = optional_str(args, "watch_config") or DEFAULT_WATCH_CONFIG_PATH
     watch_configs = load_forum_watch_configs(watch_config_path)
