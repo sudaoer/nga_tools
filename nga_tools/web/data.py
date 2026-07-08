@@ -21,8 +21,10 @@ from nga_tools.forum.thread_configs import (
     thread_config_name,
     thread_config_tid,
 )
+from nga_tools.web.html_sanitize import sanitize_post_html
 
 ThreadStatus = Literal["ready", "needs_migration", "missing_html", "invalid"]
+PostDate = int | str
 
 _THREAD_DIR_RE = re.compile(r"^(\d+)_(all|\d+)$")
 _POST_HTML_RE = re.compile(r"^post_(\d+)\.html$")
@@ -57,7 +59,7 @@ class PostItem(TypedDict):
     pid: Optional[int]
     authorName: Optional[str]
     authorUid: Optional[int]
-    postdate: Optional[int]
+    postdate: Optional[PostDate]
     floorLabel: str
     html: str
 
@@ -432,10 +434,16 @@ def _post_html_path(html_dir: Path, lou: int) -> Path:
     return html_dir / f"post_{lou}.html"
 
 
-def _optional_int_from_post(post: dict[str, object], key: str) -> Optional[int]:
+def _optional_postdate_from_post(
+    post: dict[str, object],
+    key: str,
+) -> Optional[PostDate]:
     value = post.get(key)
     if type(value) is int:
         return value
+    if isinstance(value, str):
+        stripped_value = value.strip()
+        return stripped_value if stripped_value else None
     return None
 
 
@@ -473,9 +481,11 @@ def _post_item_from_row(
         "pid": pid,
         "authorName": author_name,
         "authorUid": author_uid,
-        "postdate": _optional_int_from_post(post, "postdate"),
+        "postdate": _optional_postdate_from_post(post, "postdate"),
         "floorLabel": floor_labels.label(lou),
-        "html": rewrite_html_image_sources(html, html_dir, output_dir),
+        "html": sanitize_post_html(
+            rewrite_html_image_sources(html, html_dir, output_dir)
+        ),
     }
 
 

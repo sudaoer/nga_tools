@@ -65,13 +65,39 @@ function statusLabel(status: ThreadStatus): string {
   return labels[status]
 }
 
+function dateFromValue(value: string | number): Date | null {
+  if (typeof value === 'number') {
+    return new Date(value * 1000)
+  }
+  const normalizedValue = value.trim()
+  const match = normalizedValue.match(
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/,
+  )
+  if (match) {
+    const [, year, month, day, hour, minute, second] = match
+    return new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second || '0'),
+    )
+  }
+  const date = new Date(normalizedValue)
+  if (Number.isNaN(date.getTime())) {
+    return null
+  }
+  return date
+}
+
 function formatTime(value: string | number | null): string {
   if (value === null) {
     return '-'
   }
-  const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return '-'
+  const date = dateFromValue(value)
+  if (date === null) {
+    return typeof value === 'string' && value.trim() ? value : '-'
   }
   return date.toLocaleString()
 }

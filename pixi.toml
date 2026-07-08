@@ -32,6 +32,9 @@ font-ttf-noto-emoji = ">=2.34,<3"
 poppler = ">=26.7.0,<27"
 nodejs = ">=26.4.0,<27"
 pnpm = ">=11.10.0,<12"
+fastapi-core = ">=0.139.0,<0.140"
+uvicorn = ">=0.50.2,<0.51"
+nh3 = ">=0.3.6,<0.4"
 
 [pypi-dependencies]
 bbcode = ">=1.1.0, <2"

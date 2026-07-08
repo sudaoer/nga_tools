@@ -5,6 +5,8 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+from fastapi.testclient import TestClient
+
 from nga_tools.cli.parser import args_parse
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web.data import (
@@ -13,6 +15,7 @@ from nga_tools.web.data import (
     safe_output_file,
     scan_thread_summaries,
 )
+from nga_tools.web.server import create_app
 
 
 def _write_archive(
@@ -158,6 +161,53 @@ class WebViewerDataTest:
         assert result["items"][0]["floorLabel"] == "第1楼（原5楼）"
         assert 'src="/api/files/images_unique/abc.png"' in result["items"][0]["html"]
 
+    def test_reads_posts_sanitizes_untrusted_html(self, tmp_path: Path) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "hello image")])
+        image_dir = output_dir / "images_unique"
+        image_dir.mkdir(parents=True)
+        (image_dir / "abc.png").write_bytes(b"image")
+        html_dir = thread_dir / "html_modified"
+        html_dir.mkdir()
+        (html_dir / "post_1.html").write_text(
+            (
+                '<p onclick="alert(1)">hello</p>'
+                '<script>alert("xss")</script>'
+                '<svg><animate onbegin="alert(1)" /></svg>'
+                '<img src="../../images_unique/abc.png" onerror="alert(2)">'
+                '<a href="javascript:alert(3)" onclick="alert(4)">bad</a>'
+                '<span style="color:red;position:fixed">styled</span>'
+            ),
+            encoding="utf-8",
+        )
+
+        result = read_posts(output_dir, 101, "201", offset=0, limit=50)
+        html = result["items"][0]["html"]
+        lowered_html = html.lower()
+
+        assert 'src="/api/files/images_unique/abc.png"' in html
+        assert "onclick" not in lowered_html
+        assert "onerror" not in lowered_html
+        assert "<script" not in lowered_html
+        assert "<svg" not in lowered_html
+        assert "javascript:" not in lowered_html
+        assert "position" not in lowered_html
+
+    def test_reads_posts_preserves_string_postdate(self, tmp_path: Path) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        post = _post(1, "hello")
+        post["postdate"] = "2025-06-17 13:42"
+        _write_archive(thread_dir, [post])
+        html_dir = thread_dir / "html_modified"
+        html_dir.mkdir()
+        (html_dir / "post_1.html").write_text("<p>hello</p>", encoding="utf-8")
+
+        result = read_posts(output_dir, 101, "201", offset=0, limit=50)
+
+        assert result["items"][0]["postdate"] == "2025-06-17 13:42"
+
     def test_safe_output_file_rejects_paths_outside_output_dir(
         self,
         tmp_path: Path,
@@ -172,6 +222,60 @@ class WebViewerDataTest:
 
         assert safe_output_file(output_dir, "images_unique/abc.png") == allowed
         assert safe_output_file(output_dir, "../secret.txt") is None
+
+
+class WebServerTest:
+    def test_posts_route_returns_existing_response_shape(self, tmp_path: Path) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "hello"), _post(2, "world")])
+        html_dir = thread_dir / "html_modified"
+        html_dir.mkdir()
+        (html_dir / "post_1.html").write_text("<p>hello</p>", encoding="utf-8")
+        (html_dir / "post_2.html").write_text("<p>world</p>", encoding="utf-8")
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/api/threads/101/201/posts", params={"limit": "1"})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] == 2
+        assert payload["limit"] == 1
+        assert payload["items"][0]["lou"] == 1
+
+    def test_posts_route_reports_invalid_query_as_json_error(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "hello")])
+        html_dir = thread_dir / "html_modified"
+        html_dir.mkdir()
+        (html_dir / "post_1.html").write_text("<p>hello</p>", encoding="utf-8")
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/api/threads/101/201/posts", params={"limit": "0"})
+
+        assert response.status_code == 422
+        assert response.json() == {"error": "请求参数无效。"}
+
+    def test_static_app_reports_missing_build_as_json_error(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client = TestClient(
+            create_app(output_dir=tmp_path / "output", static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/")
+
+        assert response.status_code == 503
+        assert "缺少前端构建产物" in response.json()["error"]
 
 
 class WebCliTest:

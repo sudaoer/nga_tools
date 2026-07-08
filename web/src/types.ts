@@ -29,7 +29,7 @@ export interface PostItem {
   pid: number | null
   authorName: string | null
   authorUid: number | null
-  postdate: number | null
+  postdate: number | string | null
   floorLabel: string
   html: string
 }
