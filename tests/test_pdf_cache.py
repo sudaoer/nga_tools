@@ -1,22 +1,32 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image
+from rich.console import Console
 
 from nga_tools.backup import image_store
 from nga_tools.backup.floor_map import FloorLabels
-from nga_tools.backup.pdf import _read_pdf_html
+from nga_tools.backup.pdf import (
+    PdfRenderResult,
+    _read_pdf_html,
+    _report_weasyprint_output,
+    _run_weasyprint,
+    _split_weasyprint_output,
+)
 from nga_tools.backup.pdf_plan import (
     PDF_HASH_MANIFEST_FILENAME,
     PdfRenderPlan,
+    PdfRenderTask,
     build_render_tasks,
     write_pdf_hashes,
 )
+from nga_tools.console import ConsoleReporter, use_reporter, use_warning_log
 
 
 class PdfHashCacheTest:
@@ -163,6 +173,69 @@ class PdfHashCacheTest:
             assert (folder_pdf / 'manual.pdf').exists()
             assert (folder_pdf / 'notes.html').exists()
             assert (folder_pdf / 'part_draft_2_3.pdf').exists()
+
+
+class PdfWeasyPrintCaptureTest:
+    def test_split_weasyprint_output_filters_blank_lines(self) -> None:
+        assert _split_weasyprint_output(None) == ()
+        assert _split_weasyprint_output(
+            "\nWARNING: missing glyph\r\n  INFO: done  \n\n"
+        ) == ("WARNING: missing glyph", "INFO: done")
+
+    def test_run_weasyprint_captures_combined_output(self) -> None:
+        task = PdfRenderTask("/tmp/part_0_1.html", "/tmp/part_0_1.pdf")
+
+        with patch(
+            "nga_tools.backup.pdf.subprocess.run",
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout="WARNING: missing glyph\n\n  INFO: done  \n",
+            ),
+        ) as run:
+            result = _run_weasyprint(task)
+
+        run.assert_called_once_with(
+            ["weasyprint", task.html_path, task.output_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        assert result == PdfRenderResult(
+            task=task,
+            returncode=0,
+            output_lines=("WARNING: missing glyph", "INFO: done"),
+        )
+
+    def test_reports_weasyprint_output_through_warning_reporter(self) -> None:
+        output = io.StringIO()
+        console = Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=120,
+        )
+        result = PdfRenderResult(
+            task=PdfRenderTask("/tmp/part_0_1.html", "/tmp/part_0_1.pdf"),
+            returncode=0,
+            output_lines=("WARNING: missing glyph",),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / "warnings.log"
+            with (
+                use_reporter(ConsoleReporter(console)),
+                use_warning_log(log_path),
+            ):
+                _report_weasyprint_output([result])
+
+            assert log_path.read_text(
+                encoding="utf-8"
+            ) == "警告：WeasyPrint part_0_1.pdf: WARNING: missing glyph\n"
+
+        assert output.getvalue() == (
+            "警告：WeasyPrint part_0_1.pdf: WARNING: missing glyph\n"
+        )
 
 
 class PdfImageSourceTest:

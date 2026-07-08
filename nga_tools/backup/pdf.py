@@ -39,6 +39,13 @@ class PdfHtmlSource:
     source_dir: Path
 
 
+@dataclass(frozen=True)
+class PdfRenderResult:
+    task: PdfRenderTask
+    returncode: int
+    output_lines: tuple[str, ...]
+
+
 def _tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
     value = tag.get(attr_name)
     if isinstance(value, str):
@@ -203,12 +210,32 @@ def _replace_long_image_with_slices(
     img.replace_with(wrapper)
 
 
-def _run_weasyprint(task: PdfRenderTask) -> int:
+def _split_weasyprint_output(output: str | None) -> tuple[str, ...]:
+    if not output:
+        return ()
+    return tuple(line.strip() for line in output.splitlines() if line.strip())
+
+
+def _run_weasyprint(task: PdfRenderTask) -> PdfRenderResult:
     result = subprocess.run(
         ["weasyprint", task.html_path, task.output_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
         check=False,
     )
-    return result.returncode
+    return PdfRenderResult(
+        task=task,
+        returncode=result.returncode,
+        output_lines=_split_weasyprint_output(result.stdout),
+    )
+
+
+def _report_weasyprint_output(render_results: list[PdfRenderResult]) -> None:
+    for render_result in render_results:
+        pdf_name = Path(render_result.task.output_path).name
+        for line in render_result.output_lines:
+            report_warning(f"WeasyPrint {pdf_name}: {line}")
 
 
 def _image_path_for_pdf(image_src: str, source_dir: Path) -> Path:
@@ -353,11 +380,14 @@ def generate_pdf(
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=pdf_workers
         ) as executor:
-            exit_codes = list(executor.map(_run_weasyprint, render_tasks))
+            render_results = list(executor.map(_run_weasyprint, render_tasks))
     else:
-        exit_codes = []
+        render_results = []
 
-    failed_count = sum(exit_code != 0 for exit_code in exit_codes)
+    _report_weasyprint_output(render_results)
+    failed_count = sum(
+        render_result.returncode != 0 for render_result in render_results
+    )
     if failed_count:
         raise RuntimeError(f"{failed_count}个PDF生成任务失败。")
     _write_pdf_hashes(folder_pdf, render_plan.input_hashes)
