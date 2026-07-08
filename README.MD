@@ -206,9 +206,10 @@ pixi run python main.py web serve --port 18737
 pixi run python main.py web serve --host 0.0.0.0 --port 18736
 ```
 
-Web 查看器读取当前主线备份结构：每帖目录下的 `archive.sqlite3` 和
-`html_modified/post_*.html`。旧版只有 `json/page_*.json` 的目录会在页面中
-显示为“需迁移”，请先运行 `backup migrate-store`。
+Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页面请求时从原始
+帖子数据重新渲染 HTML；`html_modified/post_*.html` 仍是备份/PDF流程使用的
+产物。旧版只有 `json/page_*.json` 的目录会在页面中显示为“需迁移”，请先运行
+`backup migrate-store`。
 
 ## 生成 PDF
 

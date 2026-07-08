@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from nga_tools.config import get_config
 from nga_tools.console import report_info
+from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web.data import (
     PostsResult,
@@ -94,20 +95,24 @@ async def thread_posts(
     request: Request,
     tid: int,
     aid_key: str,
-    offset: Annotated[int, Query(ge=0)] = 0,
-    limit: Annotated[int, Query(gt=0, le=_MAX_POST_LIMIT)] = 50,
+    page: Annotated[int, Query(ge=1)] = 1,
+    offset: Annotated[Optional[int], Query(ge=0)] = None,
+    limit: Annotated[Optional[int], Query(gt=0, le=_MAX_POST_LIMIT)] = None,
     q: str = "",
     lou_from: Optional[int] = None,
     lou_to: Optional[int] = None,
 ) -> PostsResult:
     context = _context(request)
+    resolved_page = page
+    if offset is not None and page == 1:
+        resolved_page = offset // ORIGINAL_POSTS_PER_PAGE + 1
+    del limit
     try:
         return read_posts(
             context.output_dir,
             tid,
             aid_key,
-            offset=offset,
-            limit=limit,
+            page=resolved_page,
             query=q,
             lou_from=lou_from,
             lou_to=lou_to,

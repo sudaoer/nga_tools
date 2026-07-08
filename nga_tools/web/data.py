@@ -2,18 +2,30 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import re
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional, TypedDict, cast
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote
 
 from bs4 import BeautifulSoup, Tag
 
+from nga_tools import utils
+from nga_tools.backup import image_store
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
-from nga_tools.backup.floor_models import FloorLabels
+from nga_tools.backup.floor_models import (
+    MISSING_POST_HTML,
+    ORIGINAL_POSTS_PER_PAGE,
+    FloorLabels,
+)
+from nga_tools.backup.post_data import (
+    attachment_url_from_value,
+    make_image_src_resolver,
+    post_data_from_raw,
+)
 from nga_tools.forum.thread_configs import (
     NGAThreadConfigs,
     ThreadConfig,
@@ -22,12 +34,15 @@ from nga_tools.forum.thread_configs import (
     thread_config_tid,
 )
 from nga_tools.web.html_sanitize import sanitize_post_html
+from nga_tools.web.render import ImageSrcResolver, render_web_bbcode
 
 ThreadStatus = Literal["ready", "needs_migration", "missing_html", "invalid"]
+PostEmptyReason = Literal["missing", "filtered"]
 PostDate = int | str
 
 _THREAD_DIR_RE = re.compile(r"^(\d+)_(all|\d+)$")
 _POST_HTML_RE = re.compile(r"^post_(\d+)\.html$")
+_IMG_BBCODE_RE = re.compile(r"\[img\](.*?)\[/img\]", re.IGNORECASE | re.DOTALL)
 
 
 class ThreadSummary(TypedDict):
@@ -54,7 +69,7 @@ class ThreadSummary(TypedDict):
     hasWarnings: bool
 
 
-class PostItem(TypedDict):
+class PostSlot(TypedDict):
     lou: int
     pid: Optional[int]
     authorName: Optional[str]
@@ -62,13 +77,23 @@ class PostItem(TypedDict):
     postdate: Optional[PostDate]
     floorLabel: str
     html: str
+    emptyReason: Optional[PostEmptyReason]
 
 
 class PostsResult(TypedDict):
-    items: list[PostItem]
+    slots: list[PostSlot]
+    items: list[PostSlot]
     total: int
     offset: int
     limit: int
+    page: int
+    pageSize: int
+    pageStartLou: int
+    pageEndLou: int
+    totalPages: int
+    postCount: int
+    matchingPostCount: int
+    maxLou: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -234,11 +259,9 @@ def _thread_summary_for_folder(
     if db_path.is_file():
         try:
             stats = _read_archive_stats(db_path)
-            if has_html_modified:
-                status = "ready"
-            else:
-                status = "missing_html"
-                message = "缺少html_modified/post_*.html，请重新运行备份补齐本地HTML。"
+            status = "ready"
+            if not has_html_modified:
+                message = "未找到html_modified/post_*.html，Web将从原始备份数据渲染。"
         except sqlite3.Error as error:
             status = "invalid"
             message = f"archive.sqlite3无法读取：{error}"
@@ -389,49 +412,116 @@ def _safe_output_url(path: Path, output_dir: Path) -> Optional[str]:
     return "/api/files/" + quote(relative_path.as_posix(), safe="/")
 
 
-def _tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
-    value = tag.get(attr_name)
-    if isinstance(value, str):
-        return value
+def _read_image_mappings_for_urls(
+    output_dir: Path,
+    urls: set[str],
+) -> dict[str, str]:
+    normalized_urls = sorted(
+        {
+            normalized_url
+            for url in urls
+            if utils.NGA_img_link_verify(
+                normalized_url := image_store.normalize_nga_image_url(url)
+            )
+        }
+    )
+    if not normalized_urls:
+        return {}
+
+    db_path = output_dir / image_store.IMAGE_INDEX_FILENAME
+    if not db_path.is_file():
+        return {}
+
+    mappings: dict[str, str] = {}
+    try:
+        with closing(_connect_readonly(db_path)) as connection:
+            for start in range(0, len(normalized_urls), 900):
+                chunk = normalized_urls[start : start + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"""
+                    SELECT url, unique_rel_path
+                    FROM image_mappings
+                    WHERE url IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                for url, unique_rel_path in rows:
+                    if isinstance(url, str) and isinstance(unique_rel_path, str):
+                        mappings[url] = unique_rel_path
+    except sqlite3.Error:
+        return {}
+
+    return mappings
+
+
+def _output_image_url(
+    output_dir: Path,
+    image_mappings: dict[str, str],
+    image_url: str,
+) -> Optional[str]:
+    normalized_url = image_store.normalize_nga_image_url(image_url)
+    unique_rel_path = image_mappings.get(normalized_url)
+    if unique_rel_path is None:
+        return None
+    return _safe_output_url(output_dir / unique_rel_path, output_dir)
+
+
+def _raw_post_from_json(post_json: str) -> dict[str, object]:
+    raw_post: object = json.loads(post_json)
+    if isinstance(raw_post, dict):
+        return cast(dict[str, object], raw_post)
+    return {}
+
+
+def _post_content(raw_post: dict[str, object]) -> str:
+    content = raw_post.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def _attachment_urls(raw_post: dict[str, object]) -> set[str]:
+    urls: set[str] = set()
+    for match in _IMG_BBCODE_RE.finditer(_post_content(raw_post)):
+        url = attachment_url_from_value(match.group(1))
+        if url is not None:
+            urls.add(url)
+
+    try:
+        post_data = post_data_from_raw(raw_post)
+    except ValueError:
+        return urls
+
+    urls.update(attachment["url"] for attachment in post_data["image_attachments"])
+    return urls
+
+
+def _unresolved_image_src(_image_src: str) -> str | None:
     return None
 
 
-def _is_external_src(src: str) -> bool:
-    lowered = src.strip().lower()
-    return lowered.startswith(
-        ("http://", "https://", "//", "data:", "about:", "blob:")
-    )
-
-
-def rewrite_html_image_sources(
-    html: str,
-    html_dir: Path,
+def _image_src_resolver(
+    raw_post: dict[str, object],
     output_dir: Path,
-) -> str:
-    if "<img" not in html.lower():
-        return html
+    image_mappings: dict[str, str],
+) -> ImageSrcResolver:
+    attachment_resolver: ImageSrcResolver
+    try:
+        post_data = post_data_from_raw(raw_post)
+        attachment_resolver = make_image_src_resolver(post_data["image_attachments"])
+    except ValueError:
+        attachment_resolver = _unresolved_image_src
 
-    soup = BeautifulSoup(html, "html.parser")
-    images = cast(list[Tag], soup.find_all("img"))
-    for image in images:
-        src = _tag_attr_str(image, "src")
-        if src is None or _is_external_src(src):
-            continue
+    def resolve_image_src(image_src: str) -> str | None:
+        resolved_src = attachment_resolver(image_src)
+        candidate_src = image_src.strip() if resolved_src is None else resolved_src
+        normalized_src = image_store.normalize_nga_image_url(candidate_src)
+        if not utils.NGA_img_link_verify(normalized_src):
+            return resolved_src
 
-        parts = urlsplit(src)
-        if parts.scheme or parts.netloc or not parts.path or parts.path.startswith("/"):
-            continue
+        output_url = _output_image_url(output_dir, image_mappings, normalized_src)
+        return normalized_src if output_url is None else output_url
 
-        candidate = (html_dir / unquote(parts.path)).resolve()
-        output_url = _safe_output_url(candidate, output_dir)
-        if output_url is not None:
-            image["src"] = output_url
-
-    return str(soup)
-
-
-def _post_html_path(html_dir: Path, lou: int) -> Path:
-    return html_dir / f"post_{lou}.html"
+    return resolve_image_src
 
 
 def _optional_postdate_from_post(
@@ -459,22 +549,69 @@ def _post_author(post: dict[str, object]) -> tuple[Optional[str], Optional[int]]
     return author_name, author_uid
 
 
+def _tag_classes(tag: Tag) -> set[str]:
+    raw_classes = tag.get("class")
+    if not isinstance(raw_classes, list):
+        return set()
+    return set(raw_classes)
+
+
+def _find_first_by_class(tag: Tag, class_name: str) -> Tag | None:
+    for child in tag.find_all(True, recursive=False):
+        if class_name in _tag_classes(child):
+            return child
+    return None
+
+
+def _fold_summary_text(collapse_button: Tag) -> str:
+    text = collapse_button.get_text(" ", strip=True)
+    if text.startswith("+"):
+        text = text[1:].strip()
+    return text.removesuffix("...").strip() or "折叠内容"
+
+
+def _normalize_nga_fold_boxes(html: str) -> str:
+    if "foldBox" not in html and "collapse_content" not in html:
+        return html
+
+    soup = BeautifulSoup(html, "html.parser")
+    for fold_box in cast(list[Tag], soup.find_all("div")):
+        if "foldBox" not in _tag_classes(fold_box):
+            continue
+        collapse_button = _find_first_by_class(fold_box, "collapse_btn")
+        collapse_content = _find_first_by_class(fold_box, "collapse_content")
+        if collapse_button is None or collapse_content is None:
+            continue
+
+        details = soup.new_tag("details")
+        details["class"] = "nga-collapse"
+        summary = soup.new_tag("summary")
+        summary.string = _fold_summary_text(collapse_button)
+        content = soup.new_tag("div")
+        content["class"] = "nga-collapse-content"
+        for child in list(collapse_content.contents):
+            content.append(child.extract())
+        details.append(summary)
+        details.append(content)
+        fold_box.replace_with(details)
+
+    return str(soup)
+
+
 def _post_item_from_row(
-    row: tuple[int, Optional[int], str],
-    thread_folder: Path,
+    row: tuple[int, Optional[int], str, str],
     output_dir: Path,
     floor_labels: FloorLabels,
-) -> PostItem:
-    lou, pid, post_json = row
-    raw_post: object = json.loads(post_json)
-    post = cast(dict[str, object], raw_post) if isinstance(raw_post, dict) else {}
+    image_mappings: dict[str, str],
+) -> PostSlot:
+    lou, pid, post_json, _content = row
+    post = _raw_post_from_json(post_json)
     author_name, author_uid = _post_author(post)
-    html_dir = thread_folder / "html_modified"
-    html_path = _post_html_path(html_dir, lou)
-    try:
-        html = html_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        html = "<p><em>本楼层HTML缺失。</em></p>"
+    html = render_web_bbcode(
+        _post_content(post),
+        image_src_resolver=_image_src_resolver(post, output_dir, image_mappings),
+    )
+    html = _normalize_nga_fold_boxes(html)
 
     return {
         "lou": lou,
@@ -483,9 +620,29 @@ def _post_item_from_row(
         "authorUid": author_uid,
         "postdate": _optional_postdate_from_post(post, "postdate"),
         "floorLabel": floor_labels.label(lou),
-        "html": sanitize_post_html(
-            rewrite_html_image_sources(html, html_dir, output_dir)
-        ),
+        "html": sanitize_post_html(html),
+        "emptyReason": None,
+    }
+
+
+def _empty_post_slot(
+    lou: int,
+    floor_labels: FloorLabels,
+    reason: PostEmptyReason,
+) -> PostSlot:
+    message = MISSING_POST_HTML
+    if reason == "filtered":
+        message = "<p><em>此楼层不匹配当前筛选。</em></p>"
+
+    return {
+        "lou": lou,
+        "pid": None,
+        "authorName": None,
+        "authorUid": None,
+        "postdate": None,
+        "floorLabel": floor_labels.label(lou),
+        "html": message,
+        "emptyReason": reason,
     }
 
 
@@ -513,23 +670,23 @@ def read_posts(
     tid: int,
     raw_aid_key: str,
     *,
-    offset: int,
-    limit: int,
+    page: int,
     query: str = "",
     lou_from: Optional[int] = None,
     lou_to: Optional[int] = None,
 ) -> PostsResult:
+    if page < 1:
+        raise ValueError("page必须大于等于1。")
+
     aid = parse_aid_key(raw_aid_key)
     thread_folder = output_dir / f"{tid}_{raw_aid_key}"
     if not thread_folder.is_dir():
         raise ThreadNotFoundError("未找到对应备份目录。")
     db_path = thread_folder / ARCHIVE_DB_FILENAME
-    html_dir = thread_folder / "html_modified"
     if not db_path.is_file():
         raise ThreadUnavailableError("缺少archive.sqlite3。")
-    if not _has_post_html_files(html_dir):
-        raise ThreadUnavailableError("缺少html_modified/post_*.html。")
 
+    page_size = ORIGINAL_POSTS_PER_PAGE
     where_sql, params = _latest_posts_where(query.strip(), lou_from, lou_to)
     latest_cte = """
         WITH latest AS (
@@ -546,37 +703,109 @@ def read_posts(
         )
     """
     with closing(_connect_readonly(db_path)) as connection:
-        total_row = cast(
-            tuple[int],
-            connection.execute(
-                f"{latest_cte} SELECT COUNT(*) FROM latest WHERE {where_sql}",
-                tuple(params),
-            ).fetchone(),
-        )
-        rows = cast(
-            list[tuple[int, Optional[int], str]],
+        stats_row = cast(
+            tuple[int, Optional[int]],
             connection.execute(
                 f"""
                 {latest_cte}
-                SELECT lou, pid, post_json
+                SELECT COUNT(*), MAX(lou)
+                FROM latest
+                WHERE row_number = 1
+                """
+            ).fetchone(),
+        )
+        matching_row = cast(
+            tuple[int],
+            connection.execute(
+                f"""
+                {latest_cte}
+                SELECT COUNT(*)
                 FROM latest
                 WHERE {where_sql}
-                ORDER BY lou
-                LIMIT ? OFFSET ?
                 """,
-                (*params, limit, offset),
+                tuple(params),
+            ).fetchone(),
+        )
+        post_count = stats_row[0]
+        max_lou = stats_row[1]
+        slot_total = max_lou + 1 if max_lou is not None and max_lou >= 0 else 0
+        total_pages = max(1, math.ceil(slot_total / page_size))
+        resolved_page = min(page, total_pages)
+        page_start_lou = (resolved_page - 1) * page_size
+        page_end_lou = page_start_lou + page_size - 1
+        rows = cast(
+            list[tuple[int, Optional[int], str, str]],
+            connection.execute(
+                f"""
+                {latest_cte}
+                SELECT lou, pid, post_json, content
+                FROM latest
+                WHERE row_number = 1
+                    AND lou >= ?
+                    AND lou <= ?
+                ORDER BY lou
+                """,
+                (page_start_lou, page_end_lou),
             ).fetchall(),
         )
+        matching_page_lous = {
+            lou
+            for (lou,) in cast(
+                list[tuple[int]],
+                connection.execute(
+                    f"""
+                    {latest_cte}
+                    SELECT lou
+                    FROM latest
+                    WHERE {where_sql}
+                        AND lou >= ?
+                        AND lou <= ?
+                    """,
+                    (*params, page_start_lou, page_end_lou),
+                ).fetchall(),
+            )
+            if type(lou) is int
+        }
+
+    image_urls: set[str] = set()
+    for _lou, _pid, post_json, _content in rows:
+        image_urls.update(_attachment_urls(_raw_post_from_json(post_json)))
+    image_mappings = _read_image_mappings_for_urls(output_dir, image_urls)
 
     floor_labels = _load_floor_labels(thread_folder, aid)
+    row_by_lou = {row[0]: row for row in rows}
+    slots: list[PostSlot] = []
+    for lou in range(page_start_lou, page_end_lou + 1):
+        row = row_by_lou.get(lou)
+        if row is None:
+            slots.append(_empty_post_slot(lou, floor_labels, "missing"))
+            continue
+        if lou not in matching_page_lous:
+            slot = _post_item_from_row(row, output_dir, floor_labels, image_mappings)
+            slot["html"] = "<p><em>此楼层不匹配当前筛选。</em></p>"
+            slot["emptyReason"] = "filtered"
+            slots.append(slot)
+            continue
+        slots.append(
+            _post_item_from_row(row, output_dir, floor_labels, image_mappings)
+        )
+
+    items = [slot for slot in slots if slot["emptyReason"] is None]
+
     return {
-        "items": [
-            _post_item_from_row(row, thread_folder, output_dir, floor_labels)
-            for row in rows
-        ],
-        "total": total_row[0],
-        "offset": offset,
-        "limit": limit,
+        "slots": slots,
+        "items": items,
+        "total": slot_total,
+        "offset": page_start_lou,
+        "limit": page_size,
+        "page": resolved_page,
+        "pageSize": page_size,
+        "pageStartLou": page_start_lou,
+        "pageEndLou": page_end_lou,
+        "totalPages": total_pages,
+        "postCount": post_count,
+        "matchingPostCount": matching_row[0],
+        "maxLou": max_lou,
     }
 
 

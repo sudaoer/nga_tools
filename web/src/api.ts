@@ -30,8 +30,7 @@ export async function fetchThread(
 }
 
 export interface PostQuery {
-  offset: number
-  limit: number
+  page: number
   q: string
   louFrom: string
   louTo: string
@@ -43,8 +42,7 @@ export async function fetchPosts(
   query: PostQuery,
 ): Promise<PostsResult> {
   const params = new URLSearchParams()
-  params.set('offset', String(query.offset))
-  params.set('limit', String(query.limit))
+  params.set('page', String(query.page))
   if (query.q.trim()) {
     params.set('q', query.q.trim())
   }

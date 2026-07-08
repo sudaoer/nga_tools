@@ -32,11 +32,21 @@ export interface PostItem {
   postdate: number | string | null
   floorLabel: string
   html: string
+  emptyReason: 'missing' | 'filtered' | null
 }
 
 export interface PostsResult {
+  slots: PostItem[]
   items: PostItem[]
   total: number
   offset: number
   limit: number
+  page: number
+  pageSize: number
+  pageStartLou: number
+  pageEndLou: number
+  totalPages: number
+  postCount: number
+  matchingPostCount: number
+  maxLou: number | null
 }

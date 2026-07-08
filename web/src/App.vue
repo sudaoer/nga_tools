@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { fetchPosts, fetchThread, fetchThreads, type PostQuery } from './api'
-import type { PostsResult, ThreadStatus, ThreadSummary } from './types'
+import type { PostItem, PostsResult, ThreadStatus, ThreadSummary } from './types'
 
 const threads = ref<ThreadSummary[]>([])
 const selectedThread = ref<ThreadSummary | null>(null)
@@ -17,8 +17,7 @@ const listFilter = reactive({
 })
 
 const postQuery = reactive<PostQuery>({
-  offset: 0,
-  limit: 50,
+  page: 1,
   q: '',
   louFrom: '',
   louTo: '',
@@ -43,13 +42,8 @@ const filteredThreads = computed(() => {
   })
 })
 
-const pageStart = computed(() => (posts.value ? posts.value.offset + 1 : 0))
-const pageEnd = computed(() => {
-  if (!posts.value) {
-    return 0
-  }
-  return posts.value.offset + posts.value.items.length
-})
+const pageStart = computed(() => (posts.value ? posts.value.pageStartLou : 0))
+const pageEnd = computed(() => (posts.value ? posts.value.pageEndLou : 0))
 
 function titleFor(thread: ThreadSummary): string {
   return thread.subject || thread.threadName || thread.dirName
@@ -102,6 +96,31 @@ function formatTime(value: string | number | null): string {
   return date.toLocaleString()
 }
 
+function slotUserLabel(post: PostItem): string {
+  if (post.authorName) {
+    return post.authorName
+  }
+  if (post.emptyReason === 'missing') {
+    return '内容缺失'
+  }
+  if (post.emptyReason === 'filtered') {
+    return '未匹配'
+  }
+  return '未知用户'
+}
+
+function pageFromLouInput(value: string): number | null {
+  const trimmedValue = value.trim()
+  if (!trimmedValue) {
+    return null
+  }
+  const lou = Number(trimmedValue)
+  if (!Number.isFinite(lou) || lou < 0) {
+    return null
+  }
+  return Math.floor(lou / 20) + 1
+}
+
 async function loadThreads(): Promise<void> {
   loadingThreads.value = true
   threadError.value = null
@@ -122,7 +141,7 @@ async function selectThread(thread: ThreadSummary): Promise<void> {
   selectedThread.value = thread
   posts.value = null
   postError.value = null
-  postQuery.offset = 0
+  postQuery.page = 1
   if (thread.status !== 'ready') {
     return
   }
@@ -155,23 +174,23 @@ async function loadPosts(): Promise<void> {
 }
 
 function applyPostFilter(): void {
-  postQuery.offset = 0
+  postQuery.page = pageFromLouInput(postQuery.louFrom) || 1
   void loadPosts()
 }
 
 function nextPage(): void {
-  if (!posts.value || posts.value.offset + posts.value.limit >= posts.value.total) {
+  if (!posts.value || posts.value.page >= posts.value.totalPages) {
     return
   }
-  postQuery.offset += posts.value.limit
+  postQuery.page = posts.value.page + 1
   void loadPosts()
 }
 
 function previousPage(): void {
-  if (!posts.value) {
+  if (!posts.value || posts.value.page <= 1) {
     return
   }
-  postQuery.offset = Math.max(0, posts.value.offset - posts.value.limit)
+  postQuery.page = posts.value.page - 1
   void loadPosts()
 }
 
@@ -260,23 +279,31 @@ onMounted(() => {
         <div v-else-if="loadingPosts" class="empty-state">正在读取楼层...</div>
 
         <div v-if="posts" class="post-count">
-          {{ pageStart }}-{{ pageEnd }} / {{ posts.total }}
+          <span>{{ pageStart }}-{{ pageEnd }}</span>
+          <span>第 {{ posts.page }} / {{ posts.totalPages }} 页</span>
+          <span>{{ posts.matchingPostCount }} / {{ posts.postCount }} 楼</span>
         </div>
 
-        <article v-for="post in posts?.items || []" :key="post.lou" class="post-card">
+        <article
+          v-for="post in posts?.slots || []"
+          :key="post.lou"
+          class="post-card"
+          :class="{ empty: post.emptyReason !== null }"
+        >
           <header>
             <strong>{{ post.floorLabel }}</strong>
-            <span>{{ post.authorName || '未知用户' }}</span>
+            <span>{{ slotUserLabel(post) }}</span>
             <span>{{ formatTime(post.postdate) }}</span>
           </header>
           <div class="post-body" v-html="post.html"></div>
         </article>
 
-        <div v-if="posts && posts.total > posts.limit" class="pager">
-          <button type="button" :disabled="posts.offset === 0" @click="previousPage">上一页</button>
+        <div v-if="posts && posts.totalPages > 1" class="pager">
+          <button type="button" :disabled="posts.page <= 1" @click="previousPage">上一页</button>
+          <span>{{ posts.page }} / {{ posts.totalPages }}</span>
           <button
             type="button"
-            :disabled="posts.offset + posts.limit >= posts.total"
+            :disabled="posts.page >= posts.totalPages"
             @click="nextPage"
           >
             下一页
