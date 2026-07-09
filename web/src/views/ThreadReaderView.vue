@@ -44,7 +44,7 @@ const pageJumpInput = ref('')
 const listFilter = reactive({
   q: '',
   status: 'all' as ThreadStatus | 'all',
-  sortBy: 'backupUpdated' as SortKey,
+  sortBy: 'authorUpdated' as SortKey,
   sortDirection: 'desc' as SortDirection,
 })
 
@@ -349,7 +349,7 @@ function syncUrl(): void {
   if (listFilter.status !== 'all') {
     params.set('status', listFilter.status)
   }
-  if (listFilter.sortBy !== 'backupUpdated') {
+  if (listFilter.sortBy !== 'authorUpdated') {
     params.set('sort', listFilter.sortBy)
   }
   if (listFilter.sortDirection !== 'desc') {

@@ -4,6 +4,7 @@ import type {
   PostVersionGroup,
   PostVersionPreview,
   PostVersionSelectionResult,
+  PostVersionThreadSummary,
   PostsResult,
   SortDirection,
   TableRowDetail,
@@ -74,6 +75,20 @@ export async function fetchPostVersionGroups(
 ): Promise<PostVersionGroup[]> {
   const payload = await readJson<{ items: PostVersionGroup[] }>(
     `/api/admin/threads/${tid}/${encodeURIComponent(aidKey)}/post-versions`,
+  )
+  return payload.items
+}
+
+export async function fetchPostVersionThreads(
+  options: { multiVersionOnly: boolean } = { multiVersionOnly: false },
+): Promise<PostVersionThreadSummary[]> {
+  const params = new URLSearchParams()
+  if (options.multiVersionOnly) {
+    params.set('multi_version_only', 'true')
+  }
+  const query = params.toString()
+  const payload = await readJson<{ items: PostVersionThreadSummary[] }>(
+    `/api/admin/post-version-threads${query ? `?${query}` : ''}`,
   )
   return payload.items
 }

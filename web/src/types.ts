@@ -28,6 +28,10 @@ export interface ThreadSummary {
   hasWarnings: boolean
 }
 
+export interface PostVersionThreadSummary extends ThreadSummary {
+  multiVersionFloorCount: number
+}
+
 export interface PostItem {
   lou: number
   pid: number | null

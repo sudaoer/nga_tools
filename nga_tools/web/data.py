@@ -84,6 +84,14 @@ class ThreadSummary(TypedDict):
     hasWarnings: bool
 
 
+class PostVersionThreadSummary(ThreadSummary):
+    multiVersionFloorCount: int
+
+
+class PostVersionThreadSummariesResult(TypedDict):
+    items: list[PostVersionThreadSummary]
+
+
 class PostSlot(TypedDict):
     lou: int
     pid: Optional[int]
@@ -570,6 +578,50 @@ def scan_thread_summaries(
         key=lambda item: (item["updatedAt"] or "", item["dirName"]),
         reverse=True,
     )
+
+
+def _read_multi_version_floor_count(thread_folder: Path) -> int:
+    archive_db_path = thread_folder / ARCHIVE_DB_FILENAME
+    if not archive_db_path.is_file():
+        return 0
+    try:
+        with closing(_connect_readonly(archive_db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM (
+                    SELECT lou
+                    FROM post_versions
+                    GROUP BY lou
+                    HAVING COUNT(*) > 1
+                )
+                """
+            ).fetchone()
+    except sqlite3.Error:
+        return 0
+    if row is None or type(row[0]) is not int:
+        return 0
+    return row[0]
+
+
+def read_post_version_thread_summaries(
+    output_dir: Path,
+    metadata_by_key: dict[tuple[int, str], ThreadConfig],
+    *,
+    multi_version_only: bool = False,
+) -> PostVersionThreadSummariesResult:
+    items: list[PostVersionThreadSummary] = []
+    for summary in scan_thread_summaries(output_dir, metadata_by_key):
+        if summary["status"] != "ready":
+            continue
+        thread_folder = output_dir / summary["dirName"]
+        multi_version_floor_count = _read_multi_version_floor_count(thread_folder)
+        if multi_version_only and multi_version_floor_count == 0:
+            continue
+        item = cast(PostVersionThreadSummary, dict(summary))
+        item["multiVersionFloorCount"] = multi_version_floor_count
+        items.append(item)
+    return {"items": items}
 
 
 def read_thread_summary(

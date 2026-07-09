@@ -99,6 +99,20 @@ button {
   color: #fff8ee;
 }
 
+.version-thread-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #d8bf91;
+  color: #4e4034;
+  font-size: 13px;
+}
+
+.version-thread-filter input {
+  margin: 0;
+}
+
 h1,
 h2 {
   margin: 0;

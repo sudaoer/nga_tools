@@ -18,6 +18,7 @@ from nga_tools.web.data import (
     PostVersionGroupsResult,
     PostVersionPreview,
     PostVersionSelectionResult,
+    PostVersionThreadSummariesResult,
     ThreadNotFoundError,
     ThreadSummary,
     ThreadUnavailableError,
@@ -25,6 +26,7 @@ from nga_tools.web.data import (
     load_thread_metadata,
     read_post_version_groups,
     read_post_version_preview,
+    read_post_version_thread_summaries,
     read_posts,
     read_thread_summary,
     safe_output_file,
@@ -92,6 +94,18 @@ async def list_threads(request: Request) -> dict[str, list[ThreadSummary]]:
     context = _context(request)
     summaries = scan_thread_summaries(context.output_dir, load_thread_metadata())
     return {"items": summaries}
+
+
+async def list_post_version_threads(
+    request: Request,
+    multi_version_only: bool = False,
+) -> PostVersionThreadSummariesResult:
+    context = _context(request)
+    return read_post_version_thread_summaries(
+        context.output_dir,
+        load_thread_metadata(),
+        multi_version_only=multi_version_only,
+    )
 
 
 async def thread_detail(
@@ -339,6 +353,11 @@ def create_app(
     app.add_api_route(
         "/api/threads/{tid}/{aid_key}/posts",
         thread_posts,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/api/admin/post-version-threads",
+        list_post_version_threads,
         methods=["GET"],
     )
     app.add_api_route(

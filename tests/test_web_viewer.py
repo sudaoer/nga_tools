@@ -409,6 +409,40 @@ class WebServerTest:
         assert response.status_code == 503
         assert "缺少前端构建产物" in response.json()["error"]
 
+    def test_admin_post_version_threads_report_multi_version_floor_counts(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        multi_version_dir = output_dir / "101_201"
+        single_version_dir = output_dir / "102_202"
+        legacy_dir = output_dir / "103_all"
+        _write_archive(multi_version_dir, [_post(1, "before edit"), _post(2, "stable")])
+        _write_archive(multi_version_dir, [_post(1, "after edit"), _post(2, "stable")])
+        _write_archive(single_version_dir, [_post(1, "only version")])
+        (legacy_dir / "json").mkdir(parents=True)
+        (legacy_dir / "json" / "page_1.json").write_text("{}", encoding="utf-8")
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/api/admin/post-version-threads")
+        filtered_response = client.get(
+            "/api/admin/post-version-threads",
+            params={"multi_version_only": "true"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        by_dir = {item["dirName"]: item for item in payload["items"]}
+        assert set(by_dir) == {"101_201", "102_202"}
+        assert by_dir["101_201"]["multiVersionFloorCount"] == 1
+        assert by_dir["102_202"]["multiVersionFloorCount"] == 0
+        assert filtered_response.status_code == 200
+        assert [
+            item["dirName"] for item in filtered_response.json()["items"]
+        ] == ["101_201"]
+
     def test_admin_post_version_selection_affects_reader_and_html_modified(
         self,
         tmp_path: Path,

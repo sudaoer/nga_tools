@@ -1,21 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
   clearPostVersionSelection,
   fetchPostVersionGroups,
   fetchPostVersionPreview,
-  fetchThreads,
+  fetchPostVersionThreads,
   selectPostVersion,
 } from '../api'
 import type {
   PostItem,
   PostVersionGroup,
   PostVersionOption,
-  ThreadSummary,
+  PostVersionThreadSummary,
 } from '../types'
 
-const threads = ref<ThreadSummary[]>([])
-const selectedThread = ref<ThreadSummary | null>(null)
+const threads = ref<PostVersionThreadSummary[]>([])
+const selectedThread = ref<PostVersionThreadSummary | null>(null)
 const groups = ref<PostVersionGroup[]>([])
 const selectedLou = ref<number | null>(null)
 const preview = ref<PostItem | null>(null)
@@ -27,14 +27,19 @@ const loadingThreads = ref(false)
 const loadingGroups = ref(false)
 const loadingPreview = ref(false)
 const savingVersionId = ref<number | null>(null)
+const showOnlyMultiVersionThreads = ref(true)
 
 const selectedGroup = computed(
   () => groups.value.find((group) => group.lou === selectedLou.value) || null,
 )
 
-const readyThreads = computed(() => threads.value.filter((thread) => thread.status === 'ready'))
+const visibleThreads = computed(() =>
+  threads.value.filter(
+    (thread) => !showOnlyMultiVersionThreads.value || thread.multiVersionFloorCount > 0,
+  ),
+)
 
-function titleFor(thread: ThreadSummary): string {
+function titleFor(thread: PostVersionThreadSummary): string {
   return thread.subject || thread.threadName || thread.dirName
 }
 
@@ -71,23 +76,39 @@ function versionLabel(option: PostVersionOption): string {
   return '历史版'
 }
 
+function clearThreadSelection(): void {
+  selectedThread.value = null
+  groups.value = []
+  selectedLou.value = null
+  preview.value = null
+  previewVersionId.value = null
+}
+
+async function selectVisibleThread(): Promise<void> {
+  const current =
+    selectedThread.value === null
+      ? null
+      : visibleThreads.value.find(
+          (thread) =>
+            thread.tid === selectedThread.value?.tid &&
+            thread.aidKey === selectedThread.value?.aidKey,
+        ) || null
+  const target = current || visibleThreads.value[0] || null
+  if (target !== null) {
+    await selectThread(target)
+  } else {
+    clearThreadSelection()
+  }
+}
+
 async function loadThreads(): Promise<void> {
   loadingThreads.value = true
   threadError.value = null
   try {
-    threads.value = await fetchThreads()
-    const current =
-      selectedThread.value === null
-        ? null
-        : threads.value.find(
-            (thread) =>
-              thread.tid === selectedThread.value?.tid &&
-              thread.aidKey === selectedThread.value?.aidKey,
-          ) || null
-    const target = current || readyThreads.value[0] || null
-    if (target !== null) {
-      await selectThread(target)
-    }
+    threads.value = await fetchPostVersionThreads({
+      multiVersionOnly: showOnlyMultiVersionThreads.value,
+    })
+    await selectVisibleThread()
   } catch (error) {
     threadError.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -95,7 +116,7 @@ async function loadThreads(): Promise<void> {
   }
 }
 
-async function selectThread(thread: ThreadSummary): Promise<void> {
+async function selectThread(thread: PostVersionThreadSummary): Promise<void> {
   selectedThread.value = thread
   groups.value = []
   selectedLou.value = null
@@ -204,6 +225,10 @@ async function clearSelection(): Promise<void> {
   }
 }
 
+watch(showOnlyMultiVersionThreads, () => {
+  void loadThreads()
+})
+
 onMounted(() => {
   void loadThreads()
 })
@@ -219,13 +244,20 @@ onMounted(() => {
         </button>
       </div>
 
+      <label class="version-thread-filter">
+        <input v-model="showOnlyMultiVersionThreads" type="checkbox" />
+        <span>只看多版本楼层</span>
+      </label>
+
       <div v-if="threadError" class="error-box">{{ threadError }}</div>
       <div v-else-if="loadingThreads" class="empty-state">正在读取备份列表...</div>
-      <div v-else-if="readyThreads.length === 0" class="empty-state">没有可管理的备份。</div>
+      <div v-else-if="visibleThreads.length === 0" class="empty-state">
+        {{ showOnlyMultiVersionThreads ? '没有多版本楼层的备份。' : '没有可管理的备份。' }}
+      </div>
 
       <div class="thread-list">
         <button
-          v-for="thread in readyThreads"
+          v-for="thread in visibleThreads"
           :key="thread.dirName"
           type="button"
           class="thread-item"
@@ -236,6 +268,7 @@ onMounted(() => {
           <span class="thread-meta">
             <span>{{ thread.dirName }}</span>
             <span>{{ thread.postCount }} 楼</span>
+            <span>多版本 {{ thread.multiVersionFloorCount }} 楼</span>
             <span>备份 {{ formatTime(thread.updatedAt) }}</span>
           </span>
         </button>
