@@ -595,6 +595,48 @@ onMounted(() => {
           <span>{{ posts.matchingPostCount }} / {{ posts.postCount }} 楼</span>
         </div>
 
+        <div v-if="posts && posts.totalPages > 1" class="pager top-pager">
+          <button type="button" :disabled="posts.page <= 1" @click="goToPage(1)">首页</button>
+          <button type="button" :disabled="posts.page <= 1" @click="previousPage">上一页</button>
+          <template v-for="token in pagerTokens" :key="token.key">
+            <span v-if="token.type === 'ellipsis'" class="pager-ellipsis">...</span>
+            <button
+              v-else
+              type="button"
+              class="page-number"
+              :class="{ active: token.page === posts.page }"
+              :disabled="token.page === posts.page"
+              @click="goToPage(token.page)"
+            >
+              {{ token.page }}
+            </button>
+          </template>
+          <button
+            type="button"
+            :disabled="posts.page >= posts.totalPages"
+            @click="nextPage"
+          >
+            下一页
+          </button>
+          <button
+            type="button"
+            :disabled="posts.page >= posts.totalPages"
+            @click="goToPage(posts.totalPages)"
+          >
+            末页
+          </button>
+          <form class="page-jump" @submit.prevent="applyPageJump">
+            <input
+              v-model="pageJumpInput"
+              type="number"
+              min="1"
+              :max="posts.totalPages"
+              aria-label="跳转页码"
+            />
+            <button type="submit">跳转</button>
+          </form>
+        </div>
+
         <article
           v-for="post in posts?.slots || []"
           :key="post.lou"

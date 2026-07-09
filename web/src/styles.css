@@ -401,6 +401,10 @@ select {
   padding: 14px 0 0;
 }
 
+.pager.top-pager {
+  padding: 2px 0 12px;
+}
+
 .pager .page-number {
   min-width: 34px;
   padding-inline: 8px;
