@@ -17,6 +17,41 @@ from nga_tools.ngaclient.client import PageData
 ARCHIVE_DB_FILENAME = "archive.sqlite3"
 _SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
 _SQLITE_BUSY_TIMEOUT_MILLISECONDS = int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)
+_LATEST_POST_RECORDS_QUERY = """
+    SELECT id, lou, pid, post_json, source_hash
+    FROM (
+        SELECT
+            id,
+            lou,
+            pid,
+            post_json,
+            source_hash,
+            ROW_NUMBER() OVER (
+                PARTITION BY lou
+                ORDER BY last_seen_at DESC, id DESC
+            ) AS row_number
+        FROM post_versions
+        {where_lous}
+    )
+    WHERE row_number = 1
+    ORDER BY lou
+    """
+_LATEST_POST_RECORD_SUMMARIES_QUERY = """
+    SELECT lou, pid, source_hash
+    FROM (
+        SELECT
+            lou,
+            pid,
+            source_hash,
+            ROW_NUMBER() OVER (
+                PARTITION BY lou
+                ORDER BY last_seen_at DESC, id DESC
+            ) AS row_number
+        FROM post_versions
+    )
+    WHERE row_number = 1
+    ORDER BY lou
+    """
 
 
 @dataclass(frozen=True)
@@ -431,31 +466,47 @@ class ThreadArchiveStore:
             post_observations=len(raw_post_items),
         )
 
-    def read_latest_post_records(self) -> list[PostRecord]:
+    def read_latest_post_record_summaries(self) -> list[PostRecord]:
         self.require_exists()
+
+        with closing(self._connect()) as connection:
+            rows = cast(
+                list[tuple[int, int, str]],
+                connection.execute(_LATEST_POST_RECORD_SUMMARIES_QUERY).fetchall(),
+            )
+
+        records: list[PostRecord] = []
+        for lou, pid, source_hash in rows:
+            records.append(
+                {
+                    "lou": lou,
+                    "pid": pid,
+                    "post": None,
+                    "html": None,
+                    "source_hash": source_hash,
+                }
+            )
+        return records
+
+    def read_latest_post_records(self, lous: set[int] | None = None) -> list[PostRecord]:
+        self.require_exists()
+        if lous is not None and not lous:
+            return []
+
+        params: tuple[int, ...] = ()
+        where_lous = ""
+        if lous is not None:
+            sorted_lous = tuple(sorted(lous))
+            placeholders = ",".join("?" for _ in sorted_lous)
+            where_lous = f"WHERE lou IN ({placeholders})"
+            params = sorted_lous
 
         with closing(self._connect()) as connection:
             rows = cast(
                 list[tuple[int, int, int, str, str]],
                 connection.execute(
-                    """
-                    SELECT id, lou, pid, post_json, source_hash
-                    FROM (
-                        SELECT
-                            id,
-                            lou,
-                            pid,
-                            post_json,
-                            source_hash,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY lou
-                                ORDER BY last_seen_at DESC, id DESC
-                            ) AS row_number
-                        FROM post_versions
-                    )
-                    WHERE row_number = 1
-                    ORDER BY lou
-                    """
+                    _LATEST_POST_RECORDS_QUERY.format(where_lous=where_lous),
+                    params,
                 ).fetchall(),
             )
 
@@ -480,7 +531,7 @@ class ThreadArchiveStore:
     def read_latest_author_post_refs(self) -> list[AuthorPostRef]:
         return [
             {"pid": record["pid"], "author_lou": record["lou"]}
-            for record in self.read_latest_post_records()
+            for record in self.read_latest_post_record_summaries()
             if record["pid"] is not None
         ]
 

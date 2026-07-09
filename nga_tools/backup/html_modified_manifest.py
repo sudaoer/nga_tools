@@ -14,9 +14,14 @@ HTML_MODIFIED_GENERATION_VERSION = 2
 HTML_MODIFIED_HASH_ALGORITHM = "sha256"
 
 
-class HtmlModifiedManifestEntry(TypedDict):
+class RequiredHtmlModifiedManifestEntry(TypedDict):
     source_hash: str
     output_hash: str
+
+
+class HtmlModifiedManifestEntry(RequiredHtmlModifiedManifestEntry, total=False):
+    output_size: int
+    output_mtime_ns: int
 
 
 class HtmlModifiedManifest(TypedDict):
@@ -76,10 +81,16 @@ def load_manifest(folder_html_modified: Path) -> dict[str, HtmlModifiedManifestE
         if not isinstance(source_hash, str) or not isinstance(output_hash, str):
             report_warning(f"html_modified缓存文件files格式无效，按空缓存处理：{path}")
             return {}
-        files[raw_filename] = {
+        manifest_entry: HtmlModifiedManifestEntry = {
             "source_hash": source_hash,
             "output_hash": output_hash,
         }
+        output_size = entry.get("output_size")
+        output_mtime_ns = entry.get("output_mtime_ns")
+        if type(output_size) is int and type(output_mtime_ns) is int:
+            manifest_entry["output_size"] = output_size
+            manifest_entry["output_mtime_ns"] = output_mtime_ns
+        files[raw_filename] = manifest_entry
     return files
 
 
@@ -96,20 +107,49 @@ def completed_post_lous(
             continue
         if entry["source_hash"] != source_hash:
             continue
-        if not _manifest_file_matches(
-            folder_html_modified / filename,
-            entry["output_hash"],
-        ):
+        if not _manifest_file_matches(folder_html_modified / filename, entry):
             continue
         completed_lous.add(lou)
     return completed_lous
 
 
-def _manifest_file_matches(path: Path, output_hash: str) -> bool:
+def _entry_stat_matches(path: Path, entry: HtmlModifiedManifestEntry) -> bool:
+    output_size = entry.get("output_size")
+    output_mtime_ns = entry.get("output_mtime_ns")
+    if type(output_size) is not int or type(output_mtime_ns) is not int:
+        return False
+
     try:
-        return hash_text(path.read_text(encoding="utf-8")) == output_hash
+        stat_result = path.stat()
+    except OSError:
+        return False
+    return (
+        stat_result.st_size == output_size
+        and stat_result.st_mtime_ns == output_mtime_ns
+    )
+
+
+def _refresh_entry_stat(path: Path, entry: HtmlModifiedManifestEntry) -> None:
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return
+    entry["output_size"] = stat_result.st_size
+    entry["output_mtime_ns"] = stat_result.st_mtime_ns
+
+
+def _manifest_file_matches(path: Path, entry: HtmlModifiedManifestEntry) -> bool:
+    if _entry_stat_matches(path, entry):
+        return True
+    try:
+        output_matches = hash_text(path.read_text(encoding="utf-8")) == entry[
+            "output_hash"
+        ]
     except (FileNotFoundError, OSError, UnicodeDecodeError):
         return False
+    if output_matches:
+        _refresh_entry_stat(path, entry)
+    return output_matches
 
 
 def manifest_files_exist(
@@ -117,7 +157,7 @@ def manifest_files_exist(
     entries: dict[str, HtmlModifiedManifestEntry],
 ) -> bool:
     return all(
-        _manifest_file_matches(folder_html_modified / filename, entry["output_hash"])
+        _manifest_file_matches(folder_html_modified / filename, entry)
         for filename, entry in entries.items()
     )
 
@@ -162,9 +202,11 @@ def write_updated_manifest(
         output_hash = output_hash_by_lou.get(lou)
         if output_hash is None:
             continue
-        entries[filename] = {
+        entry: HtmlModifiedManifestEntry = {
             "source_hash": source_hash_by_lou[lou],
             "output_hash": output_hash,
         }
+        _refresh_entry_stat(folder_html_modified / filename, entry)
+        entries[filename] = entry
 
     write_manifest(folder_html_modified, entries)

@@ -19,6 +19,7 @@ from nga_tools.backup.archive import (
     backup_thread_sub,
     _build_floor_map_for_backup,
 )
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.image_pipeline import (
     collect_image_download_tasks as _collect_image_download_tasks,
     collect_image_download_tasks_from_parsed as _collect_image_download_tasks_from_parsed,
@@ -1202,6 +1203,19 @@ class BackupThreadSubHtmlModifiedManifestTest:
             self._run_backup_all(temp_dir, client)
             assert not (temp_dir / 'html').exists()
             assert (temp_dir / 'backup_state.json').is_file()
+            manifest_path = (
+                temp_dir
+                / "html_modified"
+                / html_modified_manifest.HTML_MODIFIED_MANIFEST_FILENAME
+            )
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for entry in manifest_data["files"].values():
+                entry.pop("output_size", None)
+                entry.pop("output_mtime_ns", None)
+            manifest_path.write_text(
+                json.dumps(manifest_data, ensure_ascii=False),
+                encoding="utf-8",
+            )
 
             def fake_get_folder(
                 tid: int,
@@ -1234,6 +1248,12 @@ class BackupThreadSubHtmlModifiedManifestTest:
                 patch("sys.stdout", new_callable=io.StringIO),
             ):
                 backup_thread_sub(123, 456)
+
+            refreshed_entries = html_modified_manifest.load_manifest(
+                temp_dir / "html_modified"
+            )
+
+        assert all("output_size" in entry for entry in refreshed_entries.values())
 
     def test_unresolved_missing_placeholder_does_not_write_fast_skip_state(
         self,
@@ -1282,6 +1302,7 @@ class BackupThreadSubHtmlModifiedManifestTest:
     def test_backup_sub_rebuilds_only_changed_source_hash_lous(self) -> None:
         client = self.MutableFakeClient()
         captured_lous: list[int] = []
+        loaded_lou_sets: list[set[int] | None] = []
 
         def fake_rewrite(
             htmls: list[PostHtml],
@@ -1295,18 +1316,33 @@ class BackupThreadSubHtmlModifiedManifestTest:
             captured_lous.extend(item["lou"] for item in htmls)
             return {item["lou"] for item in htmls}
 
+        original_read_latest_post_records = ThreadArchiveStore.read_latest_post_records
+
+        def read_latest_post_records_wrapper(
+            store: ThreadArchiveStore,
+            lous: set[int] | None = None,
+        ):
+            loaded_lou_sets.append(None if lous is None else set(lous))
+            return original_read_latest_post_records(store, lous)
+
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             self._run_backup_sub(temp_dir, client)
             client.second_content = "second changed"
 
-            self._run_backup_sub(
-                temp_dir,
-                client,
-                rewrite_side_effect=fake_rewrite,
-            )
+            with patch.object(
+                ThreadArchiveStore,
+                "read_latest_post_records",
+                read_latest_post_records_wrapper,
+            ):
+                self._run_backup_sub(
+                    temp_dir,
+                    client,
+                    rewrite_side_effect=fake_rewrite,
+                )
 
         assert captured_lous == [2]
+        assert loaded_lou_sets == [{2}]
 
     def test_failed_placeholder_html_modified_is_not_marked_complete(self) -> None:
         image_url = (

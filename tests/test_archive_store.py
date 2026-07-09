@@ -76,6 +76,51 @@ class ThreadArchiveStoreTest:
         assert records[0]['post']['content'] == 'after edit'
         assert version_count == 2
 
+    def test_read_latest_post_record_summaries_skip_post_json(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "first"},
+                        {"lou": 2, "pid": 1002, "content": "second"},
+                    ],
+                },
+                observed_at="2026-07-07T01:00:00+00:00",
+            )
+
+            summaries = store.read_latest_post_record_summaries()
+
+        assert [record['lou'] for record in summaries] == [1, 2]
+        assert [record['pid'] for record in summaries] == [1001, 1002]
+        assert all(record['post'] is None for record in summaries)
+        assert all(record['html'] is None for record in summaries)
+        assert all(record['source_hash'] for record in summaries)
+
+    def test_read_latest_post_records_can_filter_lous(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "first"},
+                        {"lou": 2, "pid": 1002, "content": "second"},
+                    ],
+                },
+                observed_at="2026-07-07T01:00:00+00:00",
+            )
+
+            records = store.read_latest_post_records({2})
+            empty_records = store.read_latest_post_records(set())
+
+        assert [record['lou'] for record in records] == [2]
+        assert records[0]['post']['content'] == 'second'
+        assert empty_records == []
+
     def test_migrate_json_pages_is_repeatable_and_keeps_json_files(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             thread_folder = Path(temp_dir_name)
@@ -106,4 +151,3 @@ class ThreadArchiveStoreTest:
         assert first.post_versions_inserted == 1
         assert second.page_snapshots_inserted == 0
         assert second.post_versions_inserted == 0
-
