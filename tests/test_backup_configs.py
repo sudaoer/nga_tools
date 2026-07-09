@@ -250,12 +250,15 @@ def _fake_get_folder(base_dir: Path) -> Callable[..., str]:
         tid: int,
         aid: int | None,
         subfolder: str | None = None,
+        *,
+        create: bool = True,
     ) -> str:
         aid_part = str(aid) if aid is not None else "all"
         path = base_dir / f"{tid}_{aid_part}"
         if subfolder is not None:
             path = path / subfolder
-        path.mkdir(parents=True, exist_ok=True)
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
         return str(path)
 
     return fake_get_folder

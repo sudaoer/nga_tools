@@ -80,12 +80,15 @@ class ImageVerifyHandlerTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 assert (tid, aid) == (101, 201)
                 path = thread_dir
                 if subfolder is not None:
                     path = path / subfolder
-                path.mkdir(parents=True, exist_ok=True)
+                if create:
+                    path.mkdir(parents=True, exist_ok=True)
                 return str(path)
 
             with (
@@ -133,12 +136,15 @@ class ImageVerifyHandlerTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 assert (tid, aid) == (101, 201)
                 path = thread_dir
                 if subfolder is not None:
                     path = path / subfolder
-                path.mkdir(parents=True, exist_ok=True)
+                if create:
+                    path.mkdir(parents=True, exist_ok=True)
                 return str(path)
 
             def verify_side_effect(tid: int, aid: int | None) -> None:

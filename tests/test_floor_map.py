@@ -21,6 +21,7 @@ from nga_tools.backup.floor_map import (
     _scan_original_pages,
 )
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.config import get_config
 from nga_tools.ngaclient.client import PageData
 
 
@@ -237,6 +238,14 @@ class FloorMapMissingInferenceTest:
 
 
 class FloorMapSignatureCacheTest:
+    def test_missing_cache_check_does_not_create_thread_folder(self) -> None:
+        output_dir = Path(get_config().output_dir)
+
+        cached = load_floor_map_build_result_if_current(123, 456, [], [])
+
+        assert cached is None
+        assert not (output_dir / "123_456").exists()
+
     def test_current_input_signature_loads_cached_floor_map(self) -> None:
         author_posts: list[AuthorPostRef] = [
             {"pid": 1001, "author_lou": 1},

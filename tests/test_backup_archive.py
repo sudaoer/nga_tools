@@ -75,9 +75,12 @@ class RewriteImageLinksTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 path = thread_dir if subfolder is None else thread_dir / subfolder
-                path.mkdir(parents=True, exist_ok=True)
+                if create:
+                    path.mkdir(parents=True, exist_ok=True)
                 return str(path)
 
             with (
@@ -130,9 +133,12 @@ class RewriteImageLinksTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 path = thread_dir if subfolder is None else thread_dir / subfolder
-                path.mkdir(parents=True, exist_ok=True)
+                if create:
+                    path.mkdir(parents=True, exist_ok=True)
                 return str(path)
 
             with (
@@ -182,9 +188,12 @@ class RewriteImageLinksTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 path = thread_dir if subfolder is None else thread_dir / subfolder
-                path.mkdir(parents=True, exist_ok=True)
+                if create:
+                    path.mkdir(parents=True, exist_ok=True)
                 return str(path)
 
             with patch(
@@ -282,9 +291,12 @@ class RewriteImageLinksTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 path = thread_dir if subfolder is None else thread_dir / subfolder
-                path.mkdir(parents=True, exist_ok=True)
+                if create:
+                    path.mkdir(parents=True, exist_ok=True)
                 return str(path)
 
             with (
@@ -330,9 +342,12 @@ class RewriteImageLinksTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 path = thread_dir if subfolder is None else thread_dir / subfolder
-                path.mkdir(parents=True, exist_ok=True)
+                if create:
+                    path.mkdir(parents=True, exist_ok=True)
                 return str(path)
 
             with (
@@ -584,9 +599,12 @@ class BackupThreadSubMissingLouTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 path = temp_dir if subfolder is None else temp_dir / subfolder
-                path.mkdir(exist_ok=True)
+                if create:
+                    path.mkdir(exist_ok=True)
                 return str(path)
 
             with (
@@ -657,9 +675,12 @@ class BackupThreadSubMissingLouTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 path = temp_dir if subfolder is None else temp_dir / subfolder
-                path.mkdir(exist_ok=True)
+                if create:
+                    path.mkdir(exist_ok=True)
                 return str(path)
 
             with (
@@ -709,9 +730,12 @@ class BackupThreadSubMissingLouTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 path = temp_dir if subfolder is None else temp_dir / subfolder
-                path.mkdir(exist_ok=True)
+                if create:
+                    path.mkdir(exist_ok=True)
                 return str(path)
 
             with (
@@ -787,9 +811,12 @@ class BackupThreadSubMissingLouTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 path = temp_dir if subfolder is None else temp_dir / subfolder
-                path.mkdir(exist_ok=True)
+                if create:
+                    path.mkdir(exist_ok=True)
                 return str(path)
 
             with (
@@ -870,9 +897,12 @@ class BackupThreadSubMissingLouTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 path = temp_dir if subfolder is None else temp_dir / subfolder
-                path.mkdir(exist_ok=True)
+                if create:
+                    path.mkdir(exist_ok=True)
                 return str(path)
 
             with (
@@ -990,9 +1020,12 @@ class BackupThreadSubHtmlModifiedManifestTest:
             tid: int,
             aid: int | None,
             subfolder: str | None = None,
+            *,
+            create: bool = True,
         ) -> str:
             path = temp_dir if subfolder is None else temp_dir / subfolder
-            path.mkdir(exist_ok=True)
+            if create:
+                path.mkdir(exist_ok=True)
             return str(path)
 
         with ExitStack() as stack:
@@ -1063,9 +1096,12 @@ class BackupThreadSubHtmlModifiedManifestTest:
             tid: int,
             aid: int | None,
             subfolder: str | None = None,
+            *,
+            create: bool = True,
         ) -> str:
             path = temp_dir if subfolder is None else temp_dir / subfolder
-            path.mkdir(exist_ok=True)
+            if create:
+                path.mkdir(exist_ok=True)
             return str(path)
 
         with ExitStack() as stack:
@@ -1261,9 +1297,12 @@ class BackupThreadSubHtmlModifiedManifestTest:
                 tid: int,
                 aid: int | None,
                 subfolder: str | None = None,
+                *,
+                create: bool = True,
             ) -> str:
                 path = temp_dir if subfolder is None else temp_dir / subfolder
-                path.mkdir(exist_ok=True)
+                if create:
+                    path.mkdir(exist_ok=True)
                 return str(path)
 
             with (

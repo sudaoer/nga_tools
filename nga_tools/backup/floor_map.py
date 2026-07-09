@@ -29,8 +29,8 @@ from nga_tools.backup.floor_models import (
 )
 
 
-def get_floor_map_path(tid: int, aid: int) -> Path:
-    return Path(utils.get_folder(tid, aid)) / FLOOR_MAP_FILENAME
+def get_floor_map_path(tid: int, aid: int, *, create: bool = True) -> Path:
+    return Path(utils.get_folder(tid, aid, create=create)) / FLOOR_MAP_FILENAME
 
 
 def is_missing_post_html(html_content: str) -> bool:
@@ -147,7 +147,7 @@ def read_unresolved_missing_author_lous_from_floor_map(
     present_lous: set[int] | None = None,
     total_lou_count: int | None = None,
 ) -> list[int]:
-    path = get_floor_map_path(tid, aid)
+    path = get_floor_map_path(tid, aid, create=False)
     if not path.exists():
         return []
 
@@ -199,7 +199,7 @@ def _write_floor_map(
     *,
     input_signature: str | None = None,
 ) -> None:
-    path = get_floor_map_path(tid, aid)
+    path = get_floor_map_path(tid, aid, create=True)
     data: dict[str, object] = {
         "version": FLOOR_MAP_VERSION,
         "floor_map_generation_version": FLOOR_MAP_GENERATION_VERSION,
@@ -275,7 +275,7 @@ def load_floor_labels(tid: int, aid: Optional[int]) -> FloorLabels:
     if aid is None:
         return FloorLabels.plain()
 
-    path = get_floor_map_path(tid, aid)
+    path = get_floor_map_path(tid, aid, create=False)
     if not path.exists():
         raise RuntimeError(
             f"缺少楼层映射文件：{path}。请先运行 backup floors 生成floor_map.json。"
@@ -336,7 +336,7 @@ def load_floor_map_build_result_if_current(
     author_posts: Sequence[AuthorPostRef],
     missing_author_lous: Sequence[int],
 ) -> FloorMapBuildResult | None:
-    path = get_floor_map_path(tid, aid)
+    path = get_floor_map_path(tid, aid, create=False)
     if not path.exists():
         return None
 
@@ -546,7 +546,7 @@ def _load_reusable_floor_map(
     author_lou_to_pid: dict[int, int],
     missing_author_lous: set[int],
 ) -> tuple[dict[int, int], dict[int, int], dict[int, list[int]]]:
-    path = get_floor_map_path(tid, aid)
+    path = get_floor_map_path(tid, aid, create=False)
     if not path.exists():
         return {}, {}, {}
 
