@@ -10,6 +10,10 @@ from typing import TypedDict, cast
 from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.config import get_config
 from nga_tools.console import report_warning
+from nga_tools.core.atomic import (
+    write_json_atomically,
+    write_text_if_changed_atomically,
+)
 
 PDF_HASH_MANIFEST_FILENAME = "pdf_input_hashes.json"
 PDF_HASH_MANIFEST_VERSION = 1
@@ -87,10 +91,11 @@ def write_pdf_hashes(folder_pdf: str, input_hashes: dict[str, str]) -> None:
         "algorithm": PDF_HASH_ALGORITHM,
         "files": dict(sorted(input_hashes.items())),
     }
-    manifest_path = pdf_hash_manifest_path(folder_pdf)
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    write_json_atomically(
+        pdf_hash_manifest_path(folder_pdf),
+        manifest,
+        indent=2,
+        trailing_newline=True,
     )
 
 
@@ -118,14 +123,17 @@ def render_pdf_html(
 
 
 def write_text_if_changed(path: str, content: str) -> None:
-    output_path = Path(path)
-    try:
-        if output_path.read_text(encoding="utf-8") == content:
-            return
-    except FileNotFoundError:
-        pass
+    write_text_if_changed_atomically(Path(path), content)
 
-    output_path.write_text(content, encoding="utf-8")
+
+def pdf_file_is_usable(path: Path) -> bool:
+    try:
+        if path.stat().st_size <= 5:
+            return False
+        with path.open("rb") as file:
+            return file.read(5) == b"%PDF-"
+    except OSError:
+        return False
 
 
 def cleanup_stale_pdf_parts(folder_pdf: str, expected_filenames: set[str]) -> int:
@@ -180,12 +188,15 @@ def build_render_tasks(
         html_hash = sha256_text(pdf_html)
         input_hashes[html_filename] = html_hash
 
-        if cached_hashes.get(html_filename) == html_hash and pdf_output_path.exists():
+        if (
+            cached_hashes.get(html_filename) == html_hash
+            and pdf_file_is_usable(pdf_output_path)
+        ):
             write_text_if_changed(str(pdf_html_path), pdf_html)
             skipped_count += 1
             continue
 
-        pdf_html_path.write_text(pdf_html, encoding="utf-8")
+        write_text_if_changed(str(pdf_html_path), pdf_html)
         render_tasks.append(PdfRenderTask(str(pdf_html_path), str(pdf_output_path)))
 
     cleaned_count = cleanup_stale_pdf_parts(folder_pdf, expected_filenames)

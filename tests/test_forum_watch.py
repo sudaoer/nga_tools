@@ -1029,6 +1029,39 @@ class ForumPostdateScanTest:
         assert client.thread_page_fetches == [(784, 1, 'postdatedesc')]
         assert sleeps == []
 
+    def test_scan_failure_keeps_previous_jsonl_output(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(
+                    page=1,
+                    total_page=2,
+                    threads=[_thread(tid=101, subject="第一页", authorid=201)],
+                ),
+            },
+            failures={
+                (784, 2): [NGAForumPageError(500, "server error")],
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "threads.jsonl"
+            output_path.write_text("old\n", encoding="utf-8")
+
+            with pytest.raises(NGAForumPageError, match="server error"):
+                scan_postdate_forum_threads(
+                    client,
+                    fids=[784],
+                    output_path=output_path,
+                    page_delay_seconds=3,
+                    sleep_func=lambda _seconds: None,
+                )
+
+            output_text = output_path.read_text(encoding="utf-8")
+            temp_paths = list(Path(tmp_dir).glob(".threads.jsonl.*.tmp"))
+
+        assert output_text == "old\n"
+        assert temp_paths == []
+
 
 class ForumPostdateDbSyncTest:
     def test_db_sync_stops_after_updating_existing_tid(self) -> None:

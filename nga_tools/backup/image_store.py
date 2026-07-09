@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 import filecmp
 import os
-import shutil
 import sqlite3
 import tempfile
 import threading
@@ -18,6 +17,7 @@ from PIL import Image, ImageDraw
 from nga_tools import utils
 from nga_tools.config import get_config
 from nga_tools.console import report_warning
+from nga_tools.core.atomic import replace_file_atomically, temporary_sibling_path
 
 
 class ImageDownloadTask(TypedDict):
@@ -70,7 +70,7 @@ class ImageLookupCache:
         if mapping is None:
             return None
         image_path = mapping.unique_path
-        if not image_path.exists():
+        if not _image_file_is_valid(image_path):
             return None
         return image_path
 
@@ -141,7 +141,13 @@ def placeholder_image_path() -> Path:
         draw.line((42, 138, 278, 42), fill=(100, 116, 139), width=6)
         draw.line((42, 42, 278, 138), fill=(100, 116, 139), width=6)
         draw.text((86, 146), "image unavailable", fill=(71, 85, 105))
-        image.save(placeholder_path, format="PNG")
+        temp_path = temporary_sibling_path(placeholder_path)
+        try:
+            image.save(temp_path, format="PNG")
+            temp_path.replace(placeholder_path)
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
     return placeholder_path
 
 
@@ -387,6 +393,8 @@ def _target_path_for_download(
     target_path = unique_dir / f"{image_hash}.{extension}"
     if not target_path.exists():
         return target_path, False, False
+    if not _image_file_is_valid(target_path):
+        return target_path, False, False
     if _same_file_content(target_path, temp_path):
         return target_path, True, False
 
@@ -394,6 +402,9 @@ def _target_path_for_download(
     while True:
         collision_path = unique_dir / f"{image_hash}-collision-{collision_index}.{extension}"
         if not collision_path.exists():
+            report_warning(f"图片SHA-256 hash碰撞，保存为：{collision_path}")
+            return collision_path, False, True
+        if not _image_file_is_valid(collision_path):
             report_warning(f"图片SHA-256 hash碰撞，保存为：{collision_path}")
             return collision_path, False, True
         if _same_file_content(collision_path, temp_path):
@@ -407,6 +418,8 @@ def _store_image_file(
     *,
     move_source: bool,
 ) -> StoredImageResult:
+    if not _image_file_is_valid(source_path):
+        raise ValueError(f"图片文件无效：{source_path}")
     image_hash = utils.sha256(str(source_path))
     extension = _image_extension_from_file(source_path, task["url"])
     with _IMAGE_STORE_LOCK:
@@ -417,9 +430,11 @@ def _store_image_file(
         )
         if not reused:
             if move_source:
-                shutil.move(str(source_path), target_path)
+                replace_file_atomically(source_path, target_path, move_source=True)
             elif source_path.resolve() != target_path.resolve():
-                shutil.copy2(source_path, target_path)
+                replace_file_atomically(source_path, target_path, move_source=False)
+            if not _image_file_is_valid(target_path):
+                raise ValueError(f"图片保存后无法校验：{target_path}")
 
         upsert_image_mapping(task["url"], target_path)
     result: StoredImageResult = {

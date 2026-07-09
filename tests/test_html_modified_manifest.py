@@ -45,6 +45,38 @@ class HtmlModifiedManifestTest:
         assert completed_lous == {1}
         assert completed_lous_after_missing_file == set()
 
+    def test_completed_post_lous_rejects_changed_output_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            html_dir = Path(tmp_dir)
+            output_path = html_dir / "post_1.html"
+            output_path.write_text("output", encoding="utf-8")
+            source_hash = html_modified_manifest.hash_text("source")
+            output_hash = html_modified_manifest.hash_text("output")
+
+            html_modified_manifest.write_updated_manifest(
+                html_dir,
+                previous_entries={},
+                source_hash_by_lou={1: source_hash},
+                skipped_lous=set(),
+                completed_lous={1},
+                output_hash_by_lou={1: output_hash},
+            )
+            entries = html_modified_manifest.load_manifest(html_dir)
+            output_path.write_text("truncated", encoding="utf-8")
+
+            completed_lous = html_modified_manifest.completed_post_lous(
+                html_dir,
+                {1: source_hash},
+                entries,
+            )
+            files_exist = html_modified_manifest.manifest_files_exist(
+                html_dir,
+                entries,
+            )
+
+        assert completed_lous == set()
+        assert not files_exist
+
     def test_generation_version_mismatch_is_empty_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             html_dir = Path(tmp_dir)
@@ -85,4 +117,3 @@ class HtmlModifiedManifestTest:
                 entries = html_modified_manifest.load_manifest(html_dir)
 
         assert entries == {}
-

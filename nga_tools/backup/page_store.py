@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Optional
 
 from nga_tools import utils
 from nga_tools.console import report_progress, report_warning
+from nga_tools.core.atomic import write_json_atomically
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import NGAPageError, PageData
 
@@ -14,10 +14,7 @@ _AUTHOR_EMPTY_PAGE_MESSAGE = "找不到内容 或 没有更多页了"
 
 def write_page_json(folder_json: Path, page_number: int, page_data: PageData) -> None:
     path = folder_json / f"page_{page_number}.json"
-    path.write_text(
-        json.dumps(page_data, ensure_ascii=False, indent=4),
-        encoding="utf-8",
-    )
+    write_json_atomically(path, page_data, indent=4)
 
 
 def _is_author_empty_page_error(

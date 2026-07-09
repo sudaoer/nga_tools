@@ -82,6 +82,22 @@ class PdfHashCacheTest:
             assert plan.render_tasks == []
             assert (folder_pdf / 'part_0_1.html').exists()
 
+    def test_matching_hash_and_invalid_pdf_schedules_render(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            folder_pdf = Path(tmp_dir)
+            original_plan = self._build_plan(
+                folder_pdf,
+                {0: "<p>zero</p>"},
+            )
+            write_pdf_hashes(str(folder_pdf), original_plan.input_hashes)
+            (folder_pdf / "part_0_1.pdf").write_bytes(b"not a pdf")
+
+            plan = self._build_plan(folder_pdf, {0: "<p>zero</p>"})
+
+            assert plan.skipped_count == 0
+            assert plan.cleaned_count == 0
+            assert len(plan.render_tasks) == 1
+
     def test_changed_html_schedules_render_even_when_pdf_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             folder_pdf = Path(tmp_dir)
@@ -238,29 +254,80 @@ class PdfWeasyPrintCaptureTest:
         ) == ("WARNING: missing glyph", "INFO: done")
 
     def test_run_weasyprint_captures_combined_output(self) -> None:
-        task = PdfRenderTask("/tmp/part_0_1.html", "/tmp/part_0_1.pdf")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task = PdfRenderTask(
+                str(Path(tmp_dir) / "part_0_1.html"),
+                str(Path(tmp_dir) / "part_0_1.pdf"),
+            )
 
-        with patch(
-            "nga_tools.backup.pdf.subprocess.run",
-            return_value=SimpleNamespace(
+            def fake_run(
+                args: list[str],
+                *,
+                stdout: int,
+                stderr: int,
+                text: bool,
+                check: bool,
+            ) -> SimpleNamespace:
+                del stdout, stderr, text, check
+                Path(args[2]).write_bytes(b"%PDF-1.7\n")
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="WARNING: missing glyph\n\n  INFO: done  \n",
+                )
+
+            with patch(
+                "nga_tools.backup.pdf.subprocess.run",
+                side_effect=fake_run,
+            ) as run:
+                result = _run_weasyprint(task)
+
+            run_args = run.call_args.args[0]
+            assert run_args[:2] == ["weasyprint", task.html_path]
+            assert run_args[2] != task.output_path
+            run.assert_called_once_with(
+                run_args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            assert result == PdfRenderResult(
+                task=task,
                 returncode=0,
-                stdout="WARNING: missing glyph\n\n  INFO: done  \n",
-            ),
-        ) as run:
-            result = _run_weasyprint(task)
+                output_lines=("WARNING: missing glyph", "INFO: done"),
+            )
+            assert Path(task.output_path).read_bytes() == b"%PDF-1.7\n"
 
-        run.assert_called_once_with(
-            ["weasyprint", task.html_path, task.output_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
-        assert result == PdfRenderResult(
-            task=task,
-            returncode=0,
-            output_lines=("WARNING: missing glyph", "INFO: done"),
-        )
+    def test_run_weasyprint_keeps_existing_pdf_when_output_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task = PdfRenderTask(
+                str(Path(tmp_dir) / "part_0_1.html"),
+                str(Path(tmp_dir) / "part_0_1.pdf"),
+            )
+            Path(task.output_path).write_bytes(b"%PDF-old\n")
+
+            def fake_run(
+                args: list[str],
+                *,
+                stdout: int,
+                stderr: int,
+                text: bool,
+                check: bool,
+            ) -> SimpleNamespace:
+                del stdout, stderr, text, check
+                Path(args[2]).write_bytes(b"not a pdf")
+                return SimpleNamespace(returncode=0, stdout="")
+
+            with patch(
+                "nga_tools.backup.pdf.subprocess.run",
+                side_effect=fake_run,
+            ):
+                result = _run_weasyprint(task)
+
+            assert result.task == task
+            assert result.returncode == 1
+            assert result.output_lines == (f"PDF输出无效：{task.output_path}",)
+            assert Path(task.output_path).read_bytes() == b"%PDF-old\n"
 
     def test_run_weasyprint_reports_missing_command(self) -> None:
         task = PdfRenderTask("/tmp/part_0_1.html", "/tmp/part_0_1.pdf")

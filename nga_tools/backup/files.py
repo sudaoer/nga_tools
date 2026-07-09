@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from nga_tools.core.atomic import write_text_atomically as _write_text_atomically
+
 
 def write_text_atomically(path: Path, text: str) -> None:
-    temp_path = path.with_name(f".{path.name}.tmp")
-    temp_path.write_text(text, encoding="utf-8")
-    temp_path.replace(path)
-
+    _write_text_atomically(path, text)

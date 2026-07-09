@@ -127,7 +127,10 @@ class ImageStoreTest:
             unique_dir = output_dir / "images_unique"
             unique_dir.mkdir(parents=True)
             existing_path = unique_dir / "existing.png"
-            existing_path.write_bytes(b"image")
+            Image.new("RGB", (1, 1), color="white").save(
+                existing_path,
+                format="PNG",
+            )
             existing_url_with_comma = (
                 "https://img.nga.178.com/attachments/"
                 "mon_202506/06/lsQkle-,552eXuT3cS10p-7f7.png"
@@ -153,6 +156,63 @@ class ImageStoreTest:
 
             assert set(mappings) == {existing_url}
             assert pending_tasks == [{'url': missing_url}]
+
+    def test_pending_image_download_tasks_retries_invalid_mapped_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+            unique_dir = output_dir / "images_unique"
+            unique_dir.mkdir(parents=True)
+            invalid_path = unique_dir / "broken.png"
+            invalid_path.write_bytes(b"not an image")
+            image_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+            )
+
+            with patch(
+                "nga_tools.backup.image_store.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                image_store.upsert_image_mapping(image_url, invalid_path)
+                pending_tasks = image_store.pending_image_download_tasks(
+                    [{"url": image_url}]
+                )
+
+            assert pending_tasks == [{"url": image_url}]
+
+    def test_store_downloaded_image_replaces_invalid_target_without_collision(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+            unique_dir = output_dir / "images_unique"
+            unique_dir.mkdir(parents=True)
+            image_hash = "a" * 64
+            target_path = unique_dir / f"{image_hash}.png"
+            target_path.write_bytes(b"not an image")
+            temp_image = Path(temp_dir_name) / "download.png"
+            Image.new("RGB", (1, 1), color="white").save(temp_image)
+            image_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+            )
+
+            with (
+                patch(
+                    "nga_tools.backup.image_store.get_config",
+                    return_value=SimpleNamespace(output_dir=str(output_dir)),
+                ),
+                patch("nga_tools.backup.image_store.utils.sha256", return_value=image_hash),
+            ):
+                result = image_store.store_downloaded_image(
+                    temp_image,
+                    {"url": image_url},
+                )
+
+            with Image.open(target_path) as image:
+                image.verify()
+            assert Path(result["unique_path"]) == target_path
+            assert "collision" not in result
 
     def test_store_downloaded_image_preserves_hash_collision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:

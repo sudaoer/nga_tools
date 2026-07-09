@@ -67,7 +67,7 @@ class RewriteImageLinksTest:
             unique_dir = output_dir / "images_unique"
             unique_dir.mkdir(parents=True)
             unique_path = unique_dir / "hash.png"
-            unique_path.write_bytes(b"image")
+            Image.new("RGB", (1, 1), color="white").save(unique_path, format="PNG")
 
             def fake_get_folder(
                 tid: int,
@@ -122,7 +122,7 @@ class RewriteImageLinksTest:
             unique_dir = output_dir / "images_unique"
             unique_dir.mkdir(parents=True)
             unique_path = unique_dir / "hash.png"
-            unique_path.write_bytes(b"image")
+            Image.new("RGB", (1, 1), color="white").save(unique_path, format="PNG")
 
             def fake_get_folder(
                 tid: int,
@@ -274,7 +274,7 @@ class RewriteImageLinksTest:
             unique_dir = output_dir / "images_unique"
             unique_dir.mkdir(parents=True)
             unique_path = unique_dir / "hash.webp"
-            unique_path.write_bytes(b"image")
+            Image.new("RGB", (1, 1), color="white").save(unique_path, format="PNG")
 
             def fake_get_folder(
                 tid: int,
@@ -1457,7 +1457,10 @@ class DownloadImagesTest:
             unique_dir = Path(temp_dir) / "images_unique"
             unique_dir.mkdir()
             unique_existing_path = unique_dir / "existing.png"
-            unique_existing_path.write_bytes(b"already here")
+            Image.new("RGB", (1, 1), color="white").save(
+                unique_existing_path,
+                format="PNG",
+            )
             existing_url = (
                 "https://img.nga.178.com/attachments/mon_202506/06/existing.png"
             )
@@ -1511,7 +1514,10 @@ class DownloadImagesTest:
             unique_dir = Path(temp_dir) / "images_unique"
             unique_dir.mkdir()
             unique_existing_path = unique_dir / "existing.png"
-            unique_existing_path.write_bytes(b"already here")
+            Image.new("RGB", (1, 1), color="white").save(
+                unique_existing_path,
+                format="PNG",
+            )
             existing_url = (
                 "https://img.nga.178.com/attachments/mon_202506/06/existing.png"
             )

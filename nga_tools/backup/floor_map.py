@@ -9,6 +9,7 @@ from typing import Optional, cast
 from nga_tools import utils
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.console import report_info, report_progress, report_warning
+from nga_tools.core.atomic import write_json_atomically
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
 from nga_tools.backup.floor_models import (
@@ -185,7 +186,7 @@ def _write_floor_map(
     }
     if input_signature is not None:
         data["input_signature"] = input_signature
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
+    write_json_atomically(path, data, indent=4)
     report_info(f"已写入楼层映射：{path}")
 
 
@@ -315,7 +316,11 @@ def load_floor_map_build_result_if_current(
     if not path.exists():
         return None
 
-    data = _read_json_object(path)
+    try:
+        data = _read_json_object(path)
+    except (FileNotFoundError, ValueError) as error:
+        report_warning(f"楼层映射缓存无效，重新生成：{path}: {error}")
+        return None
     if data.get("version") != FLOOR_MAP_VERSION:
         return None
     if data.get("floor_map_generation_version") != FLOOR_MAP_GENERATION_VERSION:

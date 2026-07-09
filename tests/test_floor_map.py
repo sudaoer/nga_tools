@@ -281,6 +281,27 @@ class FloorMapSignatureCacheTest:
         assert cached.floor_labels.original_lou_by_author_lou[1] == 10
         assert changed is None
 
+    def test_invalid_cached_floor_map_is_cache_miss(self) -> None:
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 1001, "author_lou": 1},
+        ]
+
+        with TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / "floor_map.json").write_text("{bad", encoding="utf-8")
+            with (
+                patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir),
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                cached = load_floor_map_build_result_if_current(
+                    123,
+                    456,
+                    author_posts,
+                    [],
+                )
+
+        assert cached is None
+
 
 class FloorMapMissingAuthorLousTest:
     def test_finds_gaps_while_accepting_zero_floor(self) -> None:
@@ -291,4 +312,3 @@ class FloorMapMissingAuthorLousTest:
         ]
 
         assert find_missing_author_lous(author_posts) == [2]
-

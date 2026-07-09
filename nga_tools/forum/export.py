@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal, Protocol, TypedDict
 
 from nga_tools.config import get_config
+from nga_tools.core.atomic import open_text_atomically
 from nga_tools.forum.thread_store import ForumThreadStore, timestamp_text
 from nga_tools.ngaclient.client import ForumThread, ForumThreadPage, NGAForumPageError
 
@@ -250,7 +251,7 @@ def scan_postdate_forum_threads(
     total_written = 0
     total_pages_scanned = 0
 
-    with output_path.open("w", encoding="utf-8") as output_file:
+    with open_text_atomically(output_path) as output_file:
         for fid_index, fid in enumerate(scan_fids, start=1):
             total_pages: int | None = None
             page = start_page

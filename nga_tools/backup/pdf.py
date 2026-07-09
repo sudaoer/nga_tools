@@ -26,10 +26,12 @@ from nga_tools.backup.overlay import load_post_overlays
 from nga_tools.backup.pdf_plan import (
     PdfRenderTask,
     build_render_tasks as _build_render_tasks,
+    pdf_file_is_usable,
     write_pdf_hashes as _write_pdf_hashes,
 )
 from nga_tools.config import get_config
 from nga_tools.console import report_info, report_warning
+from nga_tools.core.atomic import temporary_sibling_path
 
 SPEAKER_LINE_RE = re.compile(r"^([^\s：:][^：:]{0,15})[：:]")
 
@@ -206,11 +208,31 @@ def _is_long_image(width: int, height: int) -> bool:
 
 
 def _save_slice_image(image: Image.Image, output_path: str) -> None:
-    if "A" in image.getbands():
-        image.save(output_path, format="PNG", optimize=True)
-        return
+    final_path = Path(output_path)
+    temp_path = temporary_sibling_path(final_path)
+    try:
+        if "A" in image.getbands():
+            image.save(temp_path, format="PNG", optimize=True)
+        else:
+            image.convert("RGB").save(
+                temp_path,
+                format="JPEG",
+                quality=92,
+                optimize=True,
+            )
+        temp_path.replace(final_path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
 
-    image.convert("RGB").save(output_path, format="JPEG", quality=92, optimize=True)
+
+def _slice_image_file_is_valid(path: str) -> bool:
+    try:
+        with Image.open(path) as image:
+            image.verify()
+    except OSError:
+        return False
+    return True
 
 
 def _slice_long_image_for_pdf(
@@ -240,7 +262,9 @@ def _slice_long_image_for_pdf(
                 slice_output_dir,
                 f"{safe_stem}_slice_{index:03d}{extension}",
             )
-            if not os.path.exists(output_path):
+            if not os.path.exists(output_path) or not _slice_image_file_is_valid(
+                output_path
+            ):
                 _save_slice_image(segment, output_path)
             slice_paths.append(output_path)
 
@@ -283,24 +307,51 @@ def _pdf_worker_desc(pdf_workers: Optional[int]) -> str:
 
 
 def _run_weasyprint(task: PdfRenderTask) -> PdfRenderResult:
+    output_path = Path(task.output_path)
+    temp_output_path = temporary_sibling_path(output_path)
     try:
         result = subprocess.run(
-            ["weasyprint", task.html_path, task.output_path],
+            ["weasyprint", task.html_path, str(temp_output_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             check=False,
         )
     except FileNotFoundError as error:
+        temp_output_path.unlink(missing_ok=True)
         return PdfRenderResult(
             task=task,
             returncode=1,
             output_lines=(f"找不到weasyprint命令，请确认通过pixi环境运行：{error}",),
         )
+    output_lines = _split_weasyprint_output(result.stdout)
+    if result.returncode != 0:
+        temp_output_path.unlink(missing_ok=True)
+        return PdfRenderResult(
+            task=task,
+            returncode=result.returncode,
+            output_lines=output_lines,
+        )
+    if not pdf_file_is_usable(temp_output_path):
+        temp_output_path.unlink(missing_ok=True)
+        return PdfRenderResult(
+            task=task,
+            returncode=1,
+            output_lines=(*output_lines, f"PDF输出无效：{task.output_path}"),
+        )
+    try:
+        temp_output_path.replace(output_path)
+    except OSError as error:
+        temp_output_path.unlink(missing_ok=True)
+        return PdfRenderResult(
+            task=task,
+            returncode=1,
+            output_lines=(*output_lines, f"无法写入PDF：{task.output_path}: {error}"),
+        )
     return PdfRenderResult(
         task=task,
         returncode=result.returncode,
-        output_lines=_split_weasyprint_output(result.stdout),
+        output_lines=output_lines,
     )
 
 

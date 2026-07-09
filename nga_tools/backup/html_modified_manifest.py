@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TypedDict, cast
 
 from nga_tools.core.hashing import hash_text as _hash_text
+from nga_tools.core.atomic import write_json_atomically
 from nga_tools.console import report_warning
 
 HTML_MODIFIED_MANIFEST_FILENAME = "html_modified_manifest.json"
@@ -95,17 +96,30 @@ def completed_post_lous(
             continue
         if entry["source_hash"] != source_hash:
             continue
-        if not (folder_html_modified / filename).is_file():
+        if not _manifest_file_matches(
+            folder_html_modified / filename,
+            entry["output_hash"],
+        ):
             continue
         completed_lous.add(lou)
     return completed_lous
+
+
+def _manifest_file_matches(path: Path, output_hash: str) -> bool:
+    try:
+        return hash_text(path.read_text(encoding="utf-8")) == output_hash
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return False
 
 
 def manifest_files_exist(
     folder_html_modified: Path,
     entries: dict[str, HtmlModifiedManifestEntry],
 ) -> bool:
-    return all((folder_html_modified / filename).is_file() for filename in entries)
+    return all(
+        _manifest_file_matches(folder_html_modified / filename, entry["output_hash"])
+        for filename, entry in entries.items()
+    )
 
 
 def write_manifest(
@@ -118,13 +132,12 @@ def write_manifest(
         "algorithm": HTML_MODIFIED_HASH_ALGORITHM,
         "files": dict(sorted(entries.items())),
     }
-    path = manifest_path(folder_html_modified)
-    temp_path = path.with_name(f".{path.name}.tmp")
-    temp_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    write_json_atomically(
+        manifest_path(folder_html_modified),
+        manifest,
+        indent=2,
+        trailing_newline=True,
     )
-    temp_path.replace(path)
 
 
 def write_updated_manifest(

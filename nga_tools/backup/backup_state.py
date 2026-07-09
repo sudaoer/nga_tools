@@ -10,6 +10,7 @@ from nga_tools.backup.floor_map import (
     FLOOR_MAP_HASH_ALGORITHM,
 )
 from nga_tools.console import report_warning
+from nga_tools.core.atomic import write_json_atomically
 
 BACKUP_STATE_FILENAME = "backup_state.json"
 BACKUP_STATE_VERSION = 3
@@ -110,9 +111,4 @@ def write_state(
         "unresolved_missing_count": unresolved_missing_count,
     }
     path = state_path(thread_folder)
-    temp_path = path.with_name(f".{path.name}.tmp")
-    temp_path.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temp_path.replace(path)
+    write_json_atomically(path, state, indent=2, trailing_newline=True)
