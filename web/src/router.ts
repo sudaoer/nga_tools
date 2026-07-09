@@ -1,6 +1,4 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import ThreadReaderView from './views/ThreadReaderView.vue'
-import AdminView from './views/AdminView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -14,7 +12,7 @@ const router = createRouter({
     },
     {
       path: '/threads',
-      component: ThreadReaderView,
+      component: () => import('./views/ThreadReaderView.vue'),
     },
     {
       path: '/databases',
@@ -25,7 +23,7 @@ const router = createRouter({
     },
     {
       path: '/admin',
-      component: AdminView,
+      component: () => import('./views/AdminView.vue'),
       redirect: (to) => ({
         path: '/admin/post-versions',
         query: to.query,

@@ -36,6 +36,7 @@ const urlStateReady = ref(false)
 const requestedDatabaseId = ref<string | null>(null)
 const requestedTableName = ref<string | null>(null)
 const requestedRowId = ref<number | null>(null)
+const schemaCache = new Map<string, DatabaseSchema>()
 
 const rowQuery = reactive({
   q: '',
@@ -49,6 +50,7 @@ interface DatabaseSelectionOptions {
   resetQuery: boolean
   targetTableName: string | null
   targetRowId: number | null
+  refreshSchema: boolean
 }
 
 interface TableSelectionOptions {
@@ -249,11 +251,14 @@ function resetRowQuery(): void {
   rowQuery.sortDirection = 'asc'
 }
 
-async function loadDatabases(): Promise<void> {
+async function loadDatabases(refresh = false): Promise<void> {
   loadingDatabases.value = true
   databaseError.value = null
+  if (refresh) {
+    schemaCache.clear()
+  }
   try {
-    databases.value = await fetchDatabases()
+    databases.value = await fetchDatabases({ refresh })
     const requested =
       requestedDatabaseId.value === null
         ? null
@@ -282,6 +287,7 @@ async function loadDatabases(): Promise<void> {
       resetQuery: !preserveSelection,
       targetTableName: preserveSelection ? targetTableName : null,
       targetRowId: preserveSelection ? targetRowId : null,
+      refreshSchema: refresh,
     })
     requestedDatabaseId.value = null
     requestedTableName.value = null
@@ -293,12 +299,17 @@ async function loadDatabases(): Promise<void> {
   }
 }
 
+function refreshDatabases(): void {
+  void loadDatabases(true)
+}
+
 async function selectDatabase(
   database: DatabaseSummary,
   options: DatabaseSelectionOptions = {
     resetQuery: true,
     targetTableName: null,
     targetRowId: null,
+    refreshSchema: false,
   },
 ): Promise<void> {
   selectedDatabaseId.value = database.id
@@ -317,7 +328,11 @@ async function selectDatabase(
   }
   loadingSchema.value = true
   try {
-    schema.value = await fetchDatabaseSchema(database.id)
+    const cachedSchema = options.refreshSchema ? undefined : schemaCache.get(database.id)
+    const nextSchema =
+      cachedSchema ?? (await fetchDatabaseSchema(database.id, { refresh: options.refreshSchema }))
+    schema.value = nextSchema
+    schemaCache.set(database.id, nextSchema)
     const targetTable =
       options.targetTableName === null
         ? null
@@ -473,7 +488,7 @@ onMounted(() => {
     <aside class="database-sidebar">
       <div class="pane-header">
         <h1>数据库查看器</h1>
-        <button type="button" class="icon-button" title="刷新数据库列表" @click="loadDatabases">
+        <button type="button" class="icon-button" title="刷新数据库列表" @click="refreshDatabases">
           ↻
         </button>
       </div>

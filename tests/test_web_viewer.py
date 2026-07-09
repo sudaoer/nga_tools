@@ -12,6 +12,7 @@ from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.cli.parser import args_parse
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web import data as web_data
+from nga_tools.web import database as web_database
 from nga_tools.backup.post_overlay import POST_OVERLAYS_FILENAME
 from nga_tools.backup.post_version_selection import POST_VERSION_SELECTIONS_FILENAME
 from nga_tools.web.data import (
@@ -625,6 +626,83 @@ class WebServerTest:
             item["dirName"] for item in filtered_response.json()["items"]
         ] == ["101_201"]
 
+    def test_admin_post_version_threads_light_skips_full_archive_stats(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "before edit")])
+        _write_archive(thread_dir, [_post(1, "after edit")])
+
+        def fail_read_archive_stats(_db_path: Path):
+            raise AssertionError("light version thread scan should not read full stats")
+
+        monkeypatch.setattr(
+            web_data,
+            "_read_archive_stats",
+            fail_read_archive_stats,
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get(
+            "/api/admin/post-version-threads",
+            params={"detail": "light"},
+        )
+
+        assert response.status_code == 200
+        item = response.json()["items"][0]
+        assert item["dirName"] == "101_201"
+        assert item["statsLoaded"] is False
+        assert item["postCount"] is None
+        assert item["multiVersionFloorCount"] == 1
+
+    def test_admin_post_version_threads_use_cache_until_refresh(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "before edit")])
+        _write_archive(thread_dir, [_post(1, "after edit")])
+        calls: list[Path] = []
+        original_read_count = web_data._read_multi_version_floor_count
+
+        def wrapped_read_count(thread_folder: Path) -> int:
+            calls.append(thread_folder)
+            return original_read_count(thread_folder)
+
+        monkeypatch.setattr(
+            web_data,
+            "_read_multi_version_floor_count",
+            wrapped_read_count,
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        first_response = client.get(
+            "/api/admin/post-version-threads",
+            params={"detail": "light"},
+        )
+        second_response = client.get(
+            "/api/admin/post-version-threads",
+            params={"detail": "light"},
+        )
+        refreshed_response = client.get(
+            "/api/admin/post-version-threads",
+            params={"detail": "light", "refresh": "1"},
+        )
+
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        assert refreshed_response.status_code == 200
+        assert len(calls) == 2
+
     def test_admin_post_version_selection_affects_reader_and_html_modified(
         self,
         tmp_path: Path,
@@ -795,6 +873,38 @@ class WebDatabaseViewerTest:
         assert by_id["forum_threads"]["relativePath"] == "forum_threads.sqlite3"
         assert by_id["archive:101_201"]["tableCount"] == 4
 
+    def test_databases_route_uses_cache_until_refresh(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        _write_forum_thread_db(output_dir)
+        calls: list[Path] = []
+        original_read_table_count = web_database._read_table_count
+
+        def wrapped_read_table_count(db_path: Path) -> int:
+            calls.append(db_path)
+            return original_read_table_count(db_path)
+
+        monkeypatch.setattr(
+            web_database,
+            "_read_table_count",
+            wrapped_read_table_count,
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        first_response = client.get("/api/databases")
+        second_response = client.get("/api/databases")
+        refreshed_response = client.get("/api/databases", params={"refresh": "1"})
+
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        assert refreshed_response.status_code == 200
+        assert len(calls) == 2
+
     def test_database_schema_and_rows_support_search_sort_and_detail(
         self,
         tmp_path: Path,
@@ -843,6 +953,44 @@ class WebDatabaseViewerTest:
         detail_cell = detail_response.json()["row"]["cells"]["content"]
         assert detail_cell["value"] == "needle " + "x" * 300
         assert detail_cell["truncated"] is False
+
+    def test_database_schema_uses_cache_until_refresh(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        _write_forum_thread_db(output_dir)
+        calls: list[str] = []
+        original_read_row_count = web_database._read_row_count
+
+        def wrapped_read_row_count(
+            connection: sqlite3.Connection,
+            table_name: str,
+        ) -> Optional[int]:
+            calls.append(table_name)
+            return original_read_row_count(connection, table_name)
+
+        monkeypatch.setattr(
+            web_database,
+            "_read_row_count",
+            wrapped_read_row_count,
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        first_response = client.get("/api/databases/forum_threads/schema")
+        second_response = client.get("/api/databases/forum_threads/schema")
+        refreshed_response = client.get(
+            "/api/databases/forum_threads/schema",
+            params={"refresh": "1"},
+        )
+
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        assert refreshed_response.status_code == 200
+        assert calls == ["forum_threads_fid_784", "forum_threads_fid_784"]
 
     def test_database_rows_reject_unknown_sort_column(
         self,

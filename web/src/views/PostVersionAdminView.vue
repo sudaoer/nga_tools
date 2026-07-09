@@ -41,6 +41,8 @@ const urlStateReady = ref(false)
 const requestedThread = ref<{ tid: number; aidKey: string } | null>(null)
 const requestedLou = ref<number | null>(null)
 const requestedVersionId = ref<number | null>(null)
+let threadListRequestId = 0
+let threadStatsRequestId = 0
 
 const selectedGroup = computed(
   () => groups.value.find((group) => group.lou === selectedLou.value) || null,
@@ -129,6 +131,10 @@ function formatTime(value: string | number | null): string {
   return date.toLocaleString()
 }
 
+function formatNumber(value: number | null): string {
+  return value === null ? '-' : value.toLocaleString()
+}
+
 function formatHash(value: string): string {
   return value.slice(0, 12)
 }
@@ -215,6 +221,37 @@ function clearThreadSelection(): void {
   previewVersionId.value = null
 }
 
+function threadKey(thread: PostVersionThreadSummary): string {
+  return `${thread.tid}:${thread.aidKey}`
+}
+
+function mergeFullThreadStats(fullThreads: PostVersionThreadSummary[]): void {
+  const fullByKey = new Map(fullThreads.map((thread) => [threadKey(thread), thread]))
+  threads.value = threads.value.map((thread) => fullByKey.get(threadKey(thread)) || thread)
+  if (selectedThread.value !== null) {
+    selectedThread.value =
+      fullByKey.get(threadKey(selectedThread.value)) || selectedThread.value
+  }
+}
+
+async function loadFullThreadStats(refresh: boolean): Promise<void> {
+  const requestId = ++threadStatsRequestId
+  try {
+    const fullThreads = await fetchPostVersionThreads({
+      detail: 'full',
+      refresh,
+    })
+    if (requestId !== threadStatsRequestId) {
+      return
+    }
+    mergeFullThreadStats(fullThreads)
+  } catch (error) {
+    if (threads.value.length === 0) {
+      threadError.value = error instanceof Error ? error.message : String(error)
+    }
+  }
+}
+
 async function selectVisibleThread(): Promise<void> {
   const requested =
     requestedThread.value === null
@@ -247,19 +284,33 @@ async function selectVisibleThread(): Promise<void> {
   }
 }
 
-async function loadThreads(): Promise<void> {
+async function loadThreads(refresh = false): Promise<void> {
+  const requestId = ++threadListRequestId
   loadingThreads.value = true
   threadError.value = null
   try {
     threads.value = await fetchPostVersionThreads({
-      multiVersionOnly: showOnlyMultiVersionThreads.value,
+      detail: 'light',
+      refresh,
     })
+    if (requestId !== threadListRequestId) {
+      return
+    }
     await selectVisibleThread()
+    void loadFullThreadStats(refresh)
   } catch (error) {
-    threadError.value = error instanceof Error ? error.message : String(error)
+    if (requestId === threadListRequestId) {
+      threadError.value = error instanceof Error ? error.message : String(error)
+    }
   } finally {
-    loadingThreads.value = false
+    if (requestId === threadListRequestId) {
+      loadingThreads.value = false
+    }
   }
+}
+
+function refreshThreads(): void {
+  void loadThreads(true)
 }
 
 async function selectThread(
@@ -389,7 +440,7 @@ async function clearSelection(): Promise<void> {
 
 watch(showOnlyMultiVersionThreads, () => {
   if (urlStateReady.value) {
-    void loadThreads()
+    void selectVisibleThread()
   }
 })
 
@@ -418,7 +469,7 @@ onMounted(() => {
     <aside class="thread-pane">
       <div class="pane-header">
         <h1>备份</h1>
-        <button type="button" class="icon-button" title="刷新列表" @click="loadThreads">
+        <button type="button" class="icon-button" title="刷新列表" @click="refreshThreads">
           ↻
         </button>
       </div>
@@ -446,7 +497,7 @@ onMounted(() => {
           <span class="thread-title">{{ titleFor(thread) }}</span>
           <span class="thread-meta">
             <span>{{ thread.dirName }}</span>
-            <span>{{ thread.postCount }} 楼</span>
+            <span>{{ formatNumber(thread.postCount) }} 楼</span>
             <span>多版本 {{ thread.multiVersionFloorCount }} 楼</span>
             <span>备份 {{ formatTime(thread.updatedAt) }}</span>
           </span>

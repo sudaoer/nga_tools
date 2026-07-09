@@ -653,9 +653,10 @@ def read_post_version_thread_summaries(
     metadata_by_key: dict[tuple[int, str], ThreadConfig],
     *,
     multi_version_only: bool = False,
+    detail: ThreadSummaryDetail = "full",
 ) -> PostVersionThreadSummariesResult:
     items: list[PostVersionThreadSummary] = []
-    for summary in scan_thread_summaries(output_dir, metadata_by_key):
+    for summary in scan_thread_summaries(output_dir, metadata_by_key, detail=detail):
         if summary["status"] != "ready":
             continue
         thread_folder = output_dir / summary["dirName"]

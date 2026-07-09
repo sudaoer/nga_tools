@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from copy import deepcopy
 from _thread import LockType
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,8 +15,11 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from nga_tools.config import get_config
 from nga_tools.console import report_info
+from nga_tools.backup import image_store
+from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.forum.thread_configs import ThreadConfig
+from nga_tools.forum.thread_store import FORUM_THREAD_DB_FILENAME
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web.data import (
     PostOverlayDetail,
@@ -25,6 +29,7 @@ from nga_tools.web.data import (
     PostVersionPreview,
     PostVersionSelectionResult,
     PostVersionThreadSummariesResult,
+    PostVersionThreadSummary,
     ThreadNotFoundError,
     ThreadSummary,
     ThreadSummaryDetail,
@@ -63,6 +68,11 @@ from nga_tools.web.database import (
 _MAX_POST_LIMIT = 200
 _MAX_DATABASE_ROW_LIMIT = 200
 ThreadListFingerprint = tuple[str, ...]
+DatabaseListFingerprint = tuple[str, ...]
+DatabaseSchemaFingerprint = str
+_DATABASE_ID_FORUM_THREADS = "forum_threads"
+_DATABASE_ID_IMAGE_INDEX = "image_index"
+_ARCHIVE_DATABASE_PREFIX = "archive:"
 
 
 def _new_lock() -> LockType:
@@ -70,6 +80,28 @@ def _new_lock() -> LockType:
 
 
 def _new_lock_map() -> dict[Path, LockType]:
+    return {}
+
+
+def _new_post_version_fingerprint_map() -> dict[
+    ThreadSummaryDetail,
+    ThreadListFingerprint,
+]:
+    return {}
+
+
+def _new_post_version_thread_map() -> dict[
+    ThreadSummaryDetail,
+    list[PostVersionThreadSummary],
+]:
+    return {}
+
+
+def _new_database_schema_fingerprint_map() -> dict[str, DatabaseSchemaFingerprint]:
+    return {}
+
+
+def _new_database_schema_map() -> dict[str, DatabaseSchema]:
     return {}
 
 
@@ -118,6 +150,65 @@ def _copy_thread_summaries(items: list[ThreadSummary]) -> list[ThreadSummary]:
     return [cast(ThreadSummary, dict(item)) for item in items]
 
 
+def _copy_post_version_thread_summaries(
+    items: list[PostVersionThreadSummary],
+) -> list[PostVersionThreadSummary]:
+    return [cast(PostVersionThreadSummary, dict(item)) for item in items]
+
+
+def _copy_database_summaries(items: list[DatabaseSummary]) -> list[DatabaseSummary]:
+    return deepcopy(items)
+
+
+def _copy_database_schema(schema: DatabaseSchema) -> DatabaseSchema:
+    return deepcopy(schema)
+
+
+def _database_list_fingerprint(output_dir: Path) -> DatabaseListFingerprint:
+    entries = [
+        f"output:{_file_fingerprint(output_dir)}",
+        f"forum:{_file_fingerprint(output_dir / FORUM_THREAD_DB_FILENAME)}",
+        f"image:{_file_fingerprint(output_dir / image_store.IMAGE_INDEX_FILENAME)}",
+    ]
+    if not output_dir.is_dir():
+        return tuple(entries)
+
+    for thread_folder in sorted(output_dir.iterdir(), key=lambda path: path.name):
+        if not thread_folder.is_dir():
+            continue
+        if parse_thread_dir_name(thread_folder.name) is None:
+            continue
+        archive_db_path = thread_folder / ARCHIVE_DB_FILENAME
+        if archive_db_path.is_file():
+            entries.append(
+                f"{thread_folder.name}:{_file_fingerprint(archive_db_path)}"
+            )
+    return tuple(entries)
+
+
+def _database_file_for_id(output_dir: Path, database_id: str) -> Optional[Path]:
+    if database_id == _DATABASE_ID_FORUM_THREADS:
+        return output_dir / FORUM_THREAD_DB_FILENAME
+    if database_id == _DATABASE_ID_IMAGE_INDEX:
+        return output_dir / image_store.IMAGE_INDEX_FILENAME
+    if database_id.startswith(_ARCHIVE_DATABASE_PREFIX):
+        thread_dir_name = database_id.removeprefix(_ARCHIVE_DATABASE_PREFIX)
+        if parse_thread_dir_name(thread_dir_name) is None:
+            return None
+        return output_dir / thread_dir_name / ARCHIVE_DB_FILENAME
+    return None
+
+
+def _database_schema_fingerprint(
+    output_dir: Path,
+    database_id: str,
+) -> DatabaseSchemaFingerprint:
+    database_path = _database_file_for_id(output_dir, database_id)
+    if database_path is None:
+        return f"{database_id}\0-"
+    return f"{database_id}\0{_file_fingerprint(database_path)}"
+
+
 @dataclass
 class ThreadSummaryCache:
     _guard: LockType = field(default_factory=_new_lock)
@@ -150,6 +241,100 @@ class ThreadSummaryCache:
             return _copy_thread_summaries(items)
 
 
+@dataclass
+class PostVersionThreadCache:
+    _guard: LockType = field(default_factory=_new_lock)
+    _fingerprints: dict[ThreadSummaryDetail, ThreadListFingerprint] = field(
+        default_factory=_new_post_version_fingerprint_map
+    )
+    _items: dict[ThreadSummaryDetail, list[PostVersionThreadSummary]] = field(
+        default_factory=_new_post_version_thread_map
+    )
+
+    def read(
+        self,
+        output_dir: Path,
+        metadata_by_key: dict[tuple[int, str], ThreadConfig],
+        *,
+        detail: ThreadSummaryDetail,
+        refresh: bool,
+    ) -> list[PostVersionThreadSummary]:
+        fingerprint = _thread_list_fingerprint(output_dir)
+        with self._guard:
+            if (
+                not refresh
+                and self._fingerprints.get(detail) == fingerprint
+                and detail in self._items
+            ):
+                return _copy_post_version_thread_summaries(self._items[detail])
+
+            items = read_post_version_thread_summaries(
+                output_dir,
+                metadata_by_key,
+                detail=detail,
+            )["items"]
+            self._fingerprints[detail] = _thread_list_fingerprint(output_dir)
+            self._items[detail] = _copy_post_version_thread_summaries(items)
+            return _copy_post_version_thread_summaries(items)
+
+
+@dataclass
+class DatabaseSummaryCache:
+    _guard: LockType = field(default_factory=_new_lock)
+    _fingerprint: Optional[DatabaseListFingerprint] = None
+    _items: Optional[list[DatabaseSummary]] = None
+
+    def read(self, output_dir: Path, *, refresh: bool) -> list[DatabaseSummary]:
+        fingerprint = _database_list_fingerprint(output_dir)
+        with self._guard:
+            if (
+                not refresh
+                and self._fingerprint == fingerprint
+                and self._items is not None
+            ):
+                return _copy_database_summaries(self._items)
+
+            items = list_database_summaries(output_dir)
+            self._fingerprint = _database_list_fingerprint(output_dir)
+            self._items = _copy_database_summaries(items)
+            return _copy_database_summaries(items)
+
+
+@dataclass
+class DatabaseSchemaCache:
+    _guard: LockType = field(default_factory=_new_lock)
+    _fingerprints: dict[str, DatabaseSchemaFingerprint] = field(
+        default_factory=_new_database_schema_fingerprint_map
+    )
+    _items: dict[str, DatabaseSchema] = field(
+        default_factory=_new_database_schema_map
+    )
+
+    def read(
+        self,
+        output_dir: Path,
+        database_id: str,
+        *,
+        refresh: bool,
+    ) -> DatabaseSchema:
+        fingerprint = _database_schema_fingerprint(output_dir, database_id)
+        with self._guard:
+            if (
+                not refresh
+                and self._fingerprints.get(database_id) == fingerprint
+                and database_id in self._items
+            ):
+                return _copy_database_schema(self._items[database_id])
+
+            schema = read_database_schema(output_dir, database_id)
+            self._fingerprints[database_id] = _database_schema_fingerprint(
+                output_dir,
+                database_id,
+            )
+            self._items[database_id] = _copy_database_schema(schema)
+            return _copy_database_schema(schema)
+
+
 @dataclass(frozen=True)
 class PostVersionSelectionLocks:
     _guard: LockType = field(default_factory=_new_lock)
@@ -171,6 +356,9 @@ class ViewerContext:
     static_dir: Path
     post_version_selection_locks: PostVersionSelectionLocks
     thread_summary_cache: ThreadSummaryCache
+    post_version_thread_cache: PostVersionThreadCache
+    database_summary_cache: DatabaseSummaryCache
+    database_schema_cache: DatabaseSchemaCache
 
 
 def _context(request: Request) -> ViewerContext:
@@ -201,14 +389,23 @@ def _list_threads_sync(
 
 def _list_post_version_threads_sync(
     output_dir: Path,
+    cache: PostVersionThreadCache,
+    detail: ThreadSummaryDetail,
+    refresh: bool,
     *,
     multi_version_only: bool,
 ) -> PostVersionThreadSummariesResult:
-    return read_post_version_thread_summaries(
+    items = cache.read(
         output_dir,
         load_thread_metadata(),
-        multi_version_only=multi_version_only,
+        detail=detail,
+        refresh=refresh,
     )
+    if multi_version_only:
+        items = [
+            item for item in items if item["multiVersionFloorCount"] > 0
+        ]
+    return {"items": items}
 
 
 def _read_thread_summary_sync(
@@ -316,11 +513,16 @@ async def list_threads(
 async def list_post_version_threads(
     request: Request,
     multi_version_only: bool = False,
+    detail: ThreadSummaryDetail = "full",
+    refresh: bool = False,
 ) -> PostVersionThreadSummariesResult:
     context = _context(request)
     return await run_in_threadpool(
         _list_post_version_threads_sync,
         context.output_dir,
+        context.post_version_thread_cache,
+        detail,
+        refresh,
         multi_version_only=multi_version_only,
     )
 
@@ -592,16 +794,32 @@ async def delete_post_overlay(
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
-async def list_databases(request: Request) -> dict[str, list[DatabaseSummary]]:
+async def list_databases(
+    request: Request,
+    refresh: bool = False,
+) -> dict[str, list[DatabaseSummary]]:
     context = _context(request)
-    summaries = await run_in_threadpool(list_database_summaries, context.output_dir)
+    summaries = await run_in_threadpool(
+        context.database_summary_cache.read,
+        context.output_dir,
+        refresh=refresh,
+    )
     return {"items": summaries}
 
 
-async def database_schema(request: Request, db_id: str) -> DatabaseSchema:
+async def database_schema(
+    request: Request,
+    db_id: str,
+    refresh: bool = False,
+) -> DatabaseSchema:
     context = _context(request)
     try:
-        return await run_in_threadpool(read_database_schema, context.output_dir, db_id)
+        return await run_in_threadpool(
+            context.database_schema_cache.read,
+            context.output_dir,
+            db_id,
+            refresh=refresh,
+        )
     except DatabaseNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except DatabaseUnavailableError as error:
@@ -706,6 +924,9 @@ def create_app(
         static_dir=Path(DEFAULT_WEB_STATIC_DIR) if static_dir is None else static_dir,
         post_version_selection_locks=PostVersionSelectionLocks(),
         thread_summary_cache=ThreadSummaryCache(),
+        post_version_thread_cache=PostVersionThreadCache(),
+        database_summary_cache=DatabaseSummaryCache(),
+        database_schema_cache=DatabaseSchemaCache(),
     )
     app = FastAPI()
     app.state.viewer_context = context

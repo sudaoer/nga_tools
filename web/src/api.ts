@@ -102,12 +102,24 @@ export async function fetchPostVersionGroups(
   return payload.items
 }
 
+export interface FetchPostVersionThreadsOptions {
+  multiVersionOnly?: boolean
+  detail?: 'light' | 'full'
+  refresh?: boolean
+}
+
 export async function fetchPostVersionThreads(
-  options: { multiVersionOnly: boolean } = { multiVersionOnly: false },
+  options: FetchPostVersionThreadsOptions = {},
 ): Promise<PostVersionThreadSummary[]> {
   const params = new URLSearchParams()
   if (options.multiVersionOnly) {
     params.set('multi_version_only', 'true')
+  }
+  if (options.detail) {
+    params.set('detail', options.detail)
+  }
+  if (options.refresh) {
+    params.set('refresh', '1')
   }
   const query = params.toString()
   const payload = await readJson<{ items: PostVersionThreadSummary[] }>(
@@ -241,13 +253,40 @@ export async function clearPostOverlay(
   return readResponseJson<PostOverlayDetail>(response)
 }
 
-export async function fetchDatabases(): Promise<DatabaseSummary[]> {
-  const payload = await readJson<{ items: DatabaseSummary[] }>('/api/databases')
+export interface FetchDatabasesOptions {
+  refresh?: boolean
+}
+
+export async function fetchDatabases(
+  options: FetchDatabasesOptions = {},
+): Promise<DatabaseSummary[]> {
+  const params = new URLSearchParams()
+  if (options.refresh) {
+    params.set('refresh', '1')
+  }
+  const query = params.toString()
+  const payload = await readJson<{ items: DatabaseSummary[] }>(
+    `/api/databases${query ? `?${query}` : ''}`,
+  )
   return payload.items
 }
 
-export async function fetchDatabaseSchema(dbId: string): Promise<DatabaseSchema> {
-  return readJson<DatabaseSchema>(`/api/databases/${encodeURIComponent(dbId)}/schema`)
+export interface FetchDatabaseSchemaOptions {
+  refresh?: boolean
+}
+
+export async function fetchDatabaseSchema(
+  dbId: string,
+  options: FetchDatabaseSchemaOptions = {},
+): Promise<DatabaseSchema> {
+  const params = new URLSearchParams()
+  if (options.refresh) {
+    params.set('refresh', '1')
+  }
+  const query = params.toString()
+  return readJson<DatabaseSchema>(
+    `/api/databases/${encodeURIComponent(dbId)}/schema${query ? `?${query}` : ''}`,
+  )
 }
 
 export interface TableRowsQuery {
