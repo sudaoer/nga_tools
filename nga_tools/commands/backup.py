@@ -24,6 +24,7 @@ from nga_tools.commands.types import (
     optional_int,
     required_int,
 )
+from nga_tools.core.output_lock import use_output_folder_lock, use_thread_output_lock
 from nga_tools.core.paths import timing_log_path, warning_log_path
 from nga_tools.forum.thread_configs import (
     ThreadConfig,
@@ -63,6 +64,7 @@ def _use_thread_output_logs(
     timing_log_enabled: bool,
 ) -> Generator[None]:
     with ExitStack() as stack:
+        stack.enter_context(use_thread_output_lock(tid, aid))
         stack.enter_context(use_warning_log(warning_log_path(tid, aid)))
         stack.enter_context(
             use_timing_log(
@@ -223,11 +225,14 @@ def backup_migrate_store(args: CommandArgs) -> None:
 
         for folder in folders:
             try:
-                with use_timing_log(
-                    folder / "timing.log",
-                    task_name="backup migrate-store --all",
-                    target=f"folder={folder.name}",
-                    enabled=app_config.timing_log_enabled,
+                with (
+                    use_output_folder_lock(folder),
+                    use_timing_log(
+                        folder / "timing.log",
+                        task_name="backup migrate-store --all",
+                        target=f"folder={folder.name}",
+                        enabled=app_config.timing_log_enabled,
+                    ),
                 ):
                     with time_section("归档迁移"):
                         _migrate_store_for_thread_folder(folder)

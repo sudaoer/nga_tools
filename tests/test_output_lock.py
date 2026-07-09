@@ -1,0 +1,37 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from nga_tools.config import get_config
+from nga_tools.core.output_lock import (
+    ThreadOutputLockError,
+    thread_output_lock_path,
+    use_thread_output_lock,
+)
+
+
+def test_thread_output_lock_path_uses_thread_output_directory() -> None:
+    output_dir = Path(get_config().output_dir)
+    assert (
+        thread_output_lock_path(123, None)
+        == output_dir / "123_all" / ".nga_tools.lock"
+    )
+    assert (
+        thread_output_lock_path(123, 456)
+        == output_dir / "123_456" / ".nga_tools.lock"
+    )
+
+
+def test_thread_output_lock_fails_fast_for_same_thread() -> None:
+    with use_thread_output_lock(123, 456):
+        with pytest.raises(ThreadOutputLockError, match="输出目录正在被另一个任务使用"):
+            with use_thread_output_lock(123, 456):
+                pass
+
+
+def test_thread_output_lock_allows_different_threads() -> None:
+    with use_thread_output_lock(123, 456):
+        with use_thread_output_lock(123, None):
+            pass

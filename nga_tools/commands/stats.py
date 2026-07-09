@@ -13,6 +13,7 @@ from nga_tools.commands.types import (
     optional_int,
     required_int,
 )
+from nga_tools.core.output_lock import use_thread_output_lock
 from nga_tools.forum.thread_configs import (
     ThreadConfig,
     thread_config_aid,
@@ -55,11 +56,12 @@ def stats_words(args: CommandArgs) -> None:
         return
 
     thread_tid, thread_aid = resolve_command_thread_target(args)
-    summary = count_backup_words(
-        tid=thread_tid,
-        aid=thread_aid,
-        min_body_chars=min_body_chars,
-    )
+    with use_thread_output_lock(thread_tid, thread_aid):
+        summary = count_backup_words(
+            tid=thread_tid,
+            aid=thread_aid,
+            min_body_chars=min_body_chars,
+        )
 
     aid_text = summary.aid if summary.aid is not None else "all"
     report_info(f"统计目标：tid={summary.tid}, aid={aid_text}")

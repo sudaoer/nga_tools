@@ -666,7 +666,6 @@ class BackupConfigsHandlerTest:
 
         with (
             patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
-            patch("nga_tools.core.paths.get_folder") as get_folder_mock,
             patch(
                 "nga_tools.commands.stats.count_backup_words",
                 side_effect=count_side_effect,
@@ -678,9 +677,6 @@ class BackupConfigsHandlerTest:
             _captured_reporter() as output,
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
-            get_folder_mock.side_effect = AssertionError(
-                "stats batch must not resolve output folders"
-            )
 
             stats_words(
                 {
@@ -694,10 +690,57 @@ class BackupConfigsHandlerTest:
             call(tid=101, aid=201, min_body_chars=80),
             call(tid=102, aid=None, min_body_chars=80),
         ]
-        get_folder_mock.assert_not_called()
         output_text = output.getvalue()
         assert "first (tid: 101, aid: 201)：快照页数1" in output_text
         assert "批量统计完成：成功2个，失败0个。" in output_text
+
+    def test_duplicate_parallel_thread_configs_fail_on_output_lock(self) -> None:
+        thread_configs = [
+            _thread_config(name="first", tid=101, aid=201),
+            _thread_config(name="duplicate", tid=101, aid=201),
+        ]
+        release_event = threading.Event()
+        entered_action = threading.Event()
+
+        def backup_side_effect(
+            tid: int,
+            aid: int | None,
+            *,
+            write_json: bool,
+        ) -> None:
+            assert (tid, aid, write_json) == (101, 201, False)
+            entered_action.set()
+            assert release_event.wait(timeout=2)
+
+        release_timer = threading.Timer(0.25, release_event.set)
+        try:
+            with (
+                patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+                patch(
+                    "nga_tools.commands.backup.backup_thread_sub",
+                    side_effect=backup_side_effect,
+                ) as backup_mock,
+                patch(
+                    "nga_tools.commands.backup.configure_network_limits_from_args",
+                    return_value=_backup_config_app_config(workers=4),
+                ),
+                _captured_reporter() as output,
+            ):
+                configs_cls.return_value.get_thread_configs.return_value = thread_configs
+                release_timer.start()
+
+                with pytest.raises(SystemExit) as context:
+                    backup_configs({"workers": 2})
+        finally:
+            release_event.set()
+            release_timer.cancel()
+
+        assert context.value.code == 1
+        assert entered_action.is_set()
+        assert backup_mock.call_count == 1
+        output_text = output.getvalue()
+        assert "输出目录正在被另一个任务使用" in output_text
+        assert "批量备份完成：成功1个，失败1个。" in output_text
 
     def test_runs_sub_backup_for_each_thread_config_in_order_with_one_worker(
         self,
