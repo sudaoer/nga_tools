@@ -108,6 +108,28 @@ blockquote {{
   margin: 0.55em 0;
   padding: 0.45em 0.8em;
 }}
+blockquote.nga-quote {{
+  background: #f8f8f8;
+}}
+.nga-collapse {{
+  border-top: 1px solid #d6d6d6;
+  border-bottom: 1px solid #d6d6d6;
+  margin: 0.55em 0;
+  padding: 0.2em 0;
+}}
+.nga-collapse summary {{
+  font-weight: bold;
+}}
+.nga-collapse-content {{
+  border-top: 1px solid #e5e5e5;
+  margin-top: 0.25em;
+  padding-top: 0.35em;
+}}
+.nga-bbcode-heading {{
+  display: inline;
+  font-size: 1.08em;
+  margin: 0;
+}}
 .skyblue   {{ color: skyblue; }}
 .royalblue {{ color: royalblue; }}
 .blue      {{ color: blue; }}

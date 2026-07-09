@@ -29,6 +29,7 @@ from nga_tools.backup.pdf_plan import (
     build_render_tasks,
     write_pdf_hashes,
 )
+from nga_tools.backup.post_overlay import save_post_overlay
 from nga_tools.console import ConsoleReporter, use_reporter, use_warning_log
 
 
@@ -441,6 +442,36 @@ class PdfImageSourceTest:
 
         assert 'src="about:blank"' in html_content_by_lou[1]
         assert "display:none" in html_content_by_lou[1]
+
+    def test_read_pdf_html_prefers_bbcode_overlay_over_legacy_html_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir) / "output"
+            thread_dir = output_dir / "101_all"
+            html_dir = thread_dir / "html_modified"
+            legacy_overlay_dir = thread_dir / "overlay"
+            html_dir.mkdir(parents=True)
+            legacy_overlay_dir.mkdir(parents=True)
+            (html_dir / "post_1.html").write_text(
+                '<p class="bbcode-overlay">bbcode overlay</p>',
+                encoding="utf-8",
+            )
+            (legacy_overlay_dir / "post_1.html").write_text(
+                '<p class="legacy-overlay">legacy overlay</p>',
+                encoding="utf-8",
+            )
+            save_post_overlay(thread_dir, 1, "bbcode overlay")
+
+            with patch(
+                "nga_tools.core.paths.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                html_content_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+
+        assert "bbcode overlay" in html_content_by_lou[1]
+        assert "legacy overlay" not in html_content_by_lou[1]
 
     def test_read_pdf_html_uses_lazy_about_blank_data_srcorg(self) -> None:
         image_url = (

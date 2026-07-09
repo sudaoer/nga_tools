@@ -1,6 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { fetchPosts, fetchThread, fetchThreads, type PostQuery } from '../api'
+import {
+  clearPostOverlay,
+  fetchPostOverlay,
+  fetchPosts,
+  fetchThread,
+  fetchThreads,
+  previewPostOverlay,
+  savePostOverlay,
+  type PostQuery,
+} from '../api'
 import type { PostItem, PostsResult, ThreadStatus, ThreadSummary } from '../types'
 
 type SortKey =
@@ -40,6 +49,16 @@ const loadingThreads = ref(false)
 const loadingPosts = ref(false)
 const requestedThread = ref<{ tid: number; aidKey: string } | null>(null)
 const pageJumpInput = ref('')
+const overlayEditor = reactive({
+  lou: null as number | null,
+  floorLabel: '',
+  bbcode: '',
+  previewHtml: null as string | null,
+  error: null as string | null,
+  loading: false,
+  previewing: false,
+  saving: false,
+})
 
 const listFilter = reactive({
   q: '',
@@ -261,6 +280,107 @@ function slotUserLabel(post: PostItem): string {
   return '未知用户'
 }
 
+function closeOverlayEditor(): void {
+  overlayEditor.lou = null
+  overlayEditor.floorLabel = ''
+  overlayEditor.bbcode = ''
+  overlayEditor.previewHtml = null
+  overlayEditor.error = null
+  overlayEditor.loading = false
+  overlayEditor.previewing = false
+  overlayEditor.saving = false
+}
+
+async function openOverlayEditor(post: PostItem): Promise<void> {
+  if (!selectedThread.value || post.pid === null) {
+    return
+  }
+  overlayEditor.lou = post.lou
+  overlayEditor.floorLabel = post.floorLabel
+  overlayEditor.bbcode = ''
+  overlayEditor.previewHtml = null
+  overlayEditor.error = null
+  overlayEditor.loading = true
+  try {
+    const detail = await fetchPostOverlay(
+      selectedThread.value.tid,
+      selectedThread.value.aidKey,
+      post.lou,
+    )
+    overlayEditor.floorLabel = detail.floorLabel
+    overlayEditor.bbcode = detail.bbcode
+    overlayEditor.previewHtml = detail.html
+  } catch (error) {
+    overlayEditor.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    overlayEditor.loading = false
+  }
+}
+
+async function previewOverlay(): Promise<void> {
+  if (!selectedThread.value || overlayEditor.lou === null) {
+    return
+  }
+  overlayEditor.error = null
+  overlayEditor.previewing = true
+  try {
+    const preview = await previewPostOverlay(
+      selectedThread.value.tid,
+      selectedThread.value.aidKey,
+      overlayEditor.lou,
+      overlayEditor.bbcode,
+    )
+    overlayEditor.previewHtml = preview.html
+  } catch (error) {
+    overlayEditor.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    overlayEditor.previewing = false
+  }
+}
+
+async function saveOverlay(): Promise<void> {
+  if (!selectedThread.value || overlayEditor.lou === null) {
+    return
+  }
+  overlayEditor.error = null
+  overlayEditor.saving = true
+  try {
+    const detail = await savePostOverlay(
+      selectedThread.value.tid,
+      selectedThread.value.aidKey,
+      overlayEditor.lou,
+      overlayEditor.bbcode,
+    )
+    overlayEditor.previewHtml = detail.html
+    await loadPosts()
+  } catch (error) {
+    overlayEditor.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    overlayEditor.saving = false
+  }
+}
+
+async function clearOverlay(): Promise<void> {
+  if (!selectedThread.value || overlayEditor.lou === null) {
+    return
+  }
+  overlayEditor.error = null
+  overlayEditor.saving = true
+  try {
+    await clearPostOverlay(
+      selectedThread.value.tid,
+      selectedThread.value.aidKey,
+      overlayEditor.lou,
+    )
+    closeOverlayEditor()
+    await loadPosts()
+  } catch (error) {
+    overlayEditor.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    overlayEditor.saving = false
+  }
+}
+
 function pageFromLouInput(value: string): number | null {
   const trimmedValue = value.trim()
   if (!trimmedValue) {
@@ -402,6 +522,7 @@ async function selectThread(
   selectedThread.value = thread
   posts.value = null
   postError.value = null
+  closeOverlayEditor()
   if (options.resetPage) {
     postQuery.page = 1
   }
@@ -668,8 +789,67 @@ onMounted(() => {
             <strong>{{ post.floorLabel }}</strong>
             <span>{{ slotUserLabel(post) }}</span>
             <span>{{ formatTime(post.postdate) }}</span>
+            <span v-if="post.hasOverlay" class="overlay-badge">已覆盖</span>
+            <button
+              v-if="post.pid !== null"
+              type="button"
+              class="overlay-edit-button"
+              @click="openOverlayEditor(post)"
+            >
+              {{ post.hasOverlay ? '编辑覆盖' : '添加覆盖' }}
+            </button>
           </header>
-          <div class="post-body" v-html="post.html"></div>
+          <div class="post-content">
+            <form
+              v-if="overlayEditor.lou === post.lou"
+              class="overlay-editor"
+              @submit.prevent="saveOverlay"
+            >
+              <div class="overlay-editor-header">
+                <strong>{{ overlayEditor.floorLabel || post.floorLabel }} BBCode overlay</strong>
+                <button type="button" class="icon-button" title="关闭" @click="closeOverlayEditor">
+                  ×
+                </button>
+              </div>
+              <textarea
+                v-model="overlayEditor.bbcode"
+                :disabled="overlayEditor.loading || overlayEditor.saving"
+                rows="8"
+                spellcheck="false"
+              ></textarea>
+              <div class="overlay-editor-actions">
+                <button
+                  type="button"
+                  :disabled="overlayEditor.loading || overlayEditor.previewing"
+                  @click="previewOverlay"
+                >
+                  预览
+                </button>
+                <button
+                  type="submit"
+                  :disabled="overlayEditor.loading || overlayEditor.saving"
+                >
+                  保存
+                </button>
+                <button
+                  v-if="post.hasOverlay"
+                  type="button"
+                  :disabled="overlayEditor.loading || overlayEditor.saving"
+                  @click="clearOverlay"
+                >
+                  清除
+                </button>
+              </div>
+              <div v-if="overlayEditor.error" class="error-box">{{ overlayEditor.error }}</div>
+              <div v-else-if="overlayEditor.loading" class="empty-state">正在读取overlay...</div>
+              <div
+                v-if="overlayEditor.previewHtml"
+                class="post-body overlay-preview"
+                v-html="overlayEditor.previewHtml"
+              ></div>
+            </form>
+            <div class="post-body" v-html="post.html"></div>
+          </div>
         </article>
 
         <div v-if="posts && posts.totalPages > 1" class="pager">

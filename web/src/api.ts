@@ -1,6 +1,8 @@
 import type {
   DatabaseSchema,
   DatabaseSummary,
+  PostOverlayDetail,
+  PostOverlayPreview,
   PostVersionGroup,
   PostVersionPreview,
   PostVersionSelectionResult,
@@ -14,6 +16,10 @@ import type {
 
 async function readJson<T>(url: string): Promise<T> {
   const response = await fetch(url)
+  return readResponseJson<T>(response)
+}
+
+async function readResponseJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`
     try {
@@ -160,6 +166,62 @@ export async function clearPostVersionSelection(
     throw new Error(message)
   }
   return (await response.json()) as PostVersionSelectionResult
+}
+
+export async function fetchPostOverlay(
+  tid: number,
+  aidKey: string,
+  lou: number,
+): Promise<PostOverlayDetail> {
+  return readJson<PostOverlayDetail>(
+    `/api/admin/threads/${tid}/${encodeURIComponent(aidKey)}/overlays/${lou}`,
+  )
+}
+
+export async function previewPostOverlay(
+  tid: number,
+  aidKey: string,
+  lou: number,
+  bbcode: string,
+): Promise<PostOverlayPreview> {
+  const response = await fetch(
+    `/api/admin/threads/${tid}/${encodeURIComponent(aidKey)}/overlays/${lou}/preview`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bbcode }),
+    },
+  )
+  return readResponseJson<PostOverlayPreview>(response)
+}
+
+export async function savePostOverlay(
+  tid: number,
+  aidKey: string,
+  lou: number,
+  bbcode: string,
+): Promise<PostOverlayDetail> {
+  const response = await fetch(
+    `/api/admin/threads/${tid}/${encodeURIComponent(aidKey)}/overlays/${lou}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bbcode }),
+    },
+  )
+  return readResponseJson<PostOverlayDetail>(response)
+}
+
+export async function clearPostOverlay(
+  tid: number,
+  aidKey: string,
+  lou: number,
+): Promise<PostOverlayDetail> {
+  const response = await fetch(
+    `/api/admin/threads/${tid}/${encodeURIComponent(aidKey)}/overlays/${lou}`,
+    { method: 'DELETE' },
+  )
+  return readResponseJson<PostOverlayDetail>(response)
 }
 
 export async function fetchDatabases(): Promise<DatabaseSummary[]> {

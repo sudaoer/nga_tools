@@ -19,7 +19,6 @@ from nga_tools.backup.floor_map import (
 from nga_tools.backup import image_store
 from nga_tools.backup.image_pipeline import (
     collect_image_download_tasks_from_parsed as _collect_image_download_tasks_from_parsed,
-    completed_html_modified_lous_for_records as _completed_html_modified_lous_for_records,
     download_images as _download_images,
     failed_image_urls as _failed_image_urls,
     parse_post_htmls_for_images as _parse_post_htmls_for_images,
@@ -45,8 +44,12 @@ from nga_tools.backup.post_html import (
     post_refs_from_htmls as _post_refs_from_htmls,
     post_refs_from_posts as _post_refs_from_posts,
     recovered_missing_post_htmls as _recovered_missing_post_htmls,
-    source_hashes_by_lou as _source_hashes_by_lou,
     unresolved_missing_placeholder_lous as _unresolved_missing_placeholder_lous,
+)
+from nga_tools.backup.post_overlay import (
+    apply_post_overlays_to_records as _apply_post_overlays_to_records,
+    post_overlays_fingerprint,
+    source_hashes_by_lou_with_post_overlays as _source_hashes_by_lou,
 )
 from nga_tools.backup.post_version_selection import selections_fingerprint
 from nga_tools.backup.floor_models import PAGE_JSON_RE
@@ -106,7 +109,7 @@ def refresh_html_modified_for_lous(
     folder_html_modified = thread_folder / "html_modified"
     archive_store = ThreadArchiveStore(thread_folder)
     records = archive_store.read_effective_post_record_summaries()
-    source_hash_by_lou = _source_hashes_by_lou(records)
+    source_hash_by_lou = _source_hashes_by_lou(thread_folder, records)
     known_lous = set(source_hash_by_lou)
     unknown_lous = lous - known_lous
     if unknown_lous:
@@ -119,6 +122,7 @@ def refresh_html_modified_for_lous(
     active_records = [
         record for record in records if record["lou"] in target_lous
     ]
+    active_records = _apply_post_overlays_to_records(thread_folder, active_records)
     active_records = _hydrate_post_records_for_html(archive_store, active_records)
     active_htmls = _load_post_htmls_for_records(active_records)
 
@@ -239,6 +243,8 @@ def _can_fast_skip_author_backup(
     if state is None:
         return False
     if state["post_version_overrides_hash"] != selections_fingerprint(thread_folder):
+        return False
+    if state["post_overlays_hash"] != post_overlays_fingerprint(thread_folder):
         return False
     if state["author_total_lou_count"] != author_total_lou_count:
         return False
@@ -431,7 +437,9 @@ def backup_thread(
             )
         with time_section("HTML缓存准备"):
             folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
-            source_hash_by_lou = _source_hashes_by_lou(records)
+            source_hash_by_lou = _source_hashes_by_lou(thread_folder, records)
+        with time_section("Overlay应用"):
+            records = _apply_post_overlays_to_records(thread_folder, records)
         with time_section("BBCode转HTML"):
             htmls = _load_post_htmls_for_records(records)
         with time_section("图片解析与任务收集"):
@@ -591,18 +599,25 @@ def backup_thread_sub(
                 recovered_missing_html_by_lou,
             )
         with time_section("HTML缓存校验"):
-            (
+            folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+            source_hash_by_lou = _source_hashes_by_lou(thread_folder, records)
+            manifest_entries = html_modified_manifest.load_manifest(folder_html_modified)
+            skipped_lous = html_modified_manifest.completed_post_lous(
                 folder_html_modified,
                 source_hash_by_lou,
                 manifest_entries,
-                skipped_lous,
-            ) = _completed_html_modified_lous_for_records(records, tid, aid)
+            )
             unresolved_missing_lous = _unresolved_missing_placeholder_lous(records)
             skipped_lous -= unresolved_missing_lous
         with time_section("待读帖子筛选"):
             active_records = [
                 item for item in records if item["lou"] not in skipped_lous
             ]
+        with time_section("Overlay应用"):
+            active_records = _apply_post_overlays_to_records(
+                thread_folder,
+                active_records,
+            )
         with time_section("待处理帖子读取"):
             active_records = _hydrate_post_records_for_html(
                 archive_store,

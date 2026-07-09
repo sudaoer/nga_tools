@@ -17,6 +17,8 @@ from nga_tools.console import report_info
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web.data import (
+    PostOverlayDetail,
+    PostOverlayPreview,
     PostsResult,
     PostVersionGroupsResult,
     PostVersionPreview,
@@ -25,14 +27,18 @@ from nga_tools.web.data import (
     ThreadNotFoundError,
     ThreadSummary,
     ThreadUnavailableError,
+    clear_thread_post_overlay,
     clear_post_version_selection,
     load_thread_metadata,
+    preview_post_overlay,
+    read_post_overlay,
     read_post_version_groups,
     read_post_version_preview,
     read_post_version_thread_summaries,
     read_posts,
     read_thread_summary,
     safe_output_file,
+    save_thread_post_overlay,
     scan_thread_summaries,
     select_post_version,
 )
@@ -147,6 +153,29 @@ def _clear_post_version_selection_locked(
 ) -> PostVersionSelectionResult:
     with lock:
         return clear_post_version_selection(output_dir, tid, aid_key, lou)
+
+
+def _save_post_overlay_locked(
+    lock: LockType,
+    output_dir: Path,
+    tid: int,
+    aid_key: str,
+    lou: int,
+    bbcode: str,
+) -> PostOverlayDetail:
+    with lock:
+        return save_thread_post_overlay(output_dir, tid, aid_key, lou, bbcode)
+
+
+def _clear_post_overlay_locked(
+    lock: LockType,
+    output_dir: Path,
+    tid: int,
+    aid_key: str,
+    lou: int,
+) -> PostOverlayDetail:
+    with lock:
+        return clear_thread_post_overlay(output_dir, tid, aid_key, lou)
 
 
 async def _http_exception_handler(
@@ -347,6 +376,116 @@ async def delete_post_version_selection(
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
+async def post_overlay_detail(
+    request: Request,
+    tid: int,
+    aid_key: str,
+    lou: int,
+) -> PostOverlayDetail:
+    context = _context(request)
+    try:
+        return await run_in_threadpool(
+            read_post_overlay,
+            context.output_dir,
+            tid,
+            aid_key,
+            lou,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ThreadNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ThreadUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+async def post_overlay_preview(
+    request: Request,
+    tid: int,
+    aid_key: str,
+    lou: int,
+    payload: dict[str, object],
+) -> PostOverlayPreview:
+    raw_bbcode = payload.get("bbcode")
+    if not isinstance(raw_bbcode, str):
+        raise HTTPException(status_code=400, detail="bbcode必须是字符串。")
+    context = _context(request)
+    try:
+        return await run_in_threadpool(
+            preview_post_overlay,
+            context.output_dir,
+            tid,
+            aid_key,
+            lou,
+            raw_bbcode,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ThreadNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ThreadUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+async def put_post_overlay(
+    request: Request,
+    tid: int,
+    aid_key: str,
+    lou: int,
+    payload: dict[str, object],
+) -> PostOverlayDetail:
+    raw_bbcode = payload.get("bbcode")
+    if not isinstance(raw_bbcode, str):
+        raise HTTPException(status_code=400, detail="bbcode必须是字符串。")
+    context = _context(request)
+    lock = context.post_version_selection_locks.for_thread(
+        _thread_folder_for_lock(context, tid, aid_key)
+    )
+    try:
+        return await run_in_threadpool(
+            _save_post_overlay_locked,
+            lock,
+            context.output_dir,
+            tid,
+            aid_key,
+            lou,
+            raw_bbcode,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ThreadNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ThreadUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+async def delete_post_overlay(
+    request: Request,
+    tid: int,
+    aid_key: str,
+    lou: int,
+) -> PostOverlayDetail:
+    context = _context(request)
+    lock = context.post_version_selection_locks.for_thread(
+        _thread_folder_for_lock(context, tid, aid_key)
+    )
+    try:
+        return await run_in_threadpool(
+            _clear_post_overlay_locked,
+            lock,
+            context.output_dir,
+            tid,
+            aid_key,
+            lou,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ThreadNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ThreadUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
 async def list_databases(request: Request) -> dict[str, list[DatabaseSummary]]:
     context = _context(request)
     summaries = await run_in_threadpool(list_database_summaries, context.output_dir)
@@ -496,6 +635,26 @@ def create_app(
     app.add_api_route(
         "/api/admin/threads/{tid}/{aid_key}/post-version-selections/{lou}",
         delete_post_version_selection,
+        methods=["DELETE"],
+    )
+    app.add_api_route(
+        "/api/admin/threads/{tid}/{aid_key}/overlays/{lou}",
+        post_overlay_detail,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/api/admin/threads/{tid}/{aid_key}/overlays/{lou}/preview",
+        post_overlay_preview,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/api/admin/threads/{tid}/{aid_key}/overlays/{lou}",
+        put_post_overlay,
+        methods=["PUT"],
+    )
+    app.add_api_route(
+        "/api/admin/threads/{tid}/{aid_key}/overlays/{lou}",
+        delete_post_overlay,
         methods=["DELETE"],
     )
     app.add_api_route("/api/databases", list_databases, methods=["GET"])

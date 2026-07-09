@@ -43,6 +43,7 @@ export interface PostItem {
   floorLabel: string
   html: string
   emptyReason: 'missing' | 'filtered' | null
+  hasOverlay: boolean
 }
 
 export interface PostsResult {
@@ -91,6 +92,18 @@ export interface PostVersionSelectionResult {
   lou: number
   selectedVersionId: number | null
   activeVersionId: number
+}
+
+export interface PostOverlayDetail {
+  lou: number
+  floorLabel: string
+  hasOverlay: boolean
+  bbcode: string
+  html: string | null
+}
+
+export interface PostOverlayPreview {
+  html: string
 }
 
 export type DatabaseKind = 'forum_threads' | 'image_index' | 'archive'

@@ -390,9 +390,10 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "--all-threads会按thread_configs.json中的ThreadList批量生成PDF。",
                 "--workers控制并行处理的帖子数，--pdf-workers控制全命令共享的"
                 "WeasyPrint并发数。",
-                "Overlay：创建 <output_dir>/<tid>_<aid>/overlay/post_<楼层>.html "
-                "可在生成PDF时覆盖对应楼层。",
-                "Overlay只影响PDF生成，不会改写json或html_modified备份内容。",
+                "网页管理页保存的BBCode overlay会写入post_overlays.json，"
+                "并刷新对应html_modified，普通查看和PDF都会使用。",
+                "旧HTML overlay：<output_dir>/<tid>_<aid>/overlay/post_<楼层>.html "
+                "仅作为legacy PDF覆盖方式保留；同楼层存在BBCode overlay时会被忽略。",
             ],
             "args": [
                 "name",

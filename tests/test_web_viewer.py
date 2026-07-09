@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.cli.parser import args_parse
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
+from nga_tools.backup.post_overlay import POST_OVERLAYS_FILENAME
 from nga_tools.backup.post_version_selection import POST_VERSION_SELECTIONS_FILENAME
 from nga_tools.web.data import (
     ThreadConfig,
@@ -602,6 +603,80 @@ class WebServerTest:
         refreshed_payload = refreshed_posts_response.json()
         assert "after edit" in refreshed_payload["items"][0]["html"]
         assert refreshed_payload["items"][0]["manualVersion"] is False
+
+    def test_admin_post_overlay_affects_reader_and_html_modified(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "original"), _post(2, "other")])
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        detail_response = client.get("/api/admin/threads/101/201/overlays/1")
+        preview_response = client.post(
+            "/api/admin/threads/101/201/overlays/1/preview",
+            json={"bbcode": '[quote]覆盖[/quote]<script>alert("x")</script>'},
+        )
+        save_response = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": "[quote]覆盖[/quote]"},
+        )
+        posts_response = client.get("/api/threads/101/201/posts", params={"page": "1"})
+        filtered_response = client.get(
+            "/api/threads/101/201/posts",
+            params={"page": "1", "q": "original"},
+        )
+        rejected_response = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": "[img]https://example.test/a.png[/img]"},
+        )
+
+        assert detail_response.status_code == 200
+        detail_payload = detail_response.json()
+        assert detail_payload["hasOverlay"] is False
+        assert detail_payload["bbcode"] == "original"
+        assert detail_payload["html"] is None
+        assert preview_response.status_code == 200
+        preview_html = preview_response.json()["html"]
+        assert '<blockquote class="nga-quote">覆盖</blockquote>' in preview_html
+        assert "<script" not in preview_html.lower()
+        assert save_response.status_code == 200
+        save_payload = save_response.json()
+        assert save_payload["hasOverlay"] is True
+        assert save_payload["bbcode"] == "[quote]覆盖[/quote]"
+        assert '<blockquote class="nga-quote">覆盖</blockquote>' in save_payload["html"]
+        assert (thread_dir / POST_OVERLAYS_FILENAME).is_file()
+        html_modified = (thread_dir / "html_modified" / "post_1.html").read_text(
+            encoding="utf-8"
+        )
+        assert '<blockquote class="nga-quote">覆盖</blockquote>' in html_modified
+        assert "original" not in html_modified
+        assert posts_response.status_code == 200
+        post_payload = posts_response.json()
+        assert post_payload["items"][0]["hasOverlay"] is True
+        assert '<blockquote class="nga-quote">覆盖</blockquote>' in (
+            post_payload["items"][0]["html"]
+        )
+        assert "original" not in post_payload["items"][0]["html"]
+        assert filtered_response.status_code == 200
+        assert filtered_response.json()["matchingPostCount"] == 0
+        assert rejected_response.status_code == 400
+        assert "图片或媒体外链" in rejected_response.json()["error"]
+
+        clear_response = client.delete("/api/admin/threads/101/201/overlays/1")
+        refreshed_posts_response = client.get(
+            "/api/threads/101/201/posts",
+            params={"page": "1"},
+        )
+
+        assert clear_response.status_code == 200
+        assert clear_response.json()["hasOverlay"] is False
+        refreshed_payload = refreshed_posts_response.json()
+        assert refreshed_payload["items"][0]["hasOverlay"] is False
+        assert "original" in refreshed_payload["items"][0]["html"]
 
 
 class WebDatabaseViewerTest:

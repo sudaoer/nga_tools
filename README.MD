@@ -231,6 +231,11 @@ Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页�
 该版本与最新版正文的差异，便于判断实际变化。选择文件写入和对应 HTML/manifest
 刷新均使用原子替换。
 
+普通帖子阅读页支持为单楼添加 BBCode overlay。overlay 是整楼替换，写入
+`post_overlays.json`，保存或清除后会刷新对应 `html_modified/post_*.html`；
+网页查看和后续 PDF 导出都会使用同一结果。当前 overlay 不支持 `[img]`、`[flash]`
+或渲染后产生图片的 HTML。
+
 ## 生成 PDF
 
 先运行 `backup all` 生成 `html_modified` 和图片，再生成 PDF：
@@ -269,6 +274,8 @@ PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会�
 - `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照、正文版本和最新展示元数据；
   完整原始分页响应保存在 `page_snapshots.page_json`，`post_versions` 只按正文内容做版本控制
 - `post_version_overrides.json`：管理界面保存的正文历史版本选择；没有选择时可为空
+- `post_overlays.json`：网页阅读页保存的单楼 BBCode overlay；保存后会刷新对应
+  `html_modified/post_*.html`
 - `html_modified/`：替换为本地 `images_unique` 图片路径后的 HTML
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 - `floor_map.json`：只看作者楼层到原帖楼层的映射

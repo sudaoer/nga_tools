@@ -22,7 +22,8 @@ from nga_tools.backup.floor_map import (
 )
 from nga_tools.backup import image_store
 from nga_tools.backup.html_images import effective_image_src, image_src_path
-from nga_tools.backup.overlay import load_post_overlays
+from nga_tools.backup.overlay import load_post_overlays as load_legacy_post_overlays
+from nga_tools.backup.post_overlay import load_post_overlays as load_bbcode_post_overlays
 from nga_tools.backup.pdf_plan import (
     PdfRenderTask,
     build_render_tasks as _build_render_tasks,
@@ -401,12 +402,26 @@ def _read_pdf_html(
     }
     validate_floor_labels(floor_labels, html_text_by_lou)
 
-    overlays_by_lou = load_post_overlays(
+    bbcode_overlay_lous = set(
+        load_bbcode_post_overlays(Path(utils.get_folder(tid, aid))).keys()
+    )
+    overlays_by_lou = load_legacy_post_overlays(
         tid,
         aid,
         set(html_sources_by_lou),
         floor_labels,
     )
+    ignored_overlay_lous = bbcode_overlay_lous & set(overlays_by_lou)
+    if ignored_overlay_lous:
+        overlays_by_lou = {
+            lou: html
+            for lou, html in overlays_by_lou.items()
+            if lou not in ignored_overlay_lous
+        }
+        report_warning(
+            f"忽略{len(ignored_overlay_lous)}个同楼层旧HTML overlay，"
+            "优先使用网页BBCode overlay生成的html_modified。"
+        )
     if overlays_by_lou:
         report_info(f"应用{len(overlays_by_lou)}个post overlay。")
         overlay_folder = Path(utils.get_folder(tid, aid, "overlay"))

@@ -9,12 +9,13 @@ from nga_tools.backup.floor_map import (
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,
 )
+from nga_tools.backup.post_overlay import post_overlays_fingerprint
 from nga_tools.backup.post_version_selection import selections_fingerprint
 from nga_tools.console import report_warning
 from nga_tools.core.atomic import write_json_atomically
 
 BACKUP_STATE_FILENAME = "backup_state.json"
-BACKUP_STATE_VERSION = 4
+BACKUP_STATE_VERSION = 5
 
 
 class BackupState(TypedDict):
@@ -27,6 +28,7 @@ class BackupState(TypedDict):
     html_modified_manifest_entry_count: int
     unresolved_missing_count: int
     post_version_overrides_hash: str
+    post_overlays_hash: str
 
 
 def state_path(thread_folder: Path) -> Path:
@@ -81,6 +83,13 @@ def load_state(thread_folder: Path) -> BackupState | None:
             "post_version_overrides_hash"
         )
         return None
+    overlays_hash = data.get("post_overlays_hash")
+    if not isinstance(overlays_hash, str) or not overlays_hash:
+        report_warning(
+            f"备份状态文件字段无效，按无状态处理：{path}: "
+            "post_overlays_hash"
+        )
+        return None
 
     return {
         "version": BACKUP_STATE_VERSION,
@@ -97,6 +106,7 @@ def load_state(thread_folder: Path) -> BackupState | None:
         ),
         "unresolved_missing_count": 0,
         "post_version_overrides_hash": overrides_hash,
+        "post_overlays_hash": overlays_hash,
     }
 
 
@@ -120,6 +130,7 @@ def write_state(
         "html_modified_manifest_entry_count": html_modified_manifest_entry_count,
         "unresolved_missing_count": unresolved_missing_count,
         "post_version_overrides_hash": selections_fingerprint(thread_folder),
+        "post_overlays_hash": post_overlays_fingerprint(thread_folder),
     }
     path = state_path(thread_folder)
     write_json_atomically(path, state, indent=2, trailing_newline=True)

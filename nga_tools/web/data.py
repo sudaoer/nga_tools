@@ -31,6 +31,13 @@ from nga_tools.backup.post_data import (
     attachment_url_from_value,
     make_image_src_resolver,
 )
+from nga_tools.backup.post_overlay import (
+    PostOverlay,
+    clear_post_overlay as _clear_post_overlay,
+    load_post_overlays,
+    render_overlay_html,
+    save_post_overlay as _save_post_overlay,
+)
 from nga_tools.backup.post_version_selection import (
     load_selections,
     make_selection,
@@ -103,6 +110,7 @@ class PostSlot(TypedDict):
     floorLabel: str
     html: str
     emptyReason: Optional[PostEmptyReason]
+    hasOverlay: bool
 
 
 class PostsResult(TypedDict):
@@ -155,6 +163,18 @@ class PostVersionSelectionResult(TypedDict):
     lou: int
     selectedVersionId: Optional[int]
     activeVersionId: int
+
+
+class PostOverlayDetail(TypedDict):
+    lou: int
+    floorLabel: str
+    hasOverlay: bool
+    bbcode: str
+    html: Optional[str]
+
+
+class PostOverlayPreview(TypedDict):
+    html: str
 
 
 @dataclass(frozen=True)
@@ -857,15 +877,19 @@ def _post_item_from_row(
     output_dir: Path,
     floor_labels: FloorLabels,
     image_mappings: dict[str, str],
+    overlay: Optional[PostOverlay] = None,
 ) -> PostSlot:
-    html = render_web_bbcode(
-        row.content,
-        image_src_resolver=_image_src_resolver(
-            row.image_attachments_json,
-            output_dir,
-            image_mappings,
-        ),
-    )
+    if overlay is None:
+        html = render_web_bbcode(
+            row.content,
+            image_src_resolver=_image_src_resolver(
+                row.image_attachments_json,
+                output_dir,
+                image_mappings,
+            ),
+        )
+    else:
+        html = render_overlay_html(overlay["bbcode"])
     html = _normalize_nga_fold_boxes(html)
 
     return {
@@ -879,6 +903,7 @@ def _post_item_from_row(
         "floorLabel": floor_labels.label(row.lou),
         "html": sanitize_post_html(html),
         "emptyReason": None,
+        "hasOverlay": overlay is not None,
     }
 
 
@@ -902,6 +927,7 @@ def _empty_post_slot(
         "floorLabel": floor_labels.label(lou),
         "html": message,
         "emptyReason": reason,
+        "hasOverlay": False,
     }
 
 
@@ -910,8 +936,10 @@ def _post_row_matches(
     query: str,
     lou_from: Optional[int],
     lou_to: Optional[int],
+    overlays: dict[int, PostOverlay],
 ) -> bool:
-    if query and query not in row.content:
+    content = overlays[row.lou]["bbcode"] if row.lou in overlays else row.content
+    if query and query not in content:
         return False
     if lou_from is not None and row.lou < lou_from:
         return False
@@ -942,6 +970,7 @@ def read_posts(
         raise ThreadUnavailableError("缺少archive.sqlite3。")
     archive_store = ThreadArchiveStore(thread_folder)
     archive_store.ensure_schema()
+    overlays = load_post_overlays(thread_folder)
 
     page_size = ORIGINAL_POSTS_PER_PAGE
     stripped_query = query.strip()
@@ -974,7 +1003,7 @@ def read_posts(
         matching_lous = {
             row.lou
             for row in effective_rows
-            if _post_row_matches(row, stripped_query, lou_from, lou_to)
+            if _post_row_matches(row, stripped_query, lou_from, lou_to, overlays)
         }
         matching_post_count = len(matching_lous)
         rows = [row for row in effective_rows if row.lou in page_lous]
@@ -990,6 +1019,8 @@ def read_posts(
 
     image_urls: set[str] = set()
     for row in rows:
+        if row.lou in overlays:
+            continue
         image_urls.update(_attachment_urls(row.content, row.image_attachments_json))
     image_mappings = _read_image_mappings_for_urls(output_dir, image_urls)
 
@@ -1002,13 +1033,25 @@ def read_posts(
             slots.append(_empty_post_slot(lou, floor_labels, "missing"))
             continue
         if lou not in matching_page_lous:
-            slot = _post_item_from_row(row, output_dir, floor_labels, image_mappings)
+            slot = _post_item_from_row(
+                row,
+                output_dir,
+                floor_labels,
+                image_mappings,
+                overlays.get(lou),
+            )
             slot["html"] = "<p><em>此楼层不匹配当前筛选。</em></p>"
             slot["emptyReason"] = "filtered"
             slots.append(slot)
             continue
         slots.append(
-            _post_item_from_row(row, output_dir, floor_labels, image_mappings)
+            _post_item_from_row(
+                row,
+                output_dir,
+                floor_labels,
+                image_mappings,
+                overlays.get(lou),
+            )
         )
 
     items = [slot for slot in slots if slot["emptyReason"] is None]
@@ -1045,6 +1088,99 @@ def _archive_store_for_thread(
     archive_store = ThreadArchiveStore(thread_folder)
     archive_store.ensure_schema()
     return archive_store, thread_folder, aid
+
+
+def _read_effective_row_for_lou(
+    archive_store: ThreadArchiveStore,
+    lou: int,
+) -> ArchivePostVersionRow:
+    rows = archive_store.read_effective_post_rows({lou})
+    if not rows:
+        raise ValueError("未知楼层。")
+    return rows[0]
+
+
+def read_post_overlay(
+    output_dir: Path,
+    tid: int,
+    raw_aid_key: str,
+    lou: int,
+) -> PostOverlayDetail:
+    archive_store, thread_folder, aid = _archive_store_for_thread(
+        output_dir,
+        tid,
+        raw_aid_key,
+    )
+    row = _read_effective_row_for_lou(archive_store, lou)
+    floor_labels = _load_floor_labels(thread_folder, aid)
+    overlay = load_post_overlays(thread_folder).get(lou)
+    if overlay is None:
+        return {
+            "lou": lou,
+            "floorLabel": floor_labels.label(lou),
+            "hasOverlay": False,
+            "bbcode": row.content,
+            "html": None,
+        }
+
+    return {
+        "lou": lou,
+        "floorLabel": floor_labels.label(lou),
+        "hasOverlay": True,
+        "bbcode": overlay["bbcode"],
+        "html": render_overlay_html(overlay["bbcode"]),
+    }
+
+
+def preview_post_overlay(
+    output_dir: Path,
+    tid: int,
+    raw_aid_key: str,
+    lou: int,
+    bbcode: str,
+) -> PostOverlayPreview:
+    archive_store, _thread_folder, _aid = _archive_store_for_thread(
+        output_dir,
+        tid,
+        raw_aid_key,
+    )
+    _read_effective_row_for_lou(archive_store, lou)
+    return {"html": render_overlay_html(bbcode)}
+
+
+def save_thread_post_overlay(
+    output_dir: Path,
+    tid: int,
+    raw_aid_key: str,
+    lou: int,
+    bbcode: str,
+) -> PostOverlayDetail:
+    archive_store, thread_folder, aid = _archive_store_for_thread(
+        output_dir,
+        tid,
+        raw_aid_key,
+    )
+    _read_effective_row_for_lou(archive_store, lou)
+    _save_post_overlay(thread_folder, lou, bbcode)
+    refresh_html_modified_for_lous(tid, aid, {lou}, thread_folder)
+    return read_post_overlay(output_dir, tid, raw_aid_key, lou)
+
+
+def clear_thread_post_overlay(
+    output_dir: Path,
+    tid: int,
+    raw_aid_key: str,
+    lou: int,
+) -> PostOverlayDetail:
+    archive_store, thread_folder, aid = _archive_store_for_thread(
+        output_dir,
+        tid,
+        raw_aid_key,
+    )
+    _read_effective_row_for_lou(archive_store, lou)
+    _clear_post_overlay(thread_folder, lou)
+    refresh_html_modified_for_lous(tid, aid, {lou}, thread_folder)
+    return read_post_overlay(output_dir, tid, raw_aid_key, lou)
 
 
 def _content_preview(content: str, max_length: int = 120) -> str:
