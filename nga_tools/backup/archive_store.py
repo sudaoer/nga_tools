@@ -13,6 +13,7 @@ from nga_tools.backup.models import PostRecord
 from nga_tools.backup.post_data import post_data_from_raw, post_source_hash
 from nga_tools.core.hashing import hash_object
 from nga_tools.ngaclient.client import PageData
+from nga_tools.word_count import WORD_COUNT_VERSION, count_post_content
 
 ARCHIVE_DB_FILENAME = "archive.sqlite3"
 _SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
@@ -67,6 +68,14 @@ class ArchiveMigrationResult:
     page_snapshots_inserted: int
     post_versions_inserted: int
     post_observations: int
+
+
+@dataclass(frozen=True)
+class ArchiveWordCountTotals:
+    total_posts: int
+    body_posts: int
+    chinese_chars: int
+    chinese_with_punctuation: int
 
 
 def _now_utc_iso() -> str:
@@ -130,6 +139,11 @@ def _page_number_from_path(path: Path) -> int:
     return int(match.group(1))
 
 
+def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row[1] for row in rows if isinstance(row[1], str)}
+
+
 class ThreadArchiveStore:
     def __init__(self, thread_folder: Path) -> None:
         self.thread_folder = thread_folder
@@ -184,6 +198,9 @@ class ThreadArchiveStore:
                 source_hash TEXT NOT NULL,
                 post_json TEXT NOT NULL,
                 content TEXT NOT NULL,
+                word_count_version INTEGER NOT NULL DEFAULT 0,
+                word_count_chinese_chars INTEGER NOT NULL DEFAULT 0,
+                word_count_chinese_with_punctuation INTEGER NOT NULL DEFAULT 0,
                 first_seen_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL,
                 seen_count INTEGER NOT NULL,
@@ -191,6 +208,7 @@ class ThreadArchiveStore:
             )
             """
         )
+        self._ensure_post_version_word_count_columns(connection)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS post_observations (
@@ -218,6 +236,32 @@ class ThreadArchiveStore:
             """
         )
         connection.commit()
+
+    def _ensure_post_version_word_count_columns(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        columns = _table_columns(connection, "post_versions")
+        missing_columns = [
+            (
+                "word_count_version",
+                "ALTER TABLE post_versions ADD COLUMN "
+                "word_count_version INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "word_count_chinese_chars",
+                "ALTER TABLE post_versions ADD COLUMN "
+                "word_count_chinese_chars INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "word_count_chinese_with_punctuation",
+                "ALTER TABLE post_versions ADD COLUMN "
+                "word_count_chinese_with_punctuation INTEGER NOT NULL DEFAULT 0",
+            ),
+        ]
+        for column_name, alter_sql in missing_columns:
+            if column_name not in columns:
+                connection.execute(alter_sql)
 
     def _page_snapshot_id(
         self,
@@ -340,6 +384,7 @@ class ThreadArchiveStore:
     ) -> tuple[int, bool]:
         post = post_data_from_raw(raw_post)
         post_hash = hash_object(raw_post)
+        word_count = count_post_content(post["content"])
         inserted = (
             self._post_version_id(
                 connection,
@@ -359,15 +404,22 @@ class ThreadArchiveStore:
                 source_hash,
                 post_json,
                 content,
+                word_count_version,
+                word_count_chinese_chars,
+                word_count_chinese_with_punctuation,
                 first_seen_at,
                 last_seen_at,
                 seen_count
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT(pid, lou, post_hash) DO UPDATE SET
                 post_json = excluded.post_json,
                 content = excluded.content,
                 source_hash = excluded.source_hash,
+                word_count_version = excluded.word_count_version,
+                word_count_chinese_chars = excluded.word_count_chinese_chars,
+                word_count_chinese_with_punctuation =
+                    excluded.word_count_chinese_with_punctuation,
                 first_seen_at = CASE
                     WHEN post_versions.first_seen_at > excluded.first_seen_at
                     THEN excluded.first_seen_at
@@ -387,6 +439,9 @@ class ThreadArchiveStore:
                 post_source_hash(post),
                 _json_text(raw_post),
                 post["content"],
+                WORD_COUNT_VERSION,
+                word_count.chinese_chars,
+                word_count.chinese_with_punctuation,
                 observed_at,
                 observed_at,
                 seen_increment,
@@ -464,6 +519,109 @@ class ThreadArchiveStore:
             page_snapshot_inserted=snapshot_inserted,
             post_versions_inserted=post_versions_inserted,
             post_observations=len(raw_post_items),
+        )
+
+    def refresh_stored_word_counts(self) -> int:
+        self.require_exists()
+        with closing(self._connect()) as connection:
+            with connection:
+                rows = cast(
+                    list[tuple[int, str]],
+                    connection.execute(
+                        """
+                        SELECT id, content
+                        FROM post_versions
+                        WHERE word_count_version != ?
+                        """,
+                        (WORD_COUNT_VERSION,),
+                    ).fetchall(),
+                )
+                for row_id, content in rows:
+                    word_count = count_post_content(content)
+                    connection.execute(
+                        """
+                        UPDATE post_versions
+                        SET
+                            word_count_version = ?,
+                            word_count_chinese_chars = ?,
+                            word_count_chinese_with_punctuation = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            WORD_COUNT_VERSION,
+                            word_count.chinese_chars,
+                            word_count.chinese_with_punctuation,
+                            row_id,
+                        ),
+                    )
+        return len(rows)
+
+    def read_latest_word_count_totals(
+        self,
+        min_body_chars: int,
+    ) -> ArchiveWordCountTotals:
+        self.require_exists()
+        self.refresh_stored_word_counts()
+
+        with closing(self._connect()) as connection:
+            row = cast(
+                tuple[int, int, int, int],
+                connection.execute(
+                    """
+                    WITH latest AS (
+                        SELECT
+                            word_count_chinese_chars,
+                            word_count_chinese_with_punctuation,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY lou
+                                ORDER BY last_seen_at DESC, id DESC
+                            ) AS row_number
+                        FROM post_versions
+                    )
+                    SELECT
+                        COUNT(*),
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN word_count_chinese_with_punctuation >= ?
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ),
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN word_count_chinese_with_punctuation >= ?
+                                    THEN word_count_chinese_chars
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ),
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN word_count_chinese_with_punctuation >= ?
+                                    THEN word_count_chinese_with_punctuation
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        )
+                    FROM latest
+                    WHERE row_number = 1
+                    """,
+                    (min_body_chars, min_body_chars, min_body_chars),
+                ).fetchone(),
+            )
+
+        return ArchiveWordCountTotals(
+            total_posts=row[0],
+            body_posts=row[1],
+            chinese_chars=row[2],
+            chinese_with_punctuation=row[3],
         )
 
     def read_latest_post_record_summaries(self) -> list[PostRecord]:
@@ -622,6 +780,7 @@ class ThreadArchiveStore:
             post_versions_inserted += result.post_versions_inserted
             post_observations += result.post_observations
 
+        self.refresh_stored_word_counts()
         return ArchiveMigrationResult(
             page_files=len(page_paths),
             page_snapshots_inserted=page_snapshots_inserted,

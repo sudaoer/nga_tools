@@ -7,6 +7,7 @@ from typing import Optional
 
 from fastapi.testclient import TestClient
 
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.cli.parser import args_parse
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web.data import (
@@ -139,6 +140,9 @@ class WebViewerDataTest:
         assert by_dir["101_201"]["threadName"] == "sample"
         assert by_dir["101_201"]["subject"] == "Sample Thread"
         assert by_dir["101_201"]["postCount"] == 2
+        assert by_dir["101_201"]["bodyWordCount"] is None
+        assert by_dir["101_201"]["bodyChineseCharCount"] is None
+        assert by_dir["101_201"]["bodyWordPostCount"] is None
         assert by_dir["101_201"]["minLou"] == 1
         assert by_dir["101_201"]["maxLou"] == 2
         assert by_dir["101_201"]["authorUpdatedAt"] == 1783490002
@@ -147,6 +151,26 @@ class WebViewerDataTest:
         )
         assert by_dir["101_201"]["hasHtmlModified"] is False
         assert by_dir["102_all"]["status"] == "needs_migration"
+
+    def test_scans_stored_word_count_summary(self, tmp_path: Path) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        ThreadArchiveStore(thread_dir).upsert_page(
+            1,
+            {
+                "result": [
+                    _post(1, "正文，" * 40),
+                    _post(2, "短。"),
+                ]
+            },
+        )
+
+        summaries = scan_thread_summaries(output_dir, {})
+        summary = summaries[0]
+
+        assert summary["bodyWordCount"] == 120
+        assert summary["bodyChineseCharCount"] == 80
+        assert summary["bodyWordPostCount"] == 1
 
     def test_reads_fixed_floor_slots_without_shifting_missing_floors(
         self,

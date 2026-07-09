@@ -182,7 +182,11 @@ pixi run python main.py image prune-links
 pixi run python main.py stats words --name 帖子名
 ```
 
-统计命令只读取本地 `archive.sqlite3`，不联网、不生成统计文件；旧 `json/page_*.json` 只会被 `backup migrate-store` 显式读取。默认会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子标记，并只纳入清洗后 `中文+中文标点数` 不低于 120 的正文楼层。阈值可以通过 `--min-body-chars` 调整：
+统计命令读取本地 `archive.sqlite3`，不联网；会把每个帖子版本的字数字段写回
+归档库，但不生成独立统计文件。旧 `json/page_*.json` 只会被 `backup migrate-store`
+显式读取。默认会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子
+标记，并只纳入清洗后 `中文+中文标点数` 不低于 120 的正文楼层。阈值可以通过
+`--min-body-chars` 调整：
 
 ```powershell
 pixi run python main.py stats words --name 帖子名 --min-body-chars 80
@@ -207,7 +211,8 @@ pixi run python main.py web serve --host 0.0.0.0 --port 18736
 ```
 
 Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页面请求时从原始
-帖子数据重新渲染 HTML；`html_modified/post_*.html` 仍是备份/PDF流程使用的
+帖子数据重新渲染 HTML；线程列表会显示已存盘的正文字数，并支持按正文字数
+排序。`html_modified/post_*.html` 仍是备份/PDF流程使用的
 产物。旧版只有 `json/page_*.json` 的目录会在页面中显示为“需迁移”，请先运行
 `backup migrate-store`。
 

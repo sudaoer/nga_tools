@@ -463,7 +463,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} stats words --all-threads",
             ],
             "notes": [
-                "此命令只读取本地archive.sqlite3，不联网、不生成统计文件。",
+                "此命令读取本地archive.sqlite3，不联网；会把字数字段写回归档，"
+                "但不生成独立统计文件。",
                 "会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子标记。",
                 "默认只纳入清洗后中文+中文标点数达到120的正文楼层。",
             ],
@@ -489,6 +490,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "notes": [
                 "此命令只读取本地备份，不联网、不修改备份内容。",
                 "默认只监听本机地址，避免把本地备份暴露到局域网。",
+                "线程列表会显示已存盘的正文字数，并支持按正文字数排序。",
                 "只支持当前archive.sqlite3和html_modified备份；旧JSON请先迁移。",
             ],
             "args": ["host", "port", "static_dir"],

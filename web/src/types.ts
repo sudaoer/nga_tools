@@ -15,6 +15,9 @@ export interface ThreadSummary {
   postdate: number | null
   lastpost: number | null
   postCount: number
+  bodyWordCount: number | null
+  bodyChineseCharCount: number | null
+  bodyWordPostCount: number | null
   minLou: number | null
   maxLou: number | null
   pageCount: number

@@ -35,6 +35,7 @@ from nga_tools.forum.thread_configs import (
 )
 from nga_tools.web.html_sanitize import sanitize_post_html
 from nga_tools.web.render import ImageSrcResolver, render_web_bbcode
+from nga_tools.word_count import DEFAULT_MIN_BODY_CHARS, WORD_COUNT_VERSION
 
 ThreadStatus = Literal["ready", "needs_migration", "missing_html", "invalid"]
 PostEmptyReason = Literal["missing", "filtered"]
@@ -60,6 +61,9 @@ class ThreadSummary(TypedDict):
     postdate: Optional[int]
     lastpost: Optional[int]
     postCount: int
+    bodyWordCount: Optional[int]
+    bodyChineseCharCount: Optional[int]
+    bodyWordPostCount: Optional[int]
     minLou: Optional[int]
     maxLou: Optional[int]
     pageCount: int
@@ -100,6 +104,9 @@ class PostsResult(TypedDict):
 @dataclass(frozen=True)
 class ArchiveStats:
     post_count: int
+    body_word_count: Optional[int]
+    body_chinese_char_count: Optional[int]
+    body_word_post_count: Optional[int]
     min_lou: Optional[int]
     max_lou: Optional[int]
     page_count: int
@@ -183,6 +190,16 @@ def _connect_readonly(db_path: Path) -> sqlite3.Connection:
     return sqlite3.connect(uri, uri=True)
 
 
+def _has_word_count_columns(connection: sqlite3.Connection) -> bool:
+    rows = connection.execute("PRAGMA table_info(post_versions)").fetchall()
+    columns = {row[1] for row in rows if isinstance(row[1], str)}
+    return {
+        "word_count_version",
+        "word_count_chinese_chars",
+        "word_count_chinese_with_punctuation",
+    } <= columns
+
+
 def _postdate_from_json_text(post_json: str) -> Optional[PostDate]:
     try:
         raw_post: object = json.loads(post_json)
@@ -252,6 +269,87 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
                 "SELECT COUNT(DISTINCT page_number) FROM page_snapshots"
             ).fetchone(),
         )
+        body_word_count: Optional[int] = None
+        body_chinese_char_count: Optional[int] = None
+        body_word_post_count: Optional[int] = None
+        if _has_word_count_columns(connection):
+            word_row = cast(
+                tuple[int, int, int, int],
+                connection.execute(
+                    """
+                    WITH latest AS (
+                        SELECT
+                            word_count_version,
+                            word_count_chinese_chars,
+                            word_count_chinese_with_punctuation,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY lou
+                                ORDER BY last_seen_at DESC, id DESC
+                            ) AS row_number
+                        FROM post_versions
+                    )
+                    SELECT
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN word_count_version = ?
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ),
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN word_count_version = ?
+                                        AND word_count_chinese_with_punctuation >= ?
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ),
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN word_count_version = ?
+                                        AND word_count_chinese_with_punctuation >= ?
+                                    THEN word_count_chinese_chars
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ),
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN word_count_version = ?
+                                        AND word_count_chinese_with_punctuation >= ?
+                                    THEN word_count_chinese_with_punctuation
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        )
+                    FROM latest
+                    WHERE row_number = 1
+                    """,
+                    (
+                        WORD_COUNT_VERSION,
+                        WORD_COUNT_VERSION,
+                        DEFAULT_MIN_BODY_CHARS,
+                        WORD_COUNT_VERSION,
+                        DEFAULT_MIN_BODY_CHARS,
+                        WORD_COUNT_VERSION,
+                        DEFAULT_MIN_BODY_CHARS,
+                    ),
+                ).fetchone(),
+            )
+            if word_row[0] == post_row[0]:
+                body_word_post_count = word_row[1]
+                body_chinese_char_count = word_row[2]
+                body_word_count = word_row[3]
 
     author_updated_at: Optional[PostDate] = None
     if latest_post_row is not None:
@@ -259,6 +357,9 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
 
     return ArchiveStats(
         post_count=post_row[0],
+        body_word_count=body_word_count,
+        body_chinese_char_count=body_chinese_char_count,
+        body_word_post_count=body_word_post_count,
         min_lou=post_row[1],
         max_lou=post_row[2],
         page_count=page_row[0],
@@ -345,6 +446,9 @@ def _thread_summary_for_folder(
     message: Optional[str] = None
     stats = ArchiveStats(
         post_count=0,
+        body_word_count=None,
+        body_chinese_char_count=None,
+        body_word_post_count=None,
         min_lou=None,
         max_lou=None,
         page_count=0,
@@ -391,6 +495,9 @@ def _thread_summary_for_folder(
         "postdate": _optional_int_metadata(metadata, "postdate"),
         "lastpost": _optional_int_metadata(metadata, "lastpost"),
         "postCount": stats.post_count,
+        "bodyWordCount": stats.body_word_count,
+        "bodyChineseCharCount": stats.body_chinese_char_count,
+        "bodyWordPostCount": stats.body_word_post_count,
         "minLou": stats.min_lou,
         "maxLou": stats.max_lou,
         "pageCount": stats.page_count,

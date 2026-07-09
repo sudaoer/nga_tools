@@ -7,6 +7,7 @@ type SortKey =
   | 'backupUpdated'
   | 'authorUpdated'
   | 'postCount'
+  | 'bodyWordCount'
   | 'maxLou'
   | 'lastpost'
   | 'postdate'
@@ -21,6 +22,7 @@ const SORT_KEYS: SortKey[] = [
   'backupUpdated',
   'authorUpdated',
   'postCount',
+  'bodyWordCount',
   'maxLou',
   'lastpost',
   'postdate',
@@ -57,6 +59,7 @@ const sortLabels: Record<SortKey, string> = {
   backupUpdated: '备份更新',
   authorUpdated: '作者最后发言',
   postCount: '楼层数',
+  bodyWordCount: '正文字数',
   maxLou: '最高楼',
   lastpost: '主题最新回复',
   postdate: '主题发布时间',
@@ -170,6 +173,10 @@ function formatTime(value: string | number | null): string {
   return date.toLocaleString()
 }
 
+function formatNumber(value: number | null): string {
+  return value === null ? '-' : value.toLocaleString()
+}
+
 function timeSortValue(value: string | number | null): number | null {
   if (value === null) {
     return null
@@ -187,6 +194,9 @@ function sortValue(thread: ThreadSummary, key: SortKey): string | number | null 
   }
   if (key === 'postCount') {
     return thread.postCount
+  }
+  if (key === 'bodyWordCount') {
+    return thread.bodyWordCount
   }
   if (key === 'maxLou') {
     return thread.maxLou
@@ -223,10 +233,15 @@ function compareSortValues(
 }
 
 function compareThreads(left: ThreadSummary, right: ThreadSummary): number {
-  const result = compareSortValues(
-    sortValue(left, listFilter.sortBy),
-    sortValue(right, listFilter.sortBy),
-  )
+  const leftValue = sortValue(left, listFilter.sortBy)
+  const rightValue = sortValue(right, listFilter.sortBy)
+  if (leftValue === null && rightValue !== null) {
+    return 1
+  }
+  if (leftValue !== null && rightValue === null) {
+    return -1
+  }
+  const result = compareSortValues(leftValue, rightValue)
   if (result !== 0) {
     return listFilter.sortDirection === 'desc' ? -result : result
   }
@@ -541,6 +556,9 @@ onMounted(() => {
           <span class="thread-meta">
             <span class="status" :class="thread.status">{{ statusLabel(thread.status) }}</span>
             <span>{{ thread.postCount }} 楼</span>
+            <span v-if="thread.bodyWordCount !== null">
+              {{ formatNumber(thread.bodyWordCount) }} 字
+            </span>
             <span>{{ thread.author || thread.threadName || thread.dirName }}</span>
             <span>备份 {{ formatTime(thread.updatedAt) }}</span>
             <span v-if="thread.authorUpdatedAt !== null">
@@ -558,6 +576,9 @@ onMounted(() => {
           <div class="reader-meta">
             <span>{{ selectedThread.dirName }}</span>
             <span>{{ selectedThread.postCount }} 楼</span>
+            <span v-if="selectedThread.bodyWordCount !== null">
+              正文字数 {{ formatNumber(selectedThread.bodyWordCount) }}
+            </span>
             <span>备份更新于 {{ formatTime(selectedThread.updatedAt) }}</span>
             <span v-if="selectedThread.authorUpdatedAt !== null">
               作者最后发言 {{ formatTime(selectedThread.authorUpdatedAt) }}

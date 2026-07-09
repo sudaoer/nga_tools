@@ -315,6 +315,7 @@ def backup_thread(
             write_json=write_json,
         )
         _upsert_archive_pages(archive_store, page_data_by_page)
+        archive_store.refresh_stored_word_counts()
 
     report_info("开始处理")
 
@@ -406,6 +407,8 @@ def backup_thread_sub(
         archive_store = ThreadArchiveStore(thread_folder)
         existing_page_numbers = archive_store.read_page_numbers()
         _ensure_legacy_json_is_migrated(tid, aid, archive_store, existing_page_numbers)
+        if archive_store.exists():
+            archive_store.refresh_stored_word_counts()
 
         first_page_data = client.get_page(tid, aid, 1)
         page_count = _page_count_from_page_data(first_page_data)

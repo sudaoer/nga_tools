@@ -7,9 +7,117 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.word_count import WORD_COUNT_VERSION
 
 
 class ThreadArchiveStoreTest:
+    def test_upsert_page_stores_word_count_fields(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "正文，"},
+                    ],
+                },
+                observed_at="2026-07-07T01:00:00+00:00",
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                row = connection.execute(
+                    """
+                    SELECT
+                        word_count_version,
+                        word_count_chinese_chars,
+                        word_count_chinese_with_punctuation
+                    FROM post_versions
+                    WHERE pid = 1001
+                    """
+                ).fetchone()
+
+        assert row == (WORD_COUNT_VERSION, 2, 3)
+
+    def test_refresh_stored_word_counts_migrates_old_schema(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE post_versions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        pid INTEGER NOT NULL,
+                        lou INTEGER NOT NULL,
+                        post_hash TEXT NOT NULL,
+                        source_hash TEXT NOT NULL,
+                        post_json TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        first_seen_at TEXT NOT NULL,
+                        last_seen_at TEXT NOT NULL,
+                        seen_count INTEGER NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO post_versions (
+                        pid,
+                        lou,
+                        post_hash,
+                        source_hash,
+                        post_json,
+                        content,
+                        first_seen_at,
+                        last_seen_at,
+                        seen_count
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        1001,
+                        1,
+                        "post-hash",
+                        "source-hash",
+                        json.dumps(
+                            {"lou": 1, "pid": 1001, "content": "旧文，"},
+                            ensure_ascii=False,
+                        ),
+                        "旧文，",
+                        "2026-07-07T01:00:00+00:00",
+                        "2026-07-07T01:00:00+00:00",
+                        1,
+                    ),
+                )
+                connection.commit()
+
+            updated = store.refresh_stored_word_counts()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(post_versions)"
+                    ).fetchall()
+                }
+                row = connection.execute(
+                    """
+                    SELECT
+                        word_count_version,
+                        word_count_chinese_chars,
+                        word_count_chinese_with_punctuation
+                    FROM post_versions
+                    WHERE pid = 1001
+                    """
+                ).fetchone()
+
+        assert updated == 1
+        assert {
+            "word_count_version",
+            "word_count_chinese_chars",
+            "word_count_chinese_with_punctuation",
+        } <= columns
+        assert row == (WORD_COUNT_VERSION, 2, 3)
+
     def test_page_refresh_preserves_posts_missing_from_new_response(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
