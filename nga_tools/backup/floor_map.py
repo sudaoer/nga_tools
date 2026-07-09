@@ -140,23 +140,43 @@ def read_author_posts_from_archive(tid: int, aid: int) -> list[AuthorPostRef]:
     return ThreadArchiveStore(thread_folder).read_latest_author_post_refs()
 
 
-def read_missing_author_lous_from_html_modified(tid: int, aid: int) -> list[int]:
-    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
-    missing_lous: list[int] = []
-    for path in sorted(folder_html_modified.glob("post_*.html")):
-        if not path.is_file():
+def read_unresolved_missing_author_lous_from_floor_map(
+    tid: int,
+    aid: int,
+    *,
+    present_lous: set[int] | None = None,
+    total_lou_count: int | None = None,
+) -> list[int]:
+    path = get_floor_map_path(tid, aid)
+    if not path.exists():
+        return []
+
+    try:
+        entries = _load_floor_map_entries(path)
+    except (FileNotFoundError, ValueError) as error:
+        report_warning(f"楼层映射缺失楼缓存无效，忽略：{path}: {error}")
+        return []
+
+    missing_lous: set[int] = set()
+    for entry in entries:
+        author_lou = entry["author_lou"]
+        if entry["pid"] is not None:
             continue
-        try:
-            lou = int(path.stem.split("_", 1)[1])
-        except (IndexError, ValueError):
+        if "original_pid" in entry:
             continue
-        if is_missing_post_html(path.read_text(encoding="utf-8")):
-            missing_lous.append(lou)
+        if present_lous is not None and author_lou in present_lous:
+            continue
+        if total_lou_count is not None and author_lou > total_lou_count:
+            continue
+        missing_lous.add(author_lou)
 
-    return missing_lous
+    return sorted(missing_lous)
 
 
-def find_missing_author_lous(author_posts: Sequence[AuthorPostRef]) -> list[int]:
+def find_missing_author_lous(
+    author_posts: Sequence[AuthorPostRef],
+    total_lou_count: int | None = None,
+) -> list[int]:
     author_lous = sorted({post["author_lou"] for post in author_posts})
     expected_lou = 1
     missing_lous: list[int] = []
@@ -165,6 +185,10 @@ def find_missing_author_lous(author_posts: Sequence[AuthorPostRef]) -> list[int]
             missing_lous.extend(range(expected_lou, author_lou))
             expected_lou = author_lou
         expected_lou += 1
+
+    if total_lou_count is not None and expected_lou <= total_lou_count:
+        missing_lous.extend(range(expected_lou, total_lou_count + 1))
+
     return missing_lous
 
 
@@ -869,11 +893,20 @@ def generate_floor_map_from_backup(tid: int, aid: Optional[int]) -> None:
         report_info("未指定aid，原帖楼层与当前楼层一致，无需生成floor_map.json。")
         return
 
-    author_posts = read_author_posts_from_archive(tid, aid)
+    thread_folder = Path(utils.get_folder(tid, aid, create=False))
+    archive_store = ThreadArchiveStore(thread_folder)
+    author_posts = archive_store.read_latest_author_post_refs()
+    author_total_lou_count = archive_store.read_latest_author_total_lou_count()
+    present_lous = {post["author_lou"] for post in author_posts}
     missing_author_lous = sorted(
         {
-            *find_missing_author_lous(author_posts),
-            *read_missing_author_lous_from_html_modified(tid, aid),
+            *find_missing_author_lous(author_posts, author_total_lou_count),
+            *read_unresolved_missing_author_lous_from_floor_map(
+                tid,
+                aid,
+                present_lous=present_lous,
+                total_lou_count=author_total_lou_count,
+            ),
         }
     )
     build_and_save_floor_map(

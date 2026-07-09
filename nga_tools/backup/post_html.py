@@ -76,6 +76,7 @@ def build_post_htmls(page_data_by_page: dict[int, PageData]) -> list[PostHtml]:
 
 def find_missing_lou(
     posts: Sequence[PostHtml] | Sequence[PostRecord],
+    total_lou_count: int | None = None,
 ) -> list[int]:
     expected_lou = 1
     missing_lou: list[int] = []
@@ -85,6 +86,9 @@ def find_missing_lou(
                 missing_lou.append(lou)
             expected_lou = item["lou"]
         expected_lou += 1
+
+    if total_lou_count is not None and expected_lou <= total_lou_count:
+        missing_lou.extend(range(expected_lou, total_lou_count + 1))
 
     return missing_lou
 

@@ -535,6 +535,28 @@ class ThreadArchiveStore:
             if record["pid"] is not None
         ]
 
+    def read_latest_author_total_lou_count(self) -> Optional[int]:
+        self.require_exists()
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT vrows
+                FROM page_snapshots
+                WHERE page_number = 1
+                ORDER BY last_seen_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
+        if row is None:
+            return None
+        value = row[0]
+        if value is None:
+            return None
+        if type(value) is int:
+            return value
+        raise ValueError(f"archive vrows字段无效：{value!r}")
+
     def page_count(self) -> int:
         self.require_exists()
         with closing(self._connect()) as connection:

@@ -10,10 +10,13 @@ from unittest.mock import patch
 from nga_tools.backup.floor_map import (
     AuthorPostRef,
     FloorMapBuildResult,
+    FloorLabels,
     build_and_save_floor_map,
     find_missing_author_lous,
+    generate_floor_map_from_backup,
     load_floor_map_build_result_if_current,
     read_author_posts_from_archive,
+    read_unresolved_missing_author_lous_from_floor_map,
     _page_post_dicts,
     _scan_original_pages,
 )
@@ -312,3 +315,88 @@ class FloorMapMissingAuthorLousTest:
         ]
 
         assert find_missing_author_lous(author_posts) == [2]
+
+    def test_finds_tail_gap_from_total_lou_count(self) -> None:
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 1001, "author_lou": 1},
+            {"pid": 1003, "author_lou": 3},
+        ]
+
+        assert find_missing_author_lous(author_posts, total_lou_count=4) == [2, 4]
+
+
+class FloorMapStoredMissingAuthorLousTest:
+    def test_reads_only_unresolved_missing_lous_from_floor_map(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / "floor_map.json").write_text(
+                json.dumps(
+                    {
+                        "entries": [
+                            {"pid": 1001, "author_lou": 1, "original_lou": 1},
+                            {"pid": None, "author_lou": 2, "original_lou": 2},
+                            {"pid": None, "author_lou": 4, "original_lou": 4},
+                            {
+                                "pid": None,
+                                "author_lou": 6,
+                                "original_lou": 6,
+                                "original_pid": 6006,
+                            },
+                            {"pid": None, "author_lou": 9, "original_lou": 9},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir):
+                missing_lous = read_unresolved_missing_author_lous_from_floor_map(
+                    123,
+                    456,
+                    present_lous={4},
+                    total_lou_count=8,
+                )
+
+        assert missing_lous == [2]
+
+    def test_generate_floor_map_from_backup_uses_archive_total_lou_count(
+        self,
+    ) -> None:
+        captured_missing_lous: list[int] = []
+
+        def fake_build_floor_map(
+            client: object,
+            tid: int,
+            aid: int,
+            author_posts: list[AuthorPostRef],
+            missing_author_lous: list[int],
+            *,
+            strict: bool = True,
+        ) -> FloorMapBuildResult:
+            del client, tid, aid, author_posts, strict
+            captured_missing_lous[:] = missing_author_lous
+            return FloorMapBuildResult(FloorLabels.plain(), {})
+
+        with TemporaryDirectory() as temp_dir:
+            store = ThreadArchiveStore(Path(temp_dir))
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "vrows": 4,
+                    "result": [
+                        {"pid": 1001, "lou": 1, "content": "first"},
+                        {"pid": 1003, "lou": 3, "content": "third"},
+                    ],
+                },
+            )
+            with (
+                patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir),
+                patch(
+                    "nga_tools.backup.floor_map.build_and_save_floor_map",
+                    side_effect=fake_build_floor_map,
+                ),
+            ):
+                generate_floor_map_from_backup(123, 456)
+
+        assert captured_missing_lous == [2, 4]

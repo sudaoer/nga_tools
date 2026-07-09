@@ -32,6 +32,7 @@ from nga_tools.backup.models import ParsedPostHtml, PostHtml
 from nga_tools.backup.post_html import (
     build_post_htmls as _build_post_htmls,
     fill_missing_lou as _fill_missing_lou,
+    find_missing_lou as _find_missing_lou,
     load_post_htmls_for_records as _load_post_htmls_for_records,
     merge_missing_lou as _merge_missing_lou,
     prepare_post_records as _prepare_post_records,
@@ -537,6 +538,14 @@ class BackupThreadSubMissingLouTest:
     def test_merge_missing_lou_sorts_and_deduplicates(self) -> None:
         assert _merge_missing_lou([4, 2], [2, 3], []) == [2, 3, 4]
 
+    def test_find_missing_lou_uses_total_lou_count_for_tail_gap(self) -> None:
+        htmls: list[PostHtml] = [
+            {"lou": 1, "pid": 1001, "html": "first"},
+            {"lou": 3, "pid": 1003, "html": "third"},
+        ]
+
+        assert _find_missing_lou(htmls, total_lou_count=4) == [2, 4]
+
     def test_author_empty_page_is_written_and_later_pages_continue(self) -> None:
         class SparseAuthorClient:
             def __init__(self) -> None:
@@ -748,19 +757,29 @@ class BackupThreadSubMissingLouTest:
 
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
-            (temp_dir / "json").mkdir()
-            html_modified_dir = temp_dir / "html_modified"
-            html_modified_dir.mkdir()
-            (html_modified_dir / "post_2.html").write_text(
-                MISSING_POST_HTML,
-                encoding="utf-8",
-            )
-            (html_modified_dir / "post_4.html").write_text(
-                MISSING_POST_HTML,
-                encoding="utf-8",
-            )
-            (html_modified_dir / "post_9.html").write_text(
-                "already recovered",
+            (temp_dir / "floor_map.json").write_text(
+                json.dumps(
+                    {
+                        "version": FLOOR_MAP_VERSION,
+                        "floor_map_generation_version": FLOOR_MAP_GENERATION_VERSION,
+                        "algorithm": FLOOR_MAP_HASH_ALGORITHM,
+                        "tid": 123,
+                        "aid": 456,
+                        "entries": [
+                            {"pid": 1001, "author_lou": 1, "original_lou": 1},
+                            {"pid": None, "author_lou": 2, "original_lou": 2},
+                            {"pid": 1003, "author_lou": 3, "original_lou": 3},
+                            {"pid": None, "author_lou": 4, "original_lou": 4},
+                            {
+                                "pid": None,
+                                "author_lou": 9,
+                                "original_lou": 9,
+                                "original_pid": 9009,
+                            },
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
                 encoding="utf-8",
             )
 
@@ -827,13 +846,25 @@ class BackupThreadSubMissingLouTest:
 
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
-            (temp_dir / "json").mkdir()
-            html_modified_dir = temp_dir / "html_modified"
-            html_modified_dir.mkdir()
-            (html_modified_dir / "post_2.html").write_text(
-                MISSING_POST_HTML,
+            (temp_dir / "floor_map.json").write_text(
+                json.dumps(
+                    {
+                        "version": FLOOR_MAP_VERSION,
+                        "floor_map_generation_version": FLOOR_MAP_GENERATION_VERSION,
+                        "algorithm": FLOOR_MAP_HASH_ALGORITHM,
+                        "tid": 123,
+                        "aid": 456,
+                        "entries": [
+                            {"pid": 1001, "author_lou": 1, "original_lou": 1},
+                            {"pid": None, "author_lou": 2, "original_lou": 2},
+                            {"pid": 1003, "author_lou": 3, "original_lou": 3},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
                 encoding="utf-8",
             )
+            html_modified_dir = temp_dir / "html_modified"
 
             def fake_get_folder(
                 tid: int,
@@ -920,6 +951,15 @@ class BackupThreadSubHtmlModifiedManifestTest:
             }
             for post in author_posts
         ]
+        entries.extend(
+            {
+                "pid": None,
+                "author_lou": lou,
+                "original_lou": lou,
+            }
+            for lou in missing_lou
+        )
+        entries.sort(key=lambda entry: entry["author_lou"])
         (temp_dir / "floor_map.json").write_text(
             json.dumps(
                 {

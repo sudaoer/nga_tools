@@ -121,6 +121,68 @@ class ThreadArchiveStoreTest:
         assert records[0]['post']['content'] == 'second'
         assert empty_records == []
 
+    def test_read_latest_author_total_lou_count_uses_latest_page_one_snapshot(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "vrows": 2,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "first"},
+                    ],
+                },
+                observed_at="2026-07-07T01:00:00+00:00",
+            )
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "vrows": 4,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "first"},
+                        {"lou": 3, "pid": 1003, "content": "third"},
+                    ],
+                },
+                observed_at="2026-07-07T02:00:00+00:00",
+            )
+
+            total_lou_count = store.read_latest_author_total_lou_count()
+
+        assert total_lou_count == 4
+
+    def test_read_latest_author_total_lou_count_ignores_stale_vrows(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "vrows": 4,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "first"},
+                    ],
+                },
+                observed_at="2026-07-07T01:00:00+00:00",
+            )
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "first"},
+                    ],
+                },
+                observed_at="2026-07-07T02:00:00+00:00",
+            )
+
+            total_lou_count = store.read_latest_author_total_lou_count()
+
+        assert total_lou_count is None
+
     def test_migrate_json_pages_is_repeatable_and_keeps_json_files(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             thread_folder = Path(temp_dir_name)

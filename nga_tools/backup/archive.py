@@ -14,7 +14,7 @@ from nga_tools.backup.floor_map import (
     build_and_save_floor_map,
     load_floor_map_build_result_if_current,
     load_floor_labels,
-    read_missing_author_lous_from_html_modified,
+    read_unresolved_missing_author_lous_from_floor_map,
 )
 from nga_tools.backup import image_store
 from nga_tools.backup.image_pipeline import (
@@ -322,7 +322,7 @@ def backup_thread(
         with time_section("读取完整归档记录"):
             records = archive_store.read_latest_post_records()
         with time_section("楼层映射生成/复用"):
-            missing_lou = _find_missing_lou(records)
+            missing_lou = _find_missing_lou(records, author_total_lou_count)
             floor_map_result = _build_floor_map_for_post_refs(
                 client,
                 tid,
@@ -469,14 +469,17 @@ def backup_thread_sub(
         with time_section("读取归档摘要"):
             records = archive_store.read_latest_post_record_summaries()
         with time_section("缺失楼读取与合并"):
-            missing_lou = _find_missing_lou(records)
+            missing_lou = _find_missing_lou(records, author_total_lou_count)
             if aid is not None:
                 present_lou = {item["lou"] for item in records}
-                previous_missing_lou = [
-                    lou
-                    for lou in read_missing_author_lous_from_html_modified(tid, aid)
-                    if lou not in present_lou
-                ]
+                previous_missing_lou = (
+                    read_unresolved_missing_author_lous_from_floor_map(
+                        tid,
+                        aid,
+                        present_lous=present_lou,
+                        total_lou_count=author_total_lou_count,
+                    )
+                )
                 missing_lou = _merge_missing_lou(missing_lou, previous_missing_lou)
         with time_section("楼层映射生成/复用"):
             floor_map_result = _build_floor_map_for_post_refs(
