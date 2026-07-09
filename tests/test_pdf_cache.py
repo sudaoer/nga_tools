@@ -19,6 +19,7 @@ from nga_tools.backup.pdf import (
     _read_pdf_html,
     _report_weasyprint_output,
     _run_weasyprint,
+    _slice_image_file_is_valid,
     _split_weasyprint_output,
 )
 from nga_tools.backup.pdf_plan import (
@@ -374,6 +375,10 @@ class PdfWeasyPrintCaptureTest:
 
 
 class PdfImageSourceTest:
+    def test_slice_image_validation_treats_syntax_error_as_invalid(self) -> None:
+        with patch("nga_tools.backup.pdf.Image.open", side_effect=SyntaxError("bad")):
+            assert not _slice_image_file_is_valid("/tmp/broken.png")
+
     def test_image_path_for_pdf_allows_windows_drive_path(self) -> None:
         assert _image_path_for_pdf("C:/nga/image.png", Path("html")) == Path(
             "C:/nga/image.png"

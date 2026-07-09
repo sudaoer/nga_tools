@@ -31,7 +31,7 @@ from nga_tools.backup.pdf_plan import (
 )
 from nga_tools.config import get_config
 from nga_tools.console import report_info, report_warning
-from nga_tools.core.atomic import temporary_sibling_path
+from nga_tools.core.atomic import replace_temp_file, temporary_sibling_path
 
 SPEAKER_LINE_RE = re.compile(r"^([^\s：:][^：:]{0,15})[：:]")
 
@@ -220,7 +220,7 @@ def _save_slice_image(image: Image.Image, output_path: str) -> None:
                 quality=92,
                 optimize=True,
             )
-        temp_path.replace(final_path)
+        replace_temp_file(temp_path, final_path)
     except BaseException:
         temp_path.unlink(missing_ok=True)
         raise
@@ -230,7 +230,7 @@ def _slice_image_file_is_valid(path: str) -> bool:
     try:
         with Image.open(path) as image:
             image.verify()
-    except OSError:
+    except (OSError, SyntaxError):
         return False
     return True
 
@@ -340,7 +340,7 @@ def _run_weasyprint(task: PdfRenderTask) -> PdfRenderResult:
             output_lines=(*output_lines, f"PDF输出无效：{task.output_path}"),
         )
     try:
-        temp_output_path.replace(output_path)
+        replace_temp_file(temp_output_path, output_path)
     except OSError as error:
         temp_output_path.unlink(missing_ok=True)
         return PdfRenderResult(

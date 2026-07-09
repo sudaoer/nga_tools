@@ -3,11 +3,16 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import tempfile
+import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TextIO
+
+_DEFAULT_FILE_MODE = 0o666
+_UMASK_LOCK = threading.Lock()
 
 
 def temporary_sibling_path(path: Path) -> Path:
@@ -28,6 +33,37 @@ def _unlink_if_exists(path: Path) -> None:
         pass
 
 
+def _current_umask() -> int:
+    with _UMASK_LOCK:
+        current_umask = os.umask(0)
+        os.umask(current_umask)
+    return current_umask
+
+
+def _new_file_mode_from_umask() -> int:
+    return _DEFAULT_FILE_MODE & ~_current_umask()
+
+
+def _replacement_mode(target_path: Path) -> int:
+    try:
+        return stat.S_IMODE(target_path.stat().st_mode)
+    except FileNotFoundError:
+        return _new_file_mode_from_umask()
+
+
+def _apply_replacement_mode(temp_path: Path, target_path: Path) -> None:
+    try:
+        temp_path.chmod(_replacement_mode(target_path))
+    except OSError:
+        if os.name != "nt":
+            raise
+
+
+def replace_temp_file(temp_path: Path, target_path: Path) -> None:
+    _apply_replacement_mode(temp_path, target_path)
+    temp_path.replace(target_path)
+
+
 def write_text_atomically(
     path: Path,
     text: str,
@@ -37,7 +73,7 @@ def write_text_atomically(
     temp_path = temporary_sibling_path(path)
     try:
         temp_path.write_text(text, encoding=encoding)
-        temp_path.replace(path)
+        replace_temp_file(temp_path, path)
     except BaseException:
         _unlink_if_exists(temp_path)
         raise
@@ -47,7 +83,7 @@ def write_bytes_atomically(path: Path, data: bytes) -> None:
     temp_path = temporary_sibling_path(path)
     try:
         temp_path.write_bytes(data)
-        temp_path.replace(path)
+        replace_temp_file(temp_path, path)
     except BaseException:
         _unlink_if_exists(temp_path)
         raise
@@ -94,7 +130,7 @@ def replace_file_atomically(
             shutil.move(str(source_path), str(temp_path))
         else:
             shutil.copy2(source_path, temp_path)
-        temp_path.replace(target_path)
+        replace_temp_file(temp_path, target_path)
     except BaseException:
         _unlink_if_exists(temp_path)
         raise
@@ -110,7 +146,7 @@ def open_text_atomically(
     try:
         with temp_path.open("w", encoding=encoding) as output_file:
             yield output_file
-        temp_path.replace(path)
+        replace_temp_file(temp_path, path)
     except BaseException:
         _unlink_if_exists(temp_path)
         raise

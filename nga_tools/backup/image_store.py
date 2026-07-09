@@ -17,7 +17,11 @@ from PIL import Image, ImageDraw
 from nga_tools import utils
 from nga_tools.config import get_config
 from nga_tools.console import report_warning
-from nga_tools.core.atomic import replace_file_atomically, temporary_sibling_path
+from nga_tools.core.atomic import (
+    replace_file_atomically,
+    replace_temp_file,
+    temporary_sibling_path,
+)
 
 
 class ImageDownloadTask(TypedDict):
@@ -144,7 +148,7 @@ def placeholder_image_path() -> Path:
         temp_path = temporary_sibling_path(placeholder_path)
         try:
             image.save(temp_path, format="PNG")
-            temp_path.replace(placeholder_path)
+            replace_temp_file(temp_path, placeholder_path)
         except BaseException:
             temp_path.unlink(missing_ok=True)
             raise
