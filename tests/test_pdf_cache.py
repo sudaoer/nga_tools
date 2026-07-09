@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from PIL import Image
 from rich.console import Console
 
@@ -385,7 +386,9 @@ class PdfImageSourceTest:
             "C:/nga/image.png"
         )
 
-    def test_read_pdf_html_resolves_global_image_link(self) -> None:
+    def test_read_pdf_html_does_not_resolve_legacy_global_link_without_mapping(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir) / "output"
             html_dir = output_dir / "101_all" / "html_modified"
@@ -398,25 +401,30 @@ class PdfImageSourceTest:
             Image.new("RGB", (2, 2), color="white").save(unique_image)
             link_path = link_dir / "lsQkle-552eXuT3cS10p-7f7.png"
             link_path.symlink_to(Path("../../..") / "images_unique" / "hash.png")
+            image_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+            )
             (html_dir / "post_1.html").write_text(
-                '<p><img src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"/></p>',
+                f'<p><img src="{image_url}"/></p>',
                 encoding="utf-8",
             )
+            config = SimpleNamespace(output_dir=str(output_dir))
 
             with (
                 patch(
                     "nga_tools.core.paths.get_config",
-                    return_value=SimpleNamespace(output_dir=str(output_dir)),
+                    return_value=config,
                 ),
+                patch("nga_tools.backup.image_store.get_config", return_value=config),
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),
                 patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
             ):
-                html_content_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
-                    101,
-                    None,
-                )
-
-        assert 'src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"' in html_content_by_lou[1]
+                with pytest.raises(RuntimeError, match="不支持的远程图片链接"):
+                    _read_pdf_html(
+                        101,
+                        None,
+                    )
 
     def test_read_pdf_html_keeps_hidden_about_blank_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

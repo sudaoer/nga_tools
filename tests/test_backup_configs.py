@@ -189,7 +189,7 @@ class BackupConfigsCliTest:
     def test_all_threads_is_rejected_for_unsupported_commands(self) -> None:
         with patch("sys.stderr", new_callable=io.StringIO):
             with pytest.raises(SystemExit) as context:
-                args_parse(["image", "migrate", "--all-threads"])
+                args_parse(["image", "verify", "--all-threads"])
 
         assert context.value.code == 2
 

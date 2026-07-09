@@ -11,10 +11,6 @@ from PIL import Image
 from rich.console import Console
 
 from nga_tools.backup import image_store
-from nga_tools.backup.images import (
-    migrate_image_index,
-    prune_legacy_image_links,
-)
 from nga_tools.backup.image_verify import (
     ImageVerifyResult,
     _image_verify_worker_count,
@@ -45,17 +41,19 @@ class ImageVerifyCliTest:
         assert args['action'] == 'verify'
         assert args['name'] == '帖子名'
 
-    def test_image_migrate_parses_without_arguments(self) -> None:
-        args = args_parse(["image", "migrate"])
+    def test_image_migrate_is_rejected(self) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(["image", "migrate"])
 
-        assert args['command'] == 'image'
-        assert args['action'] == 'migrate'
+        assert context.value.code == 2
 
-    def test_image_prune_links_parses_without_arguments(self) -> None:
-        args = args_parse(["image", "prune-links"])
+    def test_image_prune_links_is_rejected(self) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(["image", "prune-links"])
 
-        assert args['command'] == 'image'
-        assert args['action'] == 'prune-links'
+        assert context.value.code == 2
 
 
 class ImageVerifyHandlerTest:
@@ -227,23 +225,25 @@ class ImageVerifyAllTest:
 
         assert verify_mock.call_args_list == [call('output/images_unique')]
 
-    def test_thread_reference_listing_resolves_legacy_image_file(self) -> None:
+    def test_remote_image_without_mapping_does_not_resolve_legacy_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir) / "output"
-            html_dir = output_dir / "101_201" / "html_modified"
             link_dir = output_dir / "images" / "mon_202506" / "06"
-            html_dir.mkdir(parents=True)
             link_dir.mkdir(parents=True)
             link_path = link_dir / "lsQkle-552eXuT3cS10p-7f7.png"
             Image.new("RGB", (1, 1), color="white").save(link_path)
-            (html_dir / "post_1.html").write_text(
-                '<img src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"/>',
-                encoding="utf-8",
+            image_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
             )
 
-            paths = _list_thread_referenced_image_paths(html_dir)
+            with patch(
+                "nga_tools.backup.image_store.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                resolved_path = image_store.link_path_for_image_src(image_url)
 
-        assert paths == [link_path]
+        assert resolved_path is None
 
     def test_thread_reference_listing_resolves_direct_unique_image_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -262,76 +262,6 @@ class ImageVerifyAllTest:
             paths = _list_thread_referenced_image_paths(html_dir)
 
         assert paths == [unique_image]
-
-    def test_migrate_image_index_rewrites_legacy_html_and_preserves_source_file(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output_dir = Path(temp_dir) / "output"
-            html_dir = output_dir / "101_201" / "html_modified"
-            link_dir = output_dir / "images" / "mon_202506" / "06"
-            html_dir.mkdir(parents=True)
-            link_dir.mkdir(parents=True)
-            link_path = link_dir / "lsQkle-552eXuT3cS10p-7f7.png"
-            Image.new("RGB", (1, 1), color="white").save(link_path)
-            (html_dir / "post_1.html").write_text(
-                '<img src="../../images/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"/>',
-                encoding="utf-8",
-            )
-            image_url = (
-                "https://img.nga.178.com/attachments/"
-                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
-            )
-
-            config = SimpleNamespace(output_dir=str(output_dir))
-            with (
-                patch("nga_tools.backup.images.get_config", return_value=config),
-                patch("nga_tools.backup.image_store.get_config", return_value=config),
-            ):
-                result = migrate_image_index()
-                mapping = image_store.image_mapping_for_url(image_url)
-
-            migrated_html = (html_dir / "post_1.html").read_text(encoding="utf-8")
-            legacy_file_survived = link_path.is_file()
-            unique_file_exists = (
-                (output_dir / mapping.unique_rel_path).exists()
-                if mapping is not None
-                else False
-            )
-
-        assert result.mappings == 1
-        assert result.updated_image_refs == 1
-        assert mapping is not None
-        assert unique_file_exists
-        assert 'src="../../images_unique/' in migrated_html
-        assert legacy_file_survived
-
-    def test_prune_legacy_image_links_removes_only_after_html_migrated(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output_dir = Path(temp_dir) / "output"
-            html_dir = output_dir / "101_201" / "html_modified"
-            link_dir = output_dir / "images" / "mon_202506" / "06"
-            unique_dir = output_dir / "images_unique"
-            html_dir.mkdir(parents=True)
-            link_dir.mkdir(parents=True)
-            unique_dir.mkdir()
-            unique_image = unique_dir / "abc.png"
-            Image.new("RGB", (1, 1), color="white").save(unique_image)
-            legacy_image = link_dir / "lsQkle-552eXuT3cS10p-7f7.png"
-            Image.new("RGB", (1, 1), color="white").save(legacy_image)
-            (html_dir / "post_1.html").write_text(
-                '<img src="../../images_unique/abc.png"/>',
-                encoding="utf-8",
-            )
-
-            config = SimpleNamespace(output_dir=str(output_dir))
-            with (
-                patch("nga_tools.backup.images.get_config", return_value=config),
-                patch("nga_tools.backup.image_store.get_config", return_value=config),
-            ):
-                result = prune_legacy_image_links()
-            images_dir_exists = (output_dir / "images").exists()
-
-        assert result.removed_links == 1
-        assert not images_dir_exists
 
     def test_parallel_folder_verify_removes_broken_images(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

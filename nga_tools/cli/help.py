@@ -89,7 +89,7 @@ def format_global_help() -> str:
             f"  {PROGRAM_USAGE} backup all --name 帖子名",
             f"  {PROGRAM_USAGE} backup sub --all-threads",
             f"  {PROGRAM_USAGE} backup pdf --name 帖子名 --pdf-workers 2",
-            f"  {PROGRAM_USAGE} image migrate",
+            f"  {PROGRAM_USAGE} image verify",
             f"  {PROGRAM_USAGE} stats words --name 帖子名",
             f"  {PROGRAM_USAGE} web serve",
         ]

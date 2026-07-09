@@ -11,7 +11,7 @@ from nga_tools.commands.backup import (
     pdf_generate,
 )
 from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
-from nga_tools.commands.image import image_migrate, image_prune_links, image_verify
+from nga_tools.commands.image import image_verify
 from nga_tools.commands.stats import stats_words
 from nga_tools.commands.types import CommandHandler
 from nga_tools.commands.web import web_serve
@@ -423,29 +423,6 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "提供帖子参数时会校验该帖html_modified引用到的图片文件。",
             ],
             "args": ["name", "tid", "aid"],
-        },
-        "migrate": {
-            "handler": image_migrate,
-            "summary": "迁移旧图片目录为SQLite映射",
-            "usage": f"{PROGRAM_USAGE} image migrate",
-            "examples": [f"{PROGRAM_USAGE} image migrate"],
-            "notes": [
-                "会从output_dir/images旧图片条目生成output_dir/image_index.sqlite3。",
-                "会把html_modified中的旧images引用改写为images_unique路径。",
-                "不会删除旧图片目录；确认后可运行image prune-links清理。",
-            ],
-            "args": [],
-        },
-        "prune-links": {
-            "handler": image_prune_links,
-            "summary": "删除已迁移的旧图片目录",
-            "usage": f"{PROGRAM_USAGE} image prune-links",
-            "examples": [f"{PROGRAM_USAGE} image prune-links"],
-            "notes": [
-                "仅当html_modified不再引用output_dir/images时才会删除。",
-                "如果旧目录内存在无法识别的文件，会拒绝删除。",
-            ],
-            "args": [],
         },
     },
     "stats": {

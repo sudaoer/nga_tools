@@ -164,18 +164,6 @@ pixi run python main.py image verify
 pixi run python main.py image verify --name 帖子名
 ```
 
-旧版本曾在 `output/images/` 下创建按 NGA 原路径组织的图片条目，通常是软链接，也可能是普通图片文件。已有旧产物可以显式迁移到 SQLite 映射和 `images_unique` 引用：
-
-```powershell
-pixi run python main.py image migrate
-```
-
-迁移命令会保留旧图片目录。确认 `html_modified` 已不再引用旧目录后，可以清理它：
-
-```powershell
-pixi run python main.py image prune-links
-```
-
 统计已有备份中的正文中文字数：
 
 ```powershell
@@ -285,7 +273,6 @@ PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会�
 - `images_unique/`：按内容 hash 保存的实际图片文件
 - `images_unique/download_failed_placeholder.png`：下载失败图片的占位图，按需生成
 - `image_index.sqlite3`：原始 NGA 图片 URL 到 `images_unique` 文件的映射
-- `images/`：旧版本图片目录，仅迁移前的历史产物会存在
 
 ## 协议
 

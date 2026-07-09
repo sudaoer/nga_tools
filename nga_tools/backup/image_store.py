@@ -163,25 +163,6 @@ def image_index_path() -> Path:
     return output_dir() / IMAGE_INDEX_FILENAME
 
 
-def image_links_dir() -> Path:
-    return output_dir() / "images"
-
-
-def image_link_path(url: str) -> Path:
-    parsed_url = parse_nga_image_url(url)
-    return (
-        image_links_dir()
-        / parsed_url.month_dir
-        / parsed_url.day_dir
-        / parsed_url.filename
-    )
-
-
-def image_link_src_from_html_dir(url: str, html_dir: str | Path) -> str:
-    link_path = image_link_path(url)
-    return os.path.relpath(link_path, html_dir).replace("\\", "/")
-
-
 def unique_image_src_from_html_dir(url: str, html_dir: str | Path) -> str | None:
     image_path = mapped_image_path_for_url(url)
     if image_path is None:
@@ -342,10 +323,7 @@ def link_path_for_image_src(image_src: str) -> Path | None:
     normalized_url = normalize_nga_image_url(image_src)
     if not utils.NGA_img_link_verify(normalized_url):
         return None
-    image_path = mapped_image_path_for_url(normalized_url)
-    if image_path is not None:
-        return image_path
-    return image_link_path(normalized_url)
+    return mapped_image_path_for_url(normalized_url)
 
 
 def _image_extension_from_url(url: str) -> str:
