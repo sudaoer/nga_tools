@@ -126,6 +126,7 @@ class WebViewerDataTest:
             "aid": 201,
             "subject": "Sample Thread",
             "author": "Alice",
+            "link": "https://bbs.nga.cn/read.php?tid=101",
             "replies": 2,
             "postdate": 1783400000,
             "lastpost": 1783490000,
@@ -140,6 +141,10 @@ class WebViewerDataTest:
         assert by_dir["101_201"]["postCount"] == 2
         assert by_dir["101_201"]["minLou"] == 1
         assert by_dir["101_201"]["maxLou"] == 2
+        assert by_dir["101_201"]["authorUpdatedAt"] == 1783490002
+        assert by_dir["101_201"]["link"] == (
+            "https://bbs.nga.cn/read.php?tid=101&authorid=201"
+        )
         assert by_dir["101_201"]["hasHtmlModified"] is False
         assert by_dir["102_all"]["status"] == "needs_migration"
 
@@ -161,8 +166,8 @@ class WebViewerDataTest:
 
         assert result["page"] == 1
         assert result["pageStartLou"] == 0
-        assert result["pageEndLou"] == 19
-        assert len(result["slots"]) == 20
+        assert result["pageEndLou"] == 2
+        assert len(result["slots"]) == 3
         assert result["slots"][0]["lou"] == 0
         assert result["slots"][0]["emptyReason"] is None
         assert result["slots"][1]["lou"] == 1
@@ -170,6 +175,22 @@ class WebViewerDataTest:
         assert result["slots"][2]["lou"] == 2
         assert result["slots"][2]["emptyReason"] is None
         assert [item["lou"] for item in result["items"]] == [0, 2]
+
+    def test_reads_last_page_without_tail_missing_slots(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(19, "page one end"), _post(21, "last")])
+
+        result = read_posts(output_dir, 101, "201", page=2)
+
+        assert result["pageStartLou"] == 20
+        assert result["pageEndLou"] == 21
+        assert [slot["lou"] for slot in result["slots"]] == [20, 21]
+        assert result["slots"][0]["emptyReason"] == "missing"
+        assert result["slots"][1]["emptyReason"] is None
 
     def test_reads_posts_and_rewrites_local_image_sources(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
@@ -298,7 +319,10 @@ class WebServerTest:
     def test_posts_route_returns_fixed_floor_slots(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
         thread_dir = output_dir / "101_201"
-        _write_archive(thread_dir, [_post(1, "hello"), _post(2, "world")])
+        _write_archive(
+            thread_dir,
+            [_post(1, "hello"), _post(2, "world"), _post(19, "page end")],
+        )
         client = TestClient(
             create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
         )

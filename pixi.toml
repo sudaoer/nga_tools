@@ -13,7 +13,7 @@ ankebak = "python main.py forum sync && python main.py backup sub --all-threads"
 web-install = "pnpm --dir web install --frozen-lockfile"
 web-build = { depends-on = ["web-install"], cmd = "pnpm --dir web build" }
 web-typecheck = { depends-on = ["web-install"], cmd = "pnpm --dir web typecheck" }
-web-serve = { depends-on = ["web-build"], cmd = "python main.py web serve" }
+web-serve = "python main.py web serve"
 
 [dependencies]
 python = ">=3.14.4,<3.15"

@@ -1,7 +1,33 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { fetchPosts, fetchThread, fetchThreads, type PostQuery } from './api'
 import type { PostItem, PostsResult, ThreadStatus, ThreadSummary } from './types'
+
+type SortKey =
+  | 'backupUpdated'
+  | 'authorUpdated'
+  | 'postCount'
+  | 'maxLou'
+  | 'lastpost'
+  | 'postdate'
+  | 'title'
+  | 'author'
+type SortDirection = 'asc' | 'desc'
+type PageToken =
+  | { type: 'page'; page: number; key: string }
+  | { type: 'ellipsis'; key: string }
+
+const SORT_KEYS: SortKey[] = [
+  'backupUpdated',
+  'authorUpdated',
+  'postCount',
+  'maxLou',
+  'lastpost',
+  'postdate',
+  'title',
+  'author',
+]
+const THREAD_STATUSES: ThreadStatus[] = ['ready', 'needs_migration', 'missing_html', 'invalid']
 
 const threads = ref<ThreadSummary[]>([])
 const selectedThread = ref<ThreadSummary | null>(null)
@@ -10,10 +36,14 @@ const threadError = ref<string | null>(null)
 const postError = ref<string | null>(null)
 const loadingThreads = ref(false)
 const loadingPosts = ref(false)
+const requestedThread = ref<{ tid: number; aidKey: string } | null>(null)
+const pageJumpInput = ref('')
 
 const listFilter = reactive({
   q: '',
   status: 'all' as ThreadStatus | 'all',
+  sortBy: 'backupUpdated' as SortKey,
+  sortDirection: 'desc' as SortDirection,
 })
 
 const postQuery = reactive<PostQuery>({
@@ -23,9 +53,20 @@ const postQuery = reactive<PostQuery>({
   louTo: '',
 })
 
-const filteredThreads = computed(() => {
+const sortLabels: Record<SortKey, string> = {
+  backupUpdated: '备份更新',
+  authorUpdated: '作者最后发言',
+  postCount: '楼层数',
+  maxLou: '最高楼',
+  lastpost: '主题最新回复',
+  postdate: '主题发布时间',
+  title: '标题',
+  author: '作者',
+}
+
+const visibleThreads = computed(() => {
   const keyword = listFilter.q.trim().toLowerCase()
-  return threads.value.filter((thread) => {
+  const filtered = threads.value.filter((thread) => {
     if (listFilter.status !== 'all' && thread.status !== listFilter.status) {
       return false
     }
@@ -40,10 +81,43 @@ const filteredThreads = computed(() => {
       String(thread.tid),
     ].some((value) => value?.toLowerCase().includes(keyword))
   })
+  return filtered.toSorted(compareThreads)
 })
 
 const pageStart = computed(() => (posts.value ? posts.value.pageStartLou : 0))
 const pageEnd = computed(() => (posts.value ? posts.value.pageEndLou : 0))
+const pagerTokens = computed<PageToken[]>(() => {
+  if (!posts.value || posts.value.totalPages <= 1) {
+    return []
+  }
+  const totalPages = posts.value.totalPages
+  const currentPage = posts.value.page
+  if (totalPages <= 9) {
+    return Array.from({ length: totalPages }, (_item, index) => ({
+      type: 'page',
+      page: index + 1,
+      key: `page-${index + 1}`,
+    }))
+  }
+
+  const pages = new Set<number>([1, totalPages])
+  for (let page = currentPage - 2; page <= currentPage + 2; page += 1) {
+    if (page > 1 && page < totalPages) {
+      pages.add(page)
+    }
+  }
+
+  const tokens: PageToken[] = []
+  let previousPage: number | null = null
+  for (const page of [...pages].sort((left, right) => left - right)) {
+    if (previousPage !== null && page > previousPage + 1) {
+      tokens.push({ type: 'ellipsis', key: `ellipsis-${previousPage}-${page}` })
+    }
+    tokens.push({ type: 'page', page, key: `page-${page}` })
+    previousPage = page
+  }
+  return tokens
+})
 
 function titleFor(thread: ThreadSummary): string {
   return thread.subject || thread.threadName || thread.dirName
@@ -96,6 +170,69 @@ function formatTime(value: string | number | null): string {
   return date.toLocaleString()
 }
 
+function timeSortValue(value: string | number | null): number | null {
+  if (value === null) {
+    return null
+  }
+  const date = dateFromValue(value)
+  return date === null ? null : date.getTime()
+}
+
+function sortValue(thread: ThreadSummary, key: SortKey): string | number | null {
+  if (key === 'backupUpdated') {
+    return timeSortValue(thread.updatedAt)
+  }
+  if (key === 'authorUpdated') {
+    return timeSortValue(thread.authorUpdatedAt)
+  }
+  if (key === 'postCount') {
+    return thread.postCount
+  }
+  if (key === 'maxLou') {
+    return thread.maxLou
+  }
+  if (key === 'lastpost') {
+    return thread.lastpost
+  }
+  if (key === 'postdate') {
+    return thread.postdate
+  }
+  if (key === 'author') {
+    return (thread.author || thread.threadName || thread.dirName).toLowerCase()
+  }
+  return titleFor(thread).toLowerCase()
+}
+
+function compareSortValues(
+  leftValue: string | number | null,
+  rightValue: string | number | null,
+): number {
+  if (leftValue === null && rightValue === null) {
+    return 0
+  }
+  if (leftValue === null) {
+    return 1
+  }
+  if (rightValue === null) {
+    return -1
+  }
+  if (typeof leftValue === 'number' && typeof rightValue === 'number') {
+    return leftValue - rightValue
+  }
+  return String(leftValue).localeCompare(String(rightValue), 'zh-Hans-CN')
+}
+
+function compareThreads(left: ThreadSummary, right: ThreadSummary): number {
+  const result = compareSortValues(
+    sortValue(left, listFilter.sortBy),
+    sortValue(right, listFilter.sortBy),
+  )
+  if (result !== 0) {
+    return listFilter.sortDirection === 'desc' ? -result : result
+  }
+  return titleFor(left).localeCompare(titleFor(right), 'zh-Hans-CN')
+}
+
 function slotUserLabel(post: PostItem): string {
   if (post.authorName) {
     return post.authorName
@@ -121,14 +258,120 @@ function pageFromLouInput(value: string): number | null {
   return Math.floor(lou / 20) + 1
 }
 
+function integerFromParam(value: string | null): number | null {
+  if (value === null || !value.trim()) {
+    return null
+  }
+  const numberValue = Number(value)
+  if (!Number.isInteger(numberValue) || numberValue < 1) {
+    return null
+  }
+  return numberValue
+}
+
+function isThreadStatus(value: string | null): value is ThreadStatus {
+  return value !== null && THREAD_STATUSES.includes(value as ThreadStatus)
+}
+
+function isSortKey(value: string | null): value is SortKey {
+  return value !== null && SORT_KEYS.includes(value as SortKey)
+}
+
+function isSortDirection(value: string | null): value is SortDirection {
+  return value === 'asc' || value === 'desc'
+}
+
+function hydrateStateFromUrl(): void {
+  const params = new URLSearchParams(window.location.search)
+  const tid = integerFromParam(params.get('tid'))
+  const aidKey = params.get('aid')
+  if (tid !== null && aidKey !== null && aidKey.trim()) {
+    requestedThread.value = { tid, aidKey }
+  }
+
+  const page = integerFromParam(params.get('page'))
+  if (page !== null) {
+    postQuery.page = page
+  }
+  postQuery.q = params.get('post_q') || ''
+  postQuery.louFrom = params.get('lou_from') || ''
+  postQuery.louTo = params.get('lou_to') || ''
+  listFilter.q = params.get('list_q') || ''
+
+  const status = params.get('status')
+  if (status === 'all' || isThreadStatus(status)) {
+    listFilter.status = status
+  }
+  const sortBy = params.get('sort')
+  if (isSortKey(sortBy)) {
+    listFilter.sortBy = sortBy
+  }
+  const sortDirection = params.get('dir')
+  if (isSortDirection(sortDirection)) {
+    listFilter.sortDirection = sortDirection
+  }
+}
+
+function setParam(params: URLSearchParams, key: string, value: string | number | null): void {
+  if (value !== null && String(value).trim()) {
+    params.set(key, String(value))
+  }
+}
+
+function syncUrl(): void {
+  const params = new URLSearchParams()
+  if (selectedThread.value !== null) {
+    params.set('tid', String(selectedThread.value.tid))
+    params.set('aid', selectedThread.value.aidKey)
+  }
+  if (postQuery.page !== 1) {
+    params.set('page', String(postQuery.page))
+  }
+  setParam(params, 'post_q', postQuery.q.trim())
+  setParam(params, 'lou_from', postQuery.louFrom.trim())
+  setParam(params, 'lou_to', postQuery.louTo.trim())
+  setParam(params, 'list_q', listFilter.q.trim())
+  if (listFilter.status !== 'all') {
+    params.set('status', listFilter.status)
+  }
+  if (listFilter.sortBy !== 'backupUpdated') {
+    params.set('sort', listFilter.sortBy)
+  }
+  if (listFilter.sortDirection !== 'desc') {
+    params.set('dir', listFilter.sortDirection)
+  }
+
+  const query = params.toString()
+  const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`
+  window.history.replaceState(null, '', nextUrl)
+}
+
 async function loadThreads(): Promise<void> {
   loadingThreads.value = true
   threadError.value = null
   try {
     threads.value = await fetchThreads()
-    const firstReady = threads.value.find((thread) => thread.status === 'ready')
-    if (firstReady && selectedThread.value === null) {
-      await selectThread(firstReady)
+    const currentThread =
+      selectedThread.value === null
+        ? null
+        : threads.value.find(
+            (thread) =>
+              thread.tid === selectedThread.value?.tid &&
+              thread.aidKey === selectedThread.value?.aidKey,
+          ) || null
+    const requested =
+      requestedThread.value === null
+        ? null
+        : threads.value.find(
+            (thread) =>
+              thread.tid === requestedThread.value?.tid &&
+              thread.aidKey === requestedThread.value?.aidKey,
+          ) || null
+    const firstReady = threads.value.find((thread) => thread.status === 'ready') || null
+    const target = currentThread || requested || firstReady
+    requestedThread.value = null
+    if (target !== null && selectedThread.value === null) {
+      await selectThread(target, { resetPage: requested === null })
     }
   } catch (error) {
     threadError.value = error instanceof Error ? error.message : String(error)
@@ -137,11 +380,16 @@ async function loadThreads(): Promise<void> {
   }
 }
 
-async function selectThread(thread: ThreadSummary): Promise<void> {
+async function selectThread(
+  thread: ThreadSummary,
+  options: { resetPage: boolean } = { resetPage: true },
+): Promise<void> {
   selectedThread.value = thread
   posts.value = null
   postError.value = null
-  postQuery.page = 1
+  if (options.resetPage) {
+    postQuery.page = 1
+  }
   if (thread.status !== 'ready') {
     return
   }
@@ -166,6 +414,7 @@ async function loadPosts(): Promise<void> {
       selectedThread.value.aidKey,
       postQuery,
     )
+    postQuery.page = posts.value.page
   } catch (error) {
     postError.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -194,7 +443,53 @@ function previousPage(): void {
   void loadPosts()
 }
 
+function goToPage(page: number): void {
+  if (!posts.value) {
+    return
+  }
+  const nextPage = Math.min(Math.max(Math.floor(page), 1), posts.value.totalPages)
+  if (nextPage === posts.value.page) {
+    pageJumpInput.value = String(posts.value.page)
+    return
+  }
+  postQuery.page = nextPage
+  void loadPosts()
+}
+
+function applyPageJump(): void {
+  const page = integerFromParam(pageJumpInput.value)
+  if (page === null) {
+    pageJumpInput.value = posts.value ? String(posts.value.page) : ''
+    return
+  }
+  goToPage(page)
+}
+
+watch(
+  () => [
+    selectedThread.value?.tid,
+    selectedThread.value?.aidKey,
+    postQuery.page,
+    postQuery.q,
+    postQuery.louFrom,
+    postQuery.louTo,
+    listFilter.q,
+    listFilter.status,
+    listFilter.sortBy,
+    listFilter.sortDirection,
+  ],
+  syncUrl,
+)
+
+watch(
+  () => posts.value?.page,
+  (page) => {
+    pageJumpInput.value = page === undefined ? '' : String(page)
+  },
+)
+
 onMounted(() => {
+  hydrateStateFromUrl()
   void loadThreads()
 })
 </script>
@@ -218,15 +513,24 @@ onMounted(() => {
           <option value="missing_html">缺HTML</option>
           <option value="invalid">无效</option>
         </select>
+        <select v-model="listFilter.sortBy" aria-label="排序字段">
+          <option v-for="key in SORT_KEYS" :key="key" :value="key">
+            按{{ sortLabels[key] }}
+          </option>
+        </select>
+        <select v-model="listFilter.sortDirection" aria-label="排序方向">
+          <option value="desc">降序</option>
+          <option value="asc">升序</option>
+        </select>
       </div>
 
       <div v-if="threadError" class="error-box">{{ threadError }}</div>
       <div v-else-if="loadingThreads" class="empty-state">正在读取备份列表...</div>
-      <div v-else-if="filteredThreads.length === 0" class="empty-state">没有匹配的备份。</div>
+      <div v-else-if="visibleThreads.length === 0" class="empty-state">没有匹配的备份。</div>
 
       <div class="thread-list">
         <button
-          v-for="thread in filteredThreads"
+          v-for="thread in visibleThreads"
           :key="thread.dirName"
           type="button"
           class="thread-item"
@@ -238,6 +542,10 @@ onMounted(() => {
             <span class="status" :class="thread.status">{{ statusLabel(thread.status) }}</span>
             <span>{{ thread.postCount }} 楼</span>
             <span>{{ thread.author || thread.threadName || thread.dirName }}</span>
+            <span>备份 {{ formatTime(thread.updatedAt) }}</span>
+            <span v-if="thread.authorUpdatedAt !== null">
+              作者最后发言 {{ formatTime(thread.authorUpdatedAt) }}
+            </span>
           </span>
         </button>
       </div>
@@ -250,7 +558,10 @@ onMounted(() => {
           <div class="reader-meta">
             <span>{{ selectedThread.dirName }}</span>
             <span>{{ selectedThread.postCount }} 楼</span>
-            <span>更新 {{ formatTime(selectedThread.updatedAt) }}</span>
+            <span>备份更新于 {{ formatTime(selectedThread.updatedAt) }}</span>
+            <span v-if="selectedThread.authorUpdatedAt !== null">
+              作者最后发言 {{ formatTime(selectedThread.authorUpdatedAt) }}
+            </span>
             <a v-if="selectedThread.link" :href="selectedThread.link" target="_blank" rel="noreferrer">
               原帖
             </a>
@@ -299,8 +610,21 @@ onMounted(() => {
         </article>
 
         <div v-if="posts && posts.totalPages > 1" class="pager">
+          <button type="button" :disabled="posts.page <= 1" @click="goToPage(1)">首页</button>
           <button type="button" :disabled="posts.page <= 1" @click="previousPage">上一页</button>
-          <span>{{ posts.page }} / {{ posts.totalPages }}</span>
+          <template v-for="token in pagerTokens" :key="token.key">
+            <span v-if="token.type === 'ellipsis'" class="pager-ellipsis">...</span>
+            <button
+              v-else
+              type="button"
+              class="page-number"
+              :class="{ active: token.page === posts.page }"
+              :disabled="token.page === posts.page"
+              @click="goToPage(token.page)"
+            >
+              {{ token.page }}
+            </button>
+          </template>
           <button
             type="button"
             :disabled="posts.page >= posts.totalPages"
@@ -308,6 +632,23 @@ onMounted(() => {
           >
             下一页
           </button>
+          <button
+            type="button"
+            :disabled="posts.page >= posts.totalPages"
+            @click="goToPage(posts.totalPages)"
+          >
+            末页
+          </button>
+          <form class="page-jump" @submit.prevent="applyPageJump">
+            <input
+              v-model="pageJumpInput"
+              type="number"
+              min="1"
+              :max="posts.totalPages"
+              aria-label="跳转页码"
+            />
+            <button type="submit">跳转</button>
+          </form>
         </div>
       </template>
     </section>

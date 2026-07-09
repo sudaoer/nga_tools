@@ -9,7 +9,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional, TypedDict, cast
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup, Tag
 
@@ -64,6 +64,7 @@ class ThreadSummary(TypedDict):
     maxLou: Optional[int]
     pageCount: int
     updatedAt: Optional[str]
+    authorUpdatedAt: Optional[PostDate]
     hasHtmlModified: bool
     hasFloorMap: bool
     hasWarnings: bool
@@ -102,6 +103,7 @@ class ArchiveStats:
     min_lou: Optional[int]
     max_lou: Optional[int]
     page_count: int
+    author_updated_at: Optional[PostDate]
 
 
 class ThreadNotFoundError(Exception):
@@ -181,7 +183,36 @@ def _connect_readonly(db_path: Path) -> sqlite3.Connection:
     return sqlite3.connect(uri, uri=True)
 
 
+def _postdate_from_json_text(post_json: str) -> Optional[PostDate]:
+    try:
+        raw_post: object = json.loads(post_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw_post, dict):
+        return None
+    post = cast(dict[str, object], raw_post)
+    value = post.get("postdate")
+    if type(value) is int:
+        return value
+    if isinstance(value, str):
+        stripped_value = value.strip()
+        return stripped_value if stripped_value else None
+    return None
+
+
 def _read_archive_stats(db_path: Path) -> ArchiveStats:
+    latest_cte = """
+        WITH latest AS (
+            SELECT
+                lou,
+                post_json,
+                ROW_NUMBER() OVER (
+                    PARTITION BY lou
+                    ORDER BY last_seen_at DESC, id DESC
+                ) AS row_number
+            FROM post_versions
+        )
+    """
     with closing(_connect_readonly(db_path)) as connection:
         post_row = cast(
             tuple[int, Optional[int], Optional[int]],
@@ -202,6 +233,19 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
                 """
             ).fetchone(),
         )
+        latest_post_row = cast(
+            Optional[tuple[str]],
+            connection.execute(
+                f"""
+                {latest_cte}
+                SELECT post_json
+                FROM latest
+                WHERE row_number = 1
+                ORDER BY lou DESC
+                LIMIT 1
+                """
+            ).fetchone(),
+        )
         page_row = cast(
             tuple[int],
             connection.execute(
@@ -209,11 +253,16 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
             ).fetchone(),
         )
 
+    author_updated_at: Optional[PostDate] = None
+    if latest_post_row is not None:
+        author_updated_at = _postdate_from_json_text(latest_post_row[0])
+
     return ArchiveStats(
         post_count=post_row[0],
         min_lou=post_row[1],
         max_lou=post_row[2],
         page_count=page_row[0],
+        author_updated_at=author_updated_at,
     )
 
 
@@ -236,6 +285,46 @@ def _latest_mtime(paths: list[Path]) -> Optional[str]:
     ).isoformat()
 
 
+def _link_with_authorid(link: str, tid: int, aid: int) -> str:
+    parts = urlsplit(link)
+    query_items = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key != "authorid"
+    ]
+    if not any(key == "tid" for key, _value in query_items):
+        query_items.insert(0, ("tid", str(tid)))
+    query_items.append(("authorid", str(aid)))
+    path = parts.path or "/read.php"
+    return urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            path,
+            urlencode(query_items),
+            parts.fragment,
+        )
+    )
+
+
+def _thread_link(
+    metadata: Optional[ThreadConfig],
+    *,
+    tid: int,
+    aid: Optional[int],
+) -> str:
+    link = _optional_str_metadata(metadata, "link")
+    if link is None:
+        try:
+            base_url = utils.get_config().base_url
+        except (FileNotFoundError, ValueError):
+            base_url = "https://bbs.nga.cn"
+        link = f"{base_url.rstrip('/')}/read.php?tid={tid}"
+    if aid is None:
+        return link
+    return _link_with_authorid(link, tid, aid)
+
+
 def _thread_summary_for_folder(
     thread_folder: Path,
     metadata: Optional[ThreadConfig],
@@ -254,7 +343,13 @@ def _thread_summary_for_folder(
     has_warnings = warnings_path.is_file()
     status: ThreadStatus = "invalid"
     message: Optional[str] = None
-    stats = ArchiveStats(post_count=0, min_lou=None, max_lou=None, page_count=0)
+    stats = ArchiveStats(
+        post_count=0,
+        min_lou=None,
+        max_lou=None,
+        page_count=0,
+        author_updated_at=None,
+    )
 
     if db_path.is_file():
         try:
@@ -291,7 +386,7 @@ def _thread_summary_for_folder(
         "threadName": _metadata_name(metadata),
         "subject": _optional_str_metadata(metadata, "subject"),
         "author": _optional_str_metadata(metadata, "author"),
-        "link": _optional_str_metadata(metadata, "link"),
+        "link": _thread_link(metadata, tid=tid, aid=aid),
         "replies": _optional_int_metadata(metadata, "replies"),
         "postdate": _optional_int_metadata(metadata, "postdate"),
         "lastpost": _optional_int_metadata(metadata, "lastpost"),
@@ -300,6 +395,7 @@ def _thread_summary_for_folder(
         "maxLou": stats.max_lou,
         "pageCount": stats.page_count,
         "updatedAt": updated_at,
+        "authorUpdatedAt": stats.author_updated_at,
         "hasHtmlModified": has_html_modified,
         "hasFloorMap": has_floor_map,
         "hasWarnings": has_warnings,
@@ -733,6 +829,11 @@ def read_posts(
         resolved_page = min(page, total_pages)
         page_start_lou = (resolved_page - 1) * page_size
         page_end_lou = page_start_lou + page_size - 1
+        slot_end_lou = (
+            min(page_end_lou, max_lou)
+            if max_lou is not None and max_lou >= page_start_lou
+            else page_start_lou - 1
+        )
         rows = cast(
             list[tuple[int, Optional[int], str, str]],
             connection.execute(
@@ -775,7 +876,7 @@ def read_posts(
     floor_labels = _load_floor_labels(thread_folder, aid)
     row_by_lou = {row[0]: row for row in rows}
     slots: list[PostSlot] = []
-    for lou in range(page_start_lou, page_end_lou + 1):
+    for lou in range(page_start_lou, slot_end_lou + 1):
         row = row_by_lou.get(lou)
         if row is None:
             slots.append(_empty_post_slot(lou, floor_labels, "missing"))
@@ -801,7 +902,7 @@ def read_posts(
         "page": resolved_page,
         "pageSize": page_size,
         "pageStartLou": page_start_lou,
-        "pageEndLou": page_end_lou,
+        "pageEndLou": max(page_start_lou, slot_end_lou),
         "totalPages": total_pages,
         "postCount": post_count,
         "matchingPostCount": matching_row[0],

@@ -19,6 +19,7 @@ export interface ThreadSummary {
   maxLou: number | null
   pageCount: number
   updatedAt: string | null
+  authorUpdatedAt: number | string | null
   hasHtmlModified: boolean
   hasFloorMap: boolean
   hasWarnings: boolean
