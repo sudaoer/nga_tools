@@ -37,6 +37,10 @@ const loadingGroups = ref(false)
 const loadingPreview = ref(false)
 const savingVersionId = ref<number | null>(null)
 const showOnlyMultiVersionThreads = ref(true)
+const urlStateReady = ref(false)
+const requestedThread = ref<{ tid: number; aidKey: string } | null>(null)
+const requestedLou = ref<number | null>(null)
+const requestedVersionId = ref<number | null>(null)
 
 const selectedGroup = computed(
   () => groups.value.find((group) => group.lou === selectedLou.value) || null,
@@ -152,6 +156,57 @@ function defaultPreviewVersionId(group: PostVersionGroup): number {
   )
 }
 
+function integerFromParam(value: string | null, minimum: number): number | null {
+  if (value === null || !value.trim()) {
+    return null
+  }
+  const numberValue = Number(value)
+  if (!Number.isInteger(numberValue) || numberValue < minimum) {
+    return null
+  }
+  return numberValue
+}
+
+function hydrateStateFromUrl(): void {
+  const params = new URLSearchParams(window.location.search)
+  const tid = integerFromParam(params.get('tid'), 1)
+  const aidKey = params.get('aid')
+  if (tid !== null && aidKey !== null && aidKey.trim()) {
+    requestedThread.value = { tid, aidKey }
+  }
+  requestedLou.value = integerFromParam(params.get('lou'), 0)
+  requestedVersionId.value = integerFromParam(params.get('version'), 1)
+  if (params.get('multi_version_only') === 'false') {
+    showOnlyMultiVersionThreads.value = false
+  }
+}
+
+function setParam(params: URLSearchParams, key: string, value: string | number | null): void {
+  if (value !== null && String(value).trim()) {
+    params.set(key, String(value))
+  }
+}
+
+function syncUrl(): void {
+  if (!urlStateReady.value) {
+    return
+  }
+  const params = new URLSearchParams()
+  if (selectedThread.value !== null) {
+    params.set('tid', String(selectedThread.value.tid))
+    params.set('aid', selectedThread.value.aidKey)
+  }
+  setParam(params, 'lou', selectedLou.value)
+  setParam(params, 'version', previewVersionId.value)
+  if (!showOnlyMultiVersionThreads.value) {
+    params.set('multi_version_only', 'false')
+  }
+
+  const query = params.toString()
+  const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`
+  window.history.replaceState(null, '', nextUrl)
+}
+
 function clearThreadSelection(): void {
   selectedThread.value = null
   groups.value = []
@@ -161,6 +216,14 @@ function clearThreadSelection(): void {
 }
 
 async function selectVisibleThread(): Promise<void> {
+  const requested =
+    requestedThread.value === null
+      ? null
+      : visibleThreads.value.find(
+          (thread) =>
+            thread.tid === requestedThread.value?.tid &&
+            thread.aidKey === requestedThread.value?.aidKey,
+        ) || null
   const current =
     selectedThread.value === null
       ? null
@@ -169,9 +232,16 @@ async function selectVisibleThread(): Promise<void> {
             thread.tid === selectedThread.value?.tid &&
             thread.aidKey === selectedThread.value?.aidKey,
         ) || null
-  const target = current || visibleThreads.value[0] || null
+  const target = current || requested || visibleThreads.value[0] || null
   if (target !== null) {
-    await selectThread(target)
+    await selectThread(target, {
+      targetLou: requested !== null ? requestedLou.value : selectedLou.value,
+      targetVersionId:
+        requested !== null ? requestedVersionId.value : previewVersionId.value,
+    })
+    requestedThread.value = null
+    requestedLou.value = null
+    requestedVersionId.value = null
   } else {
     clearThreadSelection()
   }
@@ -192,16 +262,27 @@ async function loadThreads(): Promise<void> {
   }
 }
 
-async function selectThread(thread: PostVersionThreadSummary): Promise<void> {
+async function selectThread(
+  thread: PostVersionThreadSummary,
+  options: { targetLou: number | null; targetVersionId: number | null } = {
+    targetLou: null,
+    targetVersionId: null,
+  },
+): Promise<void> {
   selectedThread.value = thread
   groups.value = []
   selectedLou.value = null
   preview.value = null
   previewVersionId.value = null
-  await loadGroups()
+  await loadGroups(options)
 }
 
-async function loadGroups(): Promise<void> {
+async function loadGroups(
+  options: { targetLou: number | null; targetVersionId: number | null } = {
+    targetLou: selectedLou.value,
+    targetVersionId: null,
+  },
+): Promise<void> {
   if (selectedThread.value === null) {
     return
   }
@@ -213,14 +294,19 @@ async function loadGroups(): Promise<void> {
       selectedThread.value.tid,
       selectedThread.value.aidKey,
     )
+    const targetLou = options.targetLou ?? selectedLou.value
     const currentGroup =
-      selectedLou.value === null
+      targetLou === null
         ? null
-        : groups.value.find((group) => group.lou === selectedLou.value) || null
+        : groups.value.find((group) => group.lou === targetLou) || null
     const target = currentGroup || groups.value[0] || null
     selectedLou.value = target?.lou ?? null
     if (target !== null) {
-      await previewVersion(defaultPreviewVersionId(target))
+      const targetVersion =
+        options.targetVersionId === null
+          ? null
+          : target.versions.find((option) => option.id === options.targetVersionId) || null
+      await previewVersion(targetVersion?.id ?? defaultPreviewVersionId(target))
     } else {
       preview.value = null
       previewVersionId.value = null
@@ -302,11 +388,28 @@ async function clearSelection(): Promise<void> {
 }
 
 watch(showOnlyMultiVersionThreads, () => {
-  void loadThreads()
+  if (urlStateReady.value) {
+    void loadThreads()
+  }
 })
 
+watch(
+  () => [
+    selectedThread.value?.tid,
+    selectedThread.value?.aidKey,
+    selectedLou.value,
+    previewVersionId.value,
+    showOnlyMultiVersionThreads.value,
+  ],
+  syncUrl,
+)
+
 onMounted(() => {
-  void loadThreads()
+  hydrateStateFromUrl()
+  void loadThreads().finally(() => {
+    urlStateReady.value = true
+    syncUrl()
+  })
 })
 </script>
 

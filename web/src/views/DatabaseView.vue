@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import {
   fetchDatabaseSchema,
   fetchDatabases,
@@ -32,6 +32,10 @@ const loadingDatabases = ref(false)
 const loadingSchema = ref(false)
 const loadingRows = ref(false)
 const loadingDetail = ref(false)
+const urlStateReady = ref(false)
+const requestedDatabaseId = ref<string | null>(null)
+const requestedTableName = ref<string | null>(null)
+const requestedRowId = ref<number | null>(null)
 
 const rowQuery = reactive({
   q: '',
@@ -40,6 +44,17 @@ const rowQuery = reactive({
   sortBy: null as string | null,
   sortDirection: 'asc' as SortDirection,
 })
+
+interface DatabaseSelectionOptions {
+  resetQuery: boolean
+  targetTableName: string | null
+  targetRowId: number | null
+}
+
+interface TableSelectionOptions {
+  resetQuery: boolean
+  targetRowId: number | null
+}
 
 const selectedDatabase = computed(
   () => databases.value.find((database) => database.id === selectedDatabaseId.value) || null,
@@ -155,6 +170,77 @@ function sortMarker(columnName: string): string {
   return rowQuery.sortDirection === 'asc' ? ' ↑' : ' ↓'
 }
 
+function integerFromParam(value: string | null, minimum: number): number | null {
+  if (value === null || !value.trim()) {
+    return null
+  }
+  const numberValue = Number(value)
+  if (!Number.isInteger(numberValue) || numberValue < minimum) {
+    return null
+  }
+  return numberValue
+}
+
+function isSortDirection(value: string | null): value is SortDirection {
+  return value === 'asc' || value === 'desc'
+}
+
+function hydrateStateFromUrl(): void {
+  const params = new URLSearchParams(window.location.search)
+  const db = params.get('db')
+  if (db !== null && db.trim()) {
+    requestedDatabaseId.value = db
+  }
+  const table = params.get('table')
+  if (table !== null && table.trim()) {
+    requestedTableName.value = table
+  }
+  requestedRowId.value = integerFromParam(params.get('rowid'), 1)
+
+  rowQuery.q = params.get('q') || ''
+  rowQuery.offset = integerFromParam(params.get('offset'), 0) || 0
+  rowQuery.limit = integerFromParam(params.get('limit'), 1) || 50
+  if (rowQuery.limit > 200) {
+    rowQuery.limit = 50
+  }
+  rowQuery.sortBy = params.get('sort_by') || null
+  const sortDirection = params.get('sort_direction')
+  if (isSortDirection(sortDirection)) {
+    rowQuery.sortDirection = sortDirection
+  }
+}
+
+function setParam(params: URLSearchParams, key: string, value: string | number | null): void {
+  if (value !== null && String(value).trim()) {
+    params.set(key, String(value))
+  }
+}
+
+function syncUrl(): void {
+  if (!urlStateReady.value) {
+    return
+  }
+  const params = new URLSearchParams()
+  setParam(params, 'db', selectedDatabaseId.value)
+  setParam(params, 'table', selectedTableName.value)
+  if (rowQuery.offset !== 0) {
+    params.set('offset', String(rowQuery.offset))
+  }
+  if (rowQuery.limit !== 50) {
+    params.set('limit', String(rowQuery.limit))
+  }
+  setParam(params, 'q', rowQuery.q.trim())
+  setParam(params, 'sort_by', rowQuery.sortBy)
+  if (rowQuery.sortBy !== null && rowQuery.sortDirection !== 'asc') {
+    params.set('sort_direction', rowQuery.sortDirection)
+  }
+  setParam(params, 'rowid', selectedRow.value?.rowId ?? null)
+
+  const query = params.toString()
+  const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`
+  window.history.replaceState(null, '', nextUrl)
+}
+
 function resetRowQuery(): void {
   rowQuery.q = ''
   rowQuery.offset = 0
@@ -168,12 +254,17 @@ async function loadDatabases(): Promise<void> {
   databaseError.value = null
   try {
     databases.value = await fetchDatabases()
+    const requested =
+      requestedDatabaseId.value === null
+        ? null
+        : databases.value.find((database) => database.id === requestedDatabaseId.value) || null
     const current =
       selectedDatabaseId.value === null
         ? null
         : databases.value.find((database) => database.id === selectedDatabaseId.value) || null
     const target =
       current ||
+      requested ||
       databases.value.find((database) => database.status === 'ready') ||
       databases.value[0] ||
       null
@@ -181,9 +272,20 @@ async function loadDatabases(): Promise<void> {
       selectedDatabaseId.value = null
       schema.value = null
       rows.value = null
+      selectedRow.value = null
       return
     }
-    await selectDatabase(target)
+    const preserveSelection = current !== null || requested !== null
+    const targetTableName = requested !== null ? requestedTableName.value : selectedTableName.value
+    const targetRowId = requested !== null ? requestedRowId.value : selectedRow.value?.rowId ?? null
+    await selectDatabase(target, {
+      resetQuery: !preserveSelection,
+      targetTableName: preserveSelection ? targetTableName : null,
+      targetRowId: preserveSelection ? targetRowId : null,
+    })
+    requestedDatabaseId.value = null
+    requestedTableName.value = null
+    requestedRowId.value = null
   } catch (error) {
     databaseError.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -191,7 +293,14 @@ async function loadDatabases(): Promise<void> {
   }
 }
 
-async function selectDatabase(database: DatabaseSummary): Promise<void> {
+async function selectDatabase(
+  database: DatabaseSummary,
+  options: DatabaseSelectionOptions = {
+    resetQuery: true,
+    targetTableName: null,
+    targetRowId: null,
+  },
+): Promise<void> {
   selectedDatabaseId.value = database.id
   selectedTableName.value = null
   schema.value = null
@@ -200,16 +309,25 @@ async function selectDatabase(database: DatabaseSummary): Promise<void> {
   schemaError.value = null
   rowError.value = null
   detailError.value = null
-  resetRowQuery()
+  if (options.resetQuery) {
+    resetRowQuery()
+  }
   if (database.status !== 'ready') {
     return
   }
   loadingSchema.value = true
   try {
     schema.value = await fetchDatabaseSchema(database.id)
-    const firstTable = schema.value.tables[0] || null
-    if (firstTable !== null) {
-      await selectTable(firstTable)
+    const targetTable =
+      options.targetTableName === null
+        ? null
+        : schema.value.tables.find((table) => table.name === options.targetTableName) || null
+    const table = targetTable || schema.value.tables[0] || null
+    if (table !== null) {
+      await selectTable(table, {
+        resetQuery: options.resetQuery,
+        targetRowId: targetTable === null ? null : options.targetRowId,
+      })
     }
   } catch (error) {
     schemaError.value = error instanceof Error ? error.message : String(error)
@@ -218,17 +336,32 @@ async function selectDatabase(database: DatabaseSummary): Promise<void> {
   }
 }
 
-async function selectTable(table: TableSummary): Promise<void> {
+async function selectTable(
+  table: TableSummary,
+  options: TableSelectionOptions = { resetQuery: true, targetRowId: null },
+): Promise<void> {
   selectedTableName.value = table.name
   rows.value = null
   selectedRow.value = null
   rowError.value = null
   detailError.value = null
-  resetRowQuery()
-  await loadRows()
+  if (options.resetQuery) {
+    resetRowQuery()
+  }
+  if (
+    rowQuery.sortBy !== null &&
+    !table.columns.some((column) => column.name === rowQuery.sortBy)
+  ) {
+    rowQuery.sortBy = null
+    rowQuery.sortDirection = 'asc'
+  }
+  await loadRows(false, { targetRowId: options.targetRowId })
 }
 
-async function loadRows(resetOffset = false): Promise<void> {
+async function loadRows(
+  resetOffset = false,
+  options: { targetRowId: number | null } = { targetRowId: null },
+): Promise<void> {
   if (selectedDatabaseId.value === null || selectedTableName.value === null) {
     return
   }
@@ -241,6 +374,9 @@ async function loadRows(resetOffset = false): Promise<void> {
   detailError.value = null
   try {
     rows.value = await fetchTableRows(selectedDatabaseId.value, selectedTableName.value, rowQuery)
+    if (options.targetRowId !== null) {
+      await openRowById(options.targetRowId)
+    }
   } catch (error) {
     rowError.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -283,16 +419,23 @@ function changeLimit(): void {
 }
 
 async function openRow(row: TableRow): Promise<void> {
-  if (row.rowId === null || selectedDatabaseId.value === null || selectedTableName.value === null) {
+  if (row.rowId === null) {
     detailError.value = '此表不支持rowid详情。'
     selectedRow.value = null
+    return
+  }
+  await openRowById(row.rowId)
+}
+
+async function openRowById(rowId: number): Promise<void> {
+  if (selectedDatabaseId.value === null || selectedTableName.value === null) {
     return
   }
   loadingDetail.value = true
   detailError.value = null
   try {
     selectedRow.value = (
-      await fetchTableRowDetail(selectedDatabaseId.value, selectedTableName.value, row.rowId)
+      await fetchTableRowDetail(selectedDatabaseId.value, selectedTableName.value, rowId)
     ).row
   } catch (error) {
     detailError.value = error instanceof Error ? error.message : String(error)
@@ -302,8 +445,26 @@ async function openRow(row: TableRow): Promise<void> {
   }
 }
 
+watch(
+  () => [
+    selectedDatabaseId.value,
+    selectedTableName.value,
+    selectedRow.value?.rowId,
+    rowQuery.q,
+    rowQuery.offset,
+    rowQuery.limit,
+    rowQuery.sortBy,
+    rowQuery.sortDirection,
+  ],
+  syncUrl,
+)
+
 onMounted(() => {
-  void loadDatabases()
+  hydrateStateFromUrl()
+  void loadDatabases().finally(() => {
+    urlStateReady.value = true
+    syncUrl()
+  })
 })
 </script>
 

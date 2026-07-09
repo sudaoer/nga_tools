@@ -18,12 +18,18 @@ const router = createRouter({
     },
     {
       path: '/databases',
-      redirect: '/admin/databases',
+      redirect: (to) => ({
+        path: '/admin/databases',
+        query: to.query,
+      }),
     },
     {
       path: '/admin',
       component: AdminView,
-      redirect: '/admin/post-versions',
+      redirect: (to) => ({
+        path: '/admin/post-versions',
+        query: to.query,
+      }),
       children: [
         {
           path: 'post-versions',
