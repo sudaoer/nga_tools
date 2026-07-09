@@ -32,6 +32,7 @@ from nga_tools.backup.pdf_plan import (
 from nga_tools.config import get_config
 from nga_tools.console import report_info, report_warning
 from nga_tools.core.atomic import replace_temp_file, temporary_sibling_path
+from nga_tools.timing import time_section
 
 SPEAKER_LINE_RE = re.compile(r"^([^\s：:][^：:]{0,15})[：:]")
 
@@ -482,13 +483,14 @@ def generate_pdf(
     if pdf_workers is not None and pdf_workers <= 0:
         raise ValueError("--pdf_workers必须大于0。")
 
-    html_content_by_lou, folder_pdf, floor_labels = _read_pdf_html(tid, aid)
-    render_plan = _build_render_tasks(
-        html_content_by_lou,
-        folder_pdf,
-        lou_per_pdf,
-        floor_labels,
-    )
+    with time_section("PDF读取与规划"):
+        html_content_by_lou, folder_pdf, floor_labels = _read_pdf_html(tid, aid)
+        render_plan = _build_render_tasks(
+            html_content_by_lou,
+            folder_pdf,
+            lou_per_pdf,
+            floor_labels,
+        )
 
     render_tasks = render_plan.render_tasks
     worker_desc = (
@@ -501,18 +503,21 @@ def generate_pdf(
     if render_plan.cleaned_count:
         report_info(f"删除{render_plan.cleaned_count}个旧PDF分段文件。")
 
-    report_info(f"开始生成{len(render_tasks)}个PDF，worker数量：{worker_desc}")
-    if pdf_renderer is None:
-        with PdfRenderPool(pdf_workers) as render_pool:
-            render_results = render_pool.render(render_tasks)
-    else:
-        render_results = pdf_renderer.render(render_tasks)
+    with time_section("PDF渲染"):
+        report_info(f"开始生成{len(render_tasks)}个PDF，worker数量：{worker_desc}")
+        if pdf_renderer is None:
+            with PdfRenderPool(pdf_workers) as render_pool:
+                render_results = render_pool.render(render_tasks)
+        else:
+            render_results = pdf_renderer.render(render_tasks)
 
-    _report_weasyprint_output(render_results)
-    failed_count = sum(
-        render_result.returncode != 0 for render_result in render_results
-    )
-    if failed_count:
-        raise RuntimeError(f"{failed_count}个PDF生成任务失败。")
-    _write_pdf_hashes(folder_pdf, render_plan.input_hashes)
+        _report_weasyprint_output(render_results)
+        failed_count = sum(
+            render_result.returncode != 0 for render_result in render_results
+        )
+        if failed_count:
+            raise RuntimeError(f"{failed_count}个PDF生成任务失败。")
+
+    with time_section("PDF缓存写入"):
+        _write_pdf_hashes(folder_pdf, render_plan.input_hashes)
     report_info("PDF生成完成。")

@@ -15,6 +15,7 @@ DEFAULT_SECRETS_PATH = PROJECT_ROOT / "secrets.json"
 DEFAULT_API_CONCURRENCY = 4
 DEFAULT_IMAGE_CONCURRENCY = 50
 DEFAULT_BACKUP_CONFIGS_WORKERS = 4
+DEFAULT_TIMING_LOG_ENABLED = True
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class AppConfig:
     api_concurrency: int
     image_concurrency: int
     backup_configs_workers: int
+    timing_log_enabled: bool
 
     @property
     def html_style(self) -> str:
@@ -200,6 +202,18 @@ def _optional_positive_int(
     raise ValueError(f"{source} 配置项必须是大于0的整数：{key}")
 
 
+def _optional_bool(
+    data: JsonObject,
+    key: str,
+    source: Path,
+    default: bool,
+) -> bool:
+    value = data.get(key, default)
+    if type(value) is bool:
+        return value
+    raise ValueError(f"{source} 配置项必须是布尔值：{key}")
+
+
 def _path_or_default(path: Optional[PathValue], default_path: Path) -> Path:
     if path is None:
         return default_path
@@ -273,6 +287,26 @@ def load_config(
             resolved_config_path,
             DEFAULT_BACKUP_CONFIGS_WORKERS,
         ),
+        timing_log_enabled=_optional_bool(
+            config_data,
+            "timing_log_enabled",
+            resolved_config_path,
+            DEFAULT_TIMING_LOG_ENABLED,
+        ),
+    )
+
+
+def load_timing_log_enabled(config_path: Optional[PathValue] = None) -> bool:
+    resolved_config_path = _path_or_default(config_path, DEFAULT_CONFIG_PATH)
+    try:
+        config_data = _read_json_object(resolved_config_path)
+    except FileNotFoundError:
+        return DEFAULT_TIMING_LOG_ENABLED
+    return _optional_bool(
+        config_data,
+        "timing_log_enabled",
+        resolved_config_path,
+        DEFAULT_TIMING_LOG_ENABLED,
     )
 
 

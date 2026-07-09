@@ -73,15 +73,38 @@ class ImageVerifyHandlerTest:
 
     def test_with_thread_target_verifies_single_thread(self) -> None:
         args = {"name": "帖子名", "tid": None, "aid": None}
-        with (
-            patch("nga_tools.commands.image.verify_all_downloaded_images") as all_mock,
-            patch(
-                "nga_tools.commands.image.resolve_command_thread_target",
-                return_value=(101, 201),
-            ) as resolve_mock,
-            patch("nga_tools.commands.image.verify_downloaded_images") as verify_mock,
-        ):
-            image_verify(args)
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            thread_dir = Path(temp_dir_name) / "101_201"
+
+            def fake_get_folder(
+                tid: int,
+                aid: int | None,
+                subfolder: str | None = None,
+            ) -> str:
+                assert (tid, aid) == (101, 201)
+                path = thread_dir
+                if subfolder is not None:
+                    path = path / subfolder
+                path.mkdir(parents=True, exist_ok=True)
+                return str(path)
+
+            with (
+                patch("nga_tools.commands.image.verify_all_downloaded_images") as all_mock,
+                patch(
+                    "nga_tools.commands.image.resolve_command_thread_target",
+                    return_value=(101, 201),
+                ) as resolve_mock,
+                patch("nga_tools.commands.image.verify_downloaded_images") as verify_mock,
+                patch(
+                    "nga_tools.core.paths.get_folder",
+                    side_effect=fake_get_folder,
+                ),
+                patch(
+                    "nga_tools.commands.image.load_timing_log_enabled",
+                    return_value=True,
+                ),
+            ):
+                image_verify(args)
 
         all_mock.assert_not_called()
         resolve_mock.assert_called_once_with(args)
@@ -103,6 +126,8 @@ class ImageVerifyHandlerTest:
             thread_dir.mkdir()
             log_path = thread_dir / "warnings.log"
             log_path.write_text("旧日志\n", encoding="utf-8")
+            timing_path = thread_dir / "timing.log"
+            timing_path.write_text("旧耗时\n", encoding="utf-8")
 
             def fake_get_folder(
                 tid: int,
@@ -133,11 +158,21 @@ class ImageVerifyHandlerTest:
                     "nga_tools.core.paths.get_folder",
                     side_effect=fake_get_folder,
                 ),
+                patch(
+                    "nga_tools.commands.image.load_timing_log_enabled",
+                    return_value=True,
+                ),
                 use_reporter(ConsoleReporter(console)),
             ):
                 image_verify(args)
 
             assert log_path.read_text(encoding='utf-8') == '警告：单帖图片告警\n'
+            timing_text = timing_path.read_text(encoding="utf-8")
+            assert "旧耗时" not in timing_text
+            assert "任务：image verify\n" in timing_text
+            assert "目标：tid=101, aid=201\n" in timing_text
+            assert "总耗时：" in timing_text
+            assert "状态：完成" in timing_text
             assert '警告：单帖图片告警' in output.getvalue()
 
     def test_aid_without_thread_target_is_rejected(self) -> None:

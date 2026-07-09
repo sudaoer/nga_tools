@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Protocol
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.archive import backup_thread, backup_thread_sub
 from nga_tools.backup.floor_map import generate_floor_map_from_backup
-from nga_tools.config import get_config
+from nga_tools.config import get_config, load_timing_log_enabled
 from nga_tools.console import (
     report_info,
     report_warning,
@@ -22,12 +24,13 @@ from nga_tools.commands.types import (
     optional_int,
     required_int,
 )
-from nga_tools.core.paths import warning_log_path
+from nga_tools.core.paths import timing_log_path, warning_log_path
 from nga_tools.forum.thread_configs import (
     ThreadConfig,
     thread_config_aid,
     thread_config_tid,
 )
+from nga_tools.timing import time_section, use_timing_log
 
 
 class BackupFetchFunc(Protocol):
@@ -46,11 +49,38 @@ def _batch_worker_count(args: CommandArgs, default_worker_count: int) -> int:
     return default_worker_count if worker_arg is None else worker_arg
 
 
+def _thread_target_label(tid: int, aid: int | None) -> str:
+    aid_text = str(aid) if aid is not None else "all"
+    return f"tid={tid}, aid={aid_text}"
+
+
+@contextmanager
+def _use_thread_output_logs(
+    *,
+    task_name: str,
+    tid: int,
+    aid: int | None,
+    timing_log_enabled: bool,
+) -> Generator[None]:
+    with ExitStack() as stack:
+        stack.enter_context(use_warning_log(warning_log_path(tid, aid)))
+        stack.enter_context(
+            use_timing_log(
+                timing_log_path(tid, aid),
+                task_name=task_name,
+                target=_thread_target_label(tid, aid),
+                enabled=timing_log_enabled,
+            )
+        )
+        yield
+
+
 def _run_backup_fetch_batch(
     args: CommandArgs,
     *,
     backup_func: BackupFetchFunc,
     progress_text: str,
+    task_name: str,
 ) -> None:
     app_config = configure_network_limits_from_args(args)
     write_json = optional_bool(args, "write_json")
@@ -67,6 +97,9 @@ def _run_backup_fetch_batch(
         failure_text="备份失败",
         summary_name="备份",
         worker_count=worker_count,
+        write_timing_log=True,
+        timing_log_enabled=app_config.timing_log_enabled,
+        task_name=task_name,
     )
 
 
@@ -76,13 +109,19 @@ def backup_all(args: CommandArgs) -> None:
             args,
             backup_func=backup_thread,
             progress_text="正在完整备份",
+            task_name="backup all --all-threads",
         )
         return
 
-    configure_network_limits_from_args(args)
+    app_config = configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
     write_json = optional_bool(args, "write_json")
-    with use_warning_log(warning_log_path(thread_tid, thread_aid)):
+    with _use_thread_output_logs(
+        task_name="backup all",
+        tid=thread_tid,
+        aid=thread_aid,
+        timing_log_enabled=app_config.timing_log_enabled,
+    ):
         backup_thread(thread_tid, thread_aid, write_json=write_json)
 
 
@@ -92,13 +131,19 @@ def backup_sub(args: CommandArgs) -> None:
             args,
             backup_func=backup_thread_sub,
             progress_text="正在增量备份",
+            task_name="backup sub --all-threads",
         )
         return
 
-    configure_network_limits_from_args(args)
+    app_config = configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
     write_json = optional_bool(args, "write_json")
-    with use_warning_log(warning_log_path(thread_tid, thread_aid)):
+    with _use_thread_output_logs(
+        task_name="backup sub",
+        tid=thread_tid,
+        aid=thread_aid,
+        timing_log_enabled=app_config.timing_log_enabled,
+    ):
         backup_thread_sub(thread_tid, thread_aid, write_json=write_json)
 
 
@@ -107,6 +152,7 @@ def backup_configs(args: CommandArgs) -> None:
         args,
         backup_func=backup_thread_sub,
         progress_text="正在增量备份",
+        task_name="backup configs",
     )
 
 
@@ -116,10 +162,11 @@ def backup_floors(args: CommandArgs) -> None:
         worker_count = _batch_worker_count(args, app_config.backup_configs_workers)
 
         def action(thread_config: ThreadConfig) -> None:
-            generate_floor_map_from_backup(
-                thread_config_tid(thread_config),
-                thread_config_aid(thread_config),
-            )
+            with time_section("楼层映射生成"):
+                generate_floor_map_from_backup(
+                    thread_config_tid(thread_config),
+                    thread_config_aid(thread_config),
+                )
 
         run_thread_config_batch(
             action=action,
@@ -127,12 +174,21 @@ def backup_floors(args: CommandArgs) -> None:
             failure_text="楼层映射失败",
             summary_name="楼层映射",
             worker_count=worker_count,
+            write_timing_log=True,
+            timing_log_enabled=app_config.timing_log_enabled,
+            task_name="backup floors --all-threads",
         )
         return
 
     thread_tid, thread_aid = resolve_command_thread_target(args)
-    with use_warning_log(warning_log_path(thread_tid, thread_aid)):
-        generate_floor_map_from_backup(thread_tid, thread_aid)
+    with _use_thread_output_logs(
+        task_name="backup floors",
+        tid=thread_tid,
+        aid=thread_aid,
+        timing_log_enabled=app_config.timing_log_enabled,
+    ):
+        with time_section("楼层映射生成"):
+            generate_floor_map_from_backup(thread_tid, thread_aid)
 
 
 def _migrate_store_for_thread_folder(thread_folder: Path) -> None:
@@ -159,14 +215,22 @@ def _backup_store_candidate_folders(output_dir: Path) -> list[Path]:
 def backup_migrate_store(args: CommandArgs) -> None:
     if optional_bool(args, "all"):
         failures: list[tuple[Path, Exception]] = []
-        folders = _backup_store_candidate_folders(Path(get_config().output_dir))
+        app_config = get_config()
+        folders = _backup_store_candidate_folders(Path(app_config.output_dir))
         if not folders:
             report_info("没有找到可迁移的备份目录。")
             return
 
         for folder in folders:
             try:
-                _migrate_store_for_thread_folder(folder)
+                with use_timing_log(
+                    folder / "timing.log",
+                    task_name="backup migrate-store --all",
+                    target=f"folder={folder.name}",
+                    enabled=app_config.timing_log_enabled,
+                ):
+                    with time_section("归档迁移"):
+                        _migrate_store_for_thread_folder(folder)
             except Exception as error:
                 failures.append((folder, error))
                 report_warning(f"迁移失败：{folder}：{error}")
@@ -182,15 +246,22 @@ def backup_migrate_store(args: CommandArgs) -> None:
     thread_tid, thread_aid = resolve_command_thread_target(args)
     log_path = warning_log_path(thread_tid, thread_aid)
     thread_folder = log_path.parent
-    with use_warning_log(log_path):
-        _migrate_store_for_thread_folder(thread_folder)
+    with _use_thread_output_logs(
+        task_name="backup migrate-store",
+        tid=thread_tid,
+        aid=thread_aid,
+        timing_log_enabled=load_timing_log_enabled(),
+    ):
+        with time_section("归档迁移"):
+            _migrate_store_for_thread_folder(thread_folder)
 
 
 def pdf_generate(args: CommandArgs) -> None:
     if optional_bool(args, "all_threads"):
+        app_config = get_config()
         worker_count = _batch_worker_count(
             args,
-            get_config().backup_configs_workers,
+            app_config.backup_configs_workers,
         )
         lou_per_pdf = required_int(args, "lou_per_pdf")
         pdf_workers = optional_int(args, "pdf_workers")
@@ -211,11 +282,19 @@ def pdf_generate(args: CommandArgs) -> None:
                 failure_text="PDF生成失败",
                 summary_name="PDF生成",
                 worker_count=worker_count,
+                write_timing_log=True,
+                timing_log_enabled=app_config.timing_log_enabled,
+                task_name="backup pdf --all-threads",
             )
         return
 
     thread_tid, thread_aid = resolve_command_thread_target(args)
-    with use_warning_log(warning_log_path(thread_tid, thread_aid)):
+    with _use_thread_output_logs(
+        task_name="backup pdf",
+        tid=thread_tid,
+        aid=thread_aid,
+        timing_log_enabled=load_timing_log_enabled(),
+    ):
         generate_pdf(
             tid=thread_tid,
             aid=thread_aid,

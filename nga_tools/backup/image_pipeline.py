@@ -14,6 +14,7 @@ from nga_tools.backup.html_images import effective_image_src
 from nga_tools.backup.models import ParsedPostHtml, PostHtml, PostRecord
 from nga_tools.backup.post_html import source_hashes_by_lou
 from nga_tools.console import report_info, report_progress, report_warning
+from nga_tools.timing import time_section
 
 
 def parse_post_htmls_for_images(htmls: Sequence[PostHtml]) -> list[ParsedPostHtml]:
@@ -241,13 +242,14 @@ def download_images(
             total=total,
         )
 
-    if pending_count > 0:
-        download_result = image_store.download_image_tasks(
-            pending_downloads,
-            on_progress=update_progress,
-        )
-    else:
-        report_progress("图片下载进度", completed=0, total=0)
+    with time_section("图片下载"):
+        if pending_count > 0:
+            download_result = image_store.download_image_tasks(
+                pending_downloads,
+                on_progress=update_progress,
+            )
+        else:
+            report_progress("图片下载进度", completed=0, total=0)
 
     report_info("图片下载完成。")
     report_info(

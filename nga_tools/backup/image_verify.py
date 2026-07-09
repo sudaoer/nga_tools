@@ -14,6 +14,7 @@ from nga_tools.backup import image_store
 from nga_tools.backup.html_images import image_src_path
 from nga_tools.config import get_config
 from nga_tools.console import report_info, report_warning
+from nga_tools.timing import time_section
 
 
 @dataclass(frozen=True)
@@ -31,9 +32,13 @@ class ImageFileVerifyResult:
 
 
 def verify_downloaded_images(tid: int, aid: Optional[int]) -> None:
-    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified", create=False))
-    image_paths = _list_thread_referenced_image_paths(folder_html_modified)
-    result = _verify_image_paths(str(folder_html_modified), image_paths)
+    with time_section("图片引用读取"):
+        folder_html_modified = Path(
+            utils.get_folder(tid, aid, "html_modified", create=False)
+        )
+        image_paths = _list_thread_referenced_image_paths(folder_html_modified)
+    with time_section("图片校验"):
+        result = _verify_image_paths(str(folder_html_modified), image_paths)
     report_info(
         f"帖子图片校验完成：引用图片{result.total}张，"
         f"删除{result.removed}个损坏文件。"

@@ -6,6 +6,7 @@
   "api_concurrency": 4,
   "image_concurrency": 50,
   "backup_configs_workers": 4,
+  "timing_log_enabled": true,
   "pdf_page_size": "A4",
   "pdf_page_margin": "12mm",
   "pdf_long_image_min_width": 800,

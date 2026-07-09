@@ -7,6 +7,7 @@ from typing import Optional
 from nga_tools.config import get_config
 
 WARNING_LOG_FILENAME = "warnings.log"
+TIMING_LOG_FILENAME = "timing.log"
 
 _CREATED_FOLDERS: set[str] = set()
 
@@ -47,6 +48,10 @@ def get_folder(
 
 def warning_log_path(tid: int, aid: int | None) -> Path:
     return Path(get_folder(tid, aid)) / WARNING_LOG_FILENAME
+
+
+def timing_log_path(tid: int, aid: int | None) -> Path:
+    return Path(get_folder(tid, aid)) / TIMING_LOG_FILENAME
 
 
 def list_files_in_folder(folder: str, ends_with: str = "") -> list[str]:

@@ -13,7 +13,7 @@ from nga_tools.console import (
     use_reporter,
     use_warning_log,
 )
-from nga_tools.core.paths import warning_log_path
+from nga_tools.core.paths import timing_log_path, warning_log_path
 from nga_tools.forum.thread_configs import (
     NGAThreadConfigs,
     ThreadConfig,
@@ -21,6 +21,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_name,
     thread_config_tid,
 )
+from nga_tools.timing import use_timing_log
 
 ThreadConfigAction = Callable[[ThreadConfig], str | None]
 ThreadBatchFailure = tuple[ThreadConfig, Exception]
@@ -46,6 +47,9 @@ def _run_thread_config_with_progress(
     progress_text: str,
     failure_text: str,
     write_warning_log: bool,
+    write_timing_log: bool,
+    timing_log_enabled: bool,
+    task_name: str,
 ) -> str | None:
     label = thread_config_label(thread_config)
     task_reporter = progress.start_thread(
@@ -61,6 +65,18 @@ def _run_thread_config_with_progress(
                 thread_config_aid(thread_config),
             )
             stack.enter_context(use_warning_log(log_path))
+        if write_timing_log:
+            stack.enter_context(
+                use_timing_log(
+                    timing_log_path(
+                        thread_config_tid(thread_config),
+                        thread_config_aid(thread_config),
+                    ),
+                    task_name=task_name,
+                    target=label,
+                    enabled=timing_log_enabled,
+                )
+            )
         report_progress(progress_text)
         try:
             result = action(thread_config)
@@ -80,6 +96,9 @@ def _run_thread_configs_sequential(
     progress_text: str,
     failure_text: str,
     write_warning_log: bool,
+    write_timing_log: bool,
+    timing_log_enabled: bool,
+    task_name: str,
 ) -> tuple[list[ThreadBatchSuccess], list[ThreadBatchFailure]]:
     successes: list[ThreadBatchSuccess] = []
     failures: list[ThreadBatchFailure] = []
@@ -95,6 +114,9 @@ def _run_thread_configs_sequential(
                 progress_text=progress_text,
                 failure_text=failure_text,
                 write_warning_log=write_warning_log,
+                write_timing_log=write_timing_log,
+                timing_log_enabled=timing_log_enabled,
+                task_name=task_name,
             )
         except Exception as error:
             failures.append((thread_config, error))
@@ -114,6 +136,9 @@ def _run_thread_configs_parallel(
     progress_text: str,
     failure_text: str,
     write_warning_log: bool,
+    write_timing_log: bool,
+    timing_log_enabled: bool,
+    task_name: str,
 ) -> tuple[list[ThreadBatchSuccess], list[ThreadBatchFailure]]:
     successes: list[ThreadBatchSuccess] = []
     failures: list[tuple[int, ThreadConfig, Exception]] = []
@@ -131,6 +156,9 @@ def _run_thread_configs_parallel(
                 progress_text=progress_text,
                 failure_text=failure_text,
                 write_warning_log=write_warning_log,
+                write_timing_log=write_timing_log,
+                timing_log_enabled=timing_log_enabled,
+                task_name=task_name,
             )
             future_context[future] = (index, thread_config)
 
@@ -175,6 +203,9 @@ def run_thread_config_batch(
     summary_name: str,
     worker_count: int,
     write_warning_log: bool = True,
+    write_timing_log: bool = False,
+    timing_log_enabled: bool = True,
+    task_name: str | None = None,
 ) -> None:
     if worker_count <= 0:
         raise ValueError("workers必须大于0。")
@@ -184,6 +215,7 @@ def run_thread_config_batch(
         report_info("没有找到任何帖子配置。")
         return
 
+    effective_task_name = task_name if task_name is not None else f"批量{summary_name}"
     with BackupConfigsProgressDisplay(
         len(thread_configs),
         console=get_reporter().console,
@@ -196,6 +228,9 @@ def run_thread_config_batch(
                 progress_text=progress_text,
                 failure_text=failure_text,
                 write_warning_log=write_warning_log,
+                write_timing_log=write_timing_log,
+                timing_log_enabled=timing_log_enabled,
+                task_name=effective_task_name,
             )
         else:
             successes, failures = _run_thread_configs_parallel(
@@ -206,6 +241,9 @@ def run_thread_config_batch(
                 progress_text=progress_text,
                 failure_text=failure_text,
                 write_warning_log=write_warning_log,
+                write_timing_log=write_timing_log,
+                timing_log_enabled=timing_log_enabled,
+                task_name=effective_task_name,
             )
 
     for _, message in sorted(successes, key=lambda item: item[0]):

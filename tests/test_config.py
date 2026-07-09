@@ -9,7 +9,9 @@ from nga_tools.config import (
     DEFAULT_API_CONCURRENCY,
     DEFAULT_BACKUP_CONFIGS_WORKERS,
     DEFAULT_IMAGE_CONCURRENCY,
+    DEFAULT_TIMING_LOG_ENABLED,
     load_config,
+    load_timing_log_enabled,
 )
 
 
@@ -66,8 +68,9 @@ class ConfigConcurrencyTest:
         assert app_config.api_concurrency == DEFAULT_API_CONCURRENCY
         assert app_config.image_concurrency == DEFAULT_IMAGE_CONCURRENCY
         assert app_config.backup_configs_workers == DEFAULT_BACKUP_CONFIGS_WORKERS
+        assert app_config.timing_log_enabled is DEFAULT_TIMING_LOG_ENABLED
 
-    def test_load_config_accepts_custom_concurrency_values(self) -> None:
+    def test_load_config_accepts_custom_optional_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             config_path, secrets_path = self._write_config_files(
                 Path(temp_dir_name),
@@ -75,6 +78,7 @@ class ConfigConcurrencyTest:
                     "api_concurrency": 2,
                     "image_concurrency": 20,
                     "backup_configs_workers": 3,
+                    "timing_log_enabled": False,
                 },
             )
 
@@ -83,6 +87,7 @@ class ConfigConcurrencyTest:
         assert app_config.api_concurrency == 2
         assert app_config.image_concurrency == 20
         assert app_config.backup_configs_workers == 3
+        assert app_config.timing_log_enabled is False
 
     @pytest.mark.parametrize(
         "config_overrides",
@@ -90,9 +95,10 @@ class ConfigConcurrencyTest:
             {"api_concurrency": 0},
             {"image_concurrency": 0},
             {"backup_configs_workers": 0},
+            {"timing_log_enabled": "yes"},
         ],
     )
-    def test_load_config_rejects_non_positive_concurrency_values(
+    def test_load_config_rejects_invalid_optional_values(
         self,
         config_overrides: dict[str, object],
     ) -> None:
@@ -104,3 +110,19 @@ class ConfigConcurrencyTest:
 
             with pytest.raises(ValueError):
                 load_config(config_path, secrets_path)
+
+    def test_load_timing_log_enabled_reads_config_without_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            config_path = Path(temp_dir_name) / "config.json"
+            config_path.write_text(
+                json.dumps(_config_data(timing_log_enabled=False)),
+                encoding="utf-8",
+            )
+
+            assert load_timing_log_enabled(config_path) is False
+
+    def test_load_timing_log_enabled_defaults_to_enabled_without_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            missing_path = Path(temp_dir_name) / "missing.json"
+
+            assert load_timing_log_enabled(missing_path) is True

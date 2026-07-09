@@ -52,6 +52,7 @@ from nga_tools.backup.floor_models import PAGE_JSON_RE
 from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
+from nga_tools.timing import time_section
 
 
 def _upsert_archive_pages(
@@ -247,89 +248,94 @@ def backup_thread(
     write_json: bool = False,
 ) -> None:
     client = NGAClient()
-    thread_folder = Path(utils.get_folder(tid, aid))
-    archive_store = ThreadArchiveStore(thread_folder)
-    first_page_data = client.get_page(tid, aid, 1)
-    page_count = _page_count_from_page_data(first_page_data)
-    author_total_lou_count = _author_total_lou_count_from_page_data(
-        first_page_data,
-        aid,
-    )
+    with time_section("抓取和写入页面"):
+        thread_folder = Path(utils.get_folder(tid, aid))
+        archive_store = ThreadArchiveStore(thread_folder)
+        first_page_data = client.get_page(tid, aid, 1)
+        page_count = _page_count_from_page_data(first_page_data)
+        author_total_lou_count = _author_total_lou_count_from_page_data(
+            first_page_data,
+            aid,
+        )
 
-    page_data_by_page = _fetch_backup_pages(
-        client,
-        tid,
-        aid,
-        page_count,
-        first_page_data,
-        write_json=write_json,
-    )
-    _upsert_archive_pages(archive_store, page_data_by_page)
+        page_data_by_page = _fetch_backup_pages(
+            client,
+            tid,
+            aid,
+            page_count,
+            first_page_data,
+            write_json=write_json,
+        )
+        _upsert_archive_pages(archive_store, page_data_by_page)
 
     report_info("开始处理")
 
-    records = archive_store.read_latest_post_records()
-    missing_lou = _find_missing_lou(records)
-    floor_map_result = _build_floor_map_for_post_refs(
-        client,
-        tid,
-        aid,
-        _post_refs_from_posts(records),
-        missing_lou,
-    )
-    floor_labels = floor_map_result.floor_labels
-    recovered_missing_html_by_lou = _recovered_missing_post_htmls(
-        floor_map_result.recovered_missing_posts_by_author_lou,
-    )
-
-    _fill_missing_post_records(
-        records,
-        missing_lou,
-        floor_labels,
-        recovered_missing_html_by_lou,
-    )
-    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
-    source_hash_by_lou = _source_hashes_by_lou(records)
-    htmls = _load_post_htmls_for_records(records)
-    parsed_htmls = _parse_post_htmls_for_images(htmls)
-    files_to_download = _collect_image_download_tasks_from_parsed(
-        parsed_htmls,
-        floor_labels,
-    )
-    download_result = _download_images(tid, aid, files_to_download)
-    image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
-    completed_lous = set(
-        _rewrite_parsed_image_links(
-            parsed_htmls,
+    with time_section("读取归档与楼层映射"):
+        records = archive_store.read_latest_post_records()
+        missing_lou = _find_missing_lou(records)
+        floor_map_result = _build_floor_map_for_post_refs(
+            client,
             tid,
             aid,
-            floor_labels,
-            _failed_image_urls(download_result),
-            image_lookup,
+            _post_refs_from_posts(records),
+            missing_lou,
         )
-    )
-    unresolved_missing_lous = _unresolved_missing_placeholder_lous(records)
-    completed_lous -= unresolved_missing_lous
-    output_hash_by_lou = _write_modified_htmls(htmls, tid, aid)
-    html_modified_manifest.write_updated_manifest(
-        folder_html_modified,
-        previous_entries={},
-        source_hash_by_lou=source_hash_by_lou,
-        skipped_lous=set(),
-        completed_lous=completed_lous,
-        output_hash_by_lou=output_hash_by_lou,
-    )
-    _write_backup_state_if_complete(
-        tid,
-        aid,
-        page_count,
-        author_total_lou_count,
-        records,
-        missing_lou,
-        source_hash_by_lou,
-        skipped_lous=set(),
-        completed_lous=completed_lous,
-    )
+        floor_labels = floor_map_result.floor_labels
+        recovered_missing_html_by_lou = _recovered_missing_post_htmls(
+            floor_map_result.recovered_missing_posts_by_author_lou,
+        )
+
+    with time_section("HTML与图片处理"):
+        _fill_missing_post_records(
+            records,
+            missing_lou,
+            floor_labels,
+            recovered_missing_html_by_lou,
+        )
+        folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+        source_hash_by_lou = _source_hashes_by_lou(records)
+        htmls = _load_post_htmls_for_records(records)
+        parsed_htmls = _parse_post_htmls_for_images(htmls)
+        files_to_download = _collect_image_download_tasks_from_parsed(
+            parsed_htmls,
+            floor_labels,
+        )
+        download_result = _download_images(tid, aid, files_to_download)
+        image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
+        completed_lous = set(
+            _rewrite_parsed_image_links(
+                parsed_htmls,
+                tid,
+                aid,
+                floor_labels,
+                _failed_image_urls(download_result),
+                image_lookup,
+            )
+        )
+        unresolved_missing_lous = _unresolved_missing_placeholder_lous(records)
+        completed_lous -= unresolved_missing_lous
+        output_hash_by_lou = _write_modified_htmls(htmls, tid, aid)
+
+    with time_section("manifest/state写入"):
+        html_modified_manifest.write_updated_manifest(
+            folder_html_modified,
+            previous_entries={},
+            source_hash_by_lou=source_hash_by_lou,
+            skipped_lous=set(),
+            completed_lous=completed_lous,
+            output_hash_by_lou=output_hash_by_lou,
+        )
+        _write_backup_state_if_complete(
+            tid,
+            aid,
+            page_count,
+            author_total_lou_count,
+            records,
+            missing_lou,
+            source_hash_by_lou,
+            skipped_lous=set(),
+            completed_lous=completed_lous,
+        )
 
 
 def backup_thread_sub(
@@ -339,140 +345,148 @@ def backup_thread_sub(
     write_json: bool = False,
 ) -> None:
     client = NGAClient()
-    thread_folder = Path(utils.get_folder(tid, aid))
-    archive_store = ThreadArchiveStore(thread_folder)
-    existing_page_numbers = archive_store.read_page_numbers()
-    _ensure_legacy_json_is_migrated(tid, aid, archive_store, existing_page_numbers)
+    with time_section("增量预检查"):
+        thread_folder = Path(utils.get_folder(tid, aid))
+        archive_store = ThreadArchiveStore(thread_folder)
+        existing_page_numbers = archive_store.read_page_numbers()
+        _ensure_legacy_json_is_migrated(tid, aid, archive_store, existing_page_numbers)
 
-    first_page_data = client.get_page(tid, aid, 1)
-    page_count = _page_count_from_page_data(first_page_data)
-    author_total_lou_count = _author_total_lou_count_from_page_data(
-        first_page_data,
-        aid,
-    )
-    if _can_fast_skip_author_backup(
-        tid,
-        aid,
-        author_total_lou_count,
-        existing_page_numbers,
-    ):
-        report_info("只看楼主总楼数未变化，跳过增量处理。")
-        return
-
-    if existing_page_numbers:
-        tail_start = min(max(existing_page_numbers), page_count)
-    else:
-        tail_start = 1
-    missing_page_numbers = set(range(1, page_count + 1)) - existing_page_numbers
-    refresh_page_numbers = set(range(tail_start, page_count + 1)) | missing_page_numbers
-    folder_json = Path(utils.get_folder(tid, aid, "json")) if write_json else None
-
-    report_progress(
-        f"准备增量备份：远端{page_count}页，本地{len(existing_page_numbers)}页，"
-        f"需获取{len(refresh_page_numbers)}页",
-        completed=0,
-        total=len(refresh_page_numbers),
-    )
-    sorted_refresh_page_numbers = sorted(refresh_page_numbers)
-    for index, page_number in enumerate(sorted_refresh_page_numbers, start=1):
-        report_progress(
-            f"正在获取第{page_number}页",
-            completed=index - 1,
-            total=len(sorted_refresh_page_numbers),
+        first_page_data = client.get_page(tid, aid, 1)
+        page_count = _page_count_from_page_data(first_page_data)
+        author_total_lou_count = _author_total_lou_count_from_page_data(
+            first_page_data,
+            aid,
         )
-        page_data = _fetch_backup_page(
-            client,
+        if _can_fast_skip_author_backup(
             tid,
             aid,
-            page_number,
-            page_count,
-            first_page_data,
+            author_total_lou_count,
+            existing_page_numbers,
+        ):
+            report_info("只看楼主总楼数未变化，跳过增量处理。")
+            return
+
+        if existing_page_numbers:
+            tail_start = min(max(existing_page_numbers), page_count)
+        else:
+            tail_start = 1
+        missing_page_numbers = set(range(1, page_count + 1)) - existing_page_numbers
+        refresh_page_numbers = (
+            set(range(tail_start, page_count + 1)) | missing_page_numbers
         )
-        if folder_json is not None:
-            _write_page_json(folder_json, page_number, page_data)
-        archive_store.upsert_page(page_number, page_data)
-    report_progress(
-        "页面获取完成",
-        completed=len(sorted_refresh_page_numbers),
-        total=len(sorted_refresh_page_numbers),
-    )
+        folder_json = Path(utils.get_folder(tid, aid, "json")) if write_json else None
+
+    with time_section("抓取和写入页面"):
+        report_progress(
+            f"准备增量备份：远端{page_count}页，本地{len(existing_page_numbers)}页，"
+            f"需获取{len(refresh_page_numbers)}页",
+            completed=0,
+            total=len(refresh_page_numbers),
+        )
+        sorted_refresh_page_numbers = sorted(refresh_page_numbers)
+        for index, page_number in enumerate(sorted_refresh_page_numbers, start=1):
+            report_progress(
+                f"正在获取第{page_number}页",
+                completed=index - 1,
+                total=len(sorted_refresh_page_numbers),
+            )
+            page_data = _fetch_backup_page(
+                client,
+                tid,
+                aid,
+                page_number,
+                page_count,
+                first_page_data,
+            )
+            if folder_json is not None:
+                _write_page_json(folder_json, page_number, page_data)
+            archive_store.upsert_page(page_number, page_data)
+        report_progress(
+            "页面获取完成",
+            completed=len(sorted_refresh_page_numbers),
+            total=len(sorted_refresh_page_numbers),
+        )
 
     report_info("开始处理")
 
-    records = archive_store.read_latest_post_records()
-    missing_lou = _find_missing_lou(records)
-    if aid is not None:
-        present_lou = {item["lou"] for item in records}
-        previous_missing_lou = [
-            lou
-            for lou in read_missing_author_lous_from_html_modified(tid, aid)
-            if lou not in present_lou
-        ]
-        missing_lou = _merge_missing_lou(missing_lou, previous_missing_lou)
-    floor_map_result = _build_floor_map_for_post_refs(
-        client,
-        tid,
-        aid,
-        _post_refs_from_posts(records),
-        missing_lou,
-    )
-    floor_labels = floor_map_result.floor_labels
-    recovered_missing_html_by_lou = _recovered_missing_post_htmls(
-        floor_map_result.recovered_missing_posts_by_author_lou,
-    )
-
-    _fill_missing_post_records(
-        records,
-        missing_lou,
-        floor_labels,
-        recovered_missing_html_by_lou,
-    )
-    (
-        folder_html_modified,
-        source_hash_by_lou,
-        manifest_entries,
-        skipped_lous,
-    ) = _completed_html_modified_lous_for_records(records, tid, aid)
-    unresolved_missing_lous = _unresolved_missing_placeholder_lous(records)
-    skipped_lous -= unresolved_missing_lous
-    active_records = [item for item in records if item["lou"] not in skipped_lous]
-    active_htmls = _load_post_htmls_for_records(active_records)
-
-    parsed_htmls = _parse_post_htmls_for_images(active_htmls)
-    files_to_download = _collect_image_download_tasks_from_parsed(
-        parsed_htmls,
-        floor_labels,
-    )
-    download_result = _download_images(tid, aid, files_to_download)
-    image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
-    completed_lous = set(
-        _rewrite_parsed_image_links(
-            parsed_htmls,
+    with time_section("读取归档与楼层映射"):
+        records = archive_store.read_latest_post_records()
+        missing_lou = _find_missing_lou(records)
+        if aid is not None:
+            present_lou = {item["lou"] for item in records}
+            previous_missing_lou = [
+                lou
+                for lou in read_missing_author_lous_from_html_modified(tid, aid)
+                if lou not in present_lou
+            ]
+            missing_lou = _merge_missing_lou(missing_lou, previous_missing_lou)
+        floor_map_result = _build_floor_map_for_post_refs(
+            client,
             tid,
             aid,
-            floor_labels,
-            _failed_image_urls(download_result),
-            image_lookup,
+            _post_refs_from_posts(records),
+            missing_lou,
         )
-    )
-    completed_lous -= unresolved_missing_lous
-    output_hash_by_lou = _write_modified_htmls(active_htmls, tid, aid)
-    html_modified_manifest.write_updated_manifest(
-        folder_html_modified,
-        previous_entries=manifest_entries,
-        source_hash_by_lou=source_hash_by_lou,
-        skipped_lous=skipped_lous,
-        completed_lous=completed_lous,
-        output_hash_by_lou=output_hash_by_lou,
-    )
-    _write_backup_state_if_complete(
-        tid,
-        aid,
-        page_count,
-        author_total_lou_count,
-        records,
-        missing_lou,
-        source_hash_by_lou,
-        skipped_lous=skipped_lous,
-        completed_lous=completed_lous,
-    )
+        floor_labels = floor_map_result.floor_labels
+        recovered_missing_html_by_lou = _recovered_missing_post_htmls(
+            floor_map_result.recovered_missing_posts_by_author_lou,
+        )
+
+    with time_section("HTML与图片处理"):
+        _fill_missing_post_records(
+            records,
+            missing_lou,
+            floor_labels,
+            recovered_missing_html_by_lou,
+        )
+        (
+            folder_html_modified,
+            source_hash_by_lou,
+            manifest_entries,
+            skipped_lous,
+        ) = _completed_html_modified_lous_for_records(records, tid, aid)
+        unresolved_missing_lous = _unresolved_missing_placeholder_lous(records)
+        skipped_lous -= unresolved_missing_lous
+        active_records = [item for item in records if item["lou"] not in skipped_lous]
+        active_htmls = _load_post_htmls_for_records(active_records)
+
+        parsed_htmls = _parse_post_htmls_for_images(active_htmls)
+        files_to_download = _collect_image_download_tasks_from_parsed(
+            parsed_htmls,
+            floor_labels,
+        )
+        download_result = _download_images(tid, aid, files_to_download)
+        image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
+        completed_lous = set(
+            _rewrite_parsed_image_links(
+                parsed_htmls,
+                tid,
+                aid,
+                floor_labels,
+                _failed_image_urls(download_result),
+                image_lookup,
+            )
+        )
+        completed_lous -= unresolved_missing_lous
+        output_hash_by_lou = _write_modified_htmls(active_htmls, tid, aid)
+
+    with time_section("manifest/state写入"):
+        html_modified_manifest.write_updated_manifest(
+            folder_html_modified,
+            previous_entries=manifest_entries,
+            source_hash_by_lou=source_hash_by_lou,
+            skipped_lous=skipped_lous,
+            completed_lous=completed_lous,
+            output_hash_by_lou=output_hash_by_lou,
+        )
+        _write_backup_state_if_complete(
+            tid,
+            aid,
+            page_count,
+            author_total_lou_count,
+            records,
+            missing_lou,
+            source_hash_by_lou,
+            skipped_lous=skipped_lous,
+            completed_lous=completed_lous,
+        )

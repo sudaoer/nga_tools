@@ -232,11 +232,16 @@ class BackupConfigsCliTest:
         assert context.value.code == 2
 
 
-def _backup_config_app_config(workers: int = 4) -> SimpleNamespace:
+def _backup_config_app_config(
+    workers: int = 4,
+    *,
+    timing_log_enabled: bool = True,
+) -> SimpleNamespace:
     return SimpleNamespace(
         api_concurrency=4,
         image_concurrency=50,
         backup_configs_workers=workers,
+        timing_log_enabled=timing_log_enabled,
     )
 
 
@@ -310,20 +315,22 @@ class BackupWarningLogTest:
             )
 
     @pytest.mark.parametrize(
-        ("handler", "implementation_path"),
+        ("handler", "implementation_path", "expected_task_name"),
         [
-            (backup_all, "nga_tools.commands.backup.backup_thread"),
-            (backup_sub, "nga_tools.commands.backup.backup_thread_sub"),
+            (backup_all, "nga_tools.commands.backup.backup_thread", "backup all"),
+            (backup_sub, "nga_tools.commands.backup.backup_thread_sub", "backup sub"),
             (
                 backup_floors,
                 "nga_tools.commands.backup.generate_floor_map_from_backup",
+                "backup floors",
             ),
         ],
     )
-    def test_single_thread_backup_commands_write_warning_log(
+    def test_single_thread_backup_commands_write_warning_and_timing_logs(
         self,
         handler: Callable[[dict[str, object]], None],
         implementation_path: str,
+        expected_task_name: str,
     ) -> None:
         with TemporaryDirectory() as temp_dir_name:
             base_dir = Path(temp_dir_name)
@@ -331,6 +338,8 @@ class BackupWarningLogTest:
             thread_dir.mkdir()
             log_path = thread_dir / "warnings.log"
             log_path.write_text("旧日志\n", encoding="utf-8")
+            timing_path = thread_dir / "timing.log"
+            timing_path.write_text("旧耗时\n", encoding="utf-8")
 
             def implementation(
                 tid: int,
@@ -363,9 +372,43 @@ class BackupWarningLogTest:
                 handler({})
 
             assert log_path.read_text(encoding='utf-8') == '警告：单帖警告\n'
+            timing_text = timing_path.read_text(encoding="utf-8")
+            assert "旧耗时" not in timing_text
+            assert f"任务：{expected_task_name}\n" in timing_text
+            assert "目标：tid=101, aid=all\n" in timing_text
+            assert "总耗时：" in timing_text
+            assert "状态：完成" in timing_text
             assert '警告：单帖警告' in output.getvalue()
 
-    def test_backup_configs_writes_per_thread_warning_logs(self) -> None:
+    def test_single_thread_backup_respects_disabled_timing_log(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            base_dir = Path(temp_dir_name)
+            thread_dir = base_dir / "101_all"
+            thread_dir.mkdir()
+            timing_path = thread_dir / "timing.log"
+            timing_path.write_text("旧耗时\n", encoding="utf-8")
+
+            with (
+                patch(
+                    "nga_tools.commands.backup.configure_network_limits_from_args",
+                    return_value=_backup_config_app_config(timing_log_enabled=False),
+                ),
+                patch(
+                    "nga_tools.commands.backup.resolve_command_thread_target",
+                    return_value=(101, None),
+                ),
+                patch(
+                    "nga_tools.core.paths.get_folder",
+                    side_effect=_fake_get_folder(base_dir),
+                ),
+                patch("nga_tools.commands.backup.backup_thread_sub"),
+                _captured_reporter(),
+            ):
+                backup_sub({})
+
+            assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
+
+    def test_backup_configs_writes_per_thread_warning_and_timing_logs(self) -> None:
         thread_configs = [
             _thread_config(name="first", tid=101, aid=201),
             _thread_config(name="second", tid=102, aid=None),
@@ -415,14 +458,28 @@ class BackupWarningLogTest:
 
             assert (base_dir / '101_201' / 'warnings.log').read_text(encoding='utf-8') == '警告：warning 101 201\n'
             assert (base_dir / '102_all' / 'warnings.log').read_text(encoding='utf-8') == '警告：warning 102 None\n'
+            first_timing = (base_dir / '101_201' / 'timing.log').read_text(
+                encoding='utf-8'
+            )
+            second_timing = (base_dir / '102_all' / 'timing.log').read_text(
+                encoding='utf-8'
+            )
+            assert "任务：backup configs\n" in first_timing
+            assert "目标：first (tid: 101, aid: 201)\n" in first_timing
+            assert "总耗时：" in first_timing
+            assert "状态：完成" in first_timing
+            assert "任务：backup configs\n" in second_timing
+            assert "目标：second (tid: 102, aid: None)\n" in second_timing
 
-    def test_pdf_generate_writes_thread_warning_log(self) -> None:
+    def test_pdf_generate_writes_thread_warning_and_timing_logs(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             base_dir = Path(temp_dir_name)
             thread_dir = base_dir / "101_201"
             thread_dir.mkdir()
             log_path = thread_dir / "warnings.log"
             log_path.write_text("旧日志\n", encoding="utf-8")
+            timing_path = thread_dir / "timing.log"
+            timing_path.write_text("旧耗时\n", encoding="utf-8")
 
             def generate_pdf_side_effect(
                 *,
@@ -447,11 +504,21 @@ class BackupWarningLogTest:
                     "nga_tools.core.paths.get_folder",
                     side_effect=_fake_get_folder(base_dir),
                 ),
+                patch(
+                    "nga_tools.commands.backup.load_timing_log_enabled",
+                    return_value=True,
+                ),
                 _captured_reporter() as output,
             ):
                 pdf_generate({"lou_per_pdf": 50, "pdf_workers": 2})
 
             assert log_path.read_text(encoding='utf-8') == '警告：PDF告警\n'
+            timing_text = timing_path.read_text(encoding="utf-8")
+            assert "旧耗时" not in timing_text
+            assert "任务：backup pdf\n" in timing_text
+            assert "目标：tid=101, aid=201\n" in timing_text
+            assert "总耗时：" in timing_text
+            assert "状态：完成" in timing_text
             assert '警告：PDF告警' in output.getvalue()
 
 
