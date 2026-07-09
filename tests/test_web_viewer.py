@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.cli.parser import args_parse
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
+from nga_tools.web import data as web_data
 from nga_tools.backup.post_overlay import POST_OVERLAYS_FILENAME
 from nga_tools.backup.post_version_selection import POST_VERSION_SELECTIONS_FILENAME
 from nga_tools.web.data import (
@@ -158,6 +159,7 @@ class WebViewerDataTest:
         by_dir = {item["dirName"]: item for item in summaries}
 
         assert by_dir["101_201"]["status"] == "ready"
+        assert by_dir["101_201"]["statsLoaded"] is True
         assert by_dir["101_201"]["threadName"] == "sample"
         assert by_dir["101_201"]["subject"] == "Sample Thread"
         assert by_dir["101_201"]["postCount"] == 2
@@ -172,6 +174,31 @@ class WebViewerDataTest:
         )
         assert by_dir["101_201"]["hasHtmlModified"] is False
         assert by_dir["102_all"]["status"] == "needs_migration"
+
+    def test_light_scan_skips_archive_stats(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        ready_dir = output_dir / "101_201"
+        _write_archive(ready_dir, [_post(1, "hello")])
+
+        def fail_read_archive_stats(_db_path: Path):
+            raise AssertionError("light scan should not read archive stats")
+
+        monkeypatch.setattr(
+            web_data,
+            "_read_archive_stats",
+            fail_read_archive_stats,
+        )
+
+        summaries = scan_thread_summaries(output_dir, {}, detail="light")
+
+        assert len(summaries) == 1
+        assert summaries[0]["status"] == "ready"
+        assert summaries[0]["statsLoaded"] is False
+        assert summaries[0]["postCount"] is None
 
     def test_scans_stored_word_count_summary(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
@@ -485,6 +512,71 @@ class WebServerTest:
 
         assert response.status_code == 422
         assert response.json() == {"error": "请求参数无效。"}
+
+    def test_threads_route_light_detail_skips_archive_stats(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "hello")])
+
+        def fail_read_archive_stats(_db_path: Path):
+            raise AssertionError("light detail should not read archive stats")
+
+        monkeypatch.setattr(
+            web_data,
+            "_read_archive_stats",
+            fail_read_archive_stats,
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/api/threads", params={"detail": "light"})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["items"][0]["statsLoaded"] is False
+        assert payload["items"][0]["postCount"] is None
+
+    def test_threads_route_full_detail_uses_cache_until_refresh(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "hello")])
+        calls: list[Path] = []
+        original = web_data._read_archive_stats
+
+        def wrapped_read_archive_stats(db_path: Path):
+            calls.append(db_path)
+            return original(db_path)
+
+        monkeypatch.setattr(
+            web_data,
+            "_read_archive_stats",
+            wrapped_read_archive_stats,
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        first_response = client.get("/api/threads", params={"detail": "full"})
+        second_response = client.get("/api/threads", params={"detail": "full"})
+        refreshed_response = client.get(
+            "/api/threads",
+            params={"detail": "full", "refresh": "1"},
+        )
+
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        assert refreshed_response.status_code == 200
+        assert first_response.json()["items"][0]["statsLoaded"] is True
+        assert len(calls) == 2
 
     def test_static_app_reports_missing_build_as_json_error(
         self,

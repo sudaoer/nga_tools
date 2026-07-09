@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from nga_tools.config import get_config
 from nga_tools.console import report_info
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
+from nga_tools.forum.thread_configs import ThreadConfig
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web.data import (
     PostOverlayDetail,
@@ -26,10 +27,12 @@ from nga_tools.web.data import (
     PostVersionThreadSummariesResult,
     ThreadNotFoundError,
     ThreadSummary,
+    ThreadSummaryDetail,
     ThreadUnavailableError,
     clear_thread_post_overlay,
     clear_post_version_selection,
     load_thread_metadata,
+    parse_thread_dir_name,
     preview_post_overlay,
     read_post_overlay,
     read_post_version_groups,
@@ -59,6 +62,7 @@ from nga_tools.web.database import (
 
 _MAX_POST_LIMIT = 200
 _MAX_DATABASE_ROW_LIMIT = 200
+ThreadListFingerprint = tuple[str, ...]
 
 
 def _new_lock() -> LockType:
@@ -67,6 +71,83 @@ def _new_lock() -> LockType:
 
 def _new_lock_map() -> dict[Path, LockType]:
     return {}
+
+
+def _file_fingerprint(path: Path) -> str:
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return "-"
+    return f"{stat_result.st_mtime_ns}:{stat_result.st_size}"
+
+
+def _thread_list_fingerprint(output_dir: Path) -> ThreadListFingerprint:
+    entries = [
+        f"config:{_file_fingerprint(Path(get_config().thread_config_file))}",
+        f"output:{_file_fingerprint(output_dir)}",
+    ]
+    if not output_dir.is_dir():
+        return tuple(entries)
+
+    for thread_folder in sorted(output_dir.iterdir(), key=lambda path: path.name):
+        if not thread_folder.is_dir():
+            continue
+        if parse_thread_dir_name(thread_folder.name) is None:
+            continue
+        html_modified_dir = thread_folder / "html_modified"
+        entries.append(
+            "\0".join(
+                [
+                    thread_folder.name,
+                    _file_fingerprint(thread_folder),
+                    _file_fingerprint(thread_folder / "archive.sqlite3"),
+                    _file_fingerprint(html_modified_dir),
+                    _file_fingerprint(
+                        html_modified_dir / "html_modified_manifest.json"
+                    ),
+                    _file_fingerprint(thread_folder / "floor_map.json"),
+                    _file_fingerprint(thread_folder / "warnings.log"),
+                    _file_fingerprint(thread_folder / "json"),
+                ]
+            )
+        )
+    return tuple(entries)
+
+
+def _copy_thread_summaries(items: list[ThreadSummary]) -> list[ThreadSummary]:
+    return [cast(ThreadSummary, dict(item)) for item in items]
+
+
+@dataclass
+class ThreadSummaryCache:
+    _guard: LockType = field(default_factory=_new_lock)
+    _fingerprint: Optional[ThreadListFingerprint] = None
+    _items: Optional[list[ThreadSummary]] = None
+
+    def read(
+        self,
+        output_dir: Path,
+        metadata_by_key: dict[tuple[int, str], ThreadConfig],
+        *,
+        refresh: bool,
+    ) -> list[ThreadSummary]:
+        fingerprint = _thread_list_fingerprint(output_dir)
+        with self._guard:
+            if (
+                not refresh
+                and self._fingerprint == fingerprint
+                and self._items is not None
+            ):
+                return _copy_thread_summaries(self._items)
+
+            items = scan_thread_summaries(
+                output_dir,
+                metadata_by_key,
+                detail="full",
+            )
+            self._fingerprint = _thread_list_fingerprint(output_dir)
+            self._items = _copy_thread_summaries(items)
+            return _copy_thread_summaries(items)
 
 
 @dataclass(frozen=True)
@@ -89,6 +170,7 @@ class ViewerContext:
     output_dir: Path
     static_dir: Path
     post_version_selection_locks: PostVersionSelectionLocks
+    thread_summary_cache: ThreadSummaryCache
 
 
 def _context(request: Request) -> ViewerContext:
@@ -99,8 +181,22 @@ def _error_response(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
 
 
-def _list_threads_sync(output_dir: Path) -> dict[str, list[ThreadSummary]]:
-    return {"items": scan_thread_summaries(output_dir, load_thread_metadata())}
+def _list_threads_sync(
+    output_dir: Path,
+    cache: ThreadSummaryCache,
+    detail: ThreadSummaryDetail,
+    refresh: bool,
+) -> dict[str, list[ThreadSummary]]:
+    metadata_by_key = load_thread_metadata()
+    if detail == "light":
+        return {
+            "items": scan_thread_summaries(
+                output_dir,
+                metadata_by_key,
+                detail="light",
+            )
+        }
+    return {"items": cache.read(output_dir, metadata_by_key, refresh=refresh)}
 
 
 def _list_post_version_threads_sync(
@@ -202,9 +298,19 @@ async def health(request: Request) -> dict[str, object]:
     }
 
 
-async def list_threads(request: Request) -> dict[str, list[ThreadSummary]]:
+async def list_threads(
+    request: Request,
+    detail: ThreadSummaryDetail = "full",
+    refresh: bool = False,
+) -> dict[str, list[ThreadSummary]]:
     context = _context(request)
-    return await run_in_threadpool(_list_threads_sync, context.output_dir)
+    return await run_in_threadpool(
+        _list_threads_sync,
+        context.output_dir,
+        context.thread_summary_cache,
+        detail,
+        refresh,
+    )
 
 
 async def list_post_version_threads(
@@ -599,6 +705,7 @@ def create_app(
         output_dir=resolved_output_dir,
         static_dir=Path(DEFAULT_WEB_STATIC_DIR) if static_dir is None else static_dir,
         post_version_selection_locks=PostVersionSelectionLocks(),
+        thread_summary_cache=ThreadSummaryCache(),
     )
     app = FastAPI()
     app.state.viewer_context = context

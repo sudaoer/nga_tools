@@ -35,8 +35,25 @@ async function readResponseJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T
 }
 
-export async function fetchThreads(): Promise<ThreadSummary[]> {
-  const payload = await readJson<{ items: ThreadSummary[] }>('/api/threads')
+export interface FetchThreadsOptions {
+  detail?: 'light' | 'full'
+  refresh?: boolean
+}
+
+export async function fetchThreads(
+  options: FetchThreadsOptions = {},
+): Promise<ThreadSummary[]> {
+  const params = new URLSearchParams()
+  if (options.detail) {
+    params.set('detail', options.detail)
+  }
+  if (options.refresh) {
+    params.set('refresh', '1')
+  }
+  const query = params.toString()
+  const payload = await readJson<{ items: ThreadSummary[] }>(
+    `/api/threads${query ? `?${query}` : ''}`,
+  )
   return payload.items
 }
 

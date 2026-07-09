@@ -46,9 +46,13 @@ const posts = ref<PostsResult | null>(null)
 const threadError = ref<string | null>(null)
 const postError = ref<string | null>(null)
 const loadingThreads = ref(false)
+const loadingThreadStats = ref(false)
 const loadingPosts = ref(false)
 const requestedThread = ref<{ tid: number; aidKey: string } | null>(null)
 const pageJumpInput = ref('')
+let threadListRequestId = 0
+let threadStatsRequestId = 0
+let postRequestId = 0
 const overlayEditor = reactive({
   lou: null as number | null,
   floorLabel: '',
@@ -209,7 +213,9 @@ function sortValue(thread: ThreadSummary, key: SortKey): string | number | null 
     return timeSortValue(thread.updatedAt)
   }
   if (key === 'authorUpdated') {
-    return timeSortValue(thread.authorUpdatedAt)
+    return timeSortValue(thread.authorUpdatedAt) ?? (
+      thread.statsLoaded ? null : timeSortValue(thread.updatedAt)
+    )
   }
   if (key === 'postCount') {
     return thread.postCount
@@ -481,44 +487,101 @@ function syncUrl(): void {
   window.history.replaceState(null, '', nextUrl)
 }
 
-async function loadThreads(): Promise<void> {
+function threadKey(thread: ThreadSummary): string {
+  return `${thread.tid}:${thread.aidKey}`
+}
+
+function mergeFullThreadStats(fullThreads: ThreadSummary[]): void {
+  const fullByKey = new Map(fullThreads.map((thread) => [threadKey(thread), thread]))
+  threads.value = threads.value.map((thread) => fullByKey.get(threadKey(thread)) || thread)
+  if (selectedThread.value !== null) {
+    selectedThread.value = fullByKey.get(threadKey(selectedThread.value)) || selectedThread.value
+  }
+}
+
+async function loadFullThreadStats(refresh: boolean): Promise<void> {
+  const requestId = ++threadStatsRequestId
+  loadingThreadStats.value = true
+  try {
+    const fullThreads = await fetchThreads({ detail: 'full', refresh })
+    if (requestId !== threadStatsRequestId) {
+      return
+    }
+    mergeFullThreadStats(fullThreads)
+  } catch (error) {
+    if (threads.value.length === 0) {
+      threadError.value = error instanceof Error ? error.message : String(error)
+    }
+  } finally {
+    if (requestId === threadStatsRequestId) {
+      loadingThreadStats.value = false
+    }
+  }
+}
+
+function findInitialThread(threadList: ThreadSummary[]): {
+  target: ThreadSummary | null
+  requestedMatched: boolean
+} {
+  const currentThread =
+    selectedThread.value === null
+      ? null
+      : threadList.find(
+          (thread) =>
+            thread.tid === selectedThread.value?.tid &&
+            thread.aidKey === selectedThread.value?.aidKey,
+        ) || null
+  const requested =
+    requestedThread.value === null
+      ? null
+      : threadList.find(
+          (thread) =>
+            thread.tid === requestedThread.value?.tid &&
+            thread.aidKey === requestedThread.value?.aidKey,
+        ) || null
+  return {
+    target: currentThread || requested || threadList.find((thread) => thread.status === 'ready') || null,
+    requestedMatched: requested !== null,
+  }
+}
+
+async function loadThreads(refresh = false): Promise<void> {
+  const requestId = ++threadListRequestId
   loadingThreads.value = true
   threadError.value = null
   try {
-    threads.value = await fetchThreads()
-    const currentThread =
-      selectedThread.value === null
-        ? null
-        : threads.value.find(
-            (thread) =>
-              thread.tid === selectedThread.value?.tid &&
-              thread.aidKey === selectedThread.value?.aidKey,
-          ) || null
-    const requested =
-      requestedThread.value === null
-        ? null
-        : threads.value.find(
-            (thread) =>
-              thread.tid === requestedThread.value?.tid &&
-              thread.aidKey === requestedThread.value?.aidKey,
-          ) || null
-    const firstReady = threads.value.find((thread) => thread.status === 'ready') || null
-    const target = currentThread || requested || firstReady
-    requestedThread.value = null
-    if (target !== null && selectedThread.value === null) {
-      await selectThread(target, { resetPage: requested === null })
+    const lightThreads = await fetchThreads({ detail: 'light', refresh })
+    if (requestId !== threadListRequestId) {
+      return
     }
-  } catch (error) {
-    threadError.value = error instanceof Error ? error.message : String(error)
-  } finally {
+    threads.value = lightThreads
+    const { target, requestedMatched } = findInitialThread(lightThreads)
+    requestedThread.value = null
     loadingThreads.value = false
+    if (target !== null && selectedThread.value === null) {
+      void selectThread(target, { resetPage: !requestedMatched })
+    }
+    void loadFullThreadStats(refresh)
+  } catch (error) {
+    if (requestId === threadListRequestId) {
+      threadError.value = error instanceof Error ? error.message : String(error)
+    }
+  } finally {
+    if (requestId === threadListRequestId) {
+      loadingThreads.value = false
+    }
   }
+}
+
+function refreshThreads(): void {
+  void loadThreads(true)
 }
 
 async function selectThread(
   thread: ThreadSummary,
   options: { resetPage: boolean } = { resetPage: true },
 ): Promise<void> {
+  const requestId = ++postRequestId
   selectedThread.value = thread
   posts.value = null
   postError.value = null
@@ -529,32 +592,55 @@ async function selectThread(
   if (thread.status !== 'ready') {
     return
   }
+  loadingPosts.value = true
   try {
-    selectedThread.value = await fetchThread(thread.tid, thread.aidKey)
+    const [threadDetail, postResult] = await Promise.all([
+      fetchThread(thread.tid, thread.aidKey),
+      fetchPosts(thread.tid, thread.aidKey, postQuery),
+    ])
+    if (requestId !== postRequestId) {
+      return
+    }
+    selectedThread.value = threadDetail
+    posts.value = postResult
+    postQuery.page = postResult.page
   } catch (error) {
-    postError.value = error instanceof Error ? error.message : String(error)
-    return
+    if (requestId === postRequestId) {
+      postError.value = error instanceof Error ? error.message : String(error)
+    }
+  } finally {
+    if (requestId === postRequestId) {
+      loadingPosts.value = false
+    }
   }
-  await loadPosts()
 }
 
 async function loadPosts(): Promise<void> {
   if (!selectedThread.value || selectedThread.value.status !== 'ready') {
     return
   }
+  const requestId = ++postRequestId
   loadingPosts.value = true
   postError.value = null
   try {
-    posts.value = await fetchPosts(
+    const postResult = await fetchPosts(
       selectedThread.value.tid,
       selectedThread.value.aidKey,
       postQuery,
     )
-    postQuery.page = posts.value.page
+    if (requestId !== postRequestId) {
+      return
+    }
+    posts.value = postResult
+    postQuery.page = postResult.page
   } catch (error) {
-    postError.value = error instanceof Error ? error.message : String(error)
+    if (requestId === postRequestId) {
+      postError.value = error instanceof Error ? error.message : String(error)
+    }
   } finally {
-    loadingPosts.value = false
+    if (requestId === postRequestId) {
+      loadingPosts.value = false
+    }
   }
 }
 
@@ -635,7 +721,7 @@ onMounted(() => {
     <aside class="thread-pane">
       <div class="pane-header">
         <h1>NGA 备份查看器</h1>
-        <button type="button" class="icon-button" title="刷新列表" @click="loadThreads">
+        <button type="button" class="icon-button" title="刷新列表" @click="refreshThreads">
           ↻
         </button>
       </div>
@@ -676,7 +762,7 @@ onMounted(() => {
           <span class="thread-title">{{ titleFor(thread) }}</span>
           <span class="thread-meta">
             <span class="status" :class="thread.status">{{ statusLabel(thread.status) }}</span>
-            <span>{{ thread.postCount }} 楼</span>
+            <span>{{ formatNumber(thread.postCount) }} 楼</span>
             <span v-if="thread.bodyWordCount !== null">
               {{ formatNumber(thread.bodyWordCount) }} 字
             </span>
@@ -696,7 +782,7 @@ onMounted(() => {
           <h2>{{ titleFor(selectedThread) }}</h2>
           <div class="reader-meta">
             <span>{{ selectedThread.dirName }}</span>
-            <span>{{ selectedThread.postCount }} 楼</span>
+            <span>{{ formatNumber(selectedThread.postCount) }} 楼</span>
             <span v-if="selectedThread.bodyWordCount !== null">
               正文字数 {{ formatNumber(selectedThread.bodyWordCount) }}
             </span>

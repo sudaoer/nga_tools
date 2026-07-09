@@ -7,6 +7,7 @@ export interface ThreadSummary {
   dirName: string
   status: ThreadStatus
   message: string | null
+  statsLoaded: boolean
   threadName: string | null
   subject: string | null
   author: string | null
@@ -14,13 +15,13 @@ export interface ThreadSummary {
   replies: number | null
   postdate: number | null
   lastpost: number | null
-  postCount: number
+  postCount: number | null
   bodyWordCount: number | null
   bodyChineseCharCount: number | null
   bodyWordPostCount: number | null
   minLou: number | null
   maxLou: number | null
-  pageCount: number
+  pageCount: number | null
   updatedAt: string | null
   authorUpdatedAt: number | string | null
   hasHtmlModified: boolean

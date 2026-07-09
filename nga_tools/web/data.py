@@ -55,6 +55,7 @@ from nga_tools.web.render import ImageSrcResolver, render_web_bbcode
 from nga_tools.word_count import DEFAULT_MIN_BODY_CHARS, WORD_COUNT_VERSION
 
 ThreadStatus = Literal["ready", "needs_migration", "missing_html", "invalid"]
+ThreadSummaryDetail = Literal["light", "full"]
 PostEmptyReason = Literal["missing", "filtered"]
 PostDate = int | str
 
@@ -70,6 +71,7 @@ class ThreadSummary(TypedDict):
     dirName: str
     status: ThreadStatus
     message: Optional[str]
+    statsLoaded: bool
     threadName: Optional[str]
     subject: Optional[str]
     author: Optional[str]
@@ -77,13 +79,13 @@ class ThreadSummary(TypedDict):
     replies: Optional[int]
     postdate: Optional[int]
     lastpost: Optional[int]
-    postCount: int
+    postCount: Optional[int]
     bodyWordCount: Optional[int]
     bodyChineseCharCount: Optional[int]
     bodyWordPostCount: Optional[int]
     minLou: Optional[int]
     maxLou: Optional[int]
-    pageCount: int
+    pageCount: Optional[int]
     updatedAt: Optional[str]
     authorUpdatedAt: Optional[PostDate]
     hasHtmlModified: bool
@@ -492,6 +494,8 @@ def _thread_link(
 def _thread_summary_for_folder(
     thread_folder: Path,
     metadata: Optional[ThreadConfig],
+    *,
+    detail: ThreadSummaryDetail = "full",
 ) -> Optional[ThreadSummary]:
     parsed = parse_thread_dir_name(thread_folder.name)
     if parsed is None:
@@ -502,31 +506,46 @@ def _thread_summary_for_folder(
     html_modified_dir = thread_folder / "html_modified"
     floor_map_path = thread_folder / "floor_map.json"
     warnings_path = thread_folder / "warnings.log"
-    has_html_modified = _has_post_html_files(html_modified_dir)
+    has_html_modified = (
+        _has_post_html_files(html_modified_dir)
+        if detail == "full"
+        else html_modified_dir.is_dir()
+    )
     has_floor_map = floor_map_path.is_file()
     has_warnings = warnings_path.is_file()
     status: ThreadStatus = "invalid"
     message: Optional[str] = None
-    stats = ArchiveStats(
-        post_count=0,
-        body_word_count=None,
-        body_chinese_char_count=None,
-        body_word_post_count=None,
-        min_lou=None,
-        max_lou=None,
-        page_count=0,
-        author_updated_at=None,
-    )
+    stats_loaded = False
+    post_count: Optional[int] = None
+    body_word_count: Optional[int] = None
+    body_chinese_char_count: Optional[int] = None
+    body_word_post_count: Optional[int] = None
+    min_lou: Optional[int] = None
+    max_lou: Optional[int] = None
+    page_count: Optional[int] = None
+    author_updated_at: Optional[PostDate] = None
 
     if db_path.is_file():
-        try:
-            stats = _read_archive_stats(db_path)
+        if detail == "light":
             status = "ready"
-            if not has_html_modified:
-                message = "未找到html_modified/post_*.html，Web将从原始备份数据渲染。"
-        except (sqlite3.Error, RuntimeError, ValueError) as error:
-            status = "invalid"
-            message = f"archive.sqlite3无法读取：{error}"
+        else:
+            try:
+                stats = _read_archive_stats(db_path)
+                stats_loaded = True
+                post_count = stats.post_count
+                body_word_count = stats.body_word_count
+                body_chinese_char_count = stats.body_chinese_char_count
+                body_word_post_count = stats.body_word_post_count
+                min_lou = stats.min_lou
+                max_lou = stats.max_lou
+                page_count = stats.page_count
+                author_updated_at = stats.author_updated_at
+                status = "ready"
+            except (sqlite3.Error, RuntimeError, ValueError) as error:
+                status = "invalid"
+                message = f"archive.sqlite3无法读取：{error}"
+        if status == "ready" and not has_html_modified:
+            message = "未找到html_modified/post_*.html，Web将从原始备份数据渲染。"
     elif (thread_folder / "json").is_dir():
         status = "needs_migration"
         message = "此目录只有旧分页JSON，请先运行 backup migrate-store。"
@@ -550,6 +569,7 @@ def _thread_summary_for_folder(
         "dirName": thread_folder.name,
         "status": status,
         "message": message,
+        "statsLoaded": stats_loaded,
         "threadName": _metadata_name(metadata),
         "subject": _optional_str_metadata(metadata, "subject"),
         "author": _optional_str_metadata(metadata, "author"),
@@ -557,15 +577,15 @@ def _thread_summary_for_folder(
         "replies": _optional_int_metadata(metadata, "replies"),
         "postdate": _optional_int_metadata(metadata, "postdate"),
         "lastpost": _optional_int_metadata(metadata, "lastpost"),
-        "postCount": stats.post_count,
-        "bodyWordCount": stats.body_word_count,
-        "bodyChineseCharCount": stats.body_chinese_char_count,
-        "bodyWordPostCount": stats.body_word_post_count,
-        "minLou": stats.min_lou,
-        "maxLou": stats.max_lou,
-        "pageCount": stats.page_count,
+        "postCount": post_count,
+        "bodyWordCount": body_word_count,
+        "bodyChineseCharCount": body_chinese_char_count,
+        "bodyWordPostCount": body_word_post_count,
+        "minLou": min_lou,
+        "maxLou": max_lou,
+        "pageCount": page_count,
         "updatedAt": updated_at,
-        "authorUpdatedAt": stats.author_updated_at,
+        "authorUpdatedAt": author_updated_at,
         "hasHtmlModified": has_html_modified,
         "hasFloorMap": has_floor_map,
         "hasWarnings": has_warnings,
@@ -575,6 +595,8 @@ def _thread_summary_for_folder(
 def scan_thread_summaries(
     output_dir: Path,
     metadata_by_key: dict[tuple[int, str], ThreadConfig],
+    *,
+    detail: ThreadSummaryDetail = "full",
 ) -> list[ThreadSummary]:
     if not output_dir.is_dir():
         return []
@@ -590,6 +612,7 @@ def scan_thread_summaries(
         summary = _thread_summary_for_folder(
             thread_folder,
             metadata_by_key.get((tid, raw_aid_key)),
+            detail=detail,
         )
         if summary is not None:
             summaries.append(summary)
