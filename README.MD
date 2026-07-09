@@ -195,15 +195,15 @@ pixi run python main.py stats words --all-threads
 
 ## Web 查看器
 
-安装并构建前端，然后启动本地只读查看器：
+安装并构建前端，然后启动本地查看器：
 
 ```powershell
 pixi run web-serve
 ```
 
-默认地址为 `http://127.0.0.1:18736/`。此服务只读取本地备份，不联网、
-不修改帖子配置或备份内容；默认只监听本机地址。需要临时换端口或允许局域网
-访问时，可直接运行：
+默认地址为 `http://127.0.0.1:18736/`。普通帖子阅读页只读取本地备份；
+管理页会写入正文版本选择并刷新对应 `html_modified/post_*.html`。默认只监听
+本机地址；允许局域网访问时，管理功能也会暴露给局域网内访问者：
 
 ```powershell
 pixi run python main.py web serve --port 18737
@@ -216,11 +216,18 @@ Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页�
 产物。旧版只有 `json/page_*.json` 的目录会在页面中显示为“需迁移”，请先运行
 `backup migrate-store`。
 
-前端使用 Vue Router 管理页面：`/threads` 是帖子阅读器，`/databases` 是只读
-SQLite 数据库查看器。数据库查看器只浏览项目输出目录中的
+前端使用 Vue Router 管理页面：`/threads` 是普通帖子阅读器，`/admin` 是
+管理界面；旧 `/databases` 会跳转到 `/admin/databases`。管理界面中的数据库
+查看器只浏览项目输出目录中的
 `forum_threads.sqlite3`、`image_index.sqlite3` 和各帖子目录下的
 `archive.sqlite3`，支持查看表结构、分页浏览、排序和关键字筛选，不执行用户
 输入的 SQL。
+
+管理界面的“正文版本”会列出同一楼层中正文内容有多个历史版本的楼。用户只能选择
+非最新版历史版本；当前最新版不能被手动固定，以免后续增量备份无法自动更新。选择
+会写入备份目录的 `post_version_overrides.json`，普通网页查看和后续 PDF 输入 HTML
+都会使用这套有效版本；清除选择后回到自动最新版。选择文件写入和对应 HTML/manifest
+刷新均使用原子替换。
 
 ## 生成 PDF
 
@@ -259,6 +266,7 @@ PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会�
 - `json/`：加 `--write-json` 时输出的接口最近响应分页数据
 - `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照、正文版本和最新展示元数据；
   完整原始分页响应保存在 `page_snapshots.page_json`，`post_versions` 只按正文内容做版本控制
+- `post_version_overrides.json`：管理界面保存的正文历史版本选择；没有选择时可为空
 - `html_modified/`：替换为本地 `images_unique` 图片路径后的 HTML
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 - `floor_map.json`：只看作者楼层到原帖楼层的映射

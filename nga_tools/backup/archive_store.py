@@ -15,6 +15,10 @@ from nga_tools.backup.archive_posts import (
     metadata_from_raw_post,
 )
 from nga_tools.backup.post_data import post_data_from_raw, post_source_hash
+from nga_tools.backup.post_version_selection import (
+    PostVersionSelection,
+    load_selections,
+)
 from nga_tools.core.hashing import hash_object, hash_text
 from nga_tools.ngaclient.client import PageData
 from nga_tools.word_count import WORD_COUNT_VERSION, count_post_content
@@ -51,9 +55,10 @@ _LATEST_POST_RECORDS_QUERY = """
     ORDER BY latest.lou
     """
 _LATEST_POST_RECORD_SUMMARIES_QUERY = """
-    SELECT lou, pid, source_hash
+    SELECT id, lou, pid, source_hash
     FROM (
         SELECT
+            id,
             lou,
             pid,
             source_hash,
@@ -65,6 +70,37 @@ _LATEST_POST_RECORD_SUMMARIES_QUERY = """
     )
     WHERE row_number = 1
     ORDER BY lou
+    """
+_LATEST_POST_ROWS_QUERY = """
+    SELECT
+        latest.id,
+        latest.lou,
+        latest.pid,
+        latest.content,
+        latest.source_hash,
+        post_latest_metadata.author_name,
+        post_latest_metadata.author_uid,
+        post_latest_metadata.postdate_json,
+        post_latest_metadata.image_attachments_json
+    FROM (
+        SELECT
+            id,
+            lou,
+            pid,
+            content,
+            source_hash,
+            ROW_NUMBER() OVER (
+                PARTITION BY lou
+                ORDER BY last_seen_at DESC, id DESC
+            ) AS row_number
+        FROM post_versions
+        {where_lous}
+    ) AS latest
+    LEFT JOIN post_latest_metadata
+        ON post_latest_metadata.pid = latest.pid
+        AND post_latest_metadata.lou = latest.lou
+    WHERE latest.row_number = 1
+    ORDER BY latest.lou
     """
 
 
@@ -89,6 +125,20 @@ class ArchiveWordCountTotals:
     body_posts: int
     chinese_chars: int
     chinese_with_punctuation: int
+
+
+@dataclass(frozen=True)
+class ArchivePostVersionRow:
+    version_id: int
+    lou: int
+    pid: int
+    content: str
+    source_hash: str
+    author_name: Optional[str]
+    author_uid: Optional[int]
+    postdate_json: Optional[str]
+    image_attachments_json: Optional[str]
+    manual_selection: bool
 
 
 @dataclass
@@ -1086,12 +1136,12 @@ class ThreadArchiveStore:
 
         with closing(self._connect()) as connection:
             rows = cast(
-                list[tuple[int, int, str]],
+                list[tuple[int, int, int, str]],
                 connection.execute(_LATEST_POST_RECORD_SUMMARIES_QUERY).fetchall(),
             )
 
         records: list[PostRecord] = []
-        for lou, pid, source_hash in rows:
+        for _version_id, lou, pid, source_hash in rows:
             records.append(
                 {
                     "lou": lou,
@@ -1102,6 +1152,343 @@ class ThreadArchiveStore:
                 }
             )
         return records
+
+    def _validated_post_version_selections(
+        self,
+        connection: sqlite3.Connection,
+        lous: set[int] | None = None,
+    ) -> dict[int, PostVersionSelection]:
+        selections = load_selections(self.thread_folder)
+        if lous is not None:
+            selections = {
+                lou: selection
+                for lou, selection in selections.items()
+                if lou in lous
+            }
+        if not selections:
+            return {}
+
+        valid_selections: dict[int, PostVersionSelection] = {}
+        for lou, selection in selections.items():
+            version_row = cast(
+                Optional[tuple[int, str]],
+                connection.execute(
+                    """
+                    SELECT lou, source_hash
+                    FROM post_versions
+                    WHERE id = ?
+                    """,
+                    (selection["version_id"],),
+                ).fetchone(),
+            )
+            if version_row is None:
+                continue
+            version_lou, source_hash = version_row
+            if version_lou != lou or source_hash != selection["source_hash"]:
+                continue
+
+            latest_row = cast(
+                Optional[tuple[int]],
+                connection.execute(
+                    """
+                    SELECT id
+                    FROM post_versions
+                    WHERE lou = ?
+                    ORDER BY last_seen_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (lou,),
+                ).fetchone(),
+            )
+            if latest_row is None or latest_row[0] == selection["version_id"]:
+                continue
+            valid_selections[lou] = selection
+        return valid_selections
+
+    def read_valid_post_version_selections(self) -> dict[int, PostVersionSelection]:
+        self.require_exists()
+        with closing(self._connect()) as connection:
+            return self._validated_post_version_selections(connection)
+
+    def read_effective_post_record_summaries(self) -> list[PostRecord]:
+        self.require_exists()
+
+        with closing(self._connect()) as connection:
+            rows = cast(
+                list[tuple[int, int, int, str]],
+                connection.execute(_LATEST_POST_RECORD_SUMMARIES_QUERY).fetchall(),
+            )
+            records_by_lou: dict[int, PostRecord] = {
+                lou: {
+                    "lou": lou,
+                    "pid": pid,
+                    "post": None,
+                    "html": None,
+                    "source_hash": source_hash,
+                }
+                for _version_id, lou, pid, source_hash in rows
+            }
+
+            valid_selections = self._validated_post_version_selections(connection)
+            for _lou, selection in valid_selections.items():
+                selected_row = cast(
+                    Optional[tuple[int, int, str]],
+                    connection.execute(
+                        """
+                        SELECT lou, pid, source_hash
+                        FROM post_versions
+                        WHERE id = ?
+                        """,
+                        (selection["version_id"],),
+                    ).fetchone(),
+                )
+                if selected_row is None:
+                    continue
+                selected_lou, pid, source_hash = selected_row
+                records_by_lou[selected_lou] = {
+                    "lou": selected_lou,
+                    "pid": pid,
+                    "post": None,
+                    "html": None,
+                    "source_hash": source_hash,
+                }
+
+        return [records_by_lou[lou] for lou in sorted(records_by_lou)]
+
+    def _image_attachments_json_for_version(
+        self,
+        connection: sqlite3.Connection,
+        version_id: int,
+        fallback_json: Optional[str],
+    ) -> Optional[str]:
+        snapshot_row = cast(
+            Optional[tuple[str, int]],
+            connection.execute(
+                """
+                SELECT page_snapshots.page_json, post_observations.position
+                FROM post_observations
+                JOIN page_snapshots
+                    ON page_snapshots.id = post_observations.page_snapshot_id
+                WHERE post_observations.post_version_id = ?
+                ORDER BY page_snapshots.last_seen_at DESC, page_snapshots.id DESC
+                LIMIT 1
+                """,
+                (version_id,),
+            ).fetchone(),
+        )
+        if snapshot_row is None:
+            return fallback_json
+
+        page_json, position = snapshot_row
+        try:
+            raw_page: object = json.loads(page_json)
+        except json.JSONDecodeError:
+            return fallback_json
+        if not isinstance(raw_page, dict):
+            return fallback_json
+        raw_posts = cast(dict[str, object], raw_page).get("result")
+        if not isinstance(raw_posts, list):
+            return fallback_json
+        post_items = cast(list[object], raw_posts)
+        if position < 0 or position >= len(post_items):
+            return fallback_json
+        metadata = metadata_from_raw_post(post_items[position])
+        return metadata["image_attachments_json"]
+
+    def _effective_post_row_from_sql_row(
+        self,
+        connection: sqlite3.Connection,
+        row: tuple[
+            int,
+            int,
+            int,
+            str,
+            str,
+            Optional[str],
+            Optional[int],
+            Optional[str],
+            Optional[str],
+        ],
+        *,
+        manual_selection: bool,
+        use_version_snapshot: bool | None = None,
+    ) -> ArchivePostVersionRow:
+        (
+            version_id,
+            lou,
+            pid,
+            content,
+            source_hash,
+            author_name,
+            author_uid,
+            postdate_json,
+            image_attachments_json,
+        ) = row
+        if use_version_snapshot is None:
+            use_version_snapshot = manual_selection
+        if use_version_snapshot:
+            image_attachments_json = self._image_attachments_json_for_version(
+                connection,
+                version_id,
+                image_attachments_json,
+            )
+        return ArchivePostVersionRow(
+            version_id=version_id,
+            lou=lou,
+            pid=pid,
+            content=content,
+            source_hash=source_hash,
+            author_name=author_name,
+            author_uid=author_uid,
+            postdate_json=postdate_json,
+            image_attachments_json=image_attachments_json,
+            manual_selection=manual_selection,
+        )
+
+    def read_effective_post_rows(
+        self,
+        lous: set[int] | None = None,
+    ) -> list[ArchivePostVersionRow]:
+        self.require_exists()
+        if lous is not None and not lous:
+            return []
+
+        params: tuple[int, ...] = ()
+        where_lous = ""
+        if lous is not None:
+            sorted_lous = tuple(sorted(lous))
+            placeholders = ",".join("?" for _ in sorted_lous)
+            where_lous = f"WHERE lou IN ({placeholders})"
+            params = sorted_lous
+
+        with closing(self._connect()) as connection:
+            latest_rows = cast(
+                list[
+                    tuple[
+                        int,
+                        int,
+                        int,
+                        str,
+                        str,
+                        Optional[str],
+                        Optional[int],
+                        Optional[str],
+                        Optional[str],
+                    ]
+                ],
+                connection.execute(
+                    _LATEST_POST_ROWS_QUERY.format(where_lous=where_lous),
+                    params,
+                ).fetchall(),
+            )
+            rows_by_lou = {
+                row[1]: self._effective_post_row_from_sql_row(
+                    connection,
+                    row,
+                    manual_selection=False,
+                )
+                for row in latest_rows
+            }
+
+            valid_selections = self._validated_post_version_selections(
+                connection,
+                lous,
+            )
+            for lou, selection in valid_selections.items():
+                selected_row = cast(
+                    Optional[
+                        tuple[
+                            int,
+                            int,
+                            int,
+                            str,
+                            str,
+                            Optional[str],
+                            Optional[int],
+                            Optional[str],
+                            Optional[str],
+                        ]
+                    ],
+                    connection.execute(
+                        """
+                        SELECT
+                            post_versions.id,
+                            post_versions.lou,
+                            post_versions.pid,
+                            post_versions.content,
+                            post_versions.source_hash,
+                            post_latest_metadata.author_name,
+                            post_latest_metadata.author_uid,
+                            post_latest_metadata.postdate_json,
+                            post_latest_metadata.image_attachments_json
+                        FROM post_versions
+                        LEFT JOIN post_latest_metadata
+                            ON post_latest_metadata.pid = post_versions.pid
+                            AND post_latest_metadata.lou = post_versions.lou
+                        WHERE post_versions.id = ?
+                        """,
+                        (selection["version_id"],),
+                    ).fetchone(),
+                )
+                if selected_row is None:
+                    continue
+                rows_by_lou[lou] = self._effective_post_row_from_sql_row(
+                    connection,
+                    selected_row,
+                    manual_selection=True,
+                )
+
+        return [rows_by_lou[lou] for lou in sorted(rows_by_lou)]
+
+    def read_post_row_for_version(
+        self,
+        version_id: int,
+    ) -> ArchivePostVersionRow | None:
+        self.require_exists()
+        with closing(self._connect()) as connection:
+            row = cast(
+                Optional[
+                    tuple[
+                        int,
+                        int,
+                        int,
+                        str,
+                        str,
+                        Optional[str],
+                        Optional[int],
+                        Optional[str],
+                        Optional[str],
+                    ]
+                ],
+                connection.execute(
+                    """
+                    SELECT
+                        post_versions.id,
+                        post_versions.lou,
+                        post_versions.pid,
+                        post_versions.content,
+                        post_versions.source_hash,
+                        post_latest_metadata.author_name,
+                        post_latest_metadata.author_uid,
+                        post_latest_metadata.postdate_json,
+                        post_latest_metadata.image_attachments_json
+                    FROM post_versions
+                    LEFT JOIN post_latest_metadata
+                        ON post_latest_metadata.pid = post_versions.pid
+                        AND post_latest_metadata.lou = post_versions.lou
+                    WHERE post_versions.id = ?
+                    """,
+                    (version_id,),
+                ).fetchone(),
+            )
+            if row is None:
+                return None
+            return self._effective_post_row_from_sql_row(
+                connection,
+                row,
+                manual_selection=False,
+                use_version_snapshot=True,
+            )
 
     def read_latest_post_records(self, lous: set[int] | None = None) -> list[PostRecord]:
         self.require_exists()
@@ -1140,6 +1527,29 @@ class ThreadArchiveStore:
                     },
                     "html": None,
                     "source_hash": source_hash,
+                }
+            )
+        return records
+
+    def read_effective_post_records(
+        self,
+        lous: set[int] | None = None,
+    ) -> list[PostRecord]:
+        records: list[PostRecord] = []
+        for row in self.read_effective_post_rows(lous):
+            image_attachments = image_attachments_from_json(row.image_attachments_json)
+            records.append(
+                {
+                    "lou": row.lou,
+                    "pid": row.pid,
+                    "post": {
+                        "lou": row.lou,
+                        "pid": row.pid,
+                        "content": row.content,
+                        "image_attachments": image_attachments,
+                    },
+                    "html": None,
+                    "source_hash": row.source_hash,
                 }
             )
         return records

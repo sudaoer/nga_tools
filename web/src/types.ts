@@ -31,6 +31,8 @@ export interface ThreadSummary {
 export interface PostItem {
   lou: number
   pid: number | null
+  versionId: number | null
+  manualVersion: boolean
   authorName: string | null
   authorUid: number | null
   postdate: number | string | null
@@ -53,6 +55,37 @@ export interface PostsResult {
   postCount: number
   matchingPostCount: number
   maxLou: number | null
+}
+
+export interface PostVersionOption {
+  id: number
+  sourceHash: string
+  firstSeenAt: string
+  lastSeenAt: string
+  seenCount: number
+  isLatest: boolean
+  isSelected: boolean
+  selectable: boolean
+  contentPreview: string
+}
+
+export interface PostVersionGroup {
+  lou: number
+  floorLabel: string
+  latestVersionId: number
+  selectedVersionId: number | null
+  activeVersionId: number
+  versions: PostVersionOption[]
+}
+
+export interface PostVersionPreview {
+  item: PostItem
+}
+
+export interface PostVersionSelectionResult {
+  lou: number
+  selectedVersionId: number | null
+  activeVersionId: number
 }
 
 export type DatabaseKind = 'forum_threads' | 'image_index' | 'archive'

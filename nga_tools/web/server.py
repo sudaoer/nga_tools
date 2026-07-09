@@ -15,14 +15,21 @@ from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web.data import (
     PostsResult,
+    PostVersionGroupsResult,
+    PostVersionPreview,
+    PostVersionSelectionResult,
     ThreadNotFoundError,
     ThreadSummary,
     ThreadUnavailableError,
+    clear_post_version_selection,
     load_thread_metadata,
+    read_post_version_groups,
+    read_post_version_preview,
     read_posts,
     read_thread_summary,
     safe_output_file,
     scan_thread_summaries,
+    select_post_version,
 )
 from nga_tools.web.database import (
     DatabaseNotFoundError,
@@ -132,6 +139,83 @@ async def thread_posts(
             lou_from=lou_from,
             lou_to=lou_to,
         )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ThreadNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ThreadUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+async def post_version_groups(
+    request: Request,
+    tid: int,
+    aid_key: str,
+) -> PostVersionGroupsResult:
+    context = _context(request)
+    try:
+        return read_post_version_groups(context.output_dir, tid, aid_key)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ThreadNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ThreadUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+async def post_version_preview(
+    request: Request,
+    tid: int,
+    aid_key: str,
+    version_id: int,
+) -> PostVersionPreview:
+    context = _context(request)
+    try:
+        return read_post_version_preview(context.output_dir, tid, aid_key, version_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ThreadNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ThreadUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+async def put_post_version_selection(
+    request: Request,
+    tid: int,
+    aid_key: str,
+    lou: int,
+    payload: dict[str, object],
+) -> PostVersionSelectionResult:
+    raw_version_id = payload.get("versionId")
+    if type(raw_version_id) is not int:
+        raise HTTPException(status_code=400, detail="versionId必须是整数。")
+    context = _context(request)
+    try:
+        return select_post_version(
+            context.output_dir,
+            tid,
+            aid_key,
+            lou,
+            raw_version_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ThreadNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ThreadUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+async def delete_post_version_selection(
+    request: Request,
+    tid: int,
+    aid_key: str,
+    lou: int,
+) -> PostVersionSelectionResult:
+    context = _context(request)
+    try:
+        return clear_post_version_selection(context.output_dir, tid, aid_key, lou)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ThreadNotFoundError as error:
@@ -257,6 +341,26 @@ def create_app(
         thread_posts,
         methods=["GET"],
     )
+    app.add_api_route(
+        "/api/admin/threads/{tid}/{aid_key}/post-versions",
+        post_version_groups,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/api/admin/threads/{tid}/{aid_key}/post-versions/{version_id}/preview",
+        post_version_preview,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/api/admin/threads/{tid}/{aid_key}/post-version-selections/{lou}",
+        put_post_version_selection,
+        methods=["PUT"],
+    )
+    app.add_api_route(
+        "/api/admin/threads/{tid}/{aid_key}/post-version-selections/{lou}",
+        delete_post_version_selection,
+        methods=["DELETE"],
+    )
     app.add_api_route("/api/databases", list_databases, methods=["GET"])
     app.add_api_route("/api/databases/{db_id}/schema", database_schema, methods=["GET"])
     app.add_api_route(
@@ -280,7 +384,8 @@ def serve_app(
     port: int = DEFAULT_WEB_PORT,
     static_dir: Path = Path(DEFAULT_WEB_STATIC_DIR),
 ) -> None:
-    report_info(f"只读Web查看服务：http://{host}:{port}/")
+    report_info(f"Web查看服务：http://{host}:{port}/")
+    report_info("管理界面会写入本地正文版本选择并刷新html_modified。")
     uvicorn.run(
         create_app(static_dir=static_dir),
         host=host,

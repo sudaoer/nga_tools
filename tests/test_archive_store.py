@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.post_version_selection import write_selections
 from nga_tools.core.hashing import hash_text
 from nga_tools.word_count import WORD_COUNT_VERSION
 
@@ -187,6 +188,106 @@ class ThreadArchiveStoreTest:
         assert len(records) == 1
         assert records[0]['post']['content'] == 'after edit'
         assert version_count == 2
+
+    def test_effective_post_records_use_valid_manual_selection(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            thread_folder = Path(temp_dir_name)
+            store = ThreadArchiveStore(thread_folder)
+
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "before edit"},
+                    ],
+                },
+                observed_at="2026-07-07T01:00:00+00:00",
+            )
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "after edit"},
+                    ],
+                },
+                observed_at="2026-07-07T02:00:00+00:00",
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                old_version_id, old_source_hash = connection.execute(
+                    """
+                    SELECT id, source_hash
+                    FROM post_versions
+                    WHERE content = 'before edit'
+                    """
+                ).fetchone()
+            write_selections(
+                thread_folder,
+                {
+                    1: {
+                        "version_id": old_version_id,
+                        "source_hash": old_source_hash,
+                        "selected_at": "2026-07-08T00:00:00+00:00",
+                    }
+                },
+            )
+
+            latest_records = store.read_latest_post_records()
+            effective_records = store.read_effective_post_records()
+            summaries = store.read_effective_post_record_summaries()
+
+        assert latest_records[0]["post"]["content"] == "after edit"
+        assert effective_records[0]["post"]["content"] == "before edit"
+        assert summaries[0]["source_hash"] == old_source_hash
+
+    def test_effective_post_records_ignore_latest_manual_selection(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            thread_folder = Path(temp_dir_name)
+            store = ThreadArchiveStore(thread_folder)
+
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "before edit"},
+                    ],
+                },
+                observed_at="2026-07-07T01:00:00+00:00",
+            )
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "after edit"},
+                    ],
+                },
+                observed_at="2026-07-07T02:00:00+00:00",
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                latest_version_id, latest_source_hash = connection.execute(
+                    """
+                    SELECT id, source_hash
+                    FROM post_versions
+                    WHERE content = 'after edit'
+                    """
+                ).fetchone()
+            write_selections(
+                thread_folder,
+                {
+                    1: {
+                        "version_id": latest_version_id,
+                        "source_hash": latest_source_hash,
+                        "selected_at": "2026-07-08T00:00:00+00:00",
+                    }
+                },
+            )
+
+            records = store.read_effective_post_records()
+
+        assert records[0]["post"]["content"] == "after edit"
 
     def test_metadata_only_change_does_not_create_post_version(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

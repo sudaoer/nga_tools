@@ -70,8 +70,10 @@ def rewrite_parsed_image_links(
     floor_labels: FloorLabels,
     failed_image_urls: set[str] | None = None,
     image_lookup: image_store.ImageLookupCache | None = None,
+    folder_html_modified: Path | None = None,
 ) -> set[int]:
-    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+    if folder_html_modified is None:
+        folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
     failed_image_urls = failed_image_urls or set()
     placeholder_image_src: str | None = None
     completed_lous: set[int] = set()
@@ -129,6 +131,7 @@ def rewrite_image_links(
     floor_labels: FloorLabels,
     failed_image_urls: set[str] | None = None,
     image_lookup: image_store.ImageLookupCache | None = None,
+    folder_html_modified: Path | None = None,
 ) -> set[int]:
     return rewrite_parsed_image_links(
         parse_post_htmls_for_images(htmls),
@@ -137,6 +140,7 @@ def rewrite_image_links(
         floor_labels,
         failed_image_urls,
         image_lookup,
+        folder_html_modified,
     )
 
 
@@ -144,8 +148,10 @@ def write_modified_htmls(
     htmls: list[PostHtml],
     tid: int,
     aid: Optional[int],
+    folder_html_modified: Path | None = None,
 ) -> dict[int, str]:
-    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
+    if folder_html_modified is None:
+        folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
     output_hash_by_lou: dict[int, str] = {}
     for item in htmls:
         html = item["html"]

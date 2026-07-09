@@ -20,6 +20,8 @@ from nga_tools.backup.archive_posts import (
     postdate_from_json,
 )
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
+from nga_tools.backup.archive_store import ArchivePostVersionRow
+from nga_tools.backup.archive import refresh_html_modified_for_lous
 from nga_tools.backup.floor_models import (
     MISSING_POST_HTML,
     ORIGINAL_POSTS_PER_PAGE,
@@ -28,6 +30,11 @@ from nga_tools.backup.floor_models import (
 from nga_tools.backup.post_data import (
     attachment_url_from_value,
     make_image_src_resolver,
+)
+from nga_tools.backup.post_version_selection import (
+    load_selections,
+    make_selection,
+    write_selections,
 )
 from nga_tools.forum.thread_configs import (
     NGAThreadConfigs,
@@ -80,6 +87,8 @@ class ThreadSummary(TypedDict):
 class PostSlot(TypedDict):
     lou: int
     pid: Optional[int]
+    versionId: Optional[int]
+    manualVersion: bool
     authorName: Optional[str]
     authorUid: Optional[int]
     postdate: Optional[PostDate]
@@ -102,6 +111,41 @@ class PostsResult(TypedDict):
     postCount: int
     matchingPostCount: int
     maxLou: Optional[int]
+
+
+class PostVersionOption(TypedDict):
+    id: int
+    sourceHash: str
+    firstSeenAt: str
+    lastSeenAt: str
+    seenCount: int
+    isLatest: bool
+    isSelected: bool
+    selectable: bool
+    contentPreview: str
+
+
+class PostVersionGroup(TypedDict):
+    lou: int
+    floorLabel: str
+    latestVersionId: int
+    selectedVersionId: Optional[int]
+    activeVersionId: int
+    versions: list[PostVersionOption]
+
+
+class PostVersionGroupsResult(TypedDict):
+    items: list[PostVersionGroup]
+
+
+class PostVersionPreview(TypedDict):
+    item: PostSlot
+
+
+class PostVersionSelectionResult(TypedDict):
+    lou: int
+    selectedVersionId: Optional[int]
+    activeVersionId: int
 
 
 @dataclass(frozen=True)
@@ -756,32 +800,15 @@ def _normalize_nga_fold_boxes(html: str) -> str:
 
 
 def _post_item_from_row(
-    row: tuple[
-        int,
-        Optional[int],
-        str,
-        Optional[str],
-        Optional[int],
-        Optional[str],
-        Optional[str],
-    ],
+    row: ArchivePostVersionRow,
     output_dir: Path,
     floor_labels: FloorLabels,
     image_mappings: dict[str, str],
 ) -> PostSlot:
-    (
-        lou,
-        pid,
-        content,
-        author_name,
-        author_uid,
-        postdate_json,
-        image_attachments_json,
-    ) = row
     html = render_web_bbcode(
-        content,
+        row.content,
         image_src_resolver=_image_src_resolver(
-            image_attachments_json,
+            row.image_attachments_json,
             output_dir,
             image_mappings,
         ),
@@ -789,12 +816,14 @@ def _post_item_from_row(
     html = _normalize_nga_fold_boxes(html)
 
     return {
-        "lou": lou,
-        "pid": pid,
-        "authorName": author_name,
-        "authorUid": author_uid,
-        "postdate": postdate_from_json(postdate_json),
-        "floorLabel": floor_labels.label(lou),
+        "lou": row.lou,
+        "pid": row.pid,
+        "versionId": row.version_id,
+        "manualVersion": row.manual_selection,
+        "authorName": row.author_name,
+        "authorUid": row.author_uid,
+        "postdate": postdate_from_json(row.postdate_json),
+        "floorLabel": floor_labels.label(row.lou),
         "html": sanitize_post_html(html),
         "emptyReason": None,
     }
@@ -812,6 +841,8 @@ def _empty_post_slot(
     return {
         "lou": lou,
         "pid": None,
+        "versionId": None,
+        "manualVersion": False,
         "authorName": None,
         "authorUid": None,
         "postdate": None,
@@ -821,23 +852,19 @@ def _empty_post_slot(
     }
 
 
-def _latest_posts_where(
+def _post_row_matches(
+    row: ArchivePostVersionRow,
     query: str,
     lou_from: Optional[int],
     lou_to: Optional[int],
-) -> tuple[str, list[object]]:
-    conditions = ["row_number = 1"]
-    params: list[object] = []
-    if query:
-        conditions.append("content LIKE ?")
-        params.append(f"%{query}%")
-    if lou_from is not None:
-        conditions.append("lou >= ?")
-        params.append(lou_from)
-    if lou_to is not None:
-        conditions.append("lou <= ?")
-        params.append(lou_to)
-    return " AND ".join(conditions), params
+) -> bool:
+    if query and query not in row.content:
+        return False
+    if lou_from is not None and row.lou < lou_from:
+        return False
+    if lou_to is not None and row.lou > lou_to:
+        return False
+    return True
 
 
 def read_posts(
@@ -860,132 +887,47 @@ def read_posts(
     db_path = thread_folder / ARCHIVE_DB_FILENAME
     if not db_path.is_file():
         raise ThreadUnavailableError("缺少archive.sqlite3。")
-    ThreadArchiveStore(thread_folder).ensure_schema()
+    archive_store = ThreadArchiveStore(thread_folder)
+    archive_store.ensure_schema()
 
     page_size = ORIGINAL_POSTS_PER_PAGE
-    where_sql, params = _latest_posts_where(query.strip(), lou_from, lou_to)
-    latest_cte = """
-        WITH latest AS (
-            SELECT
-                post_versions.lou,
-                post_versions.pid,
-                post_versions.content,
-                post_latest_metadata.author_name,
-                post_latest_metadata.author_uid,
-                post_latest_metadata.postdate_json,
-                post_latest_metadata.image_attachments_json,
-                ROW_NUMBER() OVER (
-                    PARTITION BY post_versions.lou
-                    ORDER BY post_versions.last_seen_at DESC, post_versions.id DESC
-                ) AS row_number
-            FROM post_versions
-            LEFT JOIN post_latest_metadata
-                ON post_latest_metadata.pid = post_versions.pid
-                AND post_latest_metadata.lou = post_versions.lou
-        )
-    """
-    with closing(_connect_readonly(db_path)) as connection:
-        stats_row = cast(
-            tuple[int, Optional[int]],
-            connection.execute(
-                f"""
-                {latest_cte}
-                SELECT COUNT(*), MAX(lou)
-                FROM latest
-                WHERE row_number = 1
-                """
-            ).fetchone(),
-        )
-        matching_row = cast(
-            tuple[int],
-            connection.execute(
-                f"""
-                {latest_cte}
-                SELECT COUNT(*)
-                FROM latest
-                WHERE {where_sql}
-                """,
-                tuple(params),
-            ).fetchone(),
-        )
-        post_count = stats_row[0]
-        max_lou = stats_row[1]
-        slot_total = max_lou + 1 if max_lou is not None and max_lou >= 0 else 0
-        total_pages = max(1, math.ceil(slot_total / page_size))
-        resolved_page = min(page, total_pages)
-        page_start_lou = (resolved_page - 1) * page_size
-        page_end_lou = page_start_lou + page_size - 1
-        slot_end_lou = (
-            min(page_end_lou, max_lou)
-            if max_lou is not None and max_lou >= page_start_lou
-            else page_start_lou - 1
-        )
-        rows = cast(
-            list[
-                tuple[
-                    int,
-                    Optional[int],
-                    str,
-                    Optional[str],
-                    Optional[int],
-                    Optional[str],
-                    Optional[str],
-                ]
-            ],
-            connection.execute(
-                f"""
-                {latest_cte}
-                SELECT
-                    lou,
-                    pid,
-                    content,
-                    author_name,
-                    author_uid,
-                    postdate_json,
-                    image_attachments_json
-                FROM latest
-                WHERE row_number = 1
-                    AND lou >= ?
-                    AND lou <= ?
-                ORDER BY lou
-                """,
-                (page_start_lou, page_end_lou),
-            ).fetchall(),
-        )
-        matching_page_lous = {
-            lou
-            for (lou,) in cast(
-                list[tuple[int]],
-                connection.execute(
-                    f"""
-                    {latest_cte}
-                    SELECT lou
-                    FROM latest
-                    WHERE {where_sql}
-                        AND lou >= ?
-                        AND lou <= ?
-                    """,
-                    (*params, page_start_lou, page_end_lou),
-                ).fetchall(),
-            )
-            if type(lou) is int
-        }
+    effective_rows = archive_store.read_effective_post_rows()
+    post_count = len(effective_rows)
+    max_lou = max((row.lou for row in effective_rows), default=None)
+    slot_total = max_lou + 1 if max_lou is not None and max_lou >= 0 else 0
+    total_pages = max(1, math.ceil(slot_total / page_size))
+    resolved_page = min(page, total_pages)
+    page_start_lou = (resolved_page - 1) * page_size
+    page_end_lou = page_start_lou + page_size - 1
+    slot_end_lou = (
+        min(page_end_lou, max_lou)
+        if max_lou is not None and max_lou >= page_start_lou
+        else page_start_lou - 1
+    )
+    stripped_query = query.strip()
+    matching_lous = {
+        row.lou
+        for row in effective_rows
+        if _post_row_matches(row, stripped_query, lou_from, lou_to)
+    }
+    rows = [
+        row
+        for row in effective_rows
+        if page_start_lou <= row.lou <= page_end_lou
+    ]
+    matching_page_lous = {
+        lou
+        for lou in matching_lous
+        if page_start_lou <= lou <= page_end_lou
+    }
 
     image_urls: set[str] = set()
-    for (
-        _lou,
-        _pid,
-        content,
-        _author_name,
-        _author_uid,
-        _postdate_json,
-        image_attachments_json,
-    ) in rows:
-        image_urls.update(_attachment_urls(content, image_attachments_json))
+    for row in rows:
+        image_urls.update(_attachment_urls(row.content, row.image_attachments_json))
     image_mappings = _read_image_mappings_for_urls(output_dir, image_urls)
 
     floor_labels = _load_floor_labels(thread_folder, aid)
-    row_by_lou = {row[0]: row for row in rows}
+    row_by_lou = {row.lou: row for row in rows}
     slots: list[PostSlot] = []
     for lou in range(page_start_lou, slot_end_lou + 1):
         row = row_by_lou.get(lou)
@@ -1016,8 +958,253 @@ def read_posts(
         "pageEndLou": max(page_start_lou, slot_end_lou),
         "totalPages": total_pages,
         "postCount": post_count,
-        "matchingPostCount": matching_row[0],
+        "matchingPostCount": len(matching_lous),
         "maxLou": max_lou,
+    }
+
+
+def _archive_store_for_thread(
+    output_dir: Path,
+    tid: int,
+    raw_aid_key: str,
+) -> tuple[ThreadArchiveStore, Path, Optional[int]]:
+    aid = parse_aid_key(raw_aid_key)
+    thread_folder = output_dir / f"{tid}_{raw_aid_key}"
+    if not thread_folder.is_dir():
+        raise ThreadNotFoundError("未找到对应备份目录。")
+    db_path = thread_folder / ARCHIVE_DB_FILENAME
+    if not db_path.is_file():
+        raise ThreadUnavailableError("缺少archive.sqlite3。")
+    archive_store = ThreadArchiveStore(thread_folder)
+    archive_store.ensure_schema()
+    return archive_store, thread_folder, aid
+
+
+def _content_preview(content: str, max_length: int = 120) -> str:
+    preview = " ".join(content.split())
+    if len(preview) <= max_length:
+        return preview
+    return preview[: max_length - 1] + "…"
+
+
+def read_post_version_groups(
+    output_dir: Path,
+    tid: int,
+    raw_aid_key: str,
+) -> PostVersionGroupsResult:
+    archive_store, thread_folder, aid = _archive_store_for_thread(
+        output_dir,
+        tid,
+        raw_aid_key,
+    )
+    selected_by_lou = archive_store.read_valid_post_version_selections()
+    floor_labels = _load_floor_labels(thread_folder, aid)
+    with closing(_connect_readonly(archive_store.db_path)) as connection:
+        rows = cast(
+            list[tuple[int, int, str, str, str, str, int, int]],
+            connection.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        id,
+                        lou,
+                        source_hash,
+                        content,
+                        first_seen_at,
+                        last_seen_at,
+                        seen_count,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY lou
+                            ORDER BY last_seen_at DESC, id DESC
+                        ) AS row_number,
+                        COUNT(*) OVER (PARTITION BY lou) AS version_count
+                    FROM post_versions
+                )
+                SELECT
+                    id,
+                    lou,
+                    source_hash,
+                    content,
+                    first_seen_at,
+                    last_seen_at,
+                    seen_count,
+                    row_number
+                FROM ranked
+                WHERE version_count > 1
+                ORDER BY lou, row_number
+                """
+            ).fetchall(),
+        )
+
+    options_by_lou: dict[int, list[PostVersionOption]] = {}
+    latest_version_by_lou: dict[int, int] = {}
+    for (
+        version_id,
+        lou,
+        source_hash,
+        content,
+        first_seen_at,
+        last_seen_at,
+        seen_count,
+        row_number,
+    ) in rows:
+        is_latest = row_number == 1
+        if is_latest:
+            latest_version_by_lou[lou] = version_id
+        selected_selection = selected_by_lou.get(lou)
+        selected_version_id = (
+            None if selected_selection is None else selected_selection["version_id"]
+        )
+        option: PostVersionOption = {
+            "id": version_id,
+            "sourceHash": source_hash,
+            "firstSeenAt": first_seen_at,
+            "lastSeenAt": last_seen_at,
+            "seenCount": seen_count,
+            "isLatest": is_latest,
+            "isSelected": selected_version_id == version_id,
+            "selectable": not is_latest,
+            "contentPreview": _content_preview(content),
+        }
+        options_by_lou.setdefault(lou, []).append(option)
+
+    groups: list[PostVersionGroup] = []
+    for lou in sorted(options_by_lou):
+        latest_version_id = latest_version_by_lou[lou]
+        selected_version = selected_by_lou.get(lou)
+        selected_version_id = (
+            None if selected_version is None else selected_version["version_id"]
+        )
+        groups.append(
+            {
+                "lou": lou,
+                "floorLabel": floor_labels.label(lou),
+                "latestVersionId": latest_version_id,
+                "selectedVersionId": selected_version_id,
+                "activeVersionId": selected_version_id or latest_version_id,
+                "versions": options_by_lou[lou],
+            }
+        )
+
+    return {"items": groups}
+
+
+def read_post_version_preview(
+    output_dir: Path,
+    tid: int,
+    raw_aid_key: str,
+    version_id: int,
+) -> PostVersionPreview:
+    archive_store, thread_folder, aid = _archive_store_for_thread(
+        output_dir,
+        tid,
+        raw_aid_key,
+    )
+    row = archive_store.read_post_row_for_version(version_id)
+    if row is None:
+        raise ValueError("未知帖子正文版本。")
+
+    image_urls = _attachment_urls(row.content, row.image_attachments_json)
+    image_mappings = _read_image_mappings_for_urls(output_dir, image_urls)
+    return {
+        "item": _post_item_from_row(
+            row,
+            output_dir,
+            _load_floor_labels(thread_folder, aid),
+            image_mappings,
+        )
+    }
+
+
+def _latest_version_id_for_lou(connection: sqlite3.Connection, lou: int) -> Optional[int]:
+    latest_row = cast(
+        Optional[tuple[int]],
+        connection.execute(
+            """
+            SELECT id
+            FROM post_versions
+            WHERE lou = ?
+            ORDER BY last_seen_at DESC, id DESC
+            LIMIT 1
+            """,
+            (lou,),
+        ).fetchone(),
+    )
+    if latest_row is None:
+        return None
+    return latest_row[0]
+
+
+def select_post_version(
+    output_dir: Path,
+    tid: int,
+    raw_aid_key: str,
+    lou: int,
+    version_id: int,
+) -> PostVersionSelectionResult:
+    archive_store, thread_folder, aid = _archive_store_for_thread(
+        output_dir,
+        tid,
+        raw_aid_key,
+    )
+    with closing(_connect_readonly(archive_store.db_path)) as connection:
+        version_row = cast(
+            Optional[tuple[int, str]],
+            connection.execute(
+                """
+                SELECT lou, source_hash
+                FROM post_versions
+                WHERE id = ?
+                """,
+                (version_id,),
+            ).fetchone(),
+        )
+        if version_row is None:
+            raise ValueError("未知帖子正文版本。")
+        version_lou, source_hash = version_row
+        if version_lou != lou:
+            raise ValueError("帖子正文版本不属于指定楼层。")
+        latest_version_id = _latest_version_id_for_lou(connection, lou)
+        if latest_version_id is None:
+            raise ValueError("未知楼层。")
+        if latest_version_id == version_id:
+            raise ValueError("不能手动选择当前最新版。")
+
+    selections = load_selections(thread_folder)
+    selections[lou] = make_selection(version_id, source_hash)
+    write_selections(thread_folder, selections)
+    refresh_html_modified_for_lous(tid, aid, {lou}, thread_folder)
+    return {
+        "lou": lou,
+        "selectedVersionId": version_id,
+        "activeVersionId": version_id,
+    }
+
+
+def clear_post_version_selection(
+    output_dir: Path,
+    tid: int,
+    raw_aid_key: str,
+    lou: int,
+) -> PostVersionSelectionResult:
+    archive_store, thread_folder, aid = _archive_store_for_thread(
+        output_dir,
+        tid,
+        raw_aid_key,
+    )
+    with closing(_connect_readonly(archive_store.db_path)) as connection:
+        latest_version_id = _latest_version_id_for_lou(connection, lou)
+        if latest_version_id is None:
+            raise ValueError("未知楼层。")
+
+    selections = load_selections(thread_folder)
+    selections.pop(lou, None)
+    write_selections(thread_folder, selections)
+    refresh_html_modified_for_lous(tid, aid, {lou}, thread_folder)
+    return {
+        "lou": lou,
+        "selectedVersionId": None,
+        "activeVersionId": latest_version_id,
     }
 
 

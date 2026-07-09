@@ -1,6 +1,9 @@
 import type {
   DatabaseSchema,
   DatabaseSummary,
+  PostVersionGroup,
+  PostVersionPreview,
+  PostVersionSelectionResult,
   PostsResult,
   SortDirection,
   TableRowDetail,
@@ -63,6 +66,85 @@ export async function fetchPosts(
   return readJson<PostsResult>(
     `/api/threads/${tid}/${encodeURIComponent(aidKey)}/posts?${params.toString()}`,
   )
+}
+
+export async function fetchPostVersionGroups(
+  tid: number,
+  aidKey: string,
+): Promise<PostVersionGroup[]> {
+  const payload = await readJson<{ items: PostVersionGroup[] }>(
+    `/api/admin/threads/${tid}/${encodeURIComponent(aidKey)}/post-versions`,
+  )
+  return payload.items
+}
+
+export async function fetchPostVersionPreview(
+  tid: number,
+  aidKey: string,
+  versionId: number,
+): Promise<PostVersionPreview> {
+  return readJson<PostVersionPreview>(
+    `/api/admin/threads/${tid}/${encodeURIComponent(
+      aidKey,
+    )}/post-versions/${versionId}/preview`,
+  )
+}
+
+export async function selectPostVersion(
+  tid: number,
+  aidKey: string,
+  lou: number,
+  versionId: number,
+): Promise<PostVersionSelectionResult> {
+  const response = await fetch(
+    `/api/admin/threads/${tid}/${encodeURIComponent(
+      aidKey,
+    )}/post-version-selections/${lou}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ versionId }),
+    },
+  )
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`
+    try {
+      const payload = (await response.json()) as { error?: string }
+      if (payload.error) {
+        message = payload.error
+      }
+    } catch {
+      // Keep the HTTP status message.
+    }
+    throw new Error(message)
+  }
+  return (await response.json()) as PostVersionSelectionResult
+}
+
+export async function clearPostVersionSelection(
+  tid: number,
+  aidKey: string,
+  lou: number,
+): Promise<PostVersionSelectionResult> {
+  const response = await fetch(
+    `/api/admin/threads/${tid}/${encodeURIComponent(
+      aidKey,
+    )}/post-version-selections/${lou}`,
+    { method: 'DELETE' },
+  )
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`
+    try {
+      const payload = (await response.json()) as { error?: string }
+      if (payload.error) {
+        message = payload.error
+      }
+    } catch {
+      // Keep the HTTP status message.
+    }
+    throw new Error(message)
+  }
+  return (await response.json()) as PostVersionSelectionResult
 }
 
 export async function fetchDatabases(): Promise<DatabaseSummary[]> {

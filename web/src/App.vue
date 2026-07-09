@@ -8,7 +8,7 @@ import { RouterLink, RouterView } from 'vue-router'
       <strong>NGA 本地查看器</strong>
       <nav aria-label="主导航">
         <RouterLink to="/threads">帖子</RouterLink>
-        <RouterLink to="/databases">数据库</RouterLink>
+        <RouterLink to="/admin">管理</RouterLink>
       </nav>
     </header>
     <RouterView />

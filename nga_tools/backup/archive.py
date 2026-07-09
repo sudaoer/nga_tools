@@ -48,6 +48,7 @@ from nga_tools.backup.post_html import (
     source_hashes_by_lou as _source_hashes_by_lou,
     unresolved_missing_placeholder_lous as _unresolved_missing_placeholder_lous,
 )
+from nga_tools.backup.post_version_selection import selections_fingerprint
 from nga_tools.backup.floor_models import PAGE_JSON_RE
 from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.ngaclient import NGAClient
@@ -79,7 +80,7 @@ def _hydrate_post_records_for_html(
 
     full_records_by_lou = {
         record["lou"]: record
-        for record in archive_store.read_latest_post_records(lous_to_load)
+        for record in archive_store.read_effective_post_records(lous_to_load)
     }
     missing_lous = lous_to_load - set(full_records_by_lou)
     if missing_lous:
@@ -89,6 +90,88 @@ def _hydrate_post_records_for_html(
         raise RuntimeError(f"archive缺少待处理楼层的完整帖子：{preview}")
 
     return [full_records_by_lou.get(record["lou"], record) for record in records]
+
+
+def refresh_html_modified_for_lous(
+    tid: int,
+    aid: Optional[int],
+    lous: set[int],
+    thread_folder: Path | None = None,
+) -> None:
+    if not lous:
+        return
+
+    if thread_folder is None:
+        thread_folder = Path(utils.get_folder(tid, aid))
+    folder_html_modified = thread_folder / "html_modified"
+    archive_store = ThreadArchiveStore(thread_folder)
+    records = archive_store.read_effective_post_record_summaries()
+    source_hash_by_lou = _source_hashes_by_lou(records)
+    known_lous = set(source_hash_by_lou)
+    unknown_lous = lous - known_lous
+    if unknown_lous:
+        preview = ", ".join(str(lou) for lou in sorted(unknown_lous)[:10])
+        if len(unknown_lous) > 10:
+            preview += ", ..."
+        raise RuntimeError(f"archive缺少待刷新楼层：{preview}")
+
+    target_lous = known_lous & lous
+    active_records = [
+        record for record in records if record["lou"] in target_lous
+    ]
+    active_records = _hydrate_post_records_for_html(archive_store, active_records)
+    active_htmls = _load_post_htmls_for_records(active_records)
+
+    if aid is None:
+        floor_labels = FloorLabels.plain()
+    else:
+        try:
+            floor_labels = load_floor_labels(tid, aid)
+        except Exception as error:
+            report_warning(f"无法加载楼层映射，使用普通楼层标签：{error}")
+            floor_labels = FloorLabels.plain()
+    parsed_htmls = _parse_post_htmls_for_images(active_htmls)
+    files_to_download = _collect_image_download_tasks_from_parsed(
+        parsed_htmls,
+        floor_labels,
+    )
+    download_result = _download_images(tid, aid, files_to_download)
+    image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
+    completed_lous = set(
+        _rewrite_parsed_image_links(
+            parsed_htmls,
+            tid,
+            aid,
+            floor_labels,
+            _failed_image_urls(download_result),
+            image_lookup,
+            folder_html_modified,
+        )
+    )
+    output_hash_by_lou = _write_modified_htmls(
+        active_htmls,
+        tid,
+        aid,
+        folder_html_modified,
+    )
+
+    manifest_entries = html_modified_manifest.load_manifest(folder_html_modified)
+    skipped_lous = (
+        html_modified_manifest.completed_post_lous(
+            folder_html_modified,
+            source_hash_by_lou,
+            manifest_entries,
+        )
+        - target_lous
+    )
+    html_modified_manifest.write_updated_manifest(
+        folder_html_modified,
+        previous_entries=manifest_entries,
+        source_hash_by_lou=source_hash_by_lou,
+        skipped_lous=skipped_lous,
+        completed_lous=completed_lous,
+        output_hash_by_lou=output_hash_by_lou,
+    )
 
 
 def _html_modified_manifest_file_stats(
@@ -154,6 +237,8 @@ def _can_fast_skip_author_backup(
     thread_folder = Path(utils.get_folder(tid, aid))
     state = backup_state.load_state(thread_folder)
     if state is None:
+        return False
+    if state["post_version_overrides_hash"] != selections_fingerprint(thread_folder):
         return False
     if state["author_total_lou_count"] != author_total_lou_count:
         return False
@@ -321,7 +406,7 @@ def backup_thread(
 
     with time_section("读取归档与楼层映射"):
         with time_section("读取完整归档记录"):
-            records = archive_store.read_latest_post_records()
+            records = archive_store.read_effective_post_records()
         with time_section("楼层映射生成/复用"):
             missing_lou = _find_missing_lou(records, author_total_lou_count)
             floor_map_result = _build_floor_map_for_post_refs(
@@ -470,7 +555,7 @@ def backup_thread_sub(
 
     with time_section("读取归档与楼层映射"):
         with time_section("读取归档摘要"):
-            records = archive_store.read_latest_post_record_summaries()
+            records = archive_store.read_effective_post_record_summaries()
         with time_section("缺失楼读取与合并"):
             missing_lou = _find_missing_lou(records, author_total_lou_count)
             if aid is not None:

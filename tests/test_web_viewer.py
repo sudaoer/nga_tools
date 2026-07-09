@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.cli.parser import args_parse
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
+from nga_tools.backup.post_version_selection import POST_VERSION_SELECTIONS_FILENAME
 from nga_tools.web.data import (
     ThreadConfig,
     read_posts,
@@ -406,6 +408,73 @@ class WebServerTest:
 
         assert response.status_code == 503
         assert "缺少前端构建产物" in response.json()["error"]
+
+    def test_admin_post_version_selection_affects_reader_and_html_modified(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "before edit")])
+        _write_archive(thread_dir, [_post(1, "after edit")])
+        with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
+            version_rows = {
+                content: version_id
+                for version_id, content in connection.execute(
+                    "SELECT id, content FROM post_versions"
+                ).fetchall()
+            }
+        old_version_id = version_rows["before edit"]
+        latest_version_id = version_rows["after edit"]
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        groups_response = client.get("/api/admin/threads/101/201/post-versions")
+        latest_response = client.put(
+            "/api/admin/threads/101/201/post-version-selections/1",
+            json={"versionId": latest_version_id},
+        )
+        select_response = client.put(
+            "/api/admin/threads/101/201/post-version-selections/1",
+            json={"versionId": old_version_id},
+        )
+        posts_response = client.get("/api/threads/101/201/posts", params={"page": "1"})
+
+        assert groups_response.status_code == 200
+        group = groups_response.json()["items"][0]
+        assert group["lou"] == 1
+        assert group["latestVersionId"] == latest_version_id
+        assert {
+            option["id"]: option["selectable"]
+            for option in group["versions"]
+        } == {latest_version_id: False, old_version_id: True}
+        assert latest_response.status_code == 400
+        assert latest_response.json() == {"error": "不能手动选择当前最新版。"}
+        assert select_response.status_code == 200
+        assert posts_response.status_code == 200
+        payload = posts_response.json()
+        assert "before edit" in payload["items"][0]["html"]
+        assert payload["items"][0]["versionId"] == old_version_id
+        assert payload["items"][0]["manualVersion"] is True
+        assert (thread_dir / POST_VERSION_SELECTIONS_FILENAME).is_file()
+        html_modified = (thread_dir / "html_modified" / "post_1.html").read_text(
+            encoding="utf-8"
+        )
+        assert "before edit" in html_modified
+
+        clear_response = client.delete(
+            "/api/admin/threads/101/201/post-version-selections/1"
+        )
+        refreshed_posts_response = client.get(
+            "/api/threads/101/201/posts",
+            params={"page": "1"},
+        )
+
+        assert clear_response.status_code == 200
+        refreshed_payload = refreshed_posts_response.json()
+        assert "after edit" in refreshed_payload["items"][0]["html"]
+        assert refreshed_payload["items"][0]["manualVersion"] is False
 
 
 class WebDatabaseViewerTest:

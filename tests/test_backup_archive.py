@@ -1395,14 +1395,14 @@ class BackupThreadSubHtmlModifiedManifestTest:
             captured_lous.extend(item["lou"] for item in htmls)
             return {item["lou"] for item in htmls}
 
-        original_read_latest_post_records = ThreadArchiveStore.read_latest_post_records
+        original_read_effective_post_records = ThreadArchiveStore.read_effective_post_records
 
-        def read_latest_post_records_wrapper(
+        def read_effective_post_records_wrapper(
             store: ThreadArchiveStore,
             lous: set[int] | None = None,
         ):
             loaded_lou_sets.append(None if lous is None else set(lous))
-            return original_read_latest_post_records(store, lous)
+            return original_read_effective_post_records(store, lous)
 
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
@@ -1411,8 +1411,8 @@ class BackupThreadSubHtmlModifiedManifestTest:
 
             with patch.object(
                 ThreadArchiveStore,
-                "read_latest_post_records",
-                read_latest_post_records_wrapper,
+                "read_effective_post_records",
+                read_effective_post_records_wrapper,
             ):
                 self._run_backup_sub(
                     temp_dir,
