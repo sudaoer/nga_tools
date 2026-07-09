@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.core.hashing import hash_text
 from nga_tools.word_count import WORD_COUNT_VERSION
 
 
@@ -104,19 +105,22 @@ class ThreadArchiveStoreTest:
                     SELECT
                         word_count_version,
                         word_count_chinese_chars,
-                        word_count_chinese_with_punctuation
+                        word_count_chinese_with_punctuation,
+                        source_hash
                     FROM post_versions
                     WHERE pid = 1001
                     """
                 ).fetchone()
 
-        assert updated == 1
+        assert updated == 0
         assert {
             "word_count_version",
             "word_count_chinese_chars",
             "word_count_chinese_with_punctuation",
         } <= columns
-        assert row == (WORD_COUNT_VERSION, 2, 3)
+        assert "post_hash" not in columns
+        assert "post_json" not in columns
+        assert row == (WORD_COUNT_VERSION, 2, 3, hash_text("旧文，"))
 
     def test_page_refresh_preserves_posts_missing_from_new_response(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -183,6 +187,209 @@ class ThreadArchiveStoreTest:
         assert len(records) == 1
         assert records[0]['post']['content'] == 'after edit'
         assert version_count == 2
+
+    def test_metadata_only_change_does_not_create_post_version(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+
+            first = store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {
+                            "lou": 1,
+                            "pid": 1001,
+                            "content": "same body",
+                            "postdate": 1001,
+                            "vote_good": 0,
+                            "author": {
+                                "uid": 2001,
+                                "username": "author",
+                                "postnum": 10,
+                            },
+                        },
+                    ],
+                },
+                observed_at="2026-07-07T01:00:00+00:00",
+            )
+            second = store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {
+                            "lou": 1,
+                            "pid": 1001,
+                            "content": "same body",
+                            "postdate": 1002,
+                            "vote_good": 1,
+                            "author": {
+                                "uid": 2001,
+                                "username": "author",
+                                "postnum": 11,
+                            },
+                        },
+                    ],
+                },
+                observed_at="2026-07-07T02:00:00+00:00",
+            )
+
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                version_row = connection.execute(
+                    """
+                    SELECT COUNT(*), source_hash, seen_count
+                    FROM post_versions
+                    WHERE pid = 1001 AND lou = 1
+                    """
+                ).fetchone()
+                metadata_row = connection.execute(
+                    """
+                    SELECT author_name, author_uid, postdate_json, seen_count
+                    FROM post_latest_metadata
+                    WHERE pid = 1001 AND lou = 1
+                    """
+                ).fetchone()
+
+        assert first.post_versions_inserted == 1
+        assert second.post_versions_inserted == 0
+        assert version_row == (1, hash_text("same body"), 2)
+        assert metadata_row == ("author", 2001, "1002", 2)
+
+    def test_old_schema_migration_merges_metadata_only_versions(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE page_snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT
+                    )
+                    """
+                )
+                connection.execute("INSERT INTO page_snapshots DEFAULT VALUES")
+                connection.execute("INSERT INTO page_snapshots DEFAULT VALUES")
+                connection.execute(
+                    """
+                    CREATE TABLE post_versions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        pid INTEGER NOT NULL,
+                        lou INTEGER NOT NULL,
+                        post_hash TEXT NOT NULL,
+                        source_hash TEXT NOT NULL,
+                        post_json TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        first_seen_at TEXT NOT NULL,
+                        last_seen_at TEXT NOT NULL,
+                        seen_count INTEGER NOT NULL
+                    )
+                    """
+                )
+                for post_hash, postnum, vote_good, seen_at in [
+                    ("raw-1", 10, 0, "2026-07-07T01:00:00+00:00"),
+                    ("raw-2", 11, 1, "2026-07-07T02:00:00+00:00"),
+                ]:
+                    connection.execute(
+                        """
+                        INSERT INTO post_versions (
+                            pid,
+                            lou,
+                            post_hash,
+                            source_hash,
+                            post_json,
+                            content,
+                            first_seen_at,
+                            last_seen_at,
+                            seen_count
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            1001,
+                            1,
+                            post_hash,
+                            f"source-{post_hash}",
+                            json.dumps(
+                                {
+                                    "lou": 1,
+                                    "pid": 1001,
+                                    "content": "same body",
+                                    "vote_good": vote_good,
+                                    "author": {
+                                        "uid": 2001,
+                                        "username": "author",
+                                        "postnum": postnum,
+                                    },
+                                },
+                                ensure_ascii=False,
+                            ),
+                            "same body",
+                            seen_at,
+                            seen_at,
+                            1,
+                        ),
+                    )
+                connection.execute(
+                    """
+                    CREATE TABLE post_observations (
+                        page_snapshot_id INTEGER NOT NULL,
+                        position INTEGER NOT NULL,
+                        pid INTEGER NOT NULL,
+                        lou INTEGER NOT NULL,
+                        post_version_id INTEGER NOT NULL,
+                        PRIMARY KEY(page_snapshot_id, position)
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO post_observations (
+                        page_snapshot_id,
+                        position,
+                        pid,
+                        lou,
+                        post_version_id
+                    )
+                    VALUES (1, 0, 1001, 1, 1), (2, 0, 1001, 1, 2)
+                    """
+                )
+                connection.commit()
+
+            store.ensure_schema()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(post_versions)"
+                    ).fetchall()
+                }
+                version_row = connection.execute(
+                    """
+                    SELECT COUNT(*), source_hash, seen_count
+                    FROM post_versions
+                    """
+                ).fetchone()
+                observation_row = connection.execute(
+                    """
+                    SELECT COUNT(*), COUNT(DISTINCT post_version_id)
+                    FROM post_observations
+                    """
+                ).fetchone()
+                metadata_row = connection.execute(
+                    """
+                    SELECT author_name, author_uid, seen_count
+                    FROM post_latest_metadata
+                    WHERE pid = 1001 AND lou = 1
+                    """
+                ).fetchone()
+
+        assert "post_hash" not in columns
+        assert "post_json" not in columns
+        assert version_row == (1, hash_text("same body"), 2)
+        assert observation_row == (2, 1)
+        assert metadata_row == ("author", 2001, 2)
 
     def test_read_latest_post_record_summaries_skip_post_json(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

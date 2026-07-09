@@ -9,7 +9,7 @@ from typing import Literal, Optional, TypeAlias, TypedDict, cast
 from urllib.parse import quote
 
 from nga_tools.backup import image_store
-from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
+from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
 from nga_tools.forum.thread_store import FORUM_THREAD_DB_FILENAME
 from nga_tools.web.data import parse_thread_dir_name
 
@@ -260,6 +260,8 @@ def resolve_database(output_dir: Path, database_id: str) -> DatabaseRef:
         raise DatabaseNotFoundError("未知数据库。")
     if not resolved_path.is_file():
         raise DatabaseNotFoundError("数据库文件不存在。")
+    if ref.kind == "archive":
+        ThreadArchiveStore(ref.path.parent).ensure_schema()
     return ref
 
 

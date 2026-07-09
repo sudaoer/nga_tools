@@ -210,8 +210,8 @@ pixi run python main.py web serve --port 18737
 pixi run python main.py web serve --host 0.0.0.0 --port 18736
 ```
 
-Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页面请求时从原始
-帖子数据重新渲染 HTML；线程列表会显示已存盘的正文字数，并支持按正文字数
+Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页面请求时从归档
+正文和最新展示元数据重新渲染 HTML；线程列表会显示已存盘的正文字数，并支持按正文字数
 排序。`html_modified/post_*.html` 仍是备份/PDF流程使用的
 产物。旧版只有 `json/page_*.json` 的目录会在页面中显示为“需迁移”，请先运行
 `backup migrate-store`。
@@ -257,7 +257,8 @@ PDF 生成功能会调用 `weasyprint` 命令。通过 `pixi run` 启动时会�
 默认输出到 `output/<tid>_<aid|all>/`：
 
 - `json/`：加 `--write-json` 时输出的接口最近响应分页数据
-- `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照和帖子版本
+- `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照、正文版本和最新展示元数据；
+  完整原始分页响应保存在 `page_snapshots.page_json`，`post_versions` 只按正文内容做版本控制
 - `html_modified/`：替换为本地 `images_unique` 图片路径后的 HTML
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 - `floor_map.json`：只看作者楼层到原帖楼层的映射

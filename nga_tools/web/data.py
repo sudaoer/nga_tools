@@ -15,7 +15,11 @@ from bs4 import BeautifulSoup, Tag
 
 from nga_tools import utils
 from nga_tools.backup import image_store
-from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
+from nga_tools.backup.archive_posts import (
+    image_attachments_from_json,
+    postdate_from_json,
+)
+from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
 from nga_tools.backup.floor_models import (
     MISSING_POST_HTML,
     ORIGINAL_POSTS_PER_PAGE,
@@ -24,7 +28,6 @@ from nga_tools.backup.floor_models import (
 from nga_tools.backup.post_data import (
     attachment_url_from_value,
     make_image_src_resolver,
-    post_data_from_raw,
 )
 from nga_tools.forum.thread_configs import (
     NGAThreadConfigs,
@@ -200,34 +203,21 @@ def _has_word_count_columns(connection: sqlite3.Connection) -> bool:
     } <= columns
 
 
-def _postdate_from_json_text(post_json: str) -> Optional[PostDate]:
-    try:
-        raw_post: object = json.loads(post_json)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(raw_post, dict):
-        return None
-    post = cast(dict[str, object], raw_post)
-    value = post.get("postdate")
-    if type(value) is int:
-        return value
-    if isinstance(value, str):
-        stripped_value = value.strip()
-        return stripped_value if stripped_value else None
-    return None
-
-
 def _read_archive_stats(db_path: Path) -> ArchiveStats:
+    ThreadArchiveStore(db_path.parent).ensure_schema()
     latest_cte = """
         WITH latest AS (
             SELECT
-                lou,
-                post_json,
+                post_versions.lou,
+                post_latest_metadata.postdate_json,
                 ROW_NUMBER() OVER (
-                    PARTITION BY lou
-                    ORDER BY last_seen_at DESC, id DESC
+                    PARTITION BY post_versions.lou
+                    ORDER BY post_versions.last_seen_at DESC, post_versions.id DESC
                 ) AS row_number
             FROM post_versions
+            LEFT JOIN post_latest_metadata
+                ON post_latest_metadata.pid = post_versions.pid
+                AND post_latest_metadata.lou = post_versions.lou
         )
     """
     with closing(_connect_readonly(db_path)) as connection:
@@ -251,11 +241,11 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
             ).fetchone(),
         )
         latest_post_row = cast(
-            Optional[tuple[str]],
+            Optional[tuple[Optional[str]]],
             connection.execute(
                 f"""
                 {latest_cte}
-                SELECT post_json
+                SELECT postdate_json
                 FROM latest
                 WHERE row_number = 1
                 ORDER BY lou DESC
@@ -353,7 +343,7 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
 
     author_updated_at: Optional[PostDate] = None
     if latest_post_row is not None:
-        author_updated_at = _postdate_from_json_text(latest_post_row[0])
+        author_updated_at = postdate_from_json(latest_post_row[0])
 
     return ArchiveStats(
         post_count=post_row[0],
@@ -461,7 +451,7 @@ def _thread_summary_for_folder(
             status = "ready"
             if not has_html_modified:
                 message = "未找到html_modified/post_*.html，Web将从原始备份数据渲染。"
-        except sqlite3.Error as error:
+        except (sqlite3.Error, RuntimeError, ValueError) as error:
             status = "invalid"
             message = f"archive.sqlite3无法读取：{error}"
     elif (thread_folder / "json").is_dir():
@@ -670,31 +660,20 @@ def _output_image_url(
     return _safe_output_url(output_dir / unique_rel_path, output_dir)
 
 
-def _raw_post_from_json(post_json: str) -> dict[str, object]:
-    raw_post: object = json.loads(post_json)
-    if isinstance(raw_post, dict):
-        return cast(dict[str, object], raw_post)
-    return {}
-
-
-def _post_content(raw_post: dict[str, object]) -> str:
-    content = raw_post.get("content")
-    return content if isinstance(content, str) else ""
-
-
-def _attachment_urls(raw_post: dict[str, object]) -> set[str]:
+def _attachment_urls(
+    content: str,
+    image_attachments_json: Optional[str],
+) -> set[str]:
     urls: set[str] = set()
-    for match in _IMG_BBCODE_RE.finditer(_post_content(raw_post)):
+    for match in _IMG_BBCODE_RE.finditer(content):
         url = attachment_url_from_value(match.group(1))
         if url is not None:
             urls.add(url)
 
-    try:
-        post_data = post_data_from_raw(raw_post)
-    except ValueError:
-        return urls
-
-    urls.update(attachment["url"] for attachment in post_data["image_attachments"])
+    urls.update(
+        attachment["url"]
+        for attachment in image_attachments_from_json(image_attachments_json)
+    )
     return urls
 
 
@@ -703,15 +682,15 @@ def _unresolved_image_src(_image_src: str) -> str | None:
 
 
 def _image_src_resolver(
-    raw_post: dict[str, object],
+    image_attachments_json: Optional[str],
     output_dir: Path,
     image_mappings: dict[str, str],
 ) -> ImageSrcResolver:
     attachment_resolver: ImageSrcResolver
-    try:
-        post_data = post_data_from_raw(raw_post)
-        attachment_resolver = make_image_src_resolver(post_data["image_attachments"])
-    except ValueError:
+    attachments = image_attachments_from_json(image_attachments_json)
+    if attachments:
+        attachment_resolver = make_image_src_resolver(attachments)
+    else:
         attachment_resolver = _unresolved_image_src
 
     def resolve_image_src(image_src: str) -> str | None:
@@ -725,31 +704,6 @@ def _image_src_resolver(
         return normalized_src if output_url is None else output_url
 
     return resolve_image_src
-
-
-def _optional_postdate_from_post(
-    post: dict[str, object],
-    key: str,
-) -> Optional[PostDate]:
-    value = post.get(key)
-    if type(value) is int:
-        return value
-    if isinstance(value, str):
-        stripped_value = value.strip()
-        return stripped_value if stripped_value else None
-    return None
-
-
-def _post_author(post: dict[str, object]) -> tuple[Optional[str], Optional[int]]:
-    raw_author = post.get("author")
-    if not isinstance(raw_author, dict):
-        return None, None
-    author = cast(dict[str, object], raw_author)
-    raw_name = author.get("username") or author.get("nickname")
-    author_name = raw_name if isinstance(raw_name, str) and raw_name else None
-    raw_uid = author.get("uid")
-    author_uid = raw_uid if type(raw_uid) is int else None
-    return author_name, author_uid
 
 
 def _tag_classes(tag: Tag) -> set[str]:
@@ -802,17 +756,35 @@ def _normalize_nga_fold_boxes(html: str) -> str:
 
 
 def _post_item_from_row(
-    row: tuple[int, Optional[int], str, str],
+    row: tuple[
+        int,
+        Optional[int],
+        str,
+        Optional[str],
+        Optional[int],
+        Optional[str],
+        Optional[str],
+    ],
     output_dir: Path,
     floor_labels: FloorLabels,
     image_mappings: dict[str, str],
 ) -> PostSlot:
-    lou, pid, post_json, _content = row
-    post = _raw_post_from_json(post_json)
-    author_name, author_uid = _post_author(post)
+    (
+        lou,
+        pid,
+        content,
+        author_name,
+        author_uid,
+        postdate_json,
+        image_attachments_json,
+    ) = row
     html = render_web_bbcode(
-        _post_content(post),
-        image_src_resolver=_image_src_resolver(post, output_dir, image_mappings),
+        content,
+        image_src_resolver=_image_src_resolver(
+            image_attachments_json,
+            output_dir,
+            image_mappings,
+        ),
     )
     html = _normalize_nga_fold_boxes(html)
 
@@ -821,7 +793,7 @@ def _post_item_from_row(
         "pid": pid,
         "authorName": author_name,
         "authorUid": author_uid,
-        "postdate": _optional_postdate_from_post(post, "postdate"),
+        "postdate": postdate_from_json(postdate_json),
         "floorLabel": floor_labels.label(lou),
         "html": sanitize_post_html(html),
         "emptyReason": None,
@@ -888,21 +860,28 @@ def read_posts(
     db_path = thread_folder / ARCHIVE_DB_FILENAME
     if not db_path.is_file():
         raise ThreadUnavailableError("缺少archive.sqlite3。")
+    ThreadArchiveStore(thread_folder).ensure_schema()
 
     page_size = ORIGINAL_POSTS_PER_PAGE
     where_sql, params = _latest_posts_where(query.strip(), lou_from, lou_to)
     latest_cte = """
         WITH latest AS (
             SELECT
-                lou,
-                pid,
-                post_json,
-                content,
+                post_versions.lou,
+                post_versions.pid,
+                post_versions.content,
+                post_latest_metadata.author_name,
+                post_latest_metadata.author_uid,
+                post_latest_metadata.postdate_json,
+                post_latest_metadata.image_attachments_json,
                 ROW_NUMBER() OVER (
-                    PARTITION BY lou
-                    ORDER BY last_seen_at DESC, id DESC
+                    PARTITION BY post_versions.lou
+                    ORDER BY post_versions.last_seen_at DESC, post_versions.id DESC
                 ) AS row_number
             FROM post_versions
+            LEFT JOIN post_latest_metadata
+                ON post_latest_metadata.pid = post_versions.pid
+                AND post_latest_metadata.lou = post_versions.lou
         )
     """
     with closing(_connect_readonly(db_path)) as connection:
@@ -942,11 +921,28 @@ def read_posts(
             else page_start_lou - 1
         )
         rows = cast(
-            list[tuple[int, Optional[int], str, str]],
+            list[
+                tuple[
+                    int,
+                    Optional[int],
+                    str,
+                    Optional[str],
+                    Optional[int],
+                    Optional[str],
+                    Optional[str],
+                ]
+            ],
             connection.execute(
                 f"""
                 {latest_cte}
-                SELECT lou, pid, post_json, content
+                SELECT
+                    lou,
+                    pid,
+                    content,
+                    author_name,
+                    author_uid,
+                    postdate_json,
+                    image_attachments_json
                 FROM latest
                 WHERE row_number = 1
                     AND lou >= ?
@@ -976,8 +972,16 @@ def read_posts(
         }
 
     image_urls: set[str] = set()
-    for _lou, _pid, post_json, _content in rows:
-        image_urls.update(_attachment_urls(_raw_post_from_json(post_json)))
+    for (
+        _lou,
+        _pid,
+        content,
+        _author_name,
+        _author_uid,
+        _postdate_json,
+        image_attachments_json,
+    ) in rows:
+        image_urls.update(_attachment_urls(content, image_attachments_json))
     image_mappings = _read_image_mappings_for_urls(output_dir, image_urls)
 
     floor_labels = _load_floor_labels(thread_folder, aid)

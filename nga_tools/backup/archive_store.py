@@ -9,9 +9,13 @@ from pathlib import Path
 from typing import Optional, cast
 
 from nga_tools.backup.floor_models import AuthorPostRef, PAGE_JSON_RE
-from nga_tools.backup.models import PostRecord
+from nga_tools.backup.models import PostData, PostRecord
+from nga_tools.backup.archive_posts import (
+    image_attachments_from_json,
+    metadata_from_raw_post,
+)
 from nga_tools.backup.post_data import post_data_from_raw, post_source_hash
-from nga_tools.core.hashing import hash_object
+from nga_tools.core.hashing import hash_object, hash_text
 from nga_tools.ngaclient.client import PageData
 from nga_tools.word_count import WORD_COUNT_VERSION, count_post_content
 
@@ -19,13 +23,19 @@ ARCHIVE_DB_FILENAME = "archive.sqlite3"
 _SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
 _SQLITE_BUSY_TIMEOUT_MILLISECONDS = int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)
 _LATEST_POST_RECORDS_QUERY = """
-    SELECT id, lou, pid, post_json, source_hash
+    SELECT
+        latest.id,
+        latest.lou,
+        latest.pid,
+        latest.content,
+        latest.source_hash,
+        post_latest_metadata.image_attachments_json
     FROM (
         SELECT
             id,
             lou,
             pid,
-            post_json,
+            content,
             source_hash,
             ROW_NUMBER() OVER (
                 PARTITION BY lou
@@ -33,9 +43,12 @@ _LATEST_POST_RECORDS_QUERY = """
             ) AS row_number
         FROM post_versions
         {where_lous}
-    )
-    WHERE row_number = 1
-    ORDER BY lou
+    ) AS latest
+    LEFT JOIN post_latest_metadata
+        ON post_latest_metadata.pid = latest.pid
+        AND post_latest_metadata.lou = latest.lou
+    WHERE latest.row_number = 1
+    ORDER BY latest.lou
     """
 _LATEST_POST_RECORD_SUMMARIES_QUERY = """
     SELECT lou, pid, source_hash
@@ -76,6 +89,33 @@ class ArchiveWordCountTotals:
     body_posts: int
     chinese_chars: int
     chinese_with_punctuation: int
+
+
+@dataclass
+class _MergedPostVersion:
+    pid: int
+    lou: int
+    source_hash: str
+    content: str
+    first_seen_at: str
+    last_seen_at: str
+    seen_count: int
+    old_ids: list[int]
+
+
+@dataclass
+class _LatestPostMetadata:
+    pid: int
+    lou: int
+    author_name: Optional[str]
+    author_uid: Optional[int]
+    postdate_json: Optional[str]
+    image_attachments_json: str
+    first_seen_at: str
+    last_seen_at: str
+    seen_count: int
+    selected_last_seen_at: str
+    selected_old_id: int
 
 
 def _now_utc_iso() -> str:
@@ -144,6 +184,18 @@ def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
     return {row[1] for row in rows if isinstance(row[1], str)}
 
 
+def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM sqlite_schema
+        WHERE type = 'table' AND name = ?
+        """,
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
 class ThreadArchiveStore:
     def __init__(self, thread_folder: Path) -> None:
         self.thread_folder = thread_folder
@@ -169,6 +221,76 @@ class ThreadArchiveStore:
         self._ensure_schema(connection)
         return connection
 
+    def ensure_schema(self) -> None:
+        with closing(self._connect()):
+            pass
+
+    def _create_post_versions_table(
+        self,
+        connection: sqlite3.Connection,
+        table_name: str = "post_versions",
+    ) -> None:
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pid INTEGER NOT NULL,
+                lou INTEGER NOT NULL,
+                source_hash TEXT NOT NULL,
+                content TEXT NOT NULL,
+                word_count_version INTEGER NOT NULL DEFAULT 0,
+                word_count_chinese_chars INTEGER NOT NULL DEFAULT 0,
+                word_count_chinese_with_punctuation INTEGER NOT NULL DEFAULT 0,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                seen_count INTEGER NOT NULL,
+                UNIQUE(pid, lou, source_hash)
+            )
+            """
+        )
+
+    def _create_post_latest_metadata_table(
+        self,
+        connection: sqlite3.Connection,
+        table_name: str = "post_latest_metadata",
+    ) -> None:
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                pid INTEGER NOT NULL,
+                lou INTEGER NOT NULL,
+                author_name TEXT,
+                author_uid INTEGER,
+                postdate_json TEXT,
+                image_attachments_json TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                seen_count INTEGER NOT NULL,
+                PRIMARY KEY(pid, lou)
+            )
+            """
+        )
+
+    def _create_post_observations_table(
+        self,
+        connection: sqlite3.Connection,
+        table_name: str = "post_observations",
+    ) -> None:
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                page_snapshot_id INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                lou INTEGER NOT NULL,
+                post_version_id INTEGER NOT NULL,
+                PRIMARY KEY(page_snapshot_id, position),
+                FOREIGN KEY(page_snapshot_id) REFERENCES page_snapshots(id),
+                FOREIGN KEY(post_version_id) REFERENCES post_versions(id)
+            )
+            """
+        )
+
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         connection.execute(
             """
@@ -188,41 +310,16 @@ class ThreadArchiveStore:
             )
             """
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS post_versions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pid INTEGER NOT NULL,
-                lou INTEGER NOT NULL,
-                post_hash TEXT NOT NULL,
-                source_hash TEXT NOT NULL,
-                post_json TEXT NOT NULL,
-                content TEXT NOT NULL,
-                word_count_version INTEGER NOT NULL DEFAULT 0,
-                word_count_chinese_chars INTEGER NOT NULL DEFAULT 0,
-                word_count_chinese_with_punctuation INTEGER NOT NULL DEFAULT 0,
-                first_seen_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL,
-                seen_count INTEGER NOT NULL,
-                UNIQUE(pid, lou, post_hash)
-            )
-            """
-        )
-        self._ensure_post_version_word_count_columns(connection)
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS post_observations (
-                page_snapshot_id INTEGER NOT NULL,
-                position INTEGER NOT NULL,
-                pid INTEGER NOT NULL,
-                lou INTEGER NOT NULL,
-                post_version_id INTEGER NOT NULL,
-                PRIMARY KEY(page_snapshot_id, position),
-                FOREIGN KEY(page_snapshot_id) REFERENCES page_snapshots(id),
-                FOREIGN KEY(post_version_id) REFERENCES post_versions(id)
-            )
-            """
-        )
+        if not _table_exists(connection, "post_versions"):
+            self._create_post_versions_table(connection)
+        else:
+            columns = _table_columns(connection, "post_versions")
+            if "post_hash" in columns or "post_json" in columns:
+                self._migrate_post_versions_schema(connection, columns)
+            else:
+                self._ensure_post_version_word_count_columns(connection)
+        self._create_post_latest_metadata_table(connection)
+        self._create_post_observations_table(connection)
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_post_versions_latest
@@ -262,6 +359,310 @@ class ThreadArchiveStore:
         for column_name, alter_sql in missing_columns:
             if column_name not in columns:
                 connection.execute(alter_sql)
+
+    def _read_old_post_version_rows(
+        self,
+        connection: sqlite3.Connection,
+        columns: set[str],
+    ) -> list[tuple[int, int, int, str, str, str, int, Optional[str]]]:
+        post_json_expression = "post_json" if "post_json" in columns else "NULL"
+        rows = connection.execute(
+            f"""
+            SELECT
+                id,
+                pid,
+                lou,
+                content,
+                first_seen_at,
+                last_seen_at,
+                seen_count,
+                {post_json_expression}
+            FROM post_versions
+            ORDER BY id
+            """
+        ).fetchall()
+        old_rows: list[tuple[int, int, int, str, str, str, int, Optional[str]]] = []
+        for row in rows:
+            old_id, pid, lou, content, first_seen_at, last_seen_at, seen_count, post_json = row
+            if (
+                type(old_id) is not int
+                or type(pid) is not int
+                or type(lou) is not int
+                or not isinstance(content, str)
+                or not isinstance(first_seen_at, str)
+                or not isinstance(last_seen_at, str)
+                or type(seen_count) is not int
+                or (post_json is not None and not isinstance(post_json, str))
+            ):
+                raise ValueError(
+                    f"archive post_versions旧行字段无效：{self.db_path} row={row!r}"
+                )
+            old_rows.append(
+                (
+                    old_id,
+                    pid,
+                    lou,
+                    content,
+                    first_seen_at,
+                    last_seen_at,
+                    seen_count,
+                    post_json,
+                )
+            )
+        return old_rows
+
+    def _read_old_post_observation_rows(
+        self,
+        connection: sqlite3.Connection,
+    ) -> list[tuple[int, int, int, int, int]]:
+        if not _table_exists(connection, "post_observations"):
+            return []
+        columns = _table_columns(connection, "post_observations")
+        required_columns = {
+            "page_snapshot_id",
+            "position",
+            "pid",
+            "lou",
+            "post_version_id",
+        }
+        if not required_columns <= columns:
+            return []
+        rows = connection.execute(
+            """
+            SELECT page_snapshot_id, position, pid, lou, post_version_id
+            FROM post_observations
+            ORDER BY page_snapshot_id, position
+            """
+        ).fetchall()
+        observation_rows: list[tuple[int, int, int, int, int]] = []
+        for row in rows:
+            page_snapshot_id, position, pid, lou, post_version_id = row
+            if (
+                type(page_snapshot_id) is int
+                and type(position) is int
+                and type(pid) is int
+                and type(lou) is int
+                and type(post_version_id) is int
+            ):
+                observation_rows.append(
+                    (page_snapshot_id, position, pid, lou, post_version_id)
+                )
+        return observation_rows
+
+    def _merge_old_post_version_row(
+        self,
+        merged_versions: dict[tuple[int, int, str], _MergedPostVersion],
+        *,
+        old_id: int,
+        pid: int,
+        lou: int,
+        content: str,
+        first_seen_at: str,
+        last_seen_at: str,
+        seen_count: int,
+    ) -> None:
+        source_hash = hash_text(content)
+        key = (pid, lou, source_hash)
+        merged = merged_versions.get(key)
+        if merged is None:
+            merged_versions[key] = _MergedPostVersion(
+                pid=pid,
+                lou=lou,
+                source_hash=source_hash,
+                content=content,
+                first_seen_at=first_seen_at,
+                last_seen_at=last_seen_at,
+                seen_count=seen_count,
+                old_ids=[old_id],
+            )
+            return
+
+        if first_seen_at < merged.first_seen_at:
+            merged.first_seen_at = first_seen_at
+        if last_seen_at > merged.last_seen_at:
+            merged.last_seen_at = last_seen_at
+        merged.seen_count += seen_count
+        merged.old_ids.append(old_id)
+
+    def _merge_old_post_metadata_row(
+        self,
+        metadata_by_post: dict[tuple[int, int], _LatestPostMetadata],
+        *,
+        old_id: int,
+        pid: int,
+        lou: int,
+        first_seen_at: str,
+        last_seen_at: str,
+        seen_count: int,
+        post_json: Optional[str],
+    ) -> None:
+        raw_post: object = None
+        if post_json is not None:
+            try:
+                raw_post = json.loads(post_json)
+            except json.JSONDecodeError:
+                raw_post = None
+        metadata = metadata_from_raw_post(raw_post)
+        key = (pid, lou)
+        current = metadata_by_post.get(key)
+        if current is None:
+            metadata_by_post[key] = _LatestPostMetadata(
+                pid=pid,
+                lou=lou,
+                author_name=metadata["author_name"],
+                author_uid=metadata["author_uid"],
+                postdate_json=metadata["postdate_json"],
+                image_attachments_json=metadata["image_attachments_json"],
+                first_seen_at=first_seen_at,
+                last_seen_at=last_seen_at,
+                seen_count=seen_count,
+                selected_last_seen_at=last_seen_at,
+                selected_old_id=old_id,
+            )
+            return
+
+        if first_seen_at < current.first_seen_at:
+            current.first_seen_at = first_seen_at
+        if last_seen_at > current.last_seen_at:
+            current.last_seen_at = last_seen_at
+        current.seen_count += seen_count
+        if (last_seen_at, old_id) >= (
+            current.selected_last_seen_at,
+            current.selected_old_id,
+        ):
+            current.author_name = metadata["author_name"]
+            current.author_uid = metadata["author_uid"]
+            current.postdate_json = metadata["postdate_json"]
+            current.image_attachments_json = metadata["image_attachments_json"]
+            current.selected_last_seen_at = last_seen_at
+            current.selected_old_id = old_id
+
+    def _migrate_post_versions_schema(
+        self,
+        connection: sqlite3.Connection,
+        columns: set[str],
+    ) -> None:
+        old_rows = self._read_old_post_version_rows(connection, columns)
+        old_observation_rows = self._read_old_post_observation_rows(connection)
+
+        merged_versions: dict[tuple[int, int, str], _MergedPostVersion] = {}
+        metadata_by_post: dict[tuple[int, int], _LatestPostMetadata] = {}
+        for old_id, pid, lou, content, first_seen_at, last_seen_at, seen_count, post_json in old_rows:
+            self._merge_old_post_version_row(
+                merged_versions,
+                old_id=old_id,
+                pid=pid,
+                lou=lou,
+                content=content,
+                first_seen_at=first_seen_at,
+                last_seen_at=last_seen_at,
+                seen_count=seen_count,
+            )
+            self._merge_old_post_metadata_row(
+                metadata_by_post,
+                old_id=old_id,
+                pid=pid,
+                lou=lou,
+                first_seen_at=first_seen_at,
+                last_seen_at=last_seen_at,
+                seen_count=seen_count,
+                post_json=post_json,
+            )
+
+        connection.execute("DROP TABLE IF EXISTS post_observations")
+        connection.execute("DROP TABLE IF EXISTS post_versions")
+        connection.execute("DROP TABLE IF EXISTS post_latest_metadata")
+        self._create_post_versions_table(connection)
+        self._create_post_latest_metadata_table(connection)
+
+        old_version_id_to_new_id: dict[int, int] = {}
+        for merged in sorted(
+            merged_versions.values(),
+            key=lambda item: min(item.old_ids),
+        ):
+            word_count = count_post_content(merged.content)
+            cursor = connection.execute(
+                """
+                INSERT INTO post_versions (
+                    pid,
+                    lou,
+                    source_hash,
+                    content,
+                    word_count_version,
+                    word_count_chinese_chars,
+                    word_count_chinese_with_punctuation,
+                    first_seen_at,
+                    last_seen_at,
+                    seen_count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    merged.pid,
+                    merged.lou,
+                    merged.source_hash,
+                    merged.content,
+                    WORD_COUNT_VERSION,
+                    word_count.chinese_chars,
+                    word_count.chinese_with_punctuation,
+                    merged.first_seen_at,
+                    merged.last_seen_at,
+                    merged.seen_count,
+                ),
+            )
+            new_id = cursor.lastrowid
+            if type(new_id) is not int:
+                raise RuntimeError("迁移post_versions后无法读取新version id。")
+            for old_id in merged.old_ids:
+                old_version_id_to_new_id[old_id] = new_id
+
+        for metadata in metadata_by_post.values():
+            connection.execute(
+                """
+                INSERT INTO post_latest_metadata (
+                    pid,
+                    lou,
+                    author_name,
+                    author_uid,
+                    postdate_json,
+                    image_attachments_json,
+                    first_seen_at,
+                    last_seen_at,
+                    seen_count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    metadata.pid,
+                    metadata.lou,
+                    metadata.author_name,
+                    metadata.author_uid,
+                    metadata.postdate_json,
+                    metadata.image_attachments_json,
+                    metadata.first_seen_at,
+                    metadata.last_seen_at,
+                    metadata.seen_count,
+                ),
+            )
+
+        self._create_post_observations_table(connection)
+        for page_snapshot_id, position, pid, lou, old_post_version_id in old_observation_rows:
+            new_post_version_id = old_version_id_to_new_id.get(old_post_version_id)
+            if new_post_version_id is None:
+                continue
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO post_observations (
+                    page_snapshot_id,
+                    position,
+                    pid,
+                    lou,
+                    post_version_id
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (page_snapshot_id, position, pid, lou, new_post_version_id),
+            )
 
     def _page_snapshot_id(
         self,
@@ -357,15 +758,15 @@ class ThreadArchiveStore:
         connection: sqlite3.Connection,
         pid: int,
         lou: int,
-        post_hash: str,
+        source_hash: str,
     ) -> Optional[int]:
         row = connection.execute(
             """
             SELECT id
             FROM post_versions
-            WHERE pid = ? AND lou = ? AND post_hash = ?
+            WHERE pid = ? AND lou = ? AND source_hash = ?
             """,
-            (pid, lou, post_hash),
+            (pid, lou, source_hash),
         ).fetchone()
         if row is None:
             return None
@@ -377,20 +778,19 @@ class ThreadArchiveStore:
     def _upsert_post_version(
         self,
         connection: sqlite3.Connection,
-        raw_post: object,
+        post: PostData,
         observed_at: str,
         *,
         count_observation: bool,
     ) -> tuple[int, bool]:
-        post = post_data_from_raw(raw_post)
-        post_hash = hash_object(raw_post)
+        source_hash = post_source_hash(post)
         word_count = count_post_content(post["content"])
         inserted = (
             self._post_version_id(
                 connection,
                 post["pid"],
                 post["lou"],
-                post_hash,
+                source_hash,
             )
             is None
         )
@@ -400,9 +800,7 @@ class ThreadArchiveStore:
             INSERT INTO post_versions (
                 pid,
                 lou,
-                post_hash,
                 source_hash,
-                post_json,
                 content,
                 word_count_version,
                 word_count_chinese_chars,
@@ -411,9 +809,8 @@ class ThreadArchiveStore:
                 last_seen_at,
                 seen_count
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(pid, lou, post_hash) DO UPDATE SET
-                post_json = excluded.post_json,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(pid, lou, source_hash) DO UPDATE SET
                 content = excluded.content,
                 source_hash = excluded.source_hash,
                 word_count_version = excluded.word_count_version,
@@ -435,9 +832,7 @@ class ThreadArchiveStore:
             (
                 post["pid"],
                 post["lou"],
-                post_hash,
-                post_source_hash(post),
-                _json_text(raw_post),
+                source_hash,
                 post["content"],
                 WORD_COUNT_VERSION,
                 word_count.chinese_chars,
@@ -451,11 +846,66 @@ class ThreadArchiveStore:
             connection,
             post["pid"],
             post["lou"],
-            post_hash,
+            source_hash,
         )
         if version_id is None:
             raise RuntimeError("写入post_versions后无法读取version id。")
         return version_id, inserted
+
+    def _upsert_post_latest_metadata(
+        self,
+        connection: sqlite3.Connection,
+        raw_post: object,
+        post: PostData,
+        observed_at: str,
+        *,
+        count_observation: bool,
+    ) -> None:
+        metadata = metadata_from_raw_post(raw_post)
+        seen_increment = 1 if count_observation else 0
+        connection.execute(
+            """
+            INSERT INTO post_latest_metadata (
+                pid,
+                lou,
+                author_name,
+                author_uid,
+                postdate_json,
+                image_attachments_json,
+                first_seen_at,
+                last_seen_at,
+                seen_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(pid, lou) DO UPDATE SET
+                author_name = excluded.author_name,
+                author_uid = excluded.author_uid,
+                postdate_json = excluded.postdate_json,
+                image_attachments_json = excluded.image_attachments_json,
+                first_seen_at = CASE
+                    WHEN post_latest_metadata.first_seen_at > excluded.first_seen_at
+                    THEN excluded.first_seen_at
+                    ELSE post_latest_metadata.first_seen_at
+                END,
+                last_seen_at = CASE
+                    WHEN post_latest_metadata.last_seen_at < excluded.last_seen_at
+                    THEN excluded.last_seen_at
+                    ELSE post_latest_metadata.last_seen_at
+                END,
+                seen_count = post_latest_metadata.seen_count + ?
+            """,
+            (
+                post["pid"],
+                post["lou"],
+                metadata["author_name"],
+                metadata["author_uid"],
+                metadata["postdate_json"],
+                metadata["image_attachments_json"],
+                observed_at,
+                observed_at,
+                seen_increment,
+            ),
+        )
 
     def upsert_page(
         self,
@@ -489,7 +939,14 @@ class ThreadArchiveStore:
                     post = post_data_from_raw(raw_post)
                     version_id, version_inserted = self._upsert_post_version(
                         connection,
+                        post,
+                        observed_at,
+                        count_observation=count_observation,
+                    )
+                    self._upsert_post_latest_metadata(
+                        connection,
                         raw_post,
+                        post,
                         observed_at,
                         count_observation=count_observation,
                     )
@@ -661,7 +1118,7 @@ class ThreadArchiveStore:
 
         with closing(self._connect()) as connection:
             rows = cast(
-                list[tuple[int, int, int, str, str]],
+                list[tuple[int, int, int, str, str, Optional[str]]],
                 connection.execute(
                     _LATEST_POST_RECORDS_QUERY.format(where_lous=where_lous),
                     params,
@@ -669,17 +1126,18 @@ class ThreadArchiveStore:
             )
 
         records: list[PostRecord] = []
-        for version_id, lou, pid, post_json, source_hash in rows:
-            raw_post: object = json.loads(post_json)
-            post = post_data_from_raw(
-                raw_post,
-                source=f"{self.db_path} post_versions.id={version_id}",
-            )
+        for _version_id, lou, pid, content, source_hash, image_attachments_json in rows:
+            image_attachments = image_attachments_from_json(image_attachments_json)
             records.append(
                 {
                     "lou": lou,
                     "pid": pid,
-                    "post": post,
+                    "post": {
+                        "lou": lou,
+                        "pid": pid,
+                        "content": content,
+                        "image_attachments": image_attachments,
+                    },
                     "html": None,
                     "source_hash": source_hash,
                 }

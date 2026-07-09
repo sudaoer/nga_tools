@@ -24,45 +24,11 @@ def _write_archive(
     posts: list[dict[str, object]],
 ) -> None:
     thread_dir.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(thread_dir / "archive.sqlite3")
-    try:
-        connection.execute("CREATE TABLE page_snapshots (page_number INTEGER)")
-        connection.execute("INSERT INTO page_snapshots (page_number) VALUES (1)")
-        connection.execute(
-            """
-            CREATE TABLE post_versions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pid INTEGER,
-                lou INTEGER,
-                post_json TEXT,
-                content TEXT,
-                last_seen_at TEXT
-            )
-            """
-        )
-        for post in posts:
-            connection.execute(
-                """
-                INSERT INTO post_versions (
-                    pid,
-                    lou,
-                    post_json,
-                    content,
-                    last_seen_at
-                )
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    post["pid"],
-                    post["lou"],
-                    json.dumps(post, ensure_ascii=False),
-                    post["content"],
-                    "2026-07-08T00:00:00+00:00",
-                ),
-            )
-        connection.commit()
-    finally:
-        connection.close()
+    ThreadArchiveStore(thread_dir).upsert_page(
+        1,
+        {"totalPage": 1, "result": posts},
+        observed_at="2026-07-08T00:00:00+00:00",
+    )
 
 
 def _post(
@@ -191,9 +157,9 @@ class WebViewerDataTest:
         assert by_dir["101_201"]["threadName"] == "sample"
         assert by_dir["101_201"]["subject"] == "Sample Thread"
         assert by_dir["101_201"]["postCount"] == 2
-        assert by_dir["101_201"]["bodyWordCount"] is None
-        assert by_dir["101_201"]["bodyChineseCharCount"] is None
-        assert by_dir["101_201"]["bodyWordPostCount"] is None
+        assert by_dir["101_201"]["bodyWordCount"] == 0
+        assert by_dir["101_201"]["bodyChineseCharCount"] == 0
+        assert by_dir["101_201"]["bodyWordPostCount"] == 0
         assert by_dir["101_201"]["minLou"] == 1
         assert by_dir["101_201"]["maxLou"] == 2
         assert by_dir["101_201"]["authorUpdatedAt"] == 1783490002
@@ -464,7 +430,7 @@ class WebDatabaseViewerTest:
         assert {"forum_threads", "image_index", "archive:101_201"} <= ids
         by_id = {item["id"]: item for item in payload["items"]}
         assert by_id["forum_threads"]["relativePath"] == "forum_threads.sqlite3"
-        assert by_id["archive:101_201"]["tableCount"] == 2
+        assert by_id["archive:101_201"]["tableCount"] == 4
 
     def test_database_schema_and_rows_support_search_sort_and_detail(
         self,

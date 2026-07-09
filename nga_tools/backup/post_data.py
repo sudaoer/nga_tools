@@ -8,7 +8,7 @@ from nga_tools import utils
 from nga_tools.backup import image_store
 from nga_tools.backup.models import ImageAttachment, PostData
 from nga_tools.bbcode_convert import ImageSrcResolver
-from nga_tools.core.hashing import hash_object
+from nga_tools.core.hashing import hash_text
 from nga_tools.ngaclient.client import PageData
 
 _NGA_IMAGE_BASE_URL = "https://img.nga.178.com/attachments/"
@@ -181,9 +181,4 @@ def make_image_src_resolver(
 
 
 def post_source_hash(post: PostData) -> str:
-    return hash_object(
-        {
-            "content": post["content"],
-            "image_attachments": post["image_attachments"],
-        }
-    )
+    return hash_text(post["content"])
