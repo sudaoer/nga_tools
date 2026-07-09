@@ -70,6 +70,7 @@ export interface PostVersionOption {
   isLatest: boolean
   isSelected: boolean
   selectable: boolean
+  content: string
   contentPreview: string
 }
 

@@ -483,6 +483,10 @@ class WebServerTest:
             option["id"]: option["selectable"]
             for option in group["versions"]
         } == {latest_version_id: False, old_version_id: True}
+        assert {option["id"]: option["content"] for option in group["versions"]} == {
+            latest_version_id: "after edit",
+            old_version_id: "before edit",
+        }
         assert latest_response.status_code == 400
         assert latest_response.json() == {"error": "不能手动选择当前最新版。"}
         assert select_response.status_code == 200

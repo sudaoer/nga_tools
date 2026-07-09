@@ -130,6 +130,7 @@ class PostVersionOption(TypedDict):
     isLatest: bool
     isSelected: bool
     selectable: bool
+    content: str
     contentPreview: str
 
 
@@ -1116,6 +1117,7 @@ def read_post_version_groups(
             "isLatest": is_latest,
             "isSelected": selected_version_id == version_id,
             "selectable": not is_latest,
+            "content": content,
             "contentPreview": _content_preview(content),
         }
         options_by_lou.setdefault(lou, []).append(option)

@@ -641,6 +641,80 @@ select {
   margin-top: 14px;
 }
 
+.version-diff-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  border: 1px solid #c8ad7e;
+  border-radius: 4px;
+  background: #fffdf7;
+  padding: 12px;
+}
+
+.version-diff-panel header,
+.version-diff-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.version-diff-panel header {
+  justify-content: space-between;
+}
+
+.version-diff-panel h3,
+.version-diff-panel p {
+  margin: 0;
+}
+
+.version-diff-panel h3 {
+  color: #591804;
+  font-size: 16px;
+}
+
+.version-diff-legend {
+  color: #65584d;
+  font-size: 12px;
+}
+
+.version-diff-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.version-diff-legend i {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+
+.version-diff-body {
+  max-height: 420px;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid #ead7b7;
+  border-radius: 4px;
+  background: #fff8e7;
+  color: #3f3124;
+  padding: 10px;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.version-diff-added {
+  background: #d9f2d6;
+  color: #174a22;
+}
+
+.version-diff-removed {
+  background: #ffe0df;
+  color: #7a1f17;
+  text-decoration: line-through;
+}
+
 .database-shell {
   display: grid;
   grid-template-columns: minmax(280px, 330px) minmax(210px, 260px) minmax(0, 1fr);

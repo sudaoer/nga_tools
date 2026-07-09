@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { diffChars } from 'diff'
 import { computed, onMounted, ref, watch } from 'vue'
 import {
   clearPostVersionSelection,
@@ -13,6 +14,14 @@ import type {
   PostVersionOption,
   PostVersionThreadSummary,
 } from '../types'
+
+type VersionDiffPartKind = 'same' | 'current' | 'latest'
+
+interface VersionDiffPart {
+  id: string
+  kind: VersionDiffPartKind
+  value: string
+}
 
 const threads = ref<PostVersionThreadSummary[]>([])
 const selectedThread = ref<PostVersionThreadSummary | null>(null)
@@ -31,6 +40,60 @@ const showOnlyMultiVersionThreads = ref(true)
 
 const selectedGroup = computed(
   () => groups.value.find((group) => group.lou === selectedLou.value) || null,
+)
+
+const latestVersionOption = computed(() => {
+  const group = selectedGroup.value
+  if (group === null) {
+    return null
+  }
+  return group.versions.find((option) => option.id === group.latestVersionId) || null
+})
+
+const previewedVersionOption = computed(() => {
+  const group = selectedGroup.value
+  if (group === null || previewVersionId.value === null) {
+    return null
+  }
+  return group.versions.find((option) => option.id === previewVersionId.value) || null
+})
+
+const versionDiffParts = computed<VersionDiffPart[]>(() => {
+  const latestOption = latestVersionOption.value
+  const previewedOption = previewedVersionOption.value
+  if (
+    latestOption === null ||
+    previewedOption === null ||
+    previewedOption.id === latestOption.id
+  ) {
+    return []
+  }
+  return diffChars(latestOption.content, previewedOption.content)
+    .filter((part) => part.value.length > 0)
+    .map((part, index) => {
+      const kind: VersionDiffPartKind = part.added
+        ? 'current'
+        : part.removed
+          ? 'latest'
+          : 'same'
+      return {
+        id: `${index}-${kind}`,
+        kind,
+        value: part.value,
+      }
+    })
+})
+
+const versionDiffReady = computed(
+  () =>
+    !loadingPreview.value &&
+    preview.value !== null &&
+    latestVersionOption.value !== null &&
+    previewedVersionOption.value !== null,
+)
+
+const hasVersionDiff = computed(() =>
+  versionDiffParts.value.some((part) => part.kind !== 'same'),
 )
 
 const visibleThreads = computed(() =>
@@ -74,6 +137,19 @@ function versionLabel(option: PostVersionOption): string {
     return '已选'
   }
   return '历史版'
+}
+
+function defaultPreviewVersionId(group: PostVersionGroup): number {
+  const selectedHistoryVersion = group.versions.find(
+    (option) => option.id === group.selectedVersionId && !option.isLatest,
+  )
+  if (selectedHistoryVersion !== undefined) {
+    return selectedHistoryVersion.id
+  }
+  return (
+    group.versions.find((option) => !option.isLatest)?.id ||
+    group.activeVersionId
+  )
 }
 
 function clearThreadSelection(): void {
@@ -144,7 +220,7 @@ async function loadGroups(): Promise<void> {
     const target = currentGroup || groups.value[0] || null
     selectedLou.value = target?.lou ?? null
     if (target !== null) {
-      await previewVersion(target.activeVersionId)
+      await previewVersion(defaultPreviewVersionId(target))
     } else {
       preview.value = null
       previewVersionId.value = null
@@ -158,7 +234,7 @@ async function loadGroups(): Promise<void> {
 
 async function selectGroup(group: PostVersionGroup): Promise<void> {
   selectedLou.value = group.lou
-  await previewVersion(group.activeVersionId)
+  await previewVersion(defaultPreviewVersionId(group))
 }
 
 async function previewVersion(versionId: number): Promise<void> {
@@ -357,6 +433,36 @@ onMounted(() => {
 
         <div v-if="actionError" class="error-box">{{ actionError }}</div>
         <div v-else-if="loadingPreview" class="empty-state reader-empty">正在读取预览...</div>
+
+        <section v-if="versionDiffReady" class="version-diff-panel">
+          <header>
+            <div>
+              <h3>与最新版对比</h3>
+              <div class="reader-meta">
+                <span>预览版本 #{{ previewedVersionOption?.id }}</span>
+                <span>最新版 #{{ latestVersionOption?.id }}</span>
+              </div>
+            </div>
+            <div class="version-diff-legend" aria-label="差异图例">
+              <span><i class="version-diff-added"></i>当前版本独有</span>
+              <span><i class="version-diff-removed"></i>最新版独有</span>
+            </div>
+          </header>
+
+          <p v-if="previewedVersionOption?.id === latestVersionOption?.id">
+            当前预览的是最新版，无差异。
+          </p>
+          <p v-else-if="!hasVersionDiff">正文内容与最新版一致。</p>
+          <pre v-else class="version-diff-body"><template
+            v-for="part in versionDiffParts"
+            :key="part.id"
+          ><span
+            :class="{
+              'version-diff-added': part.kind === 'current',
+              'version-diff-removed': part.kind === 'latest',
+            }"
+          >{{ part.value }}</span></template></pre>
+        </section>
 
         <article v-if="preview" class="post-card version-preview-card">
           <header>
