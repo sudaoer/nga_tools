@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from _thread import LockType
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Literal, Optional, cast
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -52,10 +55,34 @@ _MAX_POST_LIMIT = 200
 _MAX_DATABASE_ROW_LIMIT = 200
 
 
+def _new_lock() -> LockType:
+    return threading.Lock()
+
+
+def _new_lock_map() -> dict[Path, LockType]:
+    return {}
+
+
+@dataclass(frozen=True)
+class PostVersionSelectionLocks:
+    _guard: LockType = field(default_factory=_new_lock)
+    _locks: dict[Path, LockType] = field(default_factory=_new_lock_map)
+
+    def for_thread(self, thread_folder: Path) -> LockType:
+        lock_key = thread_folder.resolve()
+        with self._guard:
+            lock = self._locks.get(lock_key)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[lock_key] = lock
+            return lock
+
+
 @dataclass(frozen=True)
 class ViewerContext:
     output_dir: Path
     static_dir: Path
+    post_version_selection_locks: PostVersionSelectionLocks
 
 
 def _context(request: Request) -> ViewerContext:
@@ -64,6 +91,62 @@ def _context(request: Request) -> ViewerContext:
 
 def _error_response(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
+
+
+def _list_threads_sync(output_dir: Path) -> dict[str, list[ThreadSummary]]:
+    return {"items": scan_thread_summaries(output_dir, load_thread_metadata())}
+
+
+def _list_post_version_threads_sync(
+    output_dir: Path,
+    *,
+    multi_version_only: bool,
+) -> PostVersionThreadSummariesResult:
+    return read_post_version_thread_summaries(
+        output_dir,
+        load_thread_metadata(),
+        multi_version_only=multi_version_only,
+    )
+
+
+def _read_thread_summary_sync(
+    output_dir: Path,
+    tid: int,
+    aid_key: str,
+) -> ThreadSummary:
+    return read_thread_summary(
+        output_dir,
+        load_thread_metadata(),
+        tid,
+        aid_key,
+    )
+
+
+def _thread_folder_for_lock(context: ViewerContext, tid: int, aid_key: str) -> Path:
+    return context.output_dir / f"{tid}_{aid_key}"
+
+
+def _select_post_version_locked(
+    lock: LockType,
+    output_dir: Path,
+    tid: int,
+    aid_key: str,
+    lou: int,
+    version_id: int,
+) -> PostVersionSelectionResult:
+    with lock:
+        return select_post_version(output_dir, tid, aid_key, lou, version_id)
+
+
+def _clear_post_version_selection_locked(
+    lock: LockType,
+    output_dir: Path,
+    tid: int,
+    aid_key: str,
+    lou: int,
+) -> PostVersionSelectionResult:
+    with lock:
+        return clear_post_version_selection(output_dir, tid, aid_key, lou)
 
 
 async def _http_exception_handler(
@@ -92,8 +175,7 @@ async def health(request: Request) -> dict[str, object]:
 
 async def list_threads(request: Request) -> dict[str, list[ThreadSummary]]:
     context = _context(request)
-    summaries = scan_thread_summaries(context.output_dir, load_thread_metadata())
-    return {"items": summaries}
+    return await run_in_threadpool(_list_threads_sync, context.output_dir)
 
 
 async def list_post_version_threads(
@@ -101,9 +183,9 @@ async def list_post_version_threads(
     multi_version_only: bool = False,
 ) -> PostVersionThreadSummariesResult:
     context = _context(request)
-    return read_post_version_thread_summaries(
+    return await run_in_threadpool(
+        _list_post_version_threads_sync,
         context.output_dir,
-        load_thread_metadata(),
         multi_version_only=multi_version_only,
     )
 
@@ -115,9 +197,9 @@ async def thread_detail(
 ) -> ThreadSummary:
     context = _context(request)
     try:
-        return read_thread_summary(
+        return await run_in_threadpool(
+            _read_thread_summary_sync,
             context.output_dir,
-            load_thread_metadata(),
             tid,
             aid_key,
         )
@@ -144,7 +226,8 @@ async def thread_posts(
         resolved_page = offset // ORIGINAL_POSTS_PER_PAGE + 1
     del limit
     try:
-        return read_posts(
+        return await run_in_threadpool(
+            read_posts,
             context.output_dir,
             tid,
             aid_key,
@@ -168,7 +251,12 @@ async def post_version_groups(
 ) -> PostVersionGroupsResult:
     context = _context(request)
     try:
-        return read_post_version_groups(context.output_dir, tid, aid_key)
+        return await run_in_threadpool(
+            read_post_version_groups,
+            context.output_dir,
+            tid,
+            aid_key,
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ThreadNotFoundError as error:
@@ -185,7 +273,13 @@ async def post_version_preview(
 ) -> PostVersionPreview:
     context = _context(request)
     try:
-        return read_post_version_preview(context.output_dir, tid, aid_key, version_id)
+        return await run_in_threadpool(
+            read_post_version_preview,
+            context.output_dir,
+            tid,
+            aid_key,
+            version_id,
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ThreadNotFoundError as error:
@@ -205,8 +299,13 @@ async def put_post_version_selection(
     if type(raw_version_id) is not int:
         raise HTTPException(status_code=400, detail="versionId必须是整数。")
     context = _context(request)
+    lock = context.post_version_selection_locks.for_thread(
+        _thread_folder_for_lock(context, tid, aid_key)
+    )
     try:
-        return select_post_version(
+        return await run_in_threadpool(
+            _select_post_version_locked,
+            lock,
             context.output_dir,
             tid,
             aid_key,
@@ -228,8 +327,18 @@ async def delete_post_version_selection(
     lou: int,
 ) -> PostVersionSelectionResult:
     context = _context(request)
+    lock = context.post_version_selection_locks.for_thread(
+        _thread_folder_for_lock(context, tid, aid_key)
+    )
     try:
-        return clear_post_version_selection(context.output_dir, tid, aid_key, lou)
+        return await run_in_threadpool(
+            _clear_post_version_selection_locked,
+            lock,
+            context.output_dir,
+            tid,
+            aid_key,
+            lou,
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ThreadNotFoundError as error:
@@ -240,13 +349,14 @@ async def delete_post_version_selection(
 
 async def list_databases(request: Request) -> dict[str, list[DatabaseSummary]]:
     context = _context(request)
-    return {"items": list_database_summaries(context.output_dir)}
+    summaries = await run_in_threadpool(list_database_summaries, context.output_dir)
+    return {"items": summaries}
 
 
 async def database_schema(request: Request, db_id: str) -> DatabaseSchema:
     context = _context(request)
     try:
-        return read_database_schema(context.output_dir, db_id)
+        return await run_in_threadpool(read_database_schema, context.output_dir, db_id)
     except DatabaseNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except DatabaseUnavailableError as error:
@@ -265,7 +375,8 @@ async def database_table_rows(
 ) -> TableRows:
     context = _context(request)
     try:
-        return read_table_rows(
+        return await run_in_threadpool(
+            read_table_rows,
             context.output_dir,
             db_id,
             table_name,
@@ -291,7 +402,13 @@ async def database_row_detail(
 ) -> TableRowDetail:
     context = _context(request)
     try:
-        return read_table_row_detail(context.output_dir, db_id, table_name, rowid)
+        return await run_in_threadpool(
+            read_table_row_detail,
+            context.output_dir,
+            db_id,
+            table_name,
+            rowid,
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except (DatabaseNotFoundError, TableNotFoundError, RowNotFoundError) as error:
@@ -305,7 +422,7 @@ async def output_file(
     relative_path: str,
 ) -> FileResponse:
     context = _context(request)
-    path = safe_output_file(context.output_dir, relative_path)
+    path = await run_in_threadpool(safe_output_file, context.output_dir, relative_path)
     if path is None:
         raise HTTPException(status_code=404, detail="文件不存在或不允许访问。")
     return FileResponse(path)
@@ -342,6 +459,7 @@ def create_app(
     context = ViewerContext(
         output_dir=resolved_output_dir,
         static_dir=Path(DEFAULT_WEB_STATIC_DIR) if static_dir is None else static_dir,
+        post_version_selection_locks=PostVersionSelectionLocks(),
     )
     app = FastAPI()
     app.state.viewer_context = context

@@ -944,9 +944,17 @@ def read_posts(
     archive_store.ensure_schema()
 
     page_size = ORIGINAL_POSTS_PER_PAGE
-    effective_rows = archive_store.read_effective_post_rows()
-    post_count = len(effective_rows)
-    max_lou = max((row.lou for row in effective_rows), default=None)
+    stripped_query = query.strip()
+    has_filter = bool(stripped_query) or lou_from is not None or lou_to is not None
+    effective_rows: list[ArchivePostVersionRow] = []
+    if has_filter:
+        effective_rows = archive_store.read_effective_post_rows()
+        post_count = len(effective_rows)
+        max_lou = max((row.lou for row in effective_rows), default=None)
+    else:
+        stats = archive_store.read_effective_post_stats()
+        post_count = stats.post_count
+        max_lou = stats.max_lou
     slot_total = max_lou + 1 if max_lou is not None and max_lou >= 0 else 0
     total_pages = max(1, math.ceil(slot_total / page_size))
     resolved_page = min(page, total_pages)
@@ -957,17 +965,23 @@ def read_posts(
         if max_lou is not None and max_lou >= page_start_lou
         else page_start_lou - 1
     )
-    stripped_query = query.strip()
-    matching_lous = {
-        row.lou
-        for row in effective_rows
-        if _post_row_matches(row, stripped_query, lou_from, lou_to)
-    }
-    rows = [
-        row
-        for row in effective_rows
-        if page_start_lou <= row.lou <= page_end_lou
-    ]
+    page_lous: set[int] = (
+        set(range(page_start_lou, slot_end_lou + 1))
+        if slot_end_lou >= page_start_lou
+        else set[int]()
+    )
+    if has_filter:
+        matching_lous = {
+            row.lou
+            for row in effective_rows
+            if _post_row_matches(row, stripped_query, lou_from, lou_to)
+        }
+        matching_post_count = len(matching_lous)
+        rows = [row for row in effective_rows if row.lou in page_lous]
+    else:
+        rows = archive_store.read_effective_post_rows(page_lous)
+        matching_lous = {row.lou for row in rows}
+        matching_post_count = post_count
     matching_page_lous = {
         lou
         for lou in matching_lous
@@ -1011,7 +1025,7 @@ def read_posts(
         "pageEndLou": max(page_start_lou, slot_end_lou),
         "totalPages": total_pages,
         "postCount": post_count,
-        "matchingPostCount": len(matching_lous),
+        "matchingPostCount": matching_post_count,
         "maxLou": max_lou,
     }
 

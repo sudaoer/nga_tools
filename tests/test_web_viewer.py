@@ -18,6 +18,7 @@ from nga_tools.web.data import (
     safe_output_file,
     scan_thread_summaries,
 )
+from nga_tools.web import server as web_server
 from nga_tools.web.server import create_app
 
 
@@ -235,6 +236,70 @@ class WebViewerDataTest:
         assert result["slots"][0]["emptyReason"] == "missing"
         assert result["slots"][1]["emptyReason"] is None
 
+    def test_reads_unfiltered_page_without_loading_full_thread(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "early"), _post(25, "target")])
+        calls: list[set[int] | None] = []
+        original = ThreadArchiveStore.read_effective_post_rows
+
+        def wrapped_read_effective_post_rows(
+            store: ThreadArchiveStore,
+            lous: set[int] | None = None,
+        ):
+            calls.append(None if lous is None else set(lous))
+            return original(store, lous)
+
+        monkeypatch.setattr(
+            ThreadArchiveStore,
+            "read_effective_post_rows",
+            wrapped_read_effective_post_rows,
+        )
+
+        result = read_posts(output_dir, 101, "201", page=2)
+
+        assert calls == [set(range(20, 26))]
+        assert result["postCount"] == 2
+        assert result["matchingPostCount"] == 2
+        assert [item["lou"] for item in result["items"]] == [25]
+
+    def test_reads_filtered_page_with_full_thread_match_count(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(
+            thread_dir,
+            [_post(1, "needle early"), _post(25, "needle target")],
+        )
+        calls: list[set[int] | None] = []
+        original = ThreadArchiveStore.read_effective_post_rows
+
+        def wrapped_read_effective_post_rows(
+            store: ThreadArchiveStore,
+            lous: set[int] | None = None,
+        ):
+            calls.append(None if lous is None else set(lous))
+            return original(store, lous)
+
+        monkeypatch.setattr(
+            ThreadArchiveStore,
+            "read_effective_post_rows",
+            wrapped_read_effective_post_rows,
+        )
+
+        result = read_posts(output_dir, 101, "201", page=2, query="needle")
+
+        assert calls == [None]
+        assert result["matchingPostCount"] == 2
+        assert [item["lou"] for item in result["items"]] == [25]
+
     def test_reads_posts_and_rewrites_local_image_sources(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
         thread_dir = output_dir / "101_201"
@@ -379,6 +444,30 @@ class WebServerTest:
         assert len(payload["slots"]) == 20
         assert payload["slots"][0]["emptyReason"] == "missing"
         assert payload["items"][0]["lou"] == 1
+
+    def test_posts_route_dispatches_reader_through_threadpool(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "hello")])
+        calls: list[str] = []
+
+        async def fake_run_in_threadpool(func, *args, **kwargs):
+            calls.append(func.__name__)
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr(web_server, "run_in_threadpool", fake_run_in_threadpool)
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/api/threads/101/201/posts", params={"page": "1"})
+
+        assert response.status_code == 200
+        assert "read_posts" in calls
 
     def test_posts_route_reports_invalid_query_as_json_error(
         self,

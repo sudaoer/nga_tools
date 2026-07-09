@@ -128,6 +128,12 @@ class ArchiveWordCountTotals:
 
 
 @dataclass(frozen=True)
+class ArchiveEffectivePostStats:
+    post_count: int
+    max_lou: Optional[int]
+
+
+@dataclass(frozen=True)
 class ArchivePostVersionRow:
     version_id: int
     lou: int
@@ -1209,6 +1215,30 @@ class ThreadArchiveStore:
         self.require_exists()
         with closing(self._connect()) as connection:
             return self._validated_post_version_selections(connection)
+
+    def read_effective_post_stats(self) -> ArchiveEffectivePostStats:
+        self.require_exists()
+        with closing(self._connect()) as connection:
+            row = cast(
+                tuple[int, Optional[int]],
+                connection.execute(
+                    """
+                    WITH latest AS (
+                        SELECT
+                            lou,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY lou
+                                ORDER BY last_seen_at DESC, id DESC
+                            ) AS row_number
+                        FROM post_versions
+                    )
+                    SELECT COUNT(*), MAX(lou)
+                    FROM latest
+                    WHERE row_number = 1
+                    """
+                ).fetchone(),
+            )
+        return ArchiveEffectivePostStats(post_count=row[0], max_lou=row[1])
 
     def read_effective_post_record_summaries(self) -> list[PostRecord]:
         self.require_exists()
