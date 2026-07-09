@@ -1,4 +1,12 @@
-import type { PostsResult, ThreadSummary } from './types'
+import type {
+  DatabaseSchema,
+  DatabaseSummary,
+  PostsResult,
+  SortDirection,
+  TableRowDetail,
+  TableRows,
+  ThreadSummary,
+} from './types'
 
 async function readJson<T>(url: string): Promise<T> {
   const response = await fetch(url)
@@ -54,5 +62,56 @@ export async function fetchPosts(
   }
   return readJson<PostsResult>(
     `/api/threads/${tid}/${encodeURIComponent(aidKey)}/posts?${params.toString()}`,
+  )
+}
+
+export async function fetchDatabases(): Promise<DatabaseSummary[]> {
+  const payload = await readJson<{ items: DatabaseSummary[] }>('/api/databases')
+  return payload.items
+}
+
+export async function fetchDatabaseSchema(dbId: string): Promise<DatabaseSchema> {
+  return readJson<DatabaseSchema>(`/api/databases/${encodeURIComponent(dbId)}/schema`)
+}
+
+export interface TableRowsQuery {
+  offset: number
+  limit: number
+  q: string
+  sortBy: string | null
+  sortDirection: SortDirection
+}
+
+export async function fetchTableRows(
+  dbId: string,
+  tableName: string,
+  query: TableRowsQuery,
+): Promise<TableRows> {
+  const params = new URLSearchParams()
+  params.set('offset', String(query.offset))
+  params.set('limit', String(query.limit))
+  if (query.q.trim()) {
+    params.set('q', query.q.trim())
+  }
+  if (query.sortBy !== null) {
+    params.set('sort_by', query.sortBy)
+    params.set('sort_direction', query.sortDirection)
+  }
+  return readJson<TableRows>(
+    `/api/databases/${encodeURIComponent(dbId)}/tables/${encodeURIComponent(
+      tableName,
+    )}/rows?${params.toString()}`,
+  )
+}
+
+export async function fetchTableRowDetail(
+  dbId: string,
+  tableName: string,
+  rowId: number,
+): Promise<TableRowDetail> {
+  return readJson<TableRowDetail>(
+    `/api/databases/${encodeURIComponent(dbId)}/tables/${encodeURIComponent(
+      tableName,
+    )}/rows/${rowId}`,
   )
 }

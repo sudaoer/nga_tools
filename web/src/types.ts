@@ -54,3 +54,67 @@ export interface PostsResult {
   matchingPostCount: number
   maxLou: number | null
 }
+
+export type DatabaseKind = 'forum_threads' | 'image_index' | 'archive'
+export type DatabaseStatus = 'ready' | 'invalid'
+export type TableKind = 'table' | 'view'
+export type SortDirection = 'asc' | 'desc'
+export type DbCellKind = 'null' | 'integer' | 'real' | 'text' | 'blob' | 'other'
+
+export interface DatabaseSummary {
+  id: string
+  kind: DatabaseKind
+  label: string
+  relativePath: string
+  status: DatabaseStatus
+  message: string | null
+  sizeBytes: number
+  updatedAt: string
+  tableCount: number
+}
+
+export interface ColumnInfo {
+  name: string
+  type: string
+  notNull: boolean
+  primaryKey: boolean
+  defaultValue: string | null
+}
+
+export interface TableSummary {
+  name: string
+  type: TableKind
+  rowCount: number | null
+  columns: ColumnInfo[]
+}
+
+export interface DatabaseSchema {
+  database: DatabaseSummary
+  tables: TableSummary[]
+}
+
+export interface DbCell {
+  kind: DbCellKind
+  value: string | number | null
+  truncated: boolean
+}
+
+export interface TableRow {
+  rowId: number | null
+  cells: Record<string, DbCell>
+}
+
+export interface TableRows {
+  columns: ColumnInfo[]
+  rows: TableRow[]
+  total: number
+  offset: number
+  limit: number
+  query: string
+  sortBy: string | null
+  sortDirection: SortDirection
+}
+
+export interface TableRowDetail {
+  row: TableRow
+}

@@ -216,6 +216,12 @@ Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页�
 产物。旧版只有 `json/page_*.json` 的目录会在页面中显示为“需迁移”，请先运行
 `backup migrate-store`。
 
+前端使用 Vue Router 管理页面：`/threads` 是帖子阅读器，`/databases` 是只读
+SQLite 数据库查看器。数据库查看器只浏览项目输出目录中的
+`forum_threads.sqlite3`、`image_index.sqlite3` 和各帖子目录下的
+`archive.sqlite3`，支持查看表结构、分页浏览、排序和关键字筛选，不执行用户
+输入的 SQL。
+
 ## 生成 PDF
 
 先运行 `backup all` 生成 `html_modified` 和图片，再生成 PDF：

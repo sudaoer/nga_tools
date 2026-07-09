@@ -113,6 +113,57 @@ def _write_image_mapping(output_dir: Path, url: str, unique_rel_path: str) -> No
         connection.close()
 
 
+def _write_forum_thread_db(output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(output_dir / "forum_threads.sqlite3")
+    try:
+        connection.execute(
+            """
+            CREATE TABLE forum_threads_fid_784 (
+                tid INTEGER PRIMARY KEY,
+                aid INTEGER NOT NULL,
+                author TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                postdate INTEGER NOT NULL,
+                postdate_text TEXT NOT NULL,
+                lastpost INTEGER NOT NULL,
+                lastpost_text TEXT NOT NULL,
+                replies INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO forum_threads_fid_784 (
+                tid,
+                aid,
+                author,
+                subject,
+                postdate,
+                postdate_text,
+                lastpost,
+                lastpost_text,
+                replies
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                101,
+                201,
+                "Alice",
+                "Sample Thread",
+                1783400000,
+                "2026-07-07 00:00:00",
+                1783490000,
+                "2026-07-08 00:00:00",
+                12,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 class WebViewerDataTest:
     def test_scans_ready_and_legacy_backup_summaries(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
@@ -389,6 +440,116 @@ class WebServerTest:
 
         assert response.status_code == 503
         assert "缺少前端构建产物" in response.json()["error"]
+
+
+class WebDatabaseViewerTest:
+    def test_databases_route_lists_project_sqlite_sources(self, tmp_path: Path) -> None:
+        output_dir = tmp_path / "output"
+        _write_forum_thread_db(output_dir)
+        _write_image_mapping(
+            output_dir,
+            "https://img.nga.178.com/attachments/mon_202607/08/abc.png",
+            "images_unique/abc.png",
+        )
+        _write_archive(output_dir / "101_201", [_post(1, "hello")])
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/api/databases")
+
+        assert response.status_code == 200
+        payload = response.json()
+        ids = {item["id"] for item in payload["items"]}
+        assert {"forum_threads", "image_index", "archive:101_201"} <= ids
+        by_id = {item["id"]: item for item in payload["items"]}
+        assert by_id["forum_threads"]["relativePath"] == "forum_threads.sqlite3"
+        assert by_id["archive:101_201"]["tableCount"] == 2
+
+    def test_database_schema_and_rows_support_search_sort_and_detail(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        _write_archive(
+            output_dir / "101_201",
+            [
+                _post(1, "plain"),
+                _post(2, "needle " + "x" * 300),
+            ],
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        schema_response = client.get("/api/databases/archive%3A101_201/schema")
+
+        assert schema_response.status_code == 200
+        table_names = {item["name"] for item in schema_response.json()["tables"]}
+        assert {"page_snapshots", "post_versions"} <= table_names
+
+        rows_response = client.get(
+            "/api/databases/archive%3A101_201/tables/post_versions/rows",
+            params={
+                "q": "needle",
+                "sort_by": "lou",
+                "sort_direction": "desc",
+                "limit": "1",
+            },
+        )
+
+        assert rows_response.status_code == 200
+        rows_payload = rows_response.json()
+        assert rows_payload["total"] == 1
+        row = rows_payload["rows"][0]
+        assert row["rowId"] == 2
+        assert row["cells"]["lou"]["value"] == 2
+        assert row["cells"]["content"]["truncated"] is True
+
+        detail_response = client.get(
+            "/api/databases/archive%3A101_201/tables/post_versions/rows/2"
+        )
+
+        assert detail_response.status_code == 200
+        detail_cell = detail_response.json()["row"]["cells"]["content"]
+        assert detail_cell["value"] == "needle " + "x" * 300
+        assert detail_cell["truncated"] is False
+
+    def test_database_rows_reject_unknown_sort_column(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        _write_archive(output_dir / "101_201", [_post(1, "hello")])
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get(
+            "/api/databases/archive%3A101_201/tables/post_versions/rows",
+            params={"sort_by": "not_a_column"},
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {"error": "sort_by必须是当前表字段。"}
+
+    def test_database_routes_reject_unknown_database_and_table(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        _write_archive(output_dir / "101_201", [_post(1, "hello")])
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        missing_database = client.get("/api/databases/archive%3A101_999/schema")
+        missing_table = client.get(
+            "/api/databases/archive%3A101_201/tables/missing/rows"
+        )
+
+        assert missing_database.status_code == 404
+        assert missing_table.status_code == 404
 
 
 class WebCliTest:

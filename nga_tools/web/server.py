@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Optional, cast
+from typing import Annotated, Literal, Optional, cast
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -24,8 +24,23 @@ from nga_tools.web.data import (
     safe_output_file,
     scan_thread_summaries,
 )
+from nga_tools.web.database import (
+    DatabaseNotFoundError,
+    DatabaseSchema,
+    DatabaseSummary,
+    DatabaseUnavailableError,
+    RowNotFoundError,
+    TableNotFoundError,
+    TableRowDetail,
+    TableRows,
+    list_database_summaries,
+    read_database_schema,
+    read_table_row_detail,
+    read_table_rows,
+)
 
 _MAX_POST_LIMIT = 200
+_MAX_DATABASE_ROW_LIMIT = 200
 
 
 @dataclass(frozen=True)
@@ -125,6 +140,68 @@ async def thread_posts(
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
+async def list_databases(request: Request) -> dict[str, list[DatabaseSummary]]:
+    context = _context(request)
+    return {"items": list_database_summaries(context.output_dir)}
+
+
+async def database_schema(request: Request, db_id: str) -> DatabaseSchema:
+    context = _context(request)
+    try:
+        return read_database_schema(context.output_dir, db_id)
+    except DatabaseNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except DatabaseUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+async def database_table_rows(
+    request: Request,
+    db_id: str,
+    table_name: str,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(gt=0, le=_MAX_DATABASE_ROW_LIMIT)] = 50,
+    q: str = "",
+    sort_by: Optional[str] = None,
+    sort_direction: Literal["asc", "desc"] = "asc",
+) -> TableRows:
+    context = _context(request)
+    try:
+        return read_table_rows(
+            context.output_dir,
+            db_id,
+            table_name,
+            offset=offset,
+            limit=limit,
+            query=q,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except (DatabaseNotFoundError, TableNotFoundError) as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except DatabaseUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+async def database_row_detail(
+    request: Request,
+    db_id: str,
+    table_name: str,
+    rowid: int,
+) -> TableRowDetail:
+    context = _context(request)
+    try:
+        return read_table_row_detail(context.output_dir, db_id, table_name, rowid)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except (DatabaseNotFoundError, TableNotFoundError, RowNotFoundError) as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except DatabaseUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
 async def output_file(
     request: Request,
     relative_path: str,
@@ -178,6 +255,18 @@ def create_app(
     app.add_api_route(
         "/api/threads/{tid}/{aid_key}/posts",
         thread_posts,
+        methods=["GET"],
+    )
+    app.add_api_route("/api/databases", list_databases, methods=["GET"])
+    app.add_api_route("/api/databases/{db_id}/schema", database_schema, methods=["GET"])
+    app.add_api_route(
+        "/api/databases/{db_id}/tables/{table_name}/rows",
+        database_table_rows,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/api/databases/{db_id}/tables/{table_name}/rows/{rowid}",
+        database_row_detail,
         methods=["GET"],
     )
     app.add_api_route("/api/files/{relative_path:path}", output_file, methods=["GET"])
