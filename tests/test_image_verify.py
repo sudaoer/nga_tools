@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
+import imagecodecs
+import numpy as np
 from PIL import Image
 from rich.console import Console
 
@@ -22,6 +24,12 @@ from nga_tools.backup.image_verify import (
 from nga_tools.cli import args_parse
 from nga_tools.console import ConsoleReporter, report_warning, use_reporter
 from nga_tools.commands.image import image_verify
+
+
+def _write_avif_image(path: Path) -> None:
+    pixels = np.zeros((2, 3, 3), dtype=np.uint8)
+    pixels[:, :] = [255, 255, 255]
+    path.write_bytes(imagecodecs.avif_encode(pixels))
 
 
 class ImageVerifyCliTest:
@@ -281,6 +289,22 @@ class ImageVerifyAllTest:
             assert result.removed == 1
             assert valid_image.exists()
             assert not broken_image.exists()
+
+    def test_parallel_folder_verify_keeps_avif_file_with_legacy_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_dir = Path(temp_dir)
+            valid_image = image_dir / "valid.png"
+            _write_avif_image(valid_image)
+
+            with (
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                result = _verify_images_in_folder(str(image_dir))
+
+            assert result.total == 1
+            assert result.removed == 0
+            assert valid_image.exists()
 
     def test_worker_count_is_bounded(self) -> None:
         assert _image_verify_worker_count(0) == 1

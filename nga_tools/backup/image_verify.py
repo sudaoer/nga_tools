@@ -7,13 +7,13 @@ from pathlib import Path
 from typing import Optional, cast
 
 from bs4 import BeautifulSoup, Tag
-from PIL import Image
 
 from nga_tools import utils
 from nga_tools.backup import image_store
 from nga_tools.backup.html_images import image_src_path
 from nga_tools.config import get_config
 from nga_tools.console import report_info, report_warning
+from nga_tools.core.image_formats import image_file_error
 from nga_tools.timing import time_section
 
 
@@ -197,10 +197,8 @@ def _verify_image_file(folder_images: str, image_file: str) -> ImageFileVerifyRe
 
 
 def _verify_image_path(image_path: Path) -> ImageFileVerifyResult:
-    try:
-        with Image.open(image_path) as image:
-            image.verify()
-    except (OSError, SyntaxError) as error:
+    error = image_file_error(image_path)
+    if error is not None:
         removed = False
         if image_path.exists() or image_path.is_symlink():
             image_path.unlink()
@@ -208,7 +206,7 @@ def _verify_image_path(image_path: Path) -> ImageFileVerifyResult:
         return ImageFileVerifyResult(
             image_file=str(image_path),
             removed=removed,
-            error=str(error),
+            error=error,
         )
 
     return ImageFileVerifyResult(

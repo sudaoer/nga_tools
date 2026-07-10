@@ -22,6 +22,10 @@ from nga_tools.core.atomic import (
     replace_temp_file,
     temporary_sibling_path,
 )
+from nga_tools.core.image_formats import (
+    image_extension_from_file as detect_image_extension_from_file,
+    image_file_is_valid,
+)
 
 
 class ImageDownloadTask(TypedDict):
@@ -91,13 +95,6 @@ class ImageLookupCache:
     def image_task_is_complete(self, task: ImageDownloadTask) -> bool:
         return self.mapped_image_path_for_url(task["url"]) is not None
 
-
-IMAGE_FORMAT_BY_PILLOW_FORMAT = {
-    "JPEG": "jpg",
-    "PNG": "png",
-    "GIF": "gif",
-    "WEBP": "webp",
-}
 
 IMAGE_INDEX_FILENAME = "image_index.sqlite3"
 PLACEHOLDER_IMAGE_FILENAME = "download_failed_placeholder.png"
@@ -328,7 +325,17 @@ def link_path_for_image_src(image_src: str) -> Path | None:
 
 def _image_extension_from_url(url: str) -> str:
     filename = parse_nga_image_url(url).filename.lower()
-    for extension in ("jpg", "jpeg", "png", "gif", "webp"):
+    for extension in (
+        "jpg",
+        "jpeg",
+        "png",
+        "gif",
+        "webp",
+        "avif",
+        "heic",
+        "heif",
+        "jxl",
+    ):
         marker = f".{extension}"
         if marker in filename:
             return "jpg" if extension == "jpeg" else extension
@@ -336,15 +343,7 @@ def _image_extension_from_url(url: str) -> str:
 
 
 def _image_extension_from_file(path: Path, url: str) -> str:
-    try:
-        with Image.open(path) as image:
-            image_format = image.format
-    except OSError:
-        return _image_extension_from_url(url)
-
-    if image_format is None:
-        return _image_extension_from_url(url)
-    return IMAGE_FORMAT_BY_PILLOW_FORMAT.get(image_format.upper(), image_format.lower())
+    return detect_image_extension_from_file(path) or _image_extension_from_url(url)
 
 
 def _same_file_content(first: Path, second: Path) -> bool:
@@ -354,14 +353,7 @@ def _same_file_content(first: Path, second: Path) -> bool:
 
 
 def _image_file_is_valid(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    try:
-        with Image.open(path) as image:
-            image.verify()
-    except (OSError, SyntaxError):
-        return False
-    return True
+    return image_file_is_valid(path)
 
 
 def _target_path_for_download(

@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 
 _NGA_IMAGE_FILENAME_RE = re.compile(
     r"^[A-Za-z0-9-][A-Za-z0-9_-]*"
-    r"\.(?:jpg|jpeg|png|gif|webp)"
+    r"\.(?:jpg|jpeg|png|gif|webp|avif|heic|heif|jxl)"
     r"(?:\.(?:thumb|thumb_s|thumb_ss|medium)\.jpg)?$",
     re.IGNORECASE,
 )
@@ -36,4 +36,3 @@ def NGA_img_link_verify(url: str) -> bool:
         return False
 
     return bool(_NGA_IMAGE_FILENAME_RE.fullmatch(filename))
-

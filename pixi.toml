@@ -36,6 +36,8 @@ fastapi-core = ">=0.139.0,<0.140"
 uvicorn = ">=0.50.2,<0.51"
 nh3 = ">=0.3.6,<0.4"
 filelock = ">=3.16,<4"
+pillow-heif = ">=1.1,<2"
+imagecodecs = ">=2026.6,<2027"
 
 [pypi-dependencies]
 bbcode = ">=1.1.0, <2"

@@ -7,11 +7,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import imagecodecs
+import numpy as np
 import pytest
 from PIL import Image
 
 from nga_tools import utils
 from nga_tools.backup import image_store
+
+
+def _write_avif_image(path: Path) -> None:
+    pixels = np.zeros((2, 3, 3), dtype=np.uint8)
+    pixels[:, :] = [255, 255, 255]
+    path.write_bytes(imagecodecs.avif_encode(pixels))
 
 
 class NgaImageLinkVerifyTest:
@@ -26,6 +34,9 @@ class NgaImageLinkVerifyTest:
             "https://img.nga.178.com/attachments/mon_202506/06/lsQ2w-8o79K8ToS5k-5k.webp",
             "https://img.nga.178.com/attachments/mon_202506/06/lsQktk-gl8gZgT3cSqo-wf.jpeg",
             "https://img.nga.178.com/attachments/mon_202506/06/-9lddQ0-f0a0Z1tT3cSdc-7i.gif.medium.jpg",
+            "https://img.nga.178.com/attachments/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.avif",
+            "https://img.nga.178.com/attachments/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.heic",
+            "https://img.nga.178.com/attachments/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.jxl",
         ],
     )
     def test_accepts_current_nga_image_filename_formats(self, url: str) -> None:
@@ -179,6 +190,58 @@ class ImageStoreTest:
                 )
 
             assert pending_tasks == [{"url": image_url}]
+
+    def test_pending_image_download_tasks_reuses_avif_file_with_legacy_extension(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+            unique_dir = output_dir / "images_unique"
+            unique_dir.mkdir(parents=True)
+            avif_path = unique_dir / "legacy.png"
+            _write_avif_image(avif_path)
+            image_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202607/02/lsQ92-jkkjK3.png"
+            )
+
+            with patch(
+                "nga_tools.backup.image_store.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                image_store.upsert_image_mapping(image_url, avif_path)
+                pending_tasks = image_store.pending_image_download_tasks(
+                    [{"url": image_url}]
+                )
+
+            assert pending_tasks == []
+
+    def test_store_downloaded_image_uses_avif_extension_from_file_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+            temp_image = Path(temp_dir_name) / "download.png"
+            _write_avif_image(temp_image)
+            image_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202607/02/lsQ92-jkkjK3.png"
+            )
+
+            with patch(
+                "nga_tools.backup.image_store.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                result = image_store.store_downloaded_image(
+                    temp_image,
+                    {"url": image_url},
+                )
+                pending_tasks = image_store.pending_image_download_tasks(
+                    [{"url": image_url}]
+                )
+
+            unique_path = Path(result["unique_path"])
+            assert unique_path.suffix == ".avif"
+            assert unique_path.exists()
+            assert pending_tasks == []
 
     def test_store_downloaded_image_replaces_invalid_target_without_collision(
         self,
