@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -22,7 +23,7 @@ class TimingLogTest:
             ):
                 record_timing("固定阶段", 1.23456)
                 with time_section("即时阶段"):
-                    pass
+                    in_progress_text = log_path.read_text(encoding="utf-8")
 
             log_text = log_path.read_text(encoding="utf-8")
 
@@ -30,7 +31,16 @@ class TimingLogTest:
         assert "任务：backup sub\n" in log_text
         assert "目标：tid=101, aid=all\n" in log_text
         assert "阶段：固定阶段，耗时：1.235s\n" in log_text
-        assert "阶段：即时阶段，耗时：" in log_text
+        assert "阶段：即时阶段，开始时间：" in in_progress_text
+        assert "阶段：即时阶段，结束时间：" not in in_progress_text
+        assert "阶段：即时阶段，结束时间：" in log_text
+        assert "耗时：" in log_text
+        assert "状态：完成" in log_text
+        assert re.search(
+            r"阶段：即时阶段，开始时间："
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}",
+            log_text,
+        )
         assert "总耗时：" in log_text
         assert "状态：完成" in log_text
 
@@ -54,9 +64,33 @@ class TimingLogTest:
             with pytest.raises(RuntimeError):
                 with use_timing_log(log_path, task_name="backup sub"):
                     record_timing("失败前", 0.5)
-                    raise RuntimeError("boom")
+                    with time_section("失败阶段"):
+                        raise RuntimeError("boom")
 
             log_text = log_path.read_text(encoding="utf-8")
 
         assert "阶段：失败前，耗时：0.500s\n" in log_text
+        assert "阶段：失败阶段，开始时间：" in log_text
+        assert "阶段：失败阶段，结束时间：" in log_text
         assert "状态：失败" in log_text
+        assert re.search(r"总耗时：.+，状态：失败\n", log_text)
+
+    def test_nested_sections_record_start_and_end_in_execution_order(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            log_path = Path(temp_dir_name) / "timing.log"
+
+            with use_timing_log(log_path, task_name="backup sub"):
+                with time_section("父阶段"):
+                    with time_section("子阶段"):
+                        pass
+
+            stage_lines = [
+                line
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+                if line.startswith("阶段：")
+            ]
+
+        assert stage_lines[0].startswith("阶段：父阶段，开始时间：")
+        assert stage_lines[1].startswith("阶段：子阶段，开始时间：")
+        assert stage_lines[2].startswith("阶段：子阶段，结束时间：")
+        assert stage_lines[3].startswith("阶段：父阶段，结束时间：")

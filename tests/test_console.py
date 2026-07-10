@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from rich.console import Console
+from rich.progress import TimeElapsedColumn
 
 from nga_tools.console import (
     BackupConfigsProgressDisplay,
@@ -100,6 +101,82 @@ class BackupConfigsProgressDisplayTest:
         assert visible_tasks == ['总进度']
         assert '警告：first：图片链接无效' in output.getvalue()
 
+    def test_stage_completion_does_not_finish_thread_task(self) -> None:
+        output = io.StringIO()
+        console = Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=160,
+        )
+
+        with BackupConfigsProgressDisplay(1, console=console) as display:
+            reporter = display.start_thread(index=1, total=1, label="first")
+            task = display._progress.tasks[reporter.task_id]
+
+            reporter.progress("页面获取完成", completed=1, total=1)
+
+            assert task.total is None
+            assert task.completed == 0
+            assert task.fields["stage_completed"] == 1
+            assert task.fields["stage_total"] == 1
+            assert task.finished is False
+            assert task.finished_time is None
+
+            reporter.progress("继续处理")
+
+            assert task.fields["stage_completed"] is None
+            assert task.fields["stage_total"] is None
+            assert task.fields["progress_text"] == ""
+            assert task.finished is False
+
+    def test_zero_total_stage_does_not_finish_thread_task(self) -> None:
+        output = io.StringIO()
+        console = Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=160,
+        )
+
+        with BackupConfigsProgressDisplay(1, console=console) as display:
+            reporter = display.start_thread(index=1, total=1, label="first")
+            task = display._progress.tasks[reporter.task_id]
+
+            reporter.progress("没有图片", completed=0, total=0)
+
+            assert task.total is None
+            assert task.completed == 0
+            assert task.fields["progress_text"] == "0/0"
+            assert task.finished is False
+            assert task.finished_time is None
+
+    def test_elapsed_time_keeps_advancing_after_stage_completion(self) -> None:
+        output = io.StringIO()
+        console = Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=160,
+        )
+        elapsed_column = TimeElapsedColumn()
+
+        with BackupConfigsProgressDisplay(1, console=console) as display:
+            reporter = display.start_thread(index=1, total=1, label="first")
+            task = display._progress.tasks[reporter.task_id]
+            assert task.start_time is not None
+            start_time = task.start_time
+
+            reporter.progress("页面获取完成", completed=1, total=1)
+            task._get_time = lambda: start_time + 7
+            first_elapsed = str(elapsed_column.render(task))
+            task._get_time = lambda: start_time + 12
+            second_elapsed = str(elapsed_column.render(task))
+
+            assert first_elapsed == "0:00:07"
+            assert second_elapsed == "0:00:12"
+            assert task.finished is False
+
     def test_progress_runtime_text_is_rendered_without_markup_parsing(
         self,
     ) -> None:
@@ -150,4 +227,3 @@ class BackupConfigsProgressDisplayTest:
         assert '[12/235]' in output_text
         assert '这是一个非常长的NGA主题标题' in output_text
         assert '\n  …' not in output_text
-

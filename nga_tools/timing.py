@@ -23,11 +23,31 @@ class TimingLog:
         self._write_header(task_name, target)
 
     def _write_header(self, task_name: str, target: str | None) -> None:
-        started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        started_at = _format_timestamp(datetime.now().astimezone())
         self._log_file.write(f"开始时间：{started_at}\n")
         self._log_file.write(f"任务：{task_name}\n")
         if target is not None:
             self._log_file.write(f"目标：{target}\n")
+        self._log_file.flush()
+
+    def start_section(self, section_name: str, started_at: datetime) -> None:
+        self._log_file.write(
+            f"阶段：{section_name}，开始时间：{_format_timestamp(started_at)}\n"
+        )
+        self._log_file.flush()
+
+    def finish_section(
+        self,
+        section_name: str,
+        ended_at: datetime,
+        elapsed_seconds: float,
+        *,
+        status: str,
+    ) -> None:
+        self._log_file.write(
+            f"阶段：{section_name}，结束时间：{_format_timestamp(ended_at)}，"
+            f"耗时：{_format_duration(elapsed_seconds)}，状态：{status}\n"
+        )
         self._log_file.flush()
 
     def record(self, section_name: str, elapsed_seconds: float) -> None:
@@ -55,6 +75,10 @@ _CURRENT_TIMING_LOG: ContextVar[TimingLog | None] = ContextVar(
 
 def _format_duration(elapsed_seconds: float) -> str:
     return f"{elapsed_seconds:.3f}s"
+
+
+def _format_timestamp(value: datetime) -> str:
+    return value.isoformat(timespec="milliseconds")
 
 
 @contextmanager
@@ -92,11 +116,25 @@ def time_section(section_name: str) -> Generator[None]:
         yield
         return
 
+    timing_log.start_section(section_name, datetime.now().astimezone())
     start = perf_counter()
     try:
         yield
-    finally:
-        timing_log.record(section_name, perf_counter() - start)
+    except BaseException:
+        timing_log.finish_section(
+            section_name,
+            datetime.now().astimezone(),
+            perf_counter() - start,
+            status="失败",
+        )
+        raise
+    else:
+        timing_log.finish_section(
+            section_name,
+            datetime.now().astimezone(),
+            perf_counter() - start,
+            status="完成",
+        )
 
 
 def record_timing(section_name: str, elapsed_seconds: float) -> None:

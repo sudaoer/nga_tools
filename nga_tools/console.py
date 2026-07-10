@@ -14,10 +14,12 @@ from rich.progress import (
     BarColumn,
     Progress,
     SpinnerColumn,
+    Task,
     TaskID,
     TextColumn,
     TimeElapsedColumn,
 )
+from rich.progress_bar import ProgressBar
 from rich.table import Column
 
 
@@ -209,6 +211,34 @@ def _single_line_column(
     )
 
 
+class _StageBarColumn(BarColumn):
+    """Render child-stage progress without completing the parent task."""
+
+    def render(self, task: Task) -> ProgressBar:
+        stage_completed = task.fields.get("stage_completed")
+        stage_total = task.fields.get("stage_total")
+        if (
+            isinstance(stage_completed, int | float)
+            and isinstance(stage_total, int | float)
+        ):
+            completed = float(stage_completed)
+            total = float(stage_total)
+        else:
+            completed = task.completed
+            total = task.total
+        return ProgressBar(
+            total=max(0, total) if total is not None else None,
+            completed=max(0, completed),
+            width=None if self.bar_width is None else max(1, self.bar_width),
+            pulse=not task.started,
+            animation_time=task.get_time(),
+            style=self.style,
+            complete_style=self.complete_style,
+            finished_style=self.finished_style,
+            pulse_style=self.pulse_style,
+        )
+
+
 class BackupConfigTaskReporter:
     def __init__(
         self,
@@ -264,7 +294,7 @@ class BackupConfigsProgressDisplay:
                     ratio=2,
                 ),
             ),
-            BarColumn(bar_width=24),
+            _StageBarColumn(bar_width=24),
             TextColumn(
                 "{task.fields[progress_text]}",
                 justify="right",
@@ -322,6 +352,8 @@ class BackupConfigsProgressDisplay:
                 total=None,
                 progress_text="",
                 status="正在增量备份",
+                stage_completed=None,
+                stage_total=None,
             )
         return BackupConfigTaskReporter(self, task_id, label)
 
@@ -334,22 +366,18 @@ class BackupConfigsProgressDisplay:
         total: int | None = None,
     ) -> None:
         with self._lock:
-            if completed is not None:
-                self._progress.update(
-                    task_id,
-                    completed=completed,
-                    total=total,
-                    status=message,
-                    progress_text=_progress_text(completed, total),
-                )
-            else:
-                self._progress.update(
-                    task_id,
-                    completed=0,
-                    total=None,
-                    status=message,
-                    progress_text="",
-                )
+            has_stage_progress = completed is not None and total is not None
+            self._progress.update(
+                task_id,
+                status=message,
+                progress_text=(
+                    _progress_text(completed, total)
+                    if has_stage_progress
+                    else ""
+                ),
+                stage_completed=completed if has_stage_progress else None,
+                stage_total=total if has_stage_progress else None,
+            )
 
     def finish_thread(
         self,

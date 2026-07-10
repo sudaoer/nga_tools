@@ -386,7 +386,8 @@ def backup_thread(
     *,
     write_json: bool = False,
 ) -> None:
-    client = NGAClient()
+    with time_section("客户端初始化"):
+        client = NGAClient()
     with time_section("抓取和写入页面"):
         thread_folder = Path(utils.get_folder(tid, aid))
         archive_store = ThreadArchiveStore(thread_folder)
@@ -449,7 +450,8 @@ def backup_thread(
                 floor_labels,
             )
         download_result = _download_images(tid, aid, files_to_download)
-        image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
+        with time_section("图片索引查询"):
+            image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
         with time_section("HTML图片重写"):
             completed_lous = set(
                 _rewrite_parsed_image_links(
@@ -494,7 +496,8 @@ def backup_thread_sub(
     *,
     write_json: bool = False,
 ) -> None:
-    client = NGAClient()
+    with time_section("客户端初始化"):
+        client = NGAClient()
     with time_section("增量预检查"):
         thread_folder = Path(utils.get_folder(tid, aid))
         archive_store = ThreadArchiveStore(thread_folder)
@@ -633,7 +636,8 @@ def backup_thread_sub(
                 floor_labels,
             )
         download_result = _download_images(tid, aid, files_to_download)
-        image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
+        with time_section("图片索引查询"):
+            image_lookup = image_store.ImageLookupCache.for_tasks(files_to_download)
         with time_section("HTML图片重写"):
             completed_lous = set(
                 _rewrite_parsed_image_links(

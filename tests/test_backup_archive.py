@@ -51,6 +51,7 @@ from nga_tools.backup.floor_map import (
 )
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import NGAPageError
+from nga_tools.timing import use_timing_log
 
 
 class RewriteImageLinksTest:
@@ -1168,6 +1169,28 @@ class BackupThreadSubHtmlModifiedManifestTest:
             assert (temp_dir / 'archive.sqlite3').is_file()
             assert (temp_dir / 'html_modified').is_dir()
             assert not (temp_dir / 'json').exists()
+
+    @pytest.mark.parametrize("mode", ["sub", "all"])
+    def test_backup_records_previously_untracked_stages(self, mode: str) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            timing_path = temp_dir / "timing.log"
+
+            with use_timing_log(timing_path, task_name=f"backup {mode}"):
+                if mode == "sub":
+                    self._run_backup_sub(temp_dir, self.MutableFakeClient())
+                else:
+                    self._run_backup_all(temp_dir, self.MutableFakeClient())
+
+            timing_text = timing_path.read_text(encoding="utf-8")
+
+        for stage_name in (
+            "客户端初始化",
+            "图片下载准备",
+            "图片索引查询",
+        ):
+            assert f"阶段：{stage_name}，开始时间：" in timing_text
+            assert f"阶段：{stage_name}，结束时间：" in timing_text
 
     def test_backup_sub_writes_json_when_enabled(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

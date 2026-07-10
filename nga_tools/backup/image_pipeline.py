@@ -224,10 +224,11 @@ def download_images(
     files_to_download: list[image_store.ImageDownloadTask],
 ) -> utils.DownloadSummary:
     del tid, aid
-    pending_downloads = pending_download_tasks(files_to_download)
-    total_count = len(files_to_download)
-    pending_count = len(pending_downloads)
-    existing_count = total_count - pending_count
+    with time_section("图片下载准备"):
+        pending_downloads = pending_download_tasks(files_to_download)
+        total_count = len(files_to_download)
+        pending_count = len(pending_downloads)
+        existing_count = total_count - pending_count
     report_progress(
         f"共{total_count}张图片，已存在{existing_count}张，"
         f"本次下载{pending_count}张",
