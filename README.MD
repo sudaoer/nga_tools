@@ -105,8 +105,8 @@ pixi run python main.py forum sync --full-postdate --refresh --fid 784
 pixi run python main.py backup all --name 帖子名
 ```
 
-图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在 `output/image_index.sqlite3`。下载失败的图片会在 `html_modified` 中指向 `images_unique/download_failed_placeholder.png` 占位图，不写入 SQLite 映射，后续增量备份仍会继续重试原图。
-帖子内容会写入每个备份目录自己的 `archive.sqlite3`。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write-json` 会额外写入 `json/page_*.json`。生成 HTML 和楼层映射只读取 `archive.sqlite3`。
+图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在 `output/image_index.sqlite3`。下载失败的图片不写入 SQLite 映射；PDF 按需渲染时会使用 `images_unique/download_failed_placeholder.png` 占位图，后续增量备份仍会继续重试原图。
+帖子内容会写入每个备份目录自己的 `archive.sqlite3`。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write-json` 会额外写入 `json/page_*.json`。Web 和 PDF 均从 `archive.sqlite3` 按需生成各自的目标 HTML，不保存逐楼中间 HTML。
 
 补充本地缺失内容和远端新增内容：
 
@@ -114,7 +114,7 @@ pixi run python main.py backup all --name 帖子名
 pixi run python main.py backup sub --name 帖子名
 ```
 
-`backup sub` 会补抓缺失的页，并刷新本地尾页到远端最后一页；随后补齐 `html_modified` 和缺失图片。只看作者备份还会重试恢复之前仍为占位的缺失楼内容。
+`backup sub` 会补抓缺失的页，并刷新本地尾页到远端最后一页；随后从 archive 全量解析有效正文并补齐缺失图片。只看作者备份还会重试恢复缺失楼内容；从原帖恢复出的匿名正文会写入当前备份的 `archive.sqlite3`。
 增量刷新到的新页会合并进历史楼层库；同一页新响应中消失的旧楼不会从库中删除。尚未迁移的旧备份目录如果含有 `json/page_*.json` 但 `archive.sqlite3` 不完整，正常备份会报错提示先运行 `backup migrate-store`，不会自动读取旧 JSON。
 
 也可以不使用保存的名称，直接指定 `tid` 和可选的 `aid`：
@@ -144,7 +144,7 @@ pixi run python main.py backup floors --name 帖子名
 pixi run python main.py backup floors --all-threads
 ```
 
-楼层映射会增量刷新。缺失楼无法唯一确定原帖楼层时，`floor_map.json` 会记录 `candidate_original_lous` 候选列表。
+楼层映射会增量刷新。缺失楼无法唯一确定原帖楼层时，`floor_map.json` 会记录 `candidate_original_lous` 候选列表；若能从匿名原帖恢复正文，正文会直接写入同一备份的 `archive.sqlite3`。
 
 旧备份目录可以显式迁移到每帖 SQLite 存储。迁移不会删除或改写旧 `json/page_*.json`：
 
@@ -174,7 +174,7 @@ pixi run web-serve
 ```
 
 默认地址为 `http://127.0.0.1:18736/`。普通帖子阅读页只读取本地备份；
-管理页会写入正文版本选择并刷新对应 `html_modified/post_*.html`。默认只监听
+管理页会写入正文版本选择或 BBCode overlay，后续页面请求和 PDF 导出会直接使用这些设置。默认只监听
 本机地址；允许局域网访问时，管理功能也会暴露给局域网内访问者：
 
 ```powershell
@@ -184,8 +184,7 @@ pixi run python main.py web serve --host 0.0.0.0 --port 18736
 
 Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页面请求时从归档
 正文和最新展示元数据重新渲染 HTML；普通阅读器的线程列表默认按作者最后发言倒序，
-也会显示已存盘的正文字数并支持按正文字数排序。`html_modified/post_*.html` 仍是备份/PDF流程使用的
-产物。旧版只有 `json/page_*.json` 的目录会在页面中显示为“需迁移”，请先运行
+也会显示已存盘的正文字数并支持按正文字数排序。旧版只有 `json/page_*.json` 的目录会在页面中显示为“需迁移”，请先运行
 `backup migrate-store`。
 
 前端使用 Vue Router 管理页面：`/threads` 是普通帖子阅读器，`/admin` 是
@@ -198,19 +197,18 @@ Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页�
 管理界面的“正文版本”会列出同一楼层中正文内容有多个历史版本的楼，左侧备份列表
 默认只显示存在多版本楼层的备份，并可切换为显示全部可管理备份。用户只能选择
 非最新版历史版本；当前最新版不能被手动固定，以免后续增量备份无法自动更新。选择
-会写入备份目录的 `post_version_overrides.json`，普通网页查看和后续 PDF 输入 HTML
-都会使用这套有效版本；清除选择后回到自动最新版。预览历史版本时，管理页会显示
-该版本与最新版正文的差异，便于判断实际变化。选择文件写入和对应 HTML/manifest
-刷新均使用原子替换。
+会写入备份目录的 `post_version_overrides.json`，普通网页查看和后续 PDF 目标 HTML
+都会按需使用这套有效版本；清除选择后回到自动最新版。预览历史版本时，管理页会显示
+该版本与最新版正文的差异，便于判断实际变化。选择文件写入使用原子替换。
 
 普通帖子阅读页支持为单楼添加 BBCode overlay。overlay 是整楼替换，写入
-`post_overlays.json`，保存或清除后会刷新对应 `html_modified/post_*.html`；
-网页查看和后续 PDF 导出都会使用同一结果。当前 overlay 不支持 `[img]`、`[flash]`
+`post_overlays.json`；网页查看和后续 PDF 导出都会从该 BBCode 按需生成目标 HTML。
+当前 overlay 不支持 `[img]`、`[flash]`
 或渲染后产生图片的 HTML。
 
 ## 生成 PDF
 
-先运行 `backup all` 生成 `html_modified` 和图片，再生成 PDF：
+先运行 `backup all` 写入 archive 并下载图片，再生成 PDF：
 
 ```powershell
 pixi run python main.py backup pdf --name 帖子名
@@ -246,9 +244,7 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照、正文版本和最新展示元数据；
   完整原始分页响应保存在 `page_snapshots.page_json`，`post_versions` 只按正文内容做版本控制
 - `post_version_overrides.json`：管理界面保存的正文历史版本选择；没有选择时可为空
-- `post_overlays.json`：网页阅读页保存的单楼 BBCode overlay；保存后会刷新对应
-  `html_modified/post_*.html`
-- `html_modified/`：替换为本地 `images_unique` 图片路径后的 HTML
+- `post_overlays.json`：网页阅读页保存的单楼 BBCode overlay；Web 和 PDF 按需渲染
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 - `floor_map.json`：只看作者楼层到原帖楼层的映射
 
@@ -257,6 +253,9 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `images_unique/`：按内容 hash 保存的实际图片文件
 - `images_unique/download_failed_placeholder.png`：下载失败图片的占位图，按需生成
 - `image_index.sqlite3`：原始 NGA 图片 URL 到 `images_unique` 文件的映射
+
+旧版本生成的 `html_modified/`、`backup_state.json` 和 `overlay/post_*.html` 不再读取，
+程序也不会自动删除或改写这些历史产物。
 
 ## 协议
 

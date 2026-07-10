@@ -290,8 +290,7 @@ select {
   color: var(--nga-success-text);
 }
 
-.status.needs_migration,
-.status.missing_html {
+.status.needs_migration {
   background: var(--nga-warning-bg);
   color: var(--nga-warning-text);
 }

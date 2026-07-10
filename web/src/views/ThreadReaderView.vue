@@ -38,7 +38,7 @@ const SORT_KEYS: SortKey[] = [
   'title',
   'author',
 ]
-const THREAD_STATUSES: ThreadStatus[] = ['ready', 'needs_migration', 'missing_html', 'invalid']
+const THREAD_STATUSES: ThreadStatus[] = ['ready', 'needs_migration', 'invalid']
 
 const threads = ref<ThreadSummary[]>([])
 const selectedThread = ref<ThreadSummary | null>(null)
@@ -153,7 +153,6 @@ function statusLabel(status: ThreadStatus): string {
   const labels: Record<ThreadStatus, string> = {
     ready: '可阅读',
     needs_migration: '需迁移',
-    missing_html: '缺HTML',
     invalid: '无效',
   }
   return labels[status]
@@ -732,7 +731,6 @@ onMounted(() => {
           <option value="all">全部状态</option>
           <option value="ready">可阅读</option>
           <option value="needs_migration">需迁移</option>
-          <option value="missing_html">缺HTML</option>
           <option value="invalid">无效</option>
         </select>
         <select v-model="listFilter.sortBy" aria-label="排序字段">

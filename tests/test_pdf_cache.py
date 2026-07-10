@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import io
+import sqlite3
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,6 +18,7 @@ from rich.console import Console
 
 from nga_tools.backup import image_store
 from nga_tools.backup import pdf_renderer
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.backup.pdf import (
     PdfRenderPool,
@@ -35,6 +38,7 @@ from nga_tools.backup.pdf_plan import (
     write_pdf_hashes,
 )
 from nga_tools.backup.post_overlay import save_post_overlay
+from nga_tools.backup.post_version_selection import write_selections
 from nga_tools.console import ConsoleReporter, use_reporter, use_warning_log
 
 
@@ -42,6 +46,17 @@ def _write_avif_image(path: Path) -> None:
     pixels = np.zeros((2, 3, 3), dtype=np.uint8)
     pixels[:, :] = [255, 255, 255]
     path.write_bytes(imagecodecs.avif_encode(pixels))
+
+
+def _write_pdf_archive(thread_dir: Path, content: str) -> None:
+    ThreadArchiveStore(thread_dir).upsert_page(
+        1,
+        {
+            "totalPage": 1,
+            "result": [{"lou": 1, "pid": 1001, "content": content}],
+        },
+        observed_at="2026-07-11T00:00:00+00:00",
+    )
 
 
 class PdfHashCacheTest:
@@ -416,28 +431,87 @@ class PdfImageSourceTest:
             "C:/nga/image.png"
         )
 
+    def test_read_pdf_html_uses_selected_archive_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir) / "output"
+            thread_dir = output_dir / "101_all"
+            store = ThreadArchiveStore(thread_dir)
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "before edit"}
+                    ],
+                },
+                observed_at="2026-07-11T00:00:00+00:00",
+            )
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "after edit"}
+                    ],
+                },
+                observed_at="2026-07-11T01:00:00+00:00",
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                version_id, source_hash = connection.execute(
+                    """
+                    SELECT id, source_hash
+                    FROM post_versions
+                    WHERE content = 'before edit'
+                    """
+                ).fetchone()
+            write_selections(
+                thread_dir,
+                {
+                    1: {
+                        "version_id": version_id,
+                        "source_hash": source_hash,
+                        "selected_at": "2026-07-11T02:00:00+00:00",
+                    }
+                },
+            )
+
+            with patch(
+                "nga_tools.core.paths.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                html_content_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+
+        assert "before edit" in html_content_by_lou[1]
+        assert "after edit" not in html_content_by_lou[1]
+
     def test_read_pdf_html_converts_avif_image_for_pdf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir) / "output"
-            html_dir = output_dir / "101_all" / "html_modified"
+            thread_dir = output_dir / "101_all"
             unique_dir = output_dir / "images_unique"
-            html_dir.mkdir(parents=True)
             unique_dir.mkdir(parents=True)
             unique_image = unique_dir / "hash.avif"
             _write_avif_image(unique_image)
-            (html_dir / "post_1.html").write_text(
-                '<p><img src="../../images_unique/hash.avif"/></p>',
-                encoding="utf-8",
+            image_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202607/11/hash.avif"
             )
+            _write_pdf_archive(thread_dir, f"[img]{image_url}[/img]")
+            config = SimpleNamespace(output_dir=str(output_dir))
 
             with (
                 patch(
                     "nga_tools.core.paths.get_config",
-                    return_value=SimpleNamespace(output_dir=str(output_dir)),
+                    return_value=config,
                 ),
+                patch("nga_tools.backup.image_store.get_config", return_value=config),
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),
                 patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
             ):
+                image_store.upsert_image_mapping(image_url, unique_image)
                 html_content_by_lou, folder_pdf, _floor_labels = _read_pdf_html(
                     101,
                     None,
@@ -458,56 +532,16 @@ class PdfImageSourceTest:
     def test_read_pdf_html_keeps_png_image_without_conversion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir) / "output"
-            html_dir = output_dir / "101_all" / "html_modified"
+            thread_dir = output_dir / "101_all"
             unique_dir = output_dir / "images_unique"
-            html_dir.mkdir(parents=True)
             unique_dir.mkdir(parents=True)
             unique_image = unique_dir / "hash.png"
             Image.new("RGB", (2, 2), color="white").save(unique_image)
-            (html_dir / "post_1.html").write_text(
-                '<p><img src="../../images_unique/hash.png"/></p>',
-                encoding="utf-8",
-            )
-
-            with (
-                patch(
-                    "nga_tools.core.paths.get_config",
-                    return_value=SimpleNamespace(output_dir=str(output_dir)),
-                ),
-                patch("nga_tools.backup.pdf._is_long_image", return_value=False),
-                patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
-            ):
-                html_content_by_lou, folder_pdf, _floor_labels = _read_pdf_html(
-                    101,
-                    None,
-                )
-
-            assert not (Path(folder_pdf) / "converted_images").exists()
-            assert 'src="../../images_unique/hash.png"' in html_content_by_lou[1]
-
-    def test_read_pdf_html_does_not_resolve_legacy_global_link_without_mapping(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            output_dir = Path(tmp_dir) / "output"
-            html_dir = output_dir / "101_all" / "html_modified"
-            unique_dir = output_dir / "images_unique"
-            link_dir = output_dir / "images" / "mon_202506" / "06"
-            html_dir.mkdir(parents=True)
-            unique_dir.mkdir(parents=True)
-            link_dir.mkdir(parents=True)
-            unique_image = unique_dir / "hash.png"
-            Image.new("RGB", (2, 2), color="white").save(unique_image)
-            link_path = link_dir / "lsQkle-552eXuT3cS10p-7f7.png"
-            link_path.symlink_to(Path("../../..") / "images_unique" / "hash.png")
             image_url = (
                 "https://img.nga.178.com/attachments/"
-                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+                "mon_202607/11/hash.png"
             )
-            (html_dir / "post_1.html").write_text(
-                f'<p><img src="{image_url}"/></p>',
-                encoding="utf-8",
-            )
+            _write_pdf_archive(thread_dir, f"[img]{image_url}[/img]")
             config = SimpleNamespace(output_dir=str(output_dir))
 
             with (
@@ -519,23 +553,65 @@ class PdfImageSourceTest:
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),
                 patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
             ):
-                with pytest.raises(RuntimeError, match="不支持的远程图片链接"):
-                    _read_pdf_html(
-                        101,
-                        None,
-                    )
+                image_store.upsert_image_mapping(image_url, unique_image)
+                html_content_by_lou, folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+
+            assert not (Path(folder_pdf) / "converted_images").exists()
+            assert 'src="../../images_unique/hash.png"' in html_content_by_lou[1]
+
+    def test_read_pdf_html_uses_placeholder_instead_of_legacy_link_without_mapping(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir) / "output"
+            thread_dir = output_dir / "101_all"
+            unique_dir = output_dir / "images_unique"
+            link_dir = output_dir / "images" / "mon_202506" / "06"
+            unique_dir.mkdir(parents=True)
+            link_dir.mkdir(parents=True)
+            unique_image = unique_dir / "hash.png"
+            Image.new("RGB", (2, 2), color="white").save(unique_image)
+            link_path = link_dir / "lsQkle-552eXuT3cS10p-7f7.png"
+            link_path.symlink_to(Path("../../..") / "images_unique" / "hash.png")
+            image_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+            )
+            _write_pdf_archive(thread_dir, f"[img]{image_url}[/img]")
+            config = SimpleNamespace(output_dir=str(output_dir))
+
+            with (
+                patch(
+                    "nga_tools.core.paths.get_config",
+                    return_value=config,
+                ),
+                patch("nga_tools.backup.image_store.get_config", return_value=config),
+                patch("nga_tools.backup.pdf._is_long_image", return_value=False),
+                patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
+            ):
+                html_content_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+
+        assert "download_failed_placeholder.png" in html_content_by_lou[1]
+        assert "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png" not in (
+            html_content_by_lou[1]
+        )
 
     def test_read_pdf_html_keeps_hidden_about_blank_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir) / "output"
-            html_dir = output_dir / "101_all" / "html_modified"
-            html_dir.mkdir(parents=True)
-            (html_dir / "post_1.html").write_text(
+            thread_dir = output_dir / "101_all"
+            _write_pdf_archive(
+                thread_dir,
                 (
                     '<p>初始<span style="font-size: 50%;">5楼</span>'
                     '<img src="about:blank" style="display:none" /></p>'
                 ),
-                encoding="utf-8",
             )
 
             with patch(
@@ -550,16 +626,17 @@ class PdfImageSourceTest:
         assert 'src="about:blank"' in html_content_by_lou[1]
         assert "display:none" in html_content_by_lou[1]
 
-    def test_read_pdf_html_prefers_bbcode_overlay_over_legacy_html_overlay(self) -> None:
+    def test_read_pdf_html_uses_bbcode_overlay_and_ignores_legacy_html(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir) / "output"
             thread_dir = output_dir / "101_all"
             html_dir = thread_dir / "html_modified"
             legacy_overlay_dir = thread_dir / "overlay"
+            _write_pdf_archive(thread_dir, "original body")
             html_dir.mkdir(parents=True)
             legacy_overlay_dir.mkdir(parents=True)
             (html_dir / "post_1.html").write_text(
-                '<p class="bbcode-overlay">bbcode overlay</p>',
+                '<p class="old-html">old materialized html</p>',
                 encoding="utf-8",
             )
             (legacy_overlay_dir / "post_1.html").write_text(
@@ -579,6 +656,8 @@ class PdfImageSourceTest:
 
         assert "bbcode overlay" in html_content_by_lou[1]
         assert "legacy overlay" not in html_content_by_lou[1]
+        assert "old materialized html" not in html_content_by_lou[1]
+        assert "original body" not in html_content_by_lou[1]
 
     def test_read_pdf_html_uses_lazy_about_blank_data_srcorg(self) -> None:
         image_url = (
@@ -587,19 +666,18 @@ class PdfImageSourceTest:
         )
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir) / "output"
-            html_dir = output_dir / "101_all" / "html_modified"
+            thread_dir = output_dir / "101_all"
             unique_dir = output_dir / "images_unique"
-            html_dir.mkdir(parents=True)
             unique_dir.mkdir(parents=True)
             unique_image = unique_dir / "hash.png"
             Image.new("RGB", (2, 2), color="white").save(unique_image)
-            (html_dir / "post_1.html").write_text(
+            _write_pdf_archive(
+                thread_dir,
                 (
                     '<p><img src="about:blank" '
                     f'data-srcorg="{image_url}" '
                     'style="max-height: 1em; min-height: 130px;" /></p>'
                 ),
-                encoding="utf-8",
             )
 
             with (

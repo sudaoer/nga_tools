@@ -32,12 +32,14 @@ class OriginalPostSnapshot(TypedDict):
     lou: int
     author_uid: Optional[int]
     content: str
+    raw_post: dict[str, object]
 
 
 class RecoveredMissingPost(TypedDict):
     original_pid: int
     original_lou: int
     content: str
+    raw_post: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -87,4 +89,3 @@ def format_candidate_lous(candidates: Sequence[int]) -> str:
 
     preview = ", ".join(str(lou) for lou in candidates[:5])
     return f"{preview} 等{len(candidates)}个"
-

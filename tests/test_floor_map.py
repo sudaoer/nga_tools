@@ -177,7 +177,17 @@ class FloorMapMissingInferenceTest:
         )
 
         assert result.floor_labels.original_lou_by_author_lou[2] == 11
-        assert result.recovered_missing_posts_by_author_lou[2] == {'original_pid': 2002, 'original_lou': 11, 'content': 'anonymous body'}
+        assert result.recovered_missing_posts_by_author_lou[2] == {
+            "original_pid": 2002,
+            "original_lou": 11,
+            "content": "anonymous body",
+            "raw_post": {
+                "pid": 2002,
+                "lou": 11,
+                "author": {"uid": -1},
+                "content": "anonymous body",
+            },
+        }
         assert {'pid': None, 'author_lou': 2, 'original_lou': 11, 'original_pid': 2002} in floor_map['entries']
 
     def test_deleted_original_post_still_maps_without_recovered_content(self) -> None:

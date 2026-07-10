@@ -13,6 +13,7 @@ from PIL import Image
 from rich.console import Console
 
 from nga_tools.backup import image_store
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.image_verify import (
     ImageVerifyResult,
     _image_verify_worker_count,
@@ -256,18 +257,40 @@ class ImageVerifyAllTest:
     def test_thread_reference_listing_resolves_direct_unique_image_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir) / "output"
-            html_dir = output_dir / "101_201" / "html_modified"
+            thread_dir = output_dir / "101_all"
             unique_dir = output_dir / "images_unique"
-            html_dir.mkdir(parents=True)
-            unique_dir.mkdir()
+            unique_dir.mkdir(parents=True)
             unique_image = unique_dir / "abc.png"
             Image.new("RGB", (1, 1), color="white").save(unique_image)
-            (html_dir / "post_1.html").write_text(
-                '<img src="../../images_unique/abc.png"/>',
-                encoding="utf-8",
+            image_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202607/11/abc.png"
             )
+            ThreadArchiveStore(thread_dir).upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {
+                            "lou": 1,
+                            "pid": 1001,
+                            "content": f"[img]{image_url}[/img]",
+                        }
+                    ],
+                },
+            )
+            config = SimpleNamespace(output_dir=str(output_dir))
 
-            paths = _list_thread_referenced_image_paths(html_dir)
+            with patch(
+                "nga_tools.backup.image_store.get_config",
+                return_value=config,
+            ):
+                image_store.upsert_image_mapping(image_url, unique_image)
+                paths = _list_thread_referenced_image_paths(
+                    101,
+                    None,
+                    thread_dir,
+                )
 
         assert paths == [unique_image]
 

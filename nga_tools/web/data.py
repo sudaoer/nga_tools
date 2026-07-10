@@ -21,7 +21,6 @@ from nga_tools.backup.archive_posts import (
 )
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
 from nga_tools.backup.archive_store import ArchivePostVersionRow
-from nga_tools.backup.archive import refresh_html_modified_for_lous
 from nga_tools.backup.floor_models import (
     MISSING_POST_HTML,
     ORIGINAL_POSTS_PER_PAGE,
@@ -32,6 +31,7 @@ from nga_tools.backup.post_data import (
     make_image_src_resolver,
 )
 from nga_tools.backup.post_overlay import (
+    POST_OVERLAYS_FILENAME,
     PostOverlay,
     clear_post_overlay as _clear_post_overlay,
     load_post_overlays,
@@ -39,6 +39,7 @@ from nga_tools.backup.post_overlay import (
     save_post_overlay as _save_post_overlay,
 )
 from nga_tools.backup.post_version_selection import (
+    POST_VERSION_SELECTIONS_FILENAME,
     load_selections,
     make_selection,
     write_selections,
@@ -54,13 +55,12 @@ from nga_tools.web.html_sanitize import sanitize_post_html
 from nga_tools.web.render import ImageSrcResolver, render_web_bbcode
 from nga_tools.word_count import DEFAULT_MIN_BODY_CHARS, WORD_COUNT_VERSION
 
-ThreadStatus = Literal["ready", "needs_migration", "missing_html", "invalid"]
+ThreadStatus = Literal["ready", "needs_migration", "invalid"]
 ThreadSummaryDetail = Literal["light", "full"]
 PostEmptyReason = Literal["missing", "filtered"]
 PostDate = int | str
 
 _THREAD_DIR_RE = re.compile(r"^(\d+)_(all|\d+)$")
-_POST_HTML_RE = re.compile(r"^post_(\d+)\.html$")
 _IMG_BBCODE_RE = re.compile(r"\[img\](.*?)\[/img\]", re.IGNORECASE | re.DOTALL)
 
 
@@ -88,7 +88,6 @@ class ThreadSummary(TypedDict):
     pageCount: Optional[int]
     updatedAt: Optional[str]
     authorUpdatedAt: Optional[PostDate]
-    hasHtmlModified: bool
     hasFloorMap: bool
     hasWarnings: bool
 
@@ -432,15 +431,6 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
     )
 
 
-def _has_post_html_files(html_modified_dir: Path) -> bool:
-    if not html_modified_dir.is_dir():
-        return False
-    return any(
-        path.is_file() and _POST_HTML_RE.fullmatch(path.name) is not None
-        for path in html_modified_dir.iterdir()
-    )
-
-
 def _latest_mtime(paths: list[Path]) -> Optional[str]:
     timestamps = [path.stat().st_mtime for path in paths if path.exists()]
     if not timestamps:
@@ -503,14 +493,8 @@ def _thread_summary_for_folder(
 
     tid, aid, raw_aid_key = parsed
     db_path = thread_folder / ARCHIVE_DB_FILENAME
-    html_modified_dir = thread_folder / "html_modified"
     floor_map_path = thread_folder / "floor_map.json"
     warnings_path = thread_folder / "warnings.log"
-    has_html_modified = (
-        _has_post_html_files(html_modified_dir)
-        if detail == "full"
-        else html_modified_dir.is_dir()
-    )
     has_floor_map = floor_map_path.is_file()
     has_warnings = warnings_path.is_file()
     status: ThreadStatus = "invalid"
@@ -544,8 +528,6 @@ def _thread_summary_for_folder(
             except (sqlite3.Error, RuntimeError, ValueError) as error:
                 status = "invalid"
                 message = f"archive.sqlite3无法读取：{error}"
-        if status == "ready" and not has_html_modified:
-            message = "未找到html_modified/post_*.html，Web将从原始备份数据渲染。"
     elif (thread_folder / "json").is_dir():
         status = "needs_migration"
         message = "此目录只有旧分页JSON，请先运行 backup migrate-store。"
@@ -556,9 +538,10 @@ def _thread_summary_for_folder(
     updated_at = _latest_mtime(
         [
             db_path,
-            html_modified_dir / "html_modified_manifest.json",
             floor_map_path,
             warnings_path,
+            thread_folder / POST_VERSION_SELECTIONS_FILENAME,
+            thread_folder / POST_OVERLAYS_FILENAME,
         ]
     )
 
@@ -586,7 +569,6 @@ def _thread_summary_for_folder(
         "pageCount": page_count,
         "updatedAt": updated_at,
         "authorUpdatedAt": author_updated_at,
-        "hasHtmlModified": has_html_modified,
         "hasFloorMap": has_floor_map,
         "hasWarnings": has_warnings,
     }
@@ -1179,14 +1161,13 @@ def save_thread_post_overlay(
     lou: int,
     bbcode: str,
 ) -> PostOverlayDetail:
-    archive_store, thread_folder, aid = _archive_store_for_thread(
+    archive_store, thread_folder, _aid = _archive_store_for_thread(
         output_dir,
         tid,
         raw_aid_key,
     )
     _read_effective_row_for_lou(archive_store, lou)
     _save_post_overlay(thread_folder, lou, bbcode)
-    refresh_html_modified_for_lous(tid, aid, {lou}, thread_folder)
     return read_post_overlay(output_dir, tid, raw_aid_key, lou)
 
 
@@ -1196,14 +1177,13 @@ def clear_thread_post_overlay(
     raw_aid_key: str,
     lou: int,
 ) -> PostOverlayDetail:
-    archive_store, thread_folder, aid = _archive_store_for_thread(
+    archive_store, thread_folder, _aid = _archive_store_for_thread(
         output_dir,
         tid,
         raw_aid_key,
     )
     _read_effective_row_for_lou(archive_store, lou)
     _clear_post_overlay(thread_folder, lou)
-    refresh_html_modified_for_lous(tid, aid, {lou}, thread_folder)
     return read_post_overlay(output_dir, tid, raw_aid_key, lou)
 
 
@@ -1370,7 +1350,7 @@ def select_post_version(
     lou: int,
     version_id: int,
 ) -> PostVersionSelectionResult:
-    archive_store, thread_folder, aid = _archive_store_for_thread(
+    archive_store, thread_folder, _aid = _archive_store_for_thread(
         output_dir,
         tid,
         raw_aid_key,
@@ -1401,7 +1381,6 @@ def select_post_version(
     selections = load_selections(thread_folder)
     selections[lou] = make_selection(version_id, source_hash)
     write_selections(thread_folder, selections)
-    refresh_html_modified_for_lous(tid, aid, {lou}, thread_folder)
     return {
         "lou": lou,
         "selectedVersionId": version_id,
@@ -1415,7 +1394,7 @@ def clear_post_version_selection(
     raw_aid_key: str,
     lou: int,
 ) -> PostVersionSelectionResult:
-    archive_store, thread_folder, aid = _archive_store_for_thread(
+    archive_store, thread_folder, _aid = _archive_store_for_thread(
         output_dir,
         tid,
         raw_aid_key,
@@ -1428,7 +1407,6 @@ def clear_post_version_selection(
     selections = load_selections(thread_folder)
     selections.pop(lou, None)
     write_selections(thread_folder, selections)
-    refresh_html_modified_for_lous(tid, aid, {lou}, thread_folder)
     return {
         "lou": lou,
         "selectedVersionId": None,

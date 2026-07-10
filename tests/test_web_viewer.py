@@ -173,7 +173,7 @@ class WebViewerDataTest:
         assert by_dir["101_201"]["link"] == (
             "https://bbs.nga.cn/read.php?tid=101&authorid=201"
         )
-        assert by_dir["101_201"]["hasHtmlModified"] is False
+        assert "hasHtmlModified" not in by_dir["101_201"]
         assert by_dir["102_all"]["status"] == "needs_migration"
 
     def test_light_scan_skips_archive_stats(
@@ -703,7 +703,7 @@ class WebServerTest:
         assert refreshed_response.status_code == 200
         assert len(calls) == 2
 
-    def test_admin_post_version_selection_affects_reader_and_html_modified(
+    def test_admin_post_version_selection_affects_reader_without_materialized_html(
         self,
         tmp_path: Path,
     ) -> None:
@@ -756,10 +756,7 @@ class WebServerTest:
         assert payload["items"][0]["versionId"] == old_version_id
         assert payload["items"][0]["manualVersion"] is True
         assert (thread_dir / POST_VERSION_SELECTIONS_FILENAME).is_file()
-        html_modified = (thread_dir / "html_modified" / "post_1.html").read_text(
-            encoding="utf-8"
-        )
-        assert "before edit" in html_modified
+        assert not (thread_dir / "html_modified").exists()
 
         clear_response = client.delete(
             "/api/admin/threads/101/201/post-version-selections/1"
@@ -774,7 +771,7 @@ class WebServerTest:
         assert "after edit" in refreshed_payload["items"][0]["html"]
         assert refreshed_payload["items"][0]["manualVersion"] is False
 
-    def test_admin_post_overlay_affects_reader_and_html_modified(
+    def test_admin_post_overlay_affects_reader_without_materialized_html(
         self,
         tmp_path: Path,
     ) -> None:
@@ -819,11 +816,7 @@ class WebServerTest:
         assert save_payload["bbcode"] == "[quote]覆盖[/quote]"
         assert '<blockquote class="nga-quote">覆盖</blockquote>' in save_payload["html"]
         assert (thread_dir / POST_OVERLAYS_FILENAME).is_file()
-        html_modified = (thread_dir / "html_modified" / "post_1.html").read_text(
-            encoding="utf-8"
-        )
-        assert '<blockquote class="nga-quote">覆盖</blockquote>' in html_modified
-        assert "original" not in html_modified
+        assert not (thread_dir / "html_modified").exists()
         assert posts_response.status_code == 200
         post_payload = posts_response.json()
         assert post_payload["items"][0]["hasOverlay"] is True

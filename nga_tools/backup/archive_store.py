@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, cast
 
-from nga_tools.backup.floor_models import AuthorPostRef, PAGE_JSON_RE
+from nga_tools.backup.floor_models import (
+    PAGE_JSON_RE,
+    AuthorPostRef,
+    RecoveredMissingPost,
+)
 from nga_tools.backup.models import PostData, PostRecord
 from nga_tools.backup.archive_posts import (
     image_attachments_from_json,
@@ -1026,6 +1030,53 @@ class ThreadArchiveStore:
             post_observations=len(raw_post_items),
         )
 
+    def upsert_recovered_posts(
+        self,
+        recovered_posts_by_author_lou: dict[int, RecoveredMissingPost],
+        *,
+        observed_at: str | None = None,
+    ) -> int:
+        if not recovered_posts_by_author_lou:
+            return 0
+
+        observed_at = _now_utc_iso() if observed_at is None else observed_at
+        inserted_count = 0
+        with closing(self._connect()) as connection:
+            with connection:
+                for author_lou, recovered in sorted(
+                    recovered_posts_by_author_lou.items()
+                ):
+                    raw_post = dict(recovered["raw_post"])
+                    raw_post["lou"] = author_lou
+                    raw_post["pid"] = recovered["original_pid"]
+                    raw_post["content"] = recovered["content"]
+                    metadata = metadata_from_raw_post(raw_post)
+                    if metadata["author_uid"] != -1:
+                        raise ValueError(
+                            f"恢复第{author_lou}楼时原帖不是匿名帖子。"
+                        )
+
+                    post = post_data_from_raw(
+                        raw_post,
+                        source=f"恢复的匿名原帖第{recovered['original_lou']}楼",
+                    )
+                    _version_id, inserted = self._upsert_post_version(
+                        connection,
+                        post,
+                        observed_at,
+                        count_observation=False,
+                    )
+                    self._upsert_post_latest_metadata(
+                        connection,
+                        raw_post,
+                        post,
+                        observed_at,
+                        count_observation=False,
+                    )
+                    if inserted:
+                        inserted_count += 1
+        return inserted_count
+
     def refresh_stored_word_counts(self) -> int:
         self.require_exists()
         with closing(self._connect()) as connection:
@@ -1509,10 +1560,36 @@ class ThreadArchiveStore:
         return records
 
     def read_latest_author_post_refs(self) -> list[AuthorPostRef]:
+        self.require_exists()
+        with closing(self._connect()) as connection:
+            rows = cast(
+                list[tuple[int, int, Optional[int]]],
+                connection.execute(
+                    """
+                    SELECT latest.pid, latest.lou, metadata.author_uid
+                    FROM (
+                        SELECT
+                            pid,
+                            lou,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY lou
+                                ORDER BY last_seen_at DESC, id DESC
+                            ) AS row_number
+                        FROM post_versions
+                    ) AS latest
+                    LEFT JOIN post_latest_metadata AS metadata
+                        ON metadata.pid = latest.pid
+                        AND metadata.lou = latest.lou
+                    WHERE latest.row_number = 1
+                    ORDER BY latest.lou
+                    """
+                ).fetchall(),
+            )
+
         return [
-            {"pid": record["pid"], "author_lou": record["lou"]}
-            for record in self.read_latest_post_record_summaries()
-            if record["pid"] is not None
+            {"pid": pid, "author_lou": lou}
+            for pid, lou, author_uid in rows
+            if author_uid != -1
         ]
 
     def read_latest_author_total_lou_count(self) -> Optional[int]:

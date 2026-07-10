@@ -1,4 +1,4 @@
-export type ThreadStatus = 'ready' | 'needs_migration' | 'missing_html' | 'invalid'
+export type ThreadStatus = 'ready' | 'needs_migration' | 'invalid'
 
 export interface ThreadSummary {
   tid: number
@@ -24,7 +24,6 @@ export interface ThreadSummary {
   pageCount: number | null
   updatedAt: string | null
   authorUpdatedAt: number | string | null
-  hasHtmlModified: boolean
   hasFloorMap: boolean
   hasWarnings: boolean
 }

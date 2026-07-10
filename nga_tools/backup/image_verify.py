@@ -4,13 +4,18 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, cast
-
-from bs4 import BeautifulSoup, Tag
+from typing import Optional
 
 from nga_tools import utils
 from nga_tools.backup import image_store
-from nga_tools.backup.html_images import image_src_path
+from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.floor_map import FloorLabels, load_floor_labels
+from nga_tools.backup.image_pipeline import (
+    collect_image_download_tasks_from_parsed,
+    parse_post_htmls_for_images,
+)
+from nga_tools.backup.post_html import load_post_htmls_for_records
+from nga_tools.backup.post_overlay import apply_post_overlays_to_records
 from nga_tools.config import get_config
 from nga_tools.console import report_info, report_warning
 from nga_tools.core.image_formats import image_file_error
@@ -33,12 +38,10 @@ class ImageFileVerifyResult:
 
 def verify_downloaded_images(tid: int, aid: Optional[int]) -> None:
     with time_section("图片引用读取"):
-        folder_html_modified = Path(
-            utils.get_folder(tid, aid, "html_modified", create=False)
-        )
-        image_paths = _list_thread_referenced_image_paths(folder_html_modified)
+        thread_folder = Path(utils.get_folder(tid, aid, create=False))
+        image_paths = _list_thread_referenced_image_paths(tid, aid, thread_folder)
     with time_section("图片校验"):
-        result = _verify_image_paths(str(folder_html_modified), image_paths)
+        result = _verify_image_paths(str(thread_folder), image_paths)
     report_info(
         f"帖子图片校验完成：引用图片{result.total}张，"
         f"删除{result.removed}个损坏文件。"
@@ -81,50 +84,40 @@ def _list_downloaded_image_folders() -> list[str]:
     return [str(unique_images)]
 
 
-def _tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
-    value = tag.get(attr_name)
-    if isinstance(value, str):
-        return value
-    return None
-
-
-def _path_from_src(image_src: str, source_dir: Path) -> Path:
-    path = image_src_path(image_src, source_dir)
-    if path is None:
-        return source_dir / image_src
-    return path
-
-
-def _image_path_from_src(image_src: str, source_dir: Path) -> Path:
-    link_path = image_store.link_path_for_image_src(image_src)
-    if link_path is not None:
-        return link_path
-
-    return _path_from_src(image_src, source_dir)
-
-
-def _list_thread_referenced_image_paths(folder_html_modified: Path) -> list[Path]:
-    if not folder_html_modified.is_dir():
-        return []
-
+def _list_thread_referenced_image_paths(
+    tid: int,
+    aid: Optional[int],
+    thread_folder: Path,
+) -> list[Path]:
+    records = ThreadArchiveStore(thread_folder).read_effective_post_records()
+    records = apply_post_overlays_to_records(thread_folder, records)
+    htmls = load_post_htmls_for_records(records)
+    parsed_htmls = parse_post_htmls_for_images(htmls)
+    if aid is None:
+        floor_labels = FloorLabels.plain()
+    else:
+        try:
+            floor_labels = load_floor_labels(tid, aid)
+        except Exception as error:
+            report_warning(f"无法加载楼层映射，使用普通楼层标签：{error}")
+            floor_labels = FloorLabels.plain()
+    tasks = collect_image_download_tasks_from_parsed(parsed_htmls, floor_labels)
+    mappings = image_store.image_mappings_for_urls(task["url"] for task in tasks)
     image_paths: list[Path] = []
     seen_paths: set[str] = set()
-    html_files = utils.list_files_in_folder(str(folder_html_modified), ends_with=".html")
-    for html_file in html_files:
-        html_path = folder_html_modified / html_file
-        soup = BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
-        images = cast(list[Tag], soup.find_all("img"))
-        for image in images:
-            image_src = _tag_attr_str(image, "src")
-            if not image_src:
-                continue
-            image_path = _image_path_from_src(image_src, folder_html_modified)
-            target_path = image_path.resolve() if image_path.exists() else image_path
-            key = str(target_path)
-            if key in seen_paths:
-                continue
-            seen_paths.add(key)
-            image_paths.append(target_path)
+    for task in tasks:
+        normalized_url = image_store.normalize_nga_image_url(task["url"])
+        mapping = mappings.get(normalized_url)
+        if mapping is None:
+            report_warning(f"帖子图片未找到本地映射：{normalized_url}")
+            continue
+        image_path = mapping.unique_path
+        target_path = image_path.resolve() if image_path.exists() else image_path
+        key = str(target_path)
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        image_paths.append(target_path)
 
     return sorted(image_paths)
 

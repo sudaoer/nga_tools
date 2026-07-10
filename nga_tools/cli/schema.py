@@ -284,7 +284,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "notes": [
                 "此命令会补抓缺失页，并刷新本地尾页到远端最后一页。",
                 "默认只写archive.sqlite3；加--write-json才输出json/page_*.json。",
-                "随后会补齐缺失或新增的html_modified和图片文件。",
+                "随后会从archive全量解析正文并补齐缺失图片，不写入逐楼HTML。",
                 "author-only备份会增量刷新floor_map.json。",
                 "--all-threads会按thread_configs.json中的ThreadList批量执行增量备份。",
             ],
@@ -337,6 +337,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "notes": [
                 "此命令会读取archive.sqlite3并联网扫描原帖，增量刷新floor_map.json。",
+                "从匿名原帖恢复出的缺失正文会写入同一archive.sqlite3。",
                 "author-only备份生成PDF前必须先有floor_map.json。",
                 "缺失楼无法唯一确定原楼层时，会在floor_map.json中记录候选原楼层。",
             ],
@@ -366,7 +367,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
         },
         "pdf": {
             "handler": pdf_generate,
-            "summary": "根据已备份的HTML和图片生成PDF",
+            "summary": "根据archive原始正文和已下载图片生成PDF",
             "usage": (
                 f"{PROGRAM_USAGE} backup pdf "
                 "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
@@ -384,9 +385,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "--workers控制并行处理的帖子数，--pdf-workers控制全命令共享的"
                 "WeasyPrint并发数。",
                 "网页管理页保存的BBCode overlay会写入post_overlays.json，"
-                "并刷新对应html_modified，普通查看和PDF都会使用。",
-                "旧HTML overlay：<output_dir>/<tid>_<aid>/overlay/post_<楼层>.html "
-                "仅作为legacy PDF覆盖方式保留；同楼层存在BBCode overlay时会被忽略。",
+                "普通查看和PDF都会按需渲染同一份overlay。",
+                "旧overlay/post_<楼层>.html不再读取。",
             ],
             "args": [
                 "name",
@@ -413,7 +413,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "notes": [
                 "不提供参数时会校验output_dir/images_unique中的全局图片。",
-                "提供帖子参数时会校验该帖html_modified引用到的图片文件。",
+                "提供帖子参数时会从archive正文解析引用并校验对应图片文件。",
             ],
             "args": ["name", "tid", "aid"],
         },
@@ -435,7 +435,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "此命令只读取本地备份，不联网、不修改备份内容。",
                 "默认只监听本机地址，避免把本地备份暴露到局域网。",
                 "线程列表会显示已存盘的正文字数，并支持按正文字数排序。",
-                "只支持当前archive.sqlite3和html_modified备份；旧JSON请先迁移。",
+                "只支持当前archive.sqlite3备份；旧JSON请先迁移。",
             ],
             "args": ["host", "port", "static_dir"],
             "defaults": {

@@ -706,6 +706,7 @@ def _scan_original_pages(
                     "lou": original_lou,
                     "author_uid": _post_author_uid(post),
                     "content": _post_content(post),
+                    "raw_post": dict(post),
                 }
             for author_lou in pid_to_author_lous.get(pid, []):
                 original_lou_by_author_lou[author_lou] = original_lou
@@ -759,6 +760,7 @@ def _recover_missing_posts_from_original_pages(
             "original_pid": original_post["pid"],
             "original_lou": original_lou,
             "content": original_post["content"],
+            "raw_post": original_post["raw_post"],
         }
 
     if recovered:
@@ -914,10 +916,13 @@ def generate_floor_map_from_backup(tid: int, aid: Optional[int]) -> None:
             ),
         }
     )
-    build_and_save_floor_map(
+    result = build_and_save_floor_map(
         NGAClient(),
         tid,
         aid,
         author_posts,
         missing_author_lous,
+    )
+    archive_store.upsert_recovered_posts(
+        result.recovered_missing_posts_by_author_lou
     )

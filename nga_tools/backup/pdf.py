@@ -16,6 +16,7 @@ from bs4.element import NavigableString
 from PIL import Image
 
 from nga_tools import utils
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_map import (
     FloorLabels,
     load_floor_labels,
@@ -23,8 +24,12 @@ from nga_tools.backup.floor_map import (
 )
 from nga_tools.backup import image_store
 from nga_tools.backup.html_images import effective_image_src, image_src_path
-from nga_tools.backup.overlay import load_post_overlays as load_legacy_post_overlays
-from nga_tools.backup.post_overlay import load_post_overlays as load_bbcode_post_overlays
+from nga_tools.backup.post_html import (
+    fill_missing_post_records,
+    find_missing_lou,
+    post_html_from_content,
+)
+from nga_tools.backup.post_overlay import load_post_overlays, render_overlay_html
 from nga_tools.backup.pdf_plan import (
     PdfRenderTask,
     build_render_tasks as _build_render_tasks,
@@ -418,14 +423,28 @@ def _report_weasyprint_output(render_results: list[PdfRenderResult]) -> None:
             report_warning(f"WeasyPrint {pdf_name}: {line}")
 
 
-def _image_path_for_pdf(image_src: str, source_dir: Path) -> Path:
-    link_path = image_store.link_path_for_image_src(image_src)
-    if link_path is not None:
-        return link_path
+def _image_path_for_pdf(
+    image_src: str,
+    source_dir: Path,
+    image_lookup: image_store.ImageLookupCache | None = None,
+) -> Path:
+    normalized_src = image_store.normalize_nga_image_url(image_src)
+    if utils.NGA_img_link_verify(normalized_src):
+        lookup = (
+            image_store.ImageLookupCache.for_urls([normalized_src])
+            if image_lookup is None
+            else image_lookup
+        )
+        image_path = lookup.mapped_image_path_for_url(normalized_src)
+        return (
+            image_store.placeholder_image_path()
+            if image_path is None
+            else image_path
+        )
 
     path = image_src_path(image_src, source_dir)
     if path is None:
-        raise RuntimeError(f"不支持的远程图片链接：{image_src}")
+        raise RuntimeError(f"不支持的图片链接：{image_src}")
 
     return path
 
@@ -434,66 +453,80 @@ def _read_pdf_html(
     tid: int,
     aid: Optional[int],
 ) -> tuple[dict[int, str], str, FloorLabels]:
-    folder_html_modified = Path(utils.get_folder(tid, aid, "html_modified"))
-    html_files = utils.list_files_in_folder(str(folder_html_modified), ends_with=".html")
+    thread_folder = Path(utils.get_folder(tid, aid, create=False))
+    archive_store = ThreadArchiveStore(thread_folder)
+    records = archive_store.read_effective_post_records()
+    floor_labels = load_floor_labels(tid, aid)
+    author_total_lou_count = (
+        archive_store.read_latest_author_total_lou_count()
+        if aid is not None
+        else None
+    )
+    missing_lous = find_missing_lou(records, author_total_lou_count)
+    present_lous = {record["lou"] for record in records}
+    fill_missing_post_records(
+        records,
+        [lou for lou in missing_lous if lou not in present_lous],
+        floor_labels,
+    )
+
     folder_pdf = utils.get_folder(tid, aid, "pdf")
     slice_output_dir = os.path.join(folder_pdf, "long_image_slices")
     os.makedirs(slice_output_dir, exist_ok=True)
 
+    overlays_by_lou = load_post_overlays(thread_folder)
+    applied_overlay_lous = set(overlays_by_lou) & {
+        record["lou"] for record in records
+    }
+    if applied_overlay_lous:
+        report_info(f"应用{len(applied_overlay_lous)}个BBCode post overlay。")
+
     html_sources_by_lou: dict[int, PdfHtmlSource] = {}
-    for html_file in html_files:
-        html_path = folder_html_modified / html_file
-        lou = int(html_file.split("_")[1].split(".")[0])
+    for record in records:
+        lou = record["lou"]
+        overlay = overlays_by_lou.get(lou)
+        if overlay is not None:
+            html = render_overlay_html(overlay["bbcode"])
+            source_name = f"post_overlays.json第{lou}楼"
+        elif record["html"] is not None:
+            html = record["html"]
+            source_name = f"archive缺失占位第{lou}楼"
+        else:
+            post = record["post"]
+            if post is None:
+                raise RuntimeError(f"archive缺少第{lou}楼的可转换正文。")
+            html = post_html_from_content(post)
+            source_name = f"archive.sqlite3第{lou}楼"
         html_sources_by_lou[lou] = PdfHtmlSource(
-            html=html_path.read_text(encoding="utf-8"),
-            source_name=f"html_modified/post_{lou}.html",
-            source_dir=folder_html_modified,
+            html=html,
+            source_name=source_name,
+            source_dir=thread_folder,
         )
 
-    floor_labels = load_floor_labels(tid, aid)
     html_text_by_lou = {
         lou: source.html for lou, source in html_sources_by_lou.items()
     }
     validate_floor_labels(floor_labels, html_text_by_lou)
 
-    bbcode_overlay_lous = set(
-        load_bbcode_post_overlays(Path(utils.get_folder(tid, aid))).keys()
-    )
-    overlays_by_lou = load_legacy_post_overlays(
-        tid,
-        aid,
-        set(html_sources_by_lou),
-        floor_labels,
-    )
-    ignored_overlay_lous = bbcode_overlay_lous & set(overlays_by_lou)
-    if ignored_overlay_lous:
-        overlays_by_lou = {
-            lou: html
-            for lou, html in overlays_by_lou.items()
-            if lou not in ignored_overlay_lous
-        }
-        report_warning(
-            f"忽略{len(ignored_overlay_lous)}个同楼层旧HTML overlay，"
-            "优先使用网页BBCode overlay生成的html_modified。"
-        )
-    if overlays_by_lou:
-        report_info(f"应用{len(overlays_by_lou)}个post overlay。")
-        overlay_folder = Path(utils.get_folder(tid, aid, "overlay"))
-        for lou, overlay_html in overlays_by_lou.items():
-            html_sources_by_lou[lou] = PdfHtmlSource(
-                html=overlay_html,
-                source_name=f"overlay/post_{lou}.html",
-                source_dir=overlay_folder,
-            )
-
     html_content_by_lou: dict[int, str] = {}
     image_size_cache: dict[str, tuple[int, int]] = {}
     slice_cache: dict[str, list[str]] = {}
     converted_image_cache: dict[str, Path] = {}
+    soups_by_lou: dict[int, BeautifulSoup] = {}
+    image_urls: set[str] = set()
+
+    for lou, source in html_sources_by_lou.items():
+        soup = BeautifulSoup(source.html, "html.parser")
+        soups_by_lou[lou] = soup
+        for image in cast(list[Tag], soup.find_all("img")):
+            image_src = effective_image_src(image)
+            if image_src is not None and utils.NGA_img_link_verify(image_src):
+                image_urls.add(image_src)
+    image_lookup = image_store.ImageLookupCache.for_urls(image_urls)
 
     for lou, source in sorted(html_sources_by_lou.items()):
         source_desc = f"{source.source_name}（{floor_labels.label(lou)}）"
-        soup = BeautifulSoup(source.html, "html.parser")
+        soup = soups_by_lou[lou]
 
         images = cast(list[Tag], soup.find_all("img"))
         for image in images:
@@ -501,10 +534,14 @@ def _read_pdf_html(
             if image_src is None:
                 continue
 
-            image_path = _image_path_for_pdf(image_src, source.source_dir)
+            image_path = _image_path_for_pdf(
+                image_src,
+                source.source_dir,
+                image_lookup,
+            )
             if not image_path.exists():
                 raise RuntimeError(
-                    f"HTML文件{source_desc}中引用了不存在的图片文件{image_src}！"
+                    f"正文{source_desc}中引用了不存在的图片文件{image_src}！"
                 )
 
             try:

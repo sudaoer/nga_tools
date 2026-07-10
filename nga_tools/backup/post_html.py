@@ -6,7 +6,6 @@ from nga_tools.backup.floor_models import (
     MISSING_POST_HTML,
     AuthorPostRef,
     FloorLabels,
-    RecoveredMissingPost,
 )
 from nga_tools.backup.models import PostData, PostHtml, PostRecord
 from nga_tools.backup.post_data import (
@@ -15,7 +14,7 @@ from nga_tools.backup.post_data import (
     post_source_hash,
 )
 from nga_tools.bbcode_convert import bbcode_to_html
-from nga_tools.console import report_info, report_warning
+from nga_tools.console import report_warning
 from nga_tools.core.hashing import hash_object
 from nga_tools.ngaclient.client import PageData
 
@@ -111,20 +110,16 @@ def fill_missing_lou(
     htmls: list[PostHtml],
     missing_lou: list[int],
     floor_labels: FloorLabels,
-    recovered_missing_html_by_lou: dict[int, str],
 ) -> None:
     for lou in missing_lou:
-        if lou in recovered_missing_html_by_lou:
-            report_info(f"已恢复缺失{floor_labels.label(lou)}。")
-        else:
-            report_warning(f"缺失{floor_labels.label(lou)}！")
+        report_warning(f"缺失{floor_labels.label(lou)}！")
 
     for lou in missing_lou:
         htmls.append(
             {
                 "lou": lou,
                 "pid": None,
-                "html": recovered_missing_html_by_lou.get(lou, MISSING_POST_HTML),
+                "html": MISSING_POST_HTML,
             }
         )
 
@@ -135,16 +130,12 @@ def fill_missing_post_records(
     records: list[PostRecord],
     missing_lou: list[int],
     floor_labels: FloorLabels,
-    recovered_missing_html_by_lou: dict[int, str],
 ) -> None:
     for lou in missing_lou:
-        if lou in recovered_missing_html_by_lou:
-            report_info(f"已恢复缺失{floor_labels.label(lou)}。")
-        else:
-            report_warning(f"缺失{floor_labels.label(lou)}！")
+        report_warning(f"缺失{floor_labels.label(lou)}！")
 
     for lou in missing_lou:
-        post_html = recovered_missing_html_by_lou.get(lou, MISSING_POST_HTML)
+        post_html = MISSING_POST_HTML
         records.append(
             {
                 "lou": lou,
@@ -156,30 +147,6 @@ def fill_missing_post_records(
         )
 
     records.sort(key=lambda item: item["lou"])
-
-
-def recovered_missing_post_htmls(
-    recovered_missing_posts: dict[int, RecoveredMissingPost],
-) -> dict[int, str]:
-    if not recovered_missing_posts:
-        return {}
-
-    recovered_html_by_lou: dict[int, str] = {}
-    for author_lou, recovered_post in sorted(recovered_missing_posts.items()):
-        recovered_html_by_lou[author_lou] = bbcode_to_html(recovered_post["content"])
-    return recovered_html_by_lou
-
-
-def source_hashes_by_lou(records: Sequence[PostRecord]) -> dict[int, str]:
-    return {record["lou"]: record["source_hash"] for record in records}
-
-
-def unresolved_missing_placeholder_lous(records: Sequence[PostRecord]) -> set[int]:
-    return {
-        record["lou"]
-        for record in records
-        if record["pid"] is None and record["html"] == MISSING_POST_HTML
-    }
 
 
 def post_refs_from_posts(

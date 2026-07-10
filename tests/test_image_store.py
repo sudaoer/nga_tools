@@ -87,7 +87,7 @@ class ImageStoreTest:
             ):
                 placeholder_path = image_store.placeholder_image_path()
                 placeholder_src = image_store.placeholder_image_src_from_html_dir(
-                    output_dir / "123_all" / "html_modified",
+                    output_dir / "123_all" / "pdf",
                 )
 
             with Image.open(placeholder_path) as image:

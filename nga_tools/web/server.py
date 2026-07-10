@@ -18,6 +18,10 @@ from nga_tools.console import report_info
 from nga_tools.backup import image_store
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
+from nga_tools.backup.post_overlay import POST_OVERLAYS_FILENAME
+from nga_tools.backup.post_version_selection import (
+    POST_VERSION_SELECTIONS_FILENAME,
+)
 from nga_tools.forum.thread_configs import ThreadConfig
 from nga_tools.forum.thread_store import FORUM_THREAD_DB_FILENAME
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
@@ -126,19 +130,18 @@ def _thread_list_fingerprint(output_dir: Path) -> ThreadListFingerprint:
             continue
         if parse_thread_dir_name(thread_folder.name) is None:
             continue
-        html_modified_dir = thread_folder / "html_modified"
         entries.append(
             "\0".join(
                 [
                     thread_folder.name,
                     _file_fingerprint(thread_folder),
                     _file_fingerprint(thread_folder / "archive.sqlite3"),
-                    _file_fingerprint(html_modified_dir),
-                    _file_fingerprint(
-                        html_modified_dir / "html_modified_manifest.json"
-                    ),
                     _file_fingerprint(thread_folder / "floor_map.json"),
                     _file_fingerprint(thread_folder / "warnings.log"),
+                    _file_fingerprint(
+                        thread_folder / POST_VERSION_SELECTIONS_FILENAME
+                    ),
+                    _file_fingerprint(thread_folder / POST_OVERLAYS_FILENAME),
                     _file_fingerprint(thread_folder / "json"),
                 ]
             )
@@ -1009,7 +1012,7 @@ def serve_app(
     static_dir: Path = Path(DEFAULT_WEB_STATIC_DIR),
 ) -> None:
     report_info(f"Web查看服务：http://{host}:{port}/")
-    report_info("管理界面会写入本地正文版本选择并刷新html_modified。")
+    report_info("管理界面会写入本地正文版本选择和BBCode overlay。")
     uvicorn.run(
         create_app(static_dir=static_dir),
         host=host,
