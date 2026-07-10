@@ -136,7 +136,6 @@ def _thread_list_fingerprint(output_dir: Path) -> ThreadListFingerprint:
                     thread_folder.name,
                     _file_fingerprint(thread_folder),
                     _file_fingerprint(thread_folder / "archive.sqlite3"),
-                    _file_fingerprint(thread_folder / "floor_map.json"),
                     _file_fingerprint(thread_folder / "warnings.log"),
                     _file_fingerprint(
                         thread_folder / POST_VERSION_SELECTIONS_FILENAME

@@ -5,7 +5,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import NotRequired, Optional, TypedDict
 
-FLOOR_MAP_FILENAME = "floor_map.json"
 FLOOR_MAP_VERSION = 1
 FLOOR_MAP_GENERATION_VERSION = 1
 FLOOR_MAP_HASH_ALGORITHM = "sha256"
@@ -25,6 +24,17 @@ class FloorMapEntry(TypedDict):
     original_lou: Optional[int]
     original_pid: NotRequired[int]
     candidate_original_lous: NotRequired[list[int]]
+
+
+@dataclass(frozen=True)
+class StoredFloorMap:
+    version: int
+    generation_version: int
+    algorithm: str
+    tid: int
+    aid: int
+    input_signature: str
+    entries: list[FloorMapEntry]
 
 
 class OriginalPostSnapshot(TypedDict):

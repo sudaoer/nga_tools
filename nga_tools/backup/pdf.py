@@ -19,7 +19,7 @@ from nga_tools import utils
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_map import (
     FloorLabels,
-    load_floor_labels,
+    load_floor_labels_from_archive,
     validate_floor_labels,
 )
 from nga_tools.backup import image_store
@@ -456,7 +456,7 @@ def _read_pdf_html(
     thread_folder = Path(utils.get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
     records = archive_store.read_effective_post_records()
-    floor_labels = load_floor_labels(tid, aid)
+    floor_labels = load_floor_labels_from_archive(archive_store, aid)
     author_total_lou_count = (
         archive_store.read_latest_author_total_lou_count()
         if aid is not None

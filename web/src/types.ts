@@ -24,7 +24,6 @@ export interface ThreadSummary {
   pageCount: number | null
   updatedAt: string | null
   authorUpdatedAt: number | string | null
-  hasFloorMap: boolean
   hasWarnings: boolean
 }
 

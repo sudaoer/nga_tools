@@ -9,11 +9,9 @@ from typing import Optional, cast
 from nga_tools import utils
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.console import report_info, report_progress, report_warning
-from nga_tools.core.atomic import write_json_atomically
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
 from nga_tools.backup.floor_models import (
-    FLOOR_MAP_FILENAME,
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,
     FLOOR_MAP_VERSION,
@@ -26,68 +24,12 @@ from nga_tools.backup.floor_models import (
     MissingOriginalInference,
     OriginalPostSnapshot,
     RecoveredMissingPost,
+    StoredFloorMap,
 )
-
-
-def get_floor_map_path(tid: int, aid: int, *, create: bool = True) -> Path:
-    return Path(utils.get_folder(tid, aid, create=create)) / FLOOR_MAP_FILENAME
 
 
 def is_missing_post_html(html_content: str) -> bool:
     return html_content.strip() == MISSING_POST_HTML
-
-
-def _read_json_object(path: Path) -> dict[str, object]:
-    try:
-        raw_data: object = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as error:
-        raise FileNotFoundError(f"文件不存在：{path}") from error
-    except json.JSONDecodeError as error:
-        raise ValueError(f"文件不是有效JSON：{path}") from error
-
-    if not isinstance(raw_data, dict):
-        raise ValueError(f"JSON文件顶层必须是对象：{path}")
-
-    data = cast(dict[object, object], raw_data)
-    if not all(isinstance(key, str) for key in data):
-        raise ValueError(f"JSON对象的键必须都是字符串：{path}")
-
-    return cast(dict[str, object], data)
-
-
-def _required_int(data: dict[str, object], key: str, source: Path) -> int:
-    value = data.get(key)
-    if type(value) is int:
-        return value
-    raise ValueError(f"{source} 缺少整数字段：{key}")
-
-
-def _optional_int(data: dict[str, object], key: str, source: Path) -> Optional[int]:
-    value = data.get(key)
-    if value is None:
-        return None
-    if type(value) is int:
-        return value
-    raise ValueError(f"{source} 字段必须是整数或null：{key}")
-
-
-def _optional_int_list(
-    data: dict[str, object],
-    key: str,
-    source: Path,
-) -> list[int]:
-    value = data.get(key)
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError(f"{source} 字段必须是整数列表：{key}")
-
-    result: list[int] = []
-    for item in cast(list[object], value):
-        if type(item) is not int:
-            raise ValueError(f"{source} 字段必须是整数列表：{key}")
-        result.append(item)
-    return result
 
 
 def _page_post_dicts(
@@ -140,26 +82,25 @@ def read_author_posts_from_archive(tid: int, aid: int) -> list[AuthorPostRef]:
     return ThreadArchiveStore(thread_folder).read_latest_author_post_refs()
 
 
-def read_unresolved_missing_author_lous_from_floor_map(
-    tid: int,
-    aid: int,
+def read_unresolved_missing_author_lous_from_archive(
+    archive_store: ThreadArchiveStore,
     *,
     present_lous: set[int] | None = None,
     total_lou_count: int | None = None,
 ) -> list[int]:
     """Read unresolved missing lous; ``total_lou_count`` is NGA ``vrows`` count."""
-    path = get_floor_map_path(tid, aid, create=False)
-    if not path.exists():
-        return []
-
     try:
-        entries = _load_floor_map_entries(path)
-    except (FileNotFoundError, ValueError) as error:
-        report_warning(f"楼层映射缺失楼缓存无效，忽略：{path}: {error}")
+        stored_floor_map = archive_store.read_floor_map()
+    except ValueError as error:
+        report_warning(
+            f"楼层映射缺失楼缓存无效，忽略：{archive_store.db_path}: {error}"
+        )
+        return []
+    if stored_floor_map is None:
         return []
 
     missing_lous: set[int] = set()
-    for entry in entries:
+    for entry in stored_floor_map.entries:
         author_lou = entry["author_lou"]
         if entry["pid"] is not None:
             continue
@@ -198,60 +139,25 @@ def find_missing_author_lous(
 
 
 def _write_floor_map(
+    archive_store: ThreadArchiveStore,
     tid: int,
     aid: int,
     entries: Sequence[FloorMapEntry],
     *,
-    input_signature: str | None = None,
+    input_signature: str,
 ) -> None:
-    path = get_floor_map_path(tid, aid, create=True)
-    data: dict[str, object] = {
-        "version": FLOOR_MAP_VERSION,
-        "floor_map_generation_version": FLOOR_MAP_GENERATION_VERSION,
-        "algorithm": FLOOR_MAP_HASH_ALGORITHM,
-        "tid": tid,
-        "aid": aid,
-        "entries": list(entries),
-    }
-    if input_signature is not None:
-        data["input_signature"] = input_signature
-    write_json_atomically(path, data, indent=4)
-    report_info(f"已写入楼层映射：{path}")
-
-
-def _load_floor_map_entries_from_data(
-    data: dict[str, object],
-    path: Path,
-) -> list[FloorMapEntry]:
-    raw_entries = data.get("entries")
-    if not isinstance(raw_entries, list):
-        raise ValueError(f"{path} 缺少entries列表。")
-
-    entries: list[FloorMapEntry] = []
-    for raw_entry in cast(list[object], raw_entries):
-        if not isinstance(raw_entry, dict):
-            raise ValueError(f"{path} 中的楼层映射项不是对象：{raw_entry!r}")
-        entry = cast(dict[str, object], raw_entry)
-        floor_map_entry: FloorMapEntry = {
-            "pid": _optional_int(entry, "pid", path),
-            "author_lou": _required_int(entry, "author_lou", path),
-            "original_lou": _optional_int(entry, "original_lou", path),
-        }
-        original_pid = _optional_int(entry, "original_pid", path)
-        if original_pid is not None:
-            floor_map_entry["original_pid"] = original_pid
-        candidate_original_lous = _optional_int_list(
-            entry, "candidate_original_lous", path
+    archive_store.replace_floor_map(
+        StoredFloorMap(
+            version=FLOOR_MAP_VERSION,
+            generation_version=FLOOR_MAP_GENERATION_VERSION,
+            algorithm=FLOOR_MAP_HASH_ALGORITHM,
+            tid=tid,
+            aid=aid,
+            input_signature=input_signature,
+            entries=list(entries),
         )
-        if candidate_original_lous:
-            floor_map_entry["candidate_original_lous"] = candidate_original_lous
-        entries.append(floor_map_entry)
-
-    return entries
-
-
-def _load_floor_map_entries(path: Path) -> list[FloorMapEntry]:
-    return _load_floor_map_entries_from_data(_read_json_object(path), path)
+    )
+    report_info(f"已写入楼层映射：{archive_store.db_path}")
 
 
 def _floor_labels_from_entries(entries: Sequence[FloorMapEntry]) -> FloorLabels:
@@ -276,17 +182,21 @@ def _floor_labels_from_entries(entries: Sequence[FloorMapEntry]) -> FloorLabels:
     )
 
 
-def load_floor_labels(tid: int, aid: Optional[int]) -> FloorLabels:
+def load_floor_labels_from_archive(
+    archive_store: ThreadArchiveStore,
+    aid: Optional[int],
+) -> FloorLabels:
     if aid is None:
         return FloorLabels.plain()
 
-    path = get_floor_map_path(tid, aid, create=False)
-    if not path.exists():
+    stored_floor_map = archive_store.read_floor_map()
+    if stored_floor_map is None:
         raise RuntimeError(
-            f"缺少楼层映射文件：{path}。请先运行 backup floors 生成floor_map.json。"
+            f"archive.sqlite3缺少楼层映射：{archive_store.db_path}。"
+            "请先运行 backup floors 生成楼层映射。"
         )
 
-    return _floor_labels_from_entries(_load_floor_map_entries(path))
+    return _floor_labels_from_entries(stored_floor_map.entries)
 
 
 def validate_floor_labels(
@@ -310,7 +220,7 @@ def validate_floor_labels(
         preview += ", ..."
     raise RuntimeError(
         f"楼层映射缺少{len(missing_lous)}个非缺失楼层：{preview}。"
-        "请先运行 backup floors 刷新floor_map.json。"
+        "请先运行 backup floors 刷新楼层映射。"
     )
 
 
@@ -336,41 +246,40 @@ def floor_map_input_signature(
 
 
 def load_floor_map_build_result_if_current(
-    tid: int,
-    aid: int,
+    archive_store: ThreadArchiveStore,
     author_posts: Sequence[AuthorPostRef],
     missing_author_lous: Sequence[int],
 ) -> FloorMapBuildResult | None:
-    path = get_floor_map_path(tid, aid, create=False)
-    if not path.exists():
-        return None
-
     try:
-        data = _read_json_object(path)
-    except (FileNotFoundError, ValueError) as error:
-        report_warning(f"楼层映射缓存无效，重新生成：{path}: {error}")
+        stored_floor_map = archive_store.read_floor_map()
+    except ValueError as error:
+        report_warning(
+            f"楼层映射缓存无效，重新生成：{archive_store.db_path}: {error}"
+        )
         return None
-    if data.get("version") != FLOOR_MAP_VERSION:
+    if stored_floor_map is None:
         return None
-    if data.get("floor_map_generation_version") != FLOOR_MAP_GENERATION_VERSION:
+    if stored_floor_map.version != FLOOR_MAP_VERSION:
         return None
-    if data.get("algorithm") != FLOOR_MAP_HASH_ALGORITHM:
+    if stored_floor_map.generation_version != FLOOR_MAP_GENERATION_VERSION:
         return None
-    if data.get("input_signature") != floor_map_input_signature(
+    if stored_floor_map.algorithm != FLOOR_MAP_HASH_ALGORITHM:
+        return None
+    if stored_floor_map.input_signature != floor_map_input_signature(
         author_posts,
         missing_author_lous,
     ):
         return None
 
-    entries = _load_floor_map_entries_from_data(data, path)
     return FloorMapBuildResult(
-        floor_labels=_floor_labels_from_entries(entries),
+        floor_labels=_floor_labels_from_entries(stored_floor_map.entries),
         recovered_missing_posts_by_author_lou={},
     )
 
 
 def build_and_save_floor_map(
     client: NGAClient,
+    archive_store: ThreadArchiveStore,
     tid: int,
     aid: int,
     author_posts: Sequence[AuthorPostRef],
@@ -392,8 +301,7 @@ def build_and_save_floor_map(
 
     found_original_by_author_lou, existing_missing_originals, existing_candidates = (
         _load_reusable_floor_map(
-            tid,
-            aid,
+            archive_store,
             author_lou_to_pid,
             set(missing_author_lous),
         )
@@ -534,7 +442,13 @@ def build_and_save_floor_map(
         )
     entries.sort(key=lambda entry: entry["author_lou"])
 
-    _write_floor_map(tid, aid, entries, input_signature=input_signature)
+    _write_floor_map(
+        archive_store,
+        tid,
+        aid,
+        entries,
+        input_signature=input_signature,
+    )
     return FloorMapBuildResult(
         floor_labels=FloorLabels(
             original_lou_by_author_lou=all_original_by_author_lou,
@@ -546,19 +460,18 @@ def build_and_save_floor_map(
 
 
 def _load_reusable_floor_map(
-    tid: int,
-    aid: int,
+    archive_store: ThreadArchiveStore,
     author_lou_to_pid: dict[int, int],
     missing_author_lous: set[int],
 ) -> tuple[dict[int, int], dict[int, int], dict[int, list[int]]]:
-    path = get_floor_map_path(tid, aid, create=False)
-    if not path.exists():
+    stored_floor_map = archive_store.read_floor_map()
+    if stored_floor_map is None:
         return {}, {}, {}
 
     original_lou_by_author_lou: dict[int, int] = {}
     missing_original_lou_by_author_lou: dict[int, int] = {}
     candidate_originals_by_author_lou: dict[int, list[int]] = {}
-    for entry in _load_floor_map_entries(path):
+    for entry in stored_floor_map.entries:
         author_lou = entry["author_lou"]
         entry_pid = entry["pid"]
         original_lou = entry["original_lou"]
@@ -897,7 +810,7 @@ def _infer_missing_original_lous(
 
 def generate_floor_map_from_backup(tid: int, aid: Optional[int]) -> None:
     if aid is None:
-        report_info("未指定aid，原帖楼层与当前楼层一致，无需生成floor_map.json。")
+        report_info("未指定aid，原帖楼层与当前楼层一致，无需生成楼层映射。")
         return
 
     thread_folder = Path(utils.get_folder(tid, aid, create=False))
@@ -908,9 +821,8 @@ def generate_floor_map_from_backup(tid: int, aid: Optional[int]) -> None:
     missing_author_lous = sorted(
         {
             *find_missing_author_lous(author_posts, author_total_lou_count),
-            *read_unresolved_missing_author_lous_from_floor_map(
-                tid,
-                aid,
+            *read_unresolved_missing_author_lous_from_archive(
+                archive_store,
                 present_lous=present_lous,
                 total_lou_count=author_total_lou_count,
             ),
@@ -918,6 +830,7 @@ def generate_floor_map_from_backup(tid: int, aid: Optional[int]) -> None:
     )
     result = build_and_save_floor_map(
         NGAClient(),
+        archive_store,
         tid,
         aid,
         author_posts,

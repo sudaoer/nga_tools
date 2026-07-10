@@ -6,13 +6,133 @@ from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.floor_models import (
+    FLOOR_MAP_GENERATION_VERSION,
+    FLOOR_MAP_HASH_ALGORITHM,
+    FLOOR_MAP_VERSION,
+    FloorMapEntry,
+    StoredFloorMap,
+)
 from nga_tools.backup.post_version_selection import write_selections
 from nga_tools.core.hashing import hash_text
 from nga_tools.word_count import WORD_COUNT_VERSION
 
 
+def _stored_floor_map(
+    entries: list[FloorMapEntry],
+    *,
+    input_signature: str = "fixture-signature",
+) -> StoredFloorMap:
+    return StoredFloorMap(
+        version=FLOOR_MAP_VERSION,
+        generation_version=FLOOR_MAP_GENERATION_VERSION,
+        algorithm=FLOOR_MAP_HASH_ALGORITHM,
+        tid=123,
+        aid=456,
+        input_signature=input_signature,
+        entries=entries,
+    )
+
+
 class ThreadArchiveStoreTest:
+    def test_floor_map_round_trip_preserves_zero_null_and_candidates(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            expected = _stored_floor_map(
+                [
+                    {"pid": 0, "author_lou": 0, "original_lou": 0},
+                    {
+                        "pid": None,
+                        "author_lou": 1,
+                        "original_lou": None,
+                        "candidate_original_lous": [3, 4],
+                    },
+                    {
+                        "pid": None,
+                        "author_lou": 2,
+                        "original_lou": 5,
+                        "original_pid": 2002,
+                    },
+                ]
+            )
+
+            store.replace_floor_map(expected)
+            actual = store.read_floor_map()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                table_names = {
+                    row[0]
+                    for row in connection.execute(
+                        """
+                        SELECT name
+                        FROM sqlite_schema
+                        WHERE type = 'table' AND name LIKE 'floor_map_%'
+                        """
+                    )
+                }
+
+        assert actual == expected
+        assert table_names == {
+            "floor_map_state",
+            "floor_map_entries",
+            "floor_map_candidates",
+        }
+
+    def test_floor_map_replace_removes_stale_entries_and_candidates(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            store.replace_floor_map(
+                _stored_floor_map(
+                    [
+                        {
+                            "pid": None,
+                            "author_lou": 1,
+                            "original_lou": None,
+                            "candidate_original_lous": [10, 11],
+                        }
+                    ]
+                )
+            )
+            replacement = _stored_floor_map(
+                [{"pid": 1002, "author_lou": 2, "original_lou": 12}],
+                input_signature="replacement",
+            )
+
+            store.replace_floor_map(replacement)
+            actual = store.read_floor_map()
+
+        assert actual == replacement
+
+    def test_invalid_floor_map_does_not_replace_existing_data(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            existing = _stored_floor_map(
+                [{"pid": 1001, "author_lou": 1, "original_lou": 10}]
+            )
+            store.replace_floor_map(existing)
+            invalid = _stored_floor_map(
+                [
+                    {
+                        "pid": 1001,
+                        "author_lou": 1,
+                        "original_lou": 10,
+                        "original_pid": 2001,
+                    }
+                ]
+            )
+
+            with pytest.raises(ValueError, match="original_pid"):
+                store.replace_floor_map(invalid)
+
+            actual = store.read_floor_map()
+
+        assert actual == existing
+
     def test_upsert_page_stores_word_count_fields(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))

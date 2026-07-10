@@ -144,7 +144,7 @@ pixi run python main.py backup floors --name 帖子名
 pixi run python main.py backup floors --all-threads
 ```
 
-楼层映射会增量刷新。缺失楼无法唯一确定原帖楼层时，`floor_map.json` 会记录 `candidate_original_lous` 候选列表；若能从匿名原帖恢复正文，正文会直接写入同一备份的 `archive.sqlite3`。
+楼层映射会增量刷新并保存在同一备份的 `archive.sqlite3` 中。缺失楼无法唯一确定原帖楼层时，数据库会保存候选原楼层；若能从匿名原帖恢复正文，正文也会直接写入该数据库。
 
 旧备份目录可以显式迁移到每帖 SQLite 存储。迁移不会删除或改写旧 `json/page_*.json`：
 
@@ -152,6 +152,9 @@ pixi run python main.py backup floors --all-threads
 pixi run python main.py backup migrate-store --name 帖子名
 pixi run python main.py backup migrate-store --all
 ```
+
+旧目录中的 `floor_map.json` 不参与迁移，也不会被读取；只看作者备份迁移分页数据后，
+请运行 `backup floors` 在 `archive.sqlite3` 中重新生成楼层映射。
 
 并行校验所有本地备份中的已下载图片，损坏或无法打开的图片会被删除：
 
@@ -234,7 +237,7 @@ PDF 分段在生成。
 
 PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 `pixi run` 启动时会使用 pixi 环境中的 WeasyPrint、Poppler 和字体依赖，支持 Linux、macOS 和 Windows 的 Pixi 环境。
 生成后的 PDF 会记录输入中间 HTML 的 hash；后续运行时，如果对应 HTML 没有变化且 PDF 文件仍存在，会跳过该分段。需要强制重新生成时，删除 `pdf/` 下对应 PDF 或 `pdf_input_hashes.json`。
-只看作者备份会读取 `floor_map.json`，在 PDF 标题中显示只看作者楼层和原帖楼层，例如 `第12楼（原86楼）`。如果缺少映射，先运行 `backup floors`。
+只看作者备份会读取 `archive.sqlite3` 中的楼层映射，在 PDF 标题中显示只看作者楼层和原帖楼层，例如 `第12楼（原86楼）`。如果缺少映射，先运行 `backup floors`。
 
 ## 输出目录
 
@@ -242,11 +245,11 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 
 - `json/`：加 `--write-json` 时输出的接口最近响应分页数据
 - `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照、正文版本和最新展示元数据；
-  完整原始分页响应保存在 `page_snapshots.page_json`，`post_versions` 只按正文内容做版本控制
+  完整原始分页响应保存在 `page_snapshots.page_json`，`post_versions` 只按正文内容做版本控制；
+  只看作者备份的楼层映射及候选原楼层也保存在此数据库
 - `post_version_overrides.json`：管理界面保存的正文历史版本选择；没有选择时可为空
 - `post_overlays.json`：网页阅读页保存的单楼 BBCode overlay；Web 和 PDF 按需渲染
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
-- `floor_map.json`：只看作者楼层到原帖楼层的映射
 
 全局图片产物位于 `output/` 根目录：
 
@@ -254,7 +257,8 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `images_unique/download_failed_placeholder.png`：下载失败图片的占位图，按需生成
 - `image_index.sqlite3`：原始 NGA 图片 URL 到 `images_unique` 文件的映射
 
-旧版本生成的 `html_modified/`、`backup_state.json` 和 `overlay/post_*.html` 不再读取，
+旧版本生成的 `html_modified/`、`backup_state.json`、`floor_map.json` 和
+`overlay/post_*.html` 不再读取，
 程序也不会自动删除或改写这些历史产物。
 
 ## 协议

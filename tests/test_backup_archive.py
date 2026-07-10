@@ -271,6 +271,7 @@ class BackupRawArchiveTest:
         assert (thread_dir / "archive.sqlite3").is_file()
         assert not (thread_dir / "html_modified").exists()
         assert not (thread_dir / "backup_state.json").exists()
+        assert not (thread_dir / "floor_map.json").exists()
         assert not (thread_dir / "json").exists()
 
     @pytest.mark.parametrize("mode", ["sub", "all"])
@@ -287,12 +288,14 @@ class BackupRawArchiveTest:
         old_html.write_text("old html sentinel", encoding="utf-8")
         old_overlay.write_text("old overlay sentinel", encoding="utf-8")
         (thread_dir / "backup_state.json").write_text("old state", encoding="utf-8")
+        (thread_dir / "floor_map.json").write_text("old map", encoding="utf-8")
 
         _run_backup(thread_dir, MutableFakeClient(), mode=mode)
 
         assert old_html.read_text(encoding="utf-8") == "old html sentinel"
         assert old_overlay.read_text(encoding="utf-8") == "old overlay sentinel"
         assert (thread_dir / "backup_state.json").read_text(encoding="utf-8") == "old state"
+        assert (thread_dir / "floor_map.json").read_text(encoding="utf-8") == "old map"
 
     @pytest.mark.parametrize("mode", ["sub", "all"])
     def test_write_json_remains_explicit(

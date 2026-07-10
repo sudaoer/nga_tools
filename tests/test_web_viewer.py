@@ -9,6 +9,12 @@ from typing import Optional
 from fastapi.testclient import TestClient
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.floor_models import (
+    FLOOR_MAP_GENERATION_VERSION,
+    FLOOR_MAP_HASH_ALGORITHM,
+    FLOOR_MAP_VERSION,
+    StoredFloorMap,
+)
 from nga_tools.cli.parser import args_parse
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web import data as web_data
@@ -344,16 +350,19 @@ class WebViewerDataTest:
         image_dir.mkdir(parents=True)
         (image_dir / "abc.png").write_bytes(b"image")
         _write_image_mapping(output_dir, image_url, "images_unique/abc.png")
-        (thread_dir / "floor_map.json").write_text(
-            json.dumps(
-                {
-                    "entries": [
-                        {"pid": 1, "author_lou": 1, "original_lou": 5},
-                    ]
-                }
-            ),
-            encoding="utf-8",
+        ThreadArchiveStore(thread_dir).replace_floor_map(
+            StoredFloorMap(
+                version=FLOOR_MAP_VERSION,
+                generation_version=FLOOR_MAP_GENERATION_VERSION,
+                algorithm=FLOOR_MAP_HASH_ALGORITHM,
+                tid=101,
+                aid=201,
+                input_signature="fixture",
+                entries=[{"pid": 1, "author_lou": 1, "original_lou": 5}],
+            )
         )
+        legacy_floor_map = thread_dir / "floor_map.json"
+        legacy_floor_map.write_text("{bad", encoding="utf-8")
 
         result = read_posts(
             output_dir,
@@ -368,6 +377,7 @@ class WebViewerDataTest:
         assert result["items"][0]["floorLabel"] == "第1楼（原5楼）"
         assert 'src="/api/files/images_unique/abc.png"' in result["items"][0]["html"]
         assert result["slots"][2]["emptyReason"] == "filtered"
+        assert legacy_floor_map.read_text(encoding="utf-8") == "{bad"
 
     def test_reads_posts_sanitizes_untrusted_html(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
@@ -864,7 +874,7 @@ class WebDatabaseViewerTest:
         assert {"forum_threads", "image_index", "archive:101_201"} <= ids
         by_id = {item["id"]: item for item in payload["items"]}
         assert by_id["forum_threads"]["relativePath"] == "forum_threads.sqlite3"
-        assert by_id["archive:101_201"]["tableCount"] == 4
+        assert by_id["archive:101_201"]["tableCount"] == 7
 
     def test_databases_route_uses_cache_until_refresh(
         self,

@@ -285,7 +285,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "此命令会补抓缺失页，并刷新本地尾页到远端最后一页。",
                 "默认只写archive.sqlite3；加--write-json才输出json/page_*.json。",
                 "随后会从archive全量解析正文并补齐缺失图片，不写入逐楼HTML。",
-                "author-only备份会增量刷新floor_map.json。",
+                "author-only备份会在archive.sqlite3中增量刷新楼层映射。",
                 "--all-threads会按thread_configs.json中的ThreadList批量执行增量备份。",
             ],
             "args": [
@@ -336,10 +336,10 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} backup floors --all-threads",
             ],
             "notes": [
-                "此命令会读取archive.sqlite3并联网扫描原帖，增量刷新floor_map.json。",
+                "此命令会读取archive.sqlite3并联网扫描原帖，增量刷新数据库中的楼层映射。",
                 "从匿名原帖恢复出的缺失正文会写入同一archive.sqlite3。",
-                "author-only备份生成PDF前必须先有floor_map.json。",
-                "缺失楼无法唯一确定原楼层时，会在floor_map.json中记录候选原楼层。",
+                "author-only备份生成PDF前必须先在archive.sqlite3中生成楼层映射。",
+                "缺失楼无法唯一确定原楼层时，会在数据库中记录候选原楼层。",
             ],
             "args": ["name", "tid", "aid", "all_threads", "workers", "api_concurrency"],
             "required_any": ["name", "tid", "all_threads"],
@@ -379,8 +379,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} backup pdf --all-threads",
             ],
             "notes": [
-                "author-only备份会读取floor_map.json，同时显示只看作者楼层和原帖楼层。",
-                f"如缺少floor_map.json，先运行 {PROGRAM_USAGE} backup floors --name 帖子名。",
+                "author-only备份会读取archive.sqlite3中的楼层映射，同时显示只看作者楼层和原帖楼层。",
+                f"如缺少楼层映射，先运行 {PROGRAM_USAGE} backup floors --name 帖子名。",
                 "--all-threads会按thread_configs.json中的ThreadList批量生成PDF。",
                 "--workers控制并行处理的帖子数，--pdf-workers控制全命令共享的"
                 "WeasyPrint并发数。",

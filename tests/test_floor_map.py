@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 import io
-import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -16,11 +15,17 @@ from nga_tools.backup.floor_map import (
     generate_floor_map_from_backup,
     load_floor_map_build_result_if_current,
     read_author_posts_from_archive,
-    read_unresolved_missing_author_lous_from_floor_map,
+    read_unresolved_missing_author_lous_from_archive,
     _page_post_dicts,
     _scan_original_pages,
 )
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.floor_models import (
+    FLOOR_MAP_GENERATION_VERSION,
+    FLOOR_MAP_HASH_ALGORITHM,
+    FLOOR_MAP_VERSION,
+    StoredFloorMap,
+)
 from nga_tools.config import get_config
 from nga_tools.ngaclient.client import PageData
 
@@ -123,7 +128,7 @@ class FloorMapMissingInferenceTest:
         self,
         page_result: list[dict[str, object]],
         missing_author_lous: list[int],
-    ) -> tuple[dict[str, object], FloorMapBuildResult]:
+    ) -> tuple[StoredFloorMap, FloorMapBuildResult]:
         author_posts: list[AuthorPostRef] = [
             {"pid": 1001, "author_lou": 1},
             {"pid": 1003, "author_lou": 3},
@@ -134,20 +139,22 @@ class FloorMapMissingInferenceTest:
         )
 
         with TemporaryDirectory() as temp_dir:
+            store = ThreadArchiveStore(Path(temp_dir))
+            store.ensure_schema()
             with (
-                patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir),
                 patch("builtins.print"),
                 patch("sys.stdout", new_callable=io.StringIO),
             ):
                 result = build_and_save_floor_map(
                     client,
+                    store,
                     123,
                     456,
                     author_posts,
                     missing_author_lous,
                 )
-            with open(f"{temp_dir}/floor_map.json", encoding="utf-8") as file:
-                floor_map = json.load(file)
+            floor_map = store.read_floor_map()
+            assert floor_map is not None
 
         return floor_map, result
 
@@ -188,7 +195,12 @@ class FloorMapMissingInferenceTest:
                 "content": "anonymous body",
             },
         }
-        assert {'pid': None, 'author_lou': 2, 'original_lou': 11, 'original_pid': 2002} in floor_map['entries']
+        assert {
+            "pid": None,
+            "author_lou": 2,
+            "original_lou": 11,
+            "original_pid": 2002,
+        } in floor_map.entries
 
     def test_deleted_original_post_still_maps_without_recovered_content(self) -> None:
         _floor_map, result = self._build_floor_map(
@@ -250,8 +262,9 @@ class FloorMapMissingInferenceTest:
 class FloorMapSignatureCacheTest:
     def test_missing_cache_check_does_not_create_thread_folder(self) -> None:
         output_dir = Path(get_config().output_dir)
+        store = ThreadArchiveStore(output_dir / "123_456")
 
-        cached = load_floor_map_build_result_if_current(123, 456, [], [])
+        cached = load_floor_map_build_result_if_current(store, [], [])
 
         assert cached is None
         assert not (output_dir / "123_456").exists()
@@ -274,27 +287,27 @@ class FloorMapSignatureCacheTest:
         )
 
         with TemporaryDirectory() as temp_dir:
+            store = ThreadArchiveStore(Path(temp_dir))
+            store.ensure_schema()
             with (
-                patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir),
                 patch("builtins.print"),
                 patch("sys.stdout", new_callable=io.StringIO),
             ):
                 build_and_save_floor_map(
                     client,
+                    store,
                     123,
                     456,
                     author_posts,
                     [],
                 )
                 cached = load_floor_map_build_result_if_current(
-                    123,
-                    456,
+                    store,
                     author_posts,
                     [],
                 )
                 changed = load_floor_map_build_result_if_current(
-                    123,
-                    456,
+                    store,
                     author_posts,
                     [3],
                 )
@@ -303,26 +316,20 @@ class FloorMapSignatureCacheTest:
         assert cached.floor_labels.original_lou_by_author_lou[1] == 10
         assert changed is None
 
-    def test_invalid_cached_floor_map_is_cache_miss(self) -> None:
+    def test_legacy_floor_map_json_is_ignored(self) -> None:
         author_posts: list[AuthorPostRef] = [
             {"pid": 1001, "author_lou": 1},
         ]
 
         with TemporaryDirectory() as temp_dir:
-            (Path(temp_dir) / "floor_map.json").write_text("{bad", encoding="utf-8")
-            with (
-                patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir),
-                patch("builtins.print"),
-                patch("sys.stdout", new_callable=io.StringIO),
-            ):
-                cached = load_floor_map_build_result_if_current(
-                    123,
-                    456,
-                    author_posts,
-                    [],
-                )
+            legacy_path = Path(temp_dir) / "floor_map.json"
+            legacy_path.write_text("{bad", encoding="utf-8")
+            store = ThreadArchiveStore(Path(temp_dir))
+            cached = load_floor_map_build_result_if_current(store, author_posts, [])
+            legacy_text = legacy_path.read_text(encoding="utf-8")
 
         assert cached is None
+        assert legacy_text == "{bad"
 
 
 class FloorMapMissingAuthorLousTest:
@@ -364,37 +371,39 @@ class FloorMapMissingAuthorLousTest:
 
 
 class FloorMapStoredMissingAuthorLousTest:
-    def test_reads_only_unresolved_missing_lous_from_floor_map(self) -> None:
+    def test_reads_only_unresolved_missing_lous_from_archive(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            (Path(temp_dir) / "floor_map.json").write_text(
-                json.dumps(
-                    {
-                        "entries": [
-                            {"pid": 1001, "author_lou": 1, "original_lou": 1},
-                            {"pid": None, "author_lou": 2, "original_lou": 2},
-                            {"pid": None, "author_lou": 4, "original_lou": 4},
-                            {
-                                "pid": None,
-                                "author_lou": 6,
-                                "original_lou": 6,
-                                "original_pid": 6006,
-                            },
-                            {"pid": None, "author_lou": 8, "original_lou": 8},
-                            {"pid": None, "author_lou": 9, "original_lou": 9},
-                        ],
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
+            store = ThreadArchiveStore(Path(temp_dir))
+            store.ensure_schema()
+            store.replace_floor_map(
+                StoredFloorMap(
+                    version=FLOOR_MAP_VERSION,
+                    generation_version=FLOOR_MAP_GENERATION_VERSION,
+                    algorithm=FLOOR_MAP_HASH_ALGORITHM,
+                    tid=123,
+                    aid=456,
+                    input_signature="fixture",
+                    entries=[
+                        {"pid": 1001, "author_lou": 1, "original_lou": 1},
+                        {"pid": None, "author_lou": 2, "original_lou": 2},
+                        {"pid": None, "author_lou": 4, "original_lou": 4},
+                        {
+                            "pid": None,
+                            "author_lou": 6,
+                            "original_lou": 6,
+                            "original_pid": 6006,
+                        },
+                        {"pid": None, "author_lou": 8, "original_lou": 8},
+                        {"pid": None, "author_lou": 9, "original_lou": 9},
+                    ],
+                )
             )
 
-            with patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir):
-                missing_lous = read_unresolved_missing_author_lous_from_floor_map(
-                    123,
-                    456,
-                    present_lous={4},
-                    total_lou_count=8,
-                )
+            missing_lous = read_unresolved_missing_author_lous_from_archive(
+                store,
+                present_lous={4},
+                total_lou_count=8,
+            )
 
         assert missing_lous == [2]
 
@@ -405,6 +414,7 @@ class FloorMapStoredMissingAuthorLousTest:
 
         def fake_build_floor_map(
             client: object,
+            archive_store: ThreadArchiveStore,
             tid: int,
             aid: int,
             author_posts: list[AuthorPostRef],
@@ -412,7 +422,7 @@ class FloorMapStoredMissingAuthorLousTest:
             *,
             strict: bool = True,
         ) -> FloorMapBuildResult:
-            del client, tid, aid, author_posts, strict
+            del client, archive_store, tid, aid, author_posts, strict
             captured_missing_lous[:] = missing_author_lous
             return FloorMapBuildResult(FloorLabels.plain(), {})
 

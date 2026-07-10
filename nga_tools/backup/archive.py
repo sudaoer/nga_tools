@@ -12,18 +12,15 @@ from nga_tools.backup.floor_map import (
     build_and_save_floor_map,
     find_missing_author_lous,
     load_floor_map_build_result_if_current,
-    load_floor_labels,
-    read_unresolved_missing_author_lous_from_floor_map,
+    load_floor_labels_from_archive,
+    read_unresolved_missing_author_lous_from_archive,
 )
 from nga_tools.backup.image_pipeline import (
     collect_image_download_tasks_from_parsed as _collect_image_download_tasks_from_parsed,
     download_images as _download_images,
     parse_post_htmls_for_images as _parse_post_htmls_for_images,
 )
-from nga_tools.backup.models import (
-    PostHtml,
-    PostRecord,
-)
+from nga_tools.backup.models import PostRecord
 from nga_tools.backup.page_store import (
     author_total_lou_count_from_page_data as _author_total_lou_count_from_page_data,
     fetch_backup_pages as _fetch_backup_pages,
@@ -36,7 +33,6 @@ from nga_tools.backup.post_html import (
     find_missing_lou as _find_missing_lou,
     load_post_htmls_for_records as _load_post_htmls_for_records,
     merge_missing_lou as _merge_missing_lou,
-    post_refs_from_htmls as _post_refs_from_htmls,
     post_refs_from_posts as _post_refs_from_posts,
 )
 from nga_tools.backup.post_overlay import (
@@ -97,24 +93,9 @@ def _ensure_legacy_json_is_migrated(
     )
 
 
-def _build_floor_map_for_backup(  # pyright: ignore[reportUnusedFunction]
-    client: NGAClient,
-    tid: int,
-    aid: Optional[int],
-    htmls: list[PostHtml],
-    missing_lou: list[int],
-) -> FloorMapBuildResult:
-    return _build_floor_map_for_post_refs(
-        client,
-        tid,
-        aid,
-        _post_refs_from_htmls(htmls),
-        missing_lou,
-    )
-
-
 def _build_floor_map_for_post_refs(
     client: NGAClient,
+    archive_store: ThreadArchiveStore,
     tid: int,
     aid: Optional[int],
     post_refs: list[AuthorPostRef],
@@ -126,16 +107,16 @@ def _build_floor_map_for_post_refs(
     try:
         if not missing_lou:
             current_result = load_floor_map_build_result_if_current(
-                tid,
-                aid,
+                archive_store,
                 post_refs,
                 missing_lou,
             )
             if current_result is not None:
-                report_info("楼层映射输入未变化，复用已有floor_map.json。")
+                report_info("楼层映射输入未变化，复用数据库中的已有映射。")
                 return current_result
         return build_and_save_floor_map(
             client,
+            archive_store,
             tid,
             aid,
             post_refs,
@@ -145,7 +126,7 @@ def _build_floor_map_for_post_refs(
     except Exception as error:
         report_warning(f"楼层映射生成失败，继续生成备份：{error}")
         try:
-            floor_labels = load_floor_labels(tid, aid)
+            floor_labels = load_floor_labels_from_archive(archive_store, aid)
         except Exception as load_error:
             report_warning(f"无法加载已有楼层映射，使用普通楼层标签：{load_error}")
             floor_labels = FloorLabels.plain()
@@ -154,7 +135,6 @@ def _build_floor_map_for_post_refs(
 
 def _post_refs_and_missing_lous(
     archive_store: ThreadArchiveStore,
-    tid: int,
     aid: Optional[int],
     author_total_lou_count: int | None,
     records: list[PostRecord],
@@ -171,9 +151,8 @@ def _post_refs_and_missing_lous(
         post_refs,
         author_total_lou_count,
     )
-    previous_missing_lous = read_unresolved_missing_author_lous_from_floor_map(
-        tid,
-        aid,
+    previous_missing_lous = read_unresolved_missing_author_lous_from_archive(
+        archive_store,
         present_lous=present_lous,
         total_lou_count=author_total_lou_count,
     )
@@ -258,7 +237,6 @@ def backup_thread(
         with time_section("缺失楼读取与合并"):
             post_refs, missing_lous = _post_refs_and_missing_lous(
                 archive_store,
-                tid,
                 aid,
                 author_total_lou_count,
                 records,
@@ -266,6 +244,7 @@ def backup_thread(
         with time_section("楼层映射生成/复用"):
             floor_map_result = _build_floor_map_for_post_refs(
                 client,
+                archive_store,
                 tid,
                 aid,
                 post_refs,
@@ -360,7 +339,6 @@ def backup_thread_sub(
         with time_section("缺失楼读取与合并"):
             post_refs, missing_lous = _post_refs_and_missing_lous(
                 archive_store,
-                tid,
                 aid,
                 author_total_lou_count,
                 records,
@@ -368,6 +346,7 @@ def backup_thread_sub(
         with time_section("楼层映射生成/复用"):
             floor_map_result = _build_floor_map_for_post_refs(
                 client,
+                archive_store,
                 tid,
                 aid,
                 post_refs,

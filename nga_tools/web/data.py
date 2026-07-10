@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime
-import json
 import math
 import re
 import sqlite3
@@ -21,6 +20,7 @@ from nga_tools.backup.archive_posts import (
 )
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
 from nga_tools.backup.archive_store import ArchivePostVersionRow
+from nga_tools.backup.floor_map import load_floor_labels_from_archive
 from nga_tools.backup.floor_models import (
     MISSING_POST_HTML,
     ORIGINAL_POSTS_PER_PAGE,
@@ -88,7 +88,6 @@ class ThreadSummary(TypedDict):
     pageCount: Optional[int]
     updatedAt: Optional[str]
     authorUpdatedAt: Optional[PostDate]
-    hasFloorMap: bool
     hasWarnings: bool
 
 
@@ -493,9 +492,7 @@ def _thread_summary_for_folder(
 
     tid, aid, raw_aid_key = parsed
     db_path = thread_folder / ARCHIVE_DB_FILENAME
-    floor_map_path = thread_folder / "floor_map.json"
     warnings_path = thread_folder / "warnings.log"
-    has_floor_map = floor_map_path.is_file()
     has_warnings = warnings_path.is_file()
     status: ThreadStatus = "invalid"
     message: Optional[str] = None
@@ -538,7 +535,6 @@ def _thread_summary_for_folder(
     updated_at = _latest_mtime(
         [
             db_path,
-            floor_map_path,
             warnings_path,
             thread_folder / POST_VERSION_SELECTIONS_FILENAME,
             thread_folder / POST_OVERLAYS_FILENAME,
@@ -569,7 +565,6 @@ def _thread_summary_for_folder(
         "pageCount": page_count,
         "updatedAt": updated_at,
         "authorUpdatedAt": author_updated_at,
-        "hasFloorMap": has_floor_map,
         "hasWarnings": has_warnings,
     }
 
@@ -670,51 +665,17 @@ def read_thread_summary(
     return summary
 
 
-def _load_floor_labels(thread_folder: Path, aid: Optional[int]) -> FloorLabels:
+def _load_floor_labels(
+    archive_store: ThreadArchiveStore,
+    aid: Optional[int],
+) -> FloorLabels:
     if aid is None:
         return FloorLabels.plain()
 
-    path = thread_folder / "floor_map.json"
-    if not path.is_file():
-        return FloorLabels.plain()
-
     try:
-        raw_data: object = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return load_floor_labels_from_archive(archive_store, aid)
+    except (RuntimeError, ValueError):
         return FloorLabels.plain()
-    if not isinstance(raw_data, dict):
-        return FloorLabels.plain()
-    data = cast(dict[str, object], raw_data)
-    raw_entries = data.get("entries")
-    if not isinstance(raw_entries, list):
-        return FloorLabels.plain()
-
-    original_lou_by_author_lou: dict[int, int] = {}
-    candidate_original_lous_by_author_lou: dict[int, list[int]] = {}
-    for raw_entry in cast(list[object], raw_entries):
-        if not isinstance(raw_entry, dict):
-            continue
-        entry = cast(dict[str, object], raw_entry)
-        author_lou = entry.get("author_lou")
-        if type(author_lou) is not int:
-            continue
-        original_lou = entry.get("original_lou")
-        if type(original_lou) is int:
-            original_lou_by_author_lou[author_lou] = original_lou
-            continue
-        raw_candidates = entry.get("candidate_original_lous")
-        if isinstance(raw_candidates, list):
-            candidates = [
-                item for item in cast(list[object], raw_candidates) if type(item) is int
-            ]
-            if candidates:
-                candidate_original_lous_by_author_lou[author_lou] = candidates
-
-    return FloorLabels(
-        original_lou_by_author_lou=original_lou_by_author_lou,
-        candidate_original_lous_by_author_lou=candidate_original_lous_by_author_lou,
-        show_original=True,
-    )
 
 
 def _safe_output_url(path: Path, output_dir: Path) -> Optional[str]:
@@ -1030,7 +991,7 @@ def read_posts(
         image_urls.update(_attachment_urls(row.content, row.image_attachments_json))
     image_mappings = _read_image_mappings_for_urls(output_dir, image_urls)
 
-    floor_labels = _load_floor_labels(thread_folder, aid)
+    floor_labels = _load_floor_labels(archive_store, aid)
     row_by_lou = {row.lou: row for row in rows}
     slots: list[PostSlot] = []
     for lou in range(page_start_lou, slot_end_lou + 1):
@@ -1118,7 +1079,7 @@ def read_post_overlay(
         raw_aid_key,
     )
     row = _read_effective_row_for_lou(archive_store, lou)
-    floor_labels = _load_floor_labels(thread_folder, aid)
+    floor_labels = _load_floor_labels(archive_store, aid)
     overlay = load_post_overlays(thread_folder).get(lou)
     if overlay is None:
         return {
@@ -1199,13 +1160,13 @@ def read_post_version_groups(
     tid: int,
     raw_aid_key: str,
 ) -> PostVersionGroupsResult:
-    archive_store, thread_folder, aid = _archive_store_for_thread(
+    archive_store, _thread_folder, aid = _archive_store_for_thread(
         output_dir,
         tid,
         raw_aid_key,
     )
     selected_by_lou = archive_store.read_valid_post_version_selections()
-    floor_labels = _load_floor_labels(thread_folder, aid)
+    floor_labels = _load_floor_labels(archive_store, aid)
     with closing(_connect_readonly(archive_store.db_path)) as connection:
         rows = cast(
             list[tuple[int, int, str, str, str, str, int, int]],
@@ -1303,7 +1264,7 @@ def read_post_version_preview(
     raw_aid_key: str,
     version_id: int,
 ) -> PostVersionPreview:
-    archive_store, thread_folder, aid = _archive_store_for_thread(
+    archive_store, _thread_folder, aid = _archive_store_for_thread(
         output_dir,
         tid,
         raw_aid_key,
@@ -1318,7 +1279,7 @@ def read_post_version_preview(
         "item": _post_item_from_row(
             row,
             output_dir,
-            _load_floor_labels(thread_folder, aid),
+            _load_floor_labels(archive_store, aid),
             image_mappings,
         )
     }

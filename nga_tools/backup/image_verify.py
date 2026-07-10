@@ -9,7 +9,7 @@ from typing import Optional
 from nga_tools import utils
 from nga_tools.backup import image_store
 from nga_tools.backup.archive_store import ThreadArchiveStore
-from nga_tools.backup.floor_map import FloorLabels, load_floor_labels
+from nga_tools.backup.floor_map import FloorLabels, load_floor_labels_from_archive
 from nga_tools.backup.image_pipeline import (
     collect_image_download_tasks_from_parsed,
     parse_post_htmls_for_images,
@@ -89,7 +89,8 @@ def _list_thread_referenced_image_paths(
     aid: Optional[int],
     thread_folder: Path,
 ) -> list[Path]:
-    records = ThreadArchiveStore(thread_folder).read_effective_post_records()
+    archive_store = ThreadArchiveStore(thread_folder)
+    records = archive_store.read_effective_post_records()
     records = apply_post_overlays_to_records(thread_folder, records)
     htmls = load_post_htmls_for_records(records)
     parsed_htmls = parse_post_htmls_for_images(htmls)
@@ -97,7 +98,7 @@ def _list_thread_referenced_image_paths(
         floor_labels = FloorLabels.plain()
     else:
         try:
-            floor_labels = load_floor_labels(tid, aid)
+            floor_labels = load_floor_labels_from_archive(archive_store, aid)
         except Exception as error:
             report_warning(f"无法加载楼层映射，使用普通楼层标签：{error}")
             floor_labels = FloorLabels.plain()
