@@ -147,6 +147,7 @@ def read_unresolved_missing_author_lous_from_floor_map(
     present_lous: set[int] | None = None,
     total_lou_count: int | None = None,
 ) -> list[int]:
+    """Read unresolved missing lous; ``total_lou_count`` is NGA ``vrows`` count."""
     path = get_floor_map_path(tid, aid, create=False)
     if not path.exists():
         return []
@@ -166,7 +167,7 @@ def read_unresolved_missing_author_lous_from_floor_map(
             continue
         if present_lous is not None and author_lou in present_lous:
             continue
-        if total_lou_count is not None and author_lou > total_lou_count:
+        if total_lou_count is not None and author_lou >= total_lou_count:
             continue
         missing_lous.add(author_lou)
 
@@ -177,6 +178,7 @@ def find_missing_author_lous(
     author_posts: Sequence[AuthorPostRef],
     total_lou_count: int | None = None,
 ) -> list[int]:
+    """Find missing author lous; ``total_lou_count`` is NGA ``vrows`` count."""
     author_lous = sorted({post["author_lou"] for post in author_posts})
     expected_lou = 1
     missing_lous: list[int] = []
@@ -186,8 +188,11 @@ def find_missing_author_lous(
             expected_lou = author_lou
         expected_lou += 1
 
-    if total_lou_count is not None and expected_lou <= total_lou_count:
-        missing_lous.extend(range(expected_lou, total_lou_count + 1))
+    if total_lou_count is not None:
+        # NGA author lous are 0-based; vrows is a row count, not the max lou.
+        last_author_lou = total_lou_count - 1
+        if last_author_lou >= 0 and expected_lou <= last_author_lou:
+            missing_lous.extend(range(expected_lou, last_author_lou + 1))
 
     return missing_lous
 

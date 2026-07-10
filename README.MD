@@ -66,8 +66,9 @@ pixi run python main.py forum sync
 中的 tid 会强制保存；否则标题包含任一 `keywords`、不包含
 `exclude_keywords`，主题回复数达到 `min_replies`，且 NGA 只看作者页的
 `vrows` 达到 `min_author_lous` 时保存；`vrows` 按 NGA 只看作者楼数计数，
-包含主楼。`min_replies` 未配置时默认为 500，`min_author_lous` 未配置时
-默认为 20。保存时会把主题楼主 `authorid` 写为 `aid`，后续使用
+包含主楼。NGA 只看作者楼号从 0 开始，因此最大有效作者楼号是 `vrows - 1`，
+不要把 `vrows` 当成最大楼号。`min_replies` 未配置时默认为 500，
+`min_author_lous` 未配置时默认为 20。保存时会把主题楼主 `authorid` 写为 `aid`，后续使用
 `backup all/sub --name 帖子名` 会默认只看楼主。
 
 `thread_configs.json` 中每项必须包含 `thread_name` 和 `tid`；可额外保存任意

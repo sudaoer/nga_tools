@@ -325,13 +325,32 @@ class FloorMapMissingAuthorLousTest:
 
         assert find_missing_author_lous(author_posts) == [2]
 
-    def test_finds_tail_gap_from_total_lou_count(self) -> None:
+    def test_treats_total_lou_count_as_vrows_count(self) -> None:
         author_posts: list[AuthorPostRef] = [
+            {"pid": 1000, "author_lou": 0},
             {"pid": 1001, "author_lou": 1},
             {"pid": 1003, "author_lou": 3},
         ]
 
-        assert find_missing_author_lous(author_posts, total_lou_count=4) == [2, 4]
+        assert find_missing_author_lous(author_posts, total_lou_count=4) == [2]
+
+    def test_does_not_create_missing_lou_for_vrows_count_itself(self) -> None:
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 1000, "author_lou": 0},
+            {"pid": 1001, "author_lou": 1},
+            {"pid": 1002, "author_lou": 2},
+            {"pid": 1003, "author_lou": 3},
+        ]
+
+        assert find_missing_author_lous(author_posts, total_lou_count=4) == []
+
+    def test_finds_tail_gap_before_max_valid_lou(self) -> None:
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 1000, "author_lou": 0},
+            {"pid": 1001, "author_lou": 1},
+        ]
+
+        assert find_missing_author_lous(author_posts, total_lou_count=4) == [2, 3]
 
 
 class FloorMapStoredMissingAuthorLousTest:
@@ -350,6 +369,7 @@ class FloorMapStoredMissingAuthorLousTest:
                                 "original_lou": 6,
                                 "original_pid": 6006,
                             },
+                            {"pid": None, "author_lou": 8, "original_lou": 8},
                             {"pid": None, "author_lou": 9, "original_lou": 9},
                         ],
                     },
@@ -394,6 +414,7 @@ class FloorMapStoredMissingAuthorLousTest:
                     "totalPage": 1,
                     "vrows": 4,
                     "result": [
+                        {"pid": 1000, "lou": 0, "content": "op"},
                         {"pid": 1001, "lou": 1, "content": "first"},
                         {"pid": 1003, "lou": 3, "content": "third"},
                     ],
@@ -408,4 +429,4 @@ class FloorMapStoredMissingAuthorLousTest:
             ):
                 generate_floor_map_from_backup(123, 456)
 
-        assert captured_missing_lous == [2, 4]
+        assert captured_missing_lous == [2]

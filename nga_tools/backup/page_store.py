@@ -106,6 +106,10 @@ def author_total_lou_count_from_page_data(
     page_data: PageData,
     aid: Optional[int],
 ) -> int | None:
+    """Return NGA ``vrows`` count for author-only pages.
+
+    NGA author lous are 0-based, so this count is not the max author lou.
+    """
     if aid is None:
         return None
     total_lous = page_data.get("vrows")

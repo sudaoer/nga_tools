@@ -78,6 +78,7 @@ def find_missing_lou(
     posts: Sequence[PostHtml] | Sequence[PostRecord],
     total_lou_count: int | None = None,
 ) -> list[int]:
+    """Find missing author lous; ``total_lou_count`` is NGA ``vrows`` count."""
     expected_lou = 1
     missing_lou: list[int] = []
     for item in sorted(posts, key=lambda post: post["lou"]):
@@ -87,8 +88,11 @@ def find_missing_lou(
             expected_lou = item["lou"]
         expected_lou += 1
 
-    if total_lou_count is not None and expected_lou <= total_lou_count:
-        missing_lou.extend(range(expected_lou, total_lou_count + 1))
+    if total_lou_count is not None:
+        # NGA author lous are 0-based; vrows is a row count, not the max lou.
+        last_author_lou = total_lou_count - 1
+        if last_author_lou >= 0 and expected_lou <= last_author_lou:
+            missing_lou.extend(range(expected_lou, last_author_lou + 1))
 
     return missing_lou
 

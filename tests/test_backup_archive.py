@@ -553,13 +553,32 @@ class BackupThreadSubMissingLouTest:
     def test_merge_missing_lou_sorts_and_deduplicates(self) -> None:
         assert _merge_missing_lou([4, 2], [2, 3], []) == [2, 3, 4]
 
-    def test_find_missing_lou_uses_total_lou_count_for_tail_gap(self) -> None:
+    def test_find_missing_lou_treats_total_lou_count_as_vrows_count(self) -> None:
         htmls: list[PostHtml] = [
+            {"lou": 0, "pid": 1000, "html": "op"},
             {"lou": 1, "pid": 1001, "html": "first"},
             {"lou": 3, "pid": 1003, "html": "third"},
         ]
 
-        assert _find_missing_lou(htmls, total_lou_count=4) == [2, 4]
+        assert _find_missing_lou(htmls, total_lou_count=4) == [2]
+
+    def test_find_missing_lou_does_not_create_tail_gap_for_vrows_itself(self) -> None:
+        htmls: list[PostHtml] = [
+            {"lou": 0, "pid": 1000, "html": "op"},
+            {"lou": 1, "pid": 1001, "html": "first"},
+            {"lou": 2, "pid": 1002, "html": "second"},
+            {"lou": 3, "pid": 1003, "html": "third"},
+        ]
+
+        assert _find_missing_lou(htmls, total_lou_count=4) == []
+
+    def test_find_missing_lou_fills_tail_gap_before_max_valid_lou(self) -> None:
+        htmls: list[PostHtml] = [
+            {"lou": 0, "pid": 1000, "html": "op"},
+            {"lou": 1, "pid": 1001, "html": "first"},
+        ]
+
+        assert _find_missing_lou(htmls, total_lou_count=4) == [2, 3]
 
     def test_author_empty_page_is_written_and_later_pages_continue(self) -> None:
         class SparseAuthorClient:
