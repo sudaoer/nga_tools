@@ -120,14 +120,6 @@ class ArchiveMigrationResult:
 
 
 @dataclass(frozen=True)
-class ArchiveWordCountTotals:
-    total_posts: int
-    body_posts: int
-    chinese_chars: int
-    chinese_with_punctuation: int
-
-
-@dataclass(frozen=True)
 class ArchiveEffectivePostStats:
     post_count: int
     max_lou: Optional[int]
@@ -1069,74 +1061,6 @@ class ThreadArchiveStore:
                     )
         return len(rows)
 
-    def read_latest_word_count_totals(
-        self,
-        min_body_chars: int,
-    ) -> ArchiveWordCountTotals:
-        self.require_exists()
-        self.refresh_stored_word_counts()
-
-        with closing(self._connect()) as connection:
-            row = cast(
-                tuple[int, int, int, int],
-                connection.execute(
-                    """
-                    WITH latest AS (
-                        SELECT
-                            word_count_chinese_chars,
-                            word_count_chinese_with_punctuation,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY lou
-                                ORDER BY last_seen_at DESC, id DESC
-                            ) AS row_number
-                        FROM post_versions
-                    )
-                    SELECT
-                        COUNT(*),
-                        COALESCE(
-                            SUM(
-                                CASE
-                                    WHEN word_count_chinese_with_punctuation >= ?
-                                    THEN 1
-                                    ELSE 0
-                                END
-                            ),
-                            0
-                        ),
-                        COALESCE(
-                            SUM(
-                                CASE
-                                    WHEN word_count_chinese_with_punctuation >= ?
-                                    THEN word_count_chinese_chars
-                                    ELSE 0
-                                END
-                            ),
-                            0
-                        ),
-                        COALESCE(
-                            SUM(
-                                CASE
-                                    WHEN word_count_chinese_with_punctuation >= ?
-                                    THEN word_count_chinese_with_punctuation
-                                    ELSE 0
-                                END
-                            ),
-                            0
-                        )
-                    FROM latest
-                    WHERE row_number = 1
-                    """,
-                    (min_body_chars, min_body_chars, min_body_chars),
-                ).fetchone(),
-            )
-
-        return ArchiveWordCountTotals(
-            total_posts=row[0],
-            body_posts=row[1],
-            chinese_chars=row[2],
-            chinese_with_punctuation=row[3],
-        )
-
     def read_latest_post_record_summaries(self) -> list[PostRecord]:
         self.require_exists()
 
@@ -1612,19 +1536,6 @@ class ThreadArchiveStore:
         if type(value) is int:
             return value
         raise ValueError(f"archive vrows字段无效：{value!r}")
-
-    def page_count(self) -> int:
-        self.require_exists()
-        with closing(self._connect()) as connection:
-            row = connection.execute(
-                "SELECT COUNT(DISTINCT page_number) FROM page_snapshots"
-            ).fetchone()
-        if row is None:
-            return 0
-        value = row[0]
-        if type(value) is int:
-            return value
-        raise ValueError(f"archive page count字段无效：{value!r}")
 
     def read_page_numbers(self) -> set[int]:
         if not self.exists():

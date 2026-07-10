@@ -22,9 +22,7 @@ from nga_tools.commands.backup import (
     backup_sub,
     pdf_generate,
 )
-from nga_tools.commands.stats import stats_words
 from nga_tools.forum.thread_configs import ThreadConfig
-from nga_tools.stats.word_count import WordCountSummary
 
 
 def _thread_config(
@@ -71,7 +69,6 @@ class BackupConfigsCliTest:
             ["backup", "sub", "--all-threads"],
             ["backup", "floors", "--all-threads"],
             ["backup", "pdf", "--all-threads"],
-            ["stats", "words", "--all-threads"],
         ],
     )
     def test_all_threads_parses_for_batch_thread_commands(
@@ -105,7 +102,7 @@ class BackupConfigsCliTest:
         assert args['image_concurrency'] == 20
         assert args['write_json'] is True
 
-    def test_hyphenated_pdf_and_stats_options_parse(self) -> None:
+    def test_hyphenated_pdf_options_parse(self) -> None:
         pdf_args = args_parse(
             [
                 "backup",
@@ -117,13 +114,9 @@ class BackupConfigsCliTest:
                 "2",
             ]
         )
-        stats_args = args_parse(
-            ["stats", "words", "--all-threads", "--min-body-chars", "80"]
-        )
 
         assert pdf_args['lou_per_pdf'] == 50
         assert pdf_args['pdf_workers'] == 2
-        assert stats_args['min_body_chars'] == 80
 
     def test_hyphenated_forum_full_postdate_options_parse(self) -> None:
         args = args_parse(
@@ -637,62 +630,6 @@ class BackupConfigsHandlerTest:
                 pdf_renderer=first_renderer,
             ),
         ]
-
-    def test_stats_words_all_threads_counts_each_archive(self) -> None:
-        thread_configs = [
-            _thread_config(name="first", tid=101, aid=201),
-            _thread_config(name="second", tid=102, aid=None),
-        ]
-
-        def count_side_effect(
-            *,
-            tid: int,
-            aid: int | None,
-            min_body_chars: int,
-        ) -> WordCountSummary:
-            assert min_body_chars == 80
-            return WordCountSummary(
-                tid=tid,
-                aid=aid,
-                archive_path=Path(f"/tmp/{tid}.sqlite3"),
-                page_count=1,
-                total_posts=10,
-                body_posts=2,
-                excluded_posts=8,
-                min_body_chars=min_body_chars,
-                chinese_chars=100,
-                chinese_with_punctuation=120,
-            )
-
-        with (
-            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
-            patch(
-                "nga_tools.commands.stats.count_backup_words",
-                side_effect=count_side_effect,
-            ) as count_mock,
-            patch(
-                "nga_tools.commands.stats.get_config",
-                return_value=_backup_config_app_config(),
-            ),
-            _captured_reporter() as output,
-        ):
-            configs_cls.return_value.get_thread_configs.return_value = thread_configs
-
-            stats_words(
-                {
-                    "all_threads": True,
-                    "workers": 1,
-                    "min_body_chars": 80,
-                }
-            )
-
-        assert count_mock.call_args_list == [
-            call(tid=101, aid=201, min_body_chars=80),
-            call(tid=102, aid=None, min_body_chars=80),
-        ]
-        output_text = output.getvalue()
-        assert "first (tid: 101, aid: 201)：快照页数1" in output_text
-        assert "批量统计完成：成功2个，失败0个。" in output_text
 
     def test_duplicate_parallel_thread_configs_fail_on_output_lock(self) -> None:
         thread_configs = [

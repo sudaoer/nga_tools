@@ -106,7 +106,7 @@ pixi run python main.py backup all --name 帖子名
 ```
 
 图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在 `output/image_index.sqlite3`。下载失败的图片会在 `html_modified` 中指向 `images_unique/download_failed_placeholder.png` 占位图，不写入 SQLite 映射，后续增量备份仍会继续重试原图。
-帖子内容会写入每个备份目录自己的 `archive.sqlite3`。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write-json` 会额外写入 `json/page_*.json`。生成 HTML、楼层映射和统计只读取 `archive.sqlite3`。
+帖子内容会写入每个备份目录自己的 `archive.sqlite3`。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write-json` 会额外写入 `json/page_*.json`。生成 HTML 和楼层映射只读取 `archive.sqlite3`。
 
 补充本地缺失内容和远端新增内容：
 
@@ -163,23 +163,6 @@ pixi run python main.py image verify
 
 ```powershell
 pixi run python main.py image verify --name 帖子名
-```
-
-统计已有备份中的正文中文字数：
-
-```powershell
-pixi run python main.py stats words --name 帖子名
-```
-
-统计命令读取本地 `archive.sqlite3`，不联网；会把每个帖子版本的字数字段写回
-归档库，但不生成独立统计文件。旧 `json/page_*.json` 只会被 `backup migrate-store`
-显式读取。默认会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子
-标记，并只纳入清洗后 `中文+中文标点数` 不低于 120 的正文楼层。阈值可以通过
-`--min-body-chars` 调整：
-
-```powershell
-pixi run python main.py stats words --name 帖子名 --min-body-chars 80
-pixi run python main.py stats words --all-threads
 ```
 
 ## Web 查看器

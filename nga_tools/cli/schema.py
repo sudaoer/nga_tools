@@ -12,7 +12,6 @@ from nga_tools.commands.backup import (
 )
 from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
 from nga_tools.commands.image import image_verify
-from nga_tools.commands.stats import stats_words
 from nga_tools.commands.types import CommandHandler
 from nga_tools.commands.web import web_serve
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
@@ -102,12 +101,6 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": int,
         "metavar": "N",
         "help": "图片下载的全局并发上限",
-    },
-    "min_body_chars": {
-        "flags": ("--min-body-chars", "--min_body_chars"),
-        "type": int,
-        "metavar": "N",
-        "help": "正文楼层判定阈值（中文+中文标点数）",
     },
     "pages": {
         "flags": ("--pages",),
@@ -423,33 +416,6 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "提供帖子参数时会校验该帖html_modified引用到的图片文件。",
             ],
             "args": ["name", "tid", "aid"],
-        },
-    },
-    "stats": {
-        "words": {
-            "handler": stats_words,
-            "summary": "统计已有备份的正文中文字数",
-            "usage": (
-                f"{PROGRAM_USAGE} stats words "
-                "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
-                "[--workers N] [--min-body-chars N]"
-            ),
-            "examples": [
-                f"{PROGRAM_USAGE} stats words --name 帖子名",
-                f"{PROGRAM_USAGE} stats words --tid 12345678 --aid 987654",
-                f"{PROGRAM_USAGE} stats words --name 帖子名 --min-body-chars 80",
-                f"{PROGRAM_USAGE} stats words --all-threads",
-            ],
-            "notes": [
-                "此命令读取本地archive.sqlite3，不联网；会把字数字段写回归档，"
-                "但不生成独立统计文件。",
-                "会清洗图片、链接、HTML/BBCode、表情、用户引用、回复引用和骰子标记。",
-                "默认只纳入清洗后中文+中文标点数达到120的正文楼层。",
-            ],
-            "args": ["name", "tid", "aid", "all_threads", "workers", "min_body_chars"],
-            "required_any": ["name", "tid", "all_threads"],
-            "defaults": {"min_body_chars": 120},
-            "positive": ["workers", "min_body_chars"],
         },
     },
     "web": {
