@@ -14,6 +14,7 @@ from PIL import Image
 
 from nga_tools import utils
 from nga_tools.backup import image_store
+from nga_tools.core import image_formats
 
 
 def _write_avif_image(path: Path) -> None:
@@ -59,6 +60,23 @@ class NgaImageLinkVerifyTest:
 
 
 class ImageStoreTest:
+    def test_ordinary_image_validation_does_not_full_read_for_modern_probe(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            image_path = Path(temp_dir_name) / "ordinary.png"
+            Image.new("RGB", (1, 1), color="white").save(image_path)
+
+            with patch(
+                "nga_tools.core.image_formats._read_file",
+                side_effect=AssertionError("unexpected full read"),
+            ):
+                extension = image_formats.image_extension_from_file(image_path)
+                error = image_formats.image_file_error(image_path)
+
+        assert extension == "png"
+        assert error is None
+
     def test_placeholder_image_path_creates_valid_png_without_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             output_dir = Path(temp_dir_name) / "output"

@@ -4,6 +4,7 @@ import concurrent.futures
 import os
 import re
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,9 +34,15 @@ from nga_tools.backup.pdf_plan import (
 from nga_tools.config import get_config
 from nga_tools.console import report_info, report_warning
 from nga_tools.core.atomic import replace_temp_file, temporary_sibling_path
+from nga_tools.core.image_formats import (
+    image_extension_from_file,
+    open_image_for_processing,
+)
 from nga_tools.timing import time_section
 
 SPEAKER_LINE_RE = re.compile(r"^([^\s：:][^：:]{0,15})[：:]")
+PDF_CONVERTED_IMAGE_DIRNAME = "converted_images"
+_PDF_CONVERTED_IMAGE_EXTENSIONS = {"avif", "jxl"}
 
 
 @dataclass(frozen=True)
@@ -83,7 +90,7 @@ class PdfRenderPool:
         if not tasks:
             return []
         executor = self._ensure_executor()
-        return list(executor.map(_run_weasyprint, tasks))
+        return list(executor.map(_run_pdf_renderer, tasks))
 
     def close(self) -> None:
         executor: concurrent.futures.ProcessPoolExecutor | None = None
@@ -159,8 +166,11 @@ def _get_image_size(
     image_size_cache: dict[str, tuple[int, int]],
 ) -> tuple[int, int]:
     if image_path not in image_size_cache:
-        with Image.open(image_path) as image:
+        image = open_image_for_processing(Path(image_path))
+        try:
             image_size_cache[image_path] = image.size
+        finally:
+            image.close()
     return image_size_cache[image_path]
 
 
@@ -249,7 +259,8 @@ def _slice_long_image_for_pdf(
     safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(image_path).stem)
     slice_paths: list[str] = []
 
-    with Image.open(image_path) as image:
+    image = open_image_for_processing(Path(image_path))
+    try:
         width, height = image.size
         slice_height = max(1, int(width * max_slice_ratio))
         if height <= slice_height:
@@ -269,9 +280,46 @@ def _slice_long_image_for_pdf(
             ):
                 _save_slice_image(segment, output_path)
             slice_paths.append(output_path)
+    finally:
+        image.close()
 
     slice_cache[image_path] = slice_paths
     return slice_paths
+
+
+def _image_needs_pdf_conversion(image_path: Path) -> bool:
+    return image_extension_from_file(image_path) in _PDF_CONVERTED_IMAGE_EXTENSIONS
+
+
+def _converted_pdf_image_path(image_path: Path, folder_pdf: str) -> Path:
+    image = open_image_for_processing(image_path)
+    try:
+        extension = "png" if "A" in image.getbands() else "jpg"
+        converted_dir = Path(folder_pdf) / PDF_CONVERTED_IMAGE_DIRNAME
+        converted_dir.mkdir(parents=True, exist_ok=True)
+        converted_path = converted_dir / f"{utils.sha256(str(image_path))}.{extension}"
+        if converted_path.exists() and _slice_image_file_is_valid(str(converted_path)):
+            return converted_path
+        _save_slice_image(image, str(converted_path))
+        return converted_path
+    finally:
+        image.close()
+
+
+def _prepare_image_for_pdf(
+    image_path: Path,
+    folder_pdf: str,
+    converted_image_cache: dict[str, Path],
+) -> Path:
+    if not _image_needs_pdf_conversion(image_path):
+        return image_path
+
+    cache_key = str(image_path)
+    converted_path = converted_image_cache.get(cache_key)
+    if converted_path is None:
+        converted_path = _converted_pdf_image_path(image_path, folder_pdf)
+        converted_image_cache[cache_key] = converted_path
+    return converted_path
 
 
 def _relative_dir_path(from_dir: str, to_path: str) -> str:
@@ -308,23 +356,29 @@ def _pdf_worker_desc(pdf_workers: Optional[int]) -> str:
     return str(pdf_workers)
 
 
-def _run_weasyprint(task: PdfRenderTask) -> PdfRenderResult:
+def _run_pdf_renderer(task: PdfRenderTask) -> PdfRenderResult:
     output_path = Path(task.output_path)
     temp_output_path = temporary_sibling_path(output_path)
     try:
         result = subprocess.run(
-            ["weasyprint", task.html_path, str(temp_output_path)],
+            [
+                sys.executable,
+                "-m",
+                "nga_tools.backup.pdf_renderer",
+                task.html_path,
+                str(temp_output_path),
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             check=False,
         )
-    except FileNotFoundError as error:
+    except OSError as error:
         temp_output_path.unlink(missing_ok=True)
         return PdfRenderResult(
             task=task,
             returncode=1,
-            output_lines=(f"找不到weasyprint命令，请确认通过pixi环境运行：{error}",),
+            output_lines=(f"无法启动PDF渲染子进程，请确认通过pixi环境运行：{error}",),
         )
     output_lines = _split_weasyprint_output(result.stdout)
     if result.returncode != 0:
@@ -435,6 +489,7 @@ def _read_pdf_html(
     html_content_by_lou: dict[int, str] = {}
     image_size_cache: dict[str, tuple[int, int]] = {}
     slice_cache: dict[str, list[str]] = {}
+    converted_image_cache: dict[str, Path] = {}
 
     for lou, source in sorted(html_sources_by_lou.items()):
         source_desc = f"{source.source_name}（{floor_labels.label(lou)}）"
@@ -452,11 +507,23 @@ def _read_pdf_html(
                     f"HTML文件{source_desc}中引用了不存在的图片文件{image_src}！"
                 )
 
+            try:
+                image_path = _prepare_image_for_pdf(
+                    image_path,
+                    folder_pdf,
+                    converted_image_cache,
+                )
+            except Exception as error:
+                report_warning(
+                    f"{floor_labels.label(lou)}跳过PDF图片转换 "
+                    f"{image_path}: {error}"
+                )
+
             image["src"] = _relative_dir_path(folder_pdf, str(image_path))
 
             try:
                 width, height = _get_image_size(str(image_path), image_size_cache)
-            except OSError as error:
+            except (OSError, SyntaxError, ValueError) as error:
                 report_warning(
                     f"{floor_labels.label(lou)}跳过无法识别尺寸的图片 "
                     f"{image_path}: {error}"

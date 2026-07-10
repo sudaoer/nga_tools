@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import io
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import imagecodecs
+import numpy as np
 import pytest
 from PIL import Image
 from rich.console import Console
 
 from nga_tools.backup import image_store
+from nga_tools.backup import pdf_renderer
 from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.backup.pdf import (
     PdfRenderPool,
@@ -19,7 +23,7 @@ from nga_tools.backup.pdf import (
     _image_path_for_pdf,
     _read_pdf_html,
     _report_weasyprint_output,
-    _run_weasyprint,
+    _run_pdf_renderer,
     _slice_image_file_is_valid,
     _split_weasyprint_output,
 )
@@ -32,6 +36,12 @@ from nga_tools.backup.pdf_plan import (
 )
 from nga_tools.backup.post_overlay import save_post_overlay
 from nga_tools.console import ConsoleReporter, use_reporter, use_warning_log
+
+
+def _write_avif_image(path: Path) -> None:
+    pixels = np.zeros((2, 3, 3), dtype=np.uint8)
+    pixels[:, :] = [255, 255, 255]
+    path.write_bytes(imagecodecs.avif_encode(pixels))
 
 
 class PdfHashCacheTest:
@@ -249,14 +259,14 @@ class PdfRenderPoolTest:
         assert executor.shutdown_count == 1
 
 
-class PdfWeasyPrintCaptureTest:
+class PdfRendererCaptureTest:
     def test_split_weasyprint_output_filters_blank_lines(self) -> None:
         assert _split_weasyprint_output(None) == ()
         assert _split_weasyprint_output(
             "\nWARNING: missing glyph\r\n  INFO: done  \n\n"
         ) == ("WARNING: missing glyph", "INFO: done")
 
-    def test_run_weasyprint_captures_combined_output(self) -> None:
+    def test_run_pdf_renderer_captures_combined_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task = PdfRenderTask(
                 str(Path(tmp_dir) / "part_0_1.html"),
@@ -272,7 +282,7 @@ class PdfWeasyPrintCaptureTest:
                 check: bool,
             ) -> SimpleNamespace:
                 del stdout, stderr, text, check
-                Path(args[2]).write_bytes(b"%PDF-1.7\n")
+                Path(args[4]).write_bytes(b"%PDF-1.7\n")
                 return SimpleNamespace(
                     returncode=0,
                     stdout="WARNING: missing glyph\n\n  INFO: done  \n",
@@ -282,11 +292,16 @@ class PdfWeasyPrintCaptureTest:
                 "nga_tools.backup.pdf.subprocess.run",
                 side_effect=fake_run,
             ) as run:
-                result = _run_weasyprint(task)
+                result = _run_pdf_renderer(task)
 
             run_args = run.call_args.args[0]
-            assert run_args[:2] == ["weasyprint", task.html_path]
-            assert run_args[2] != task.output_path
+            assert run_args[:3] == [
+                sys.executable,
+                "-m",
+                "nga_tools.backup.pdf_renderer",
+            ]
+            assert run_args[3] == task.html_path
+            assert run_args[4] != task.output_path
             run.assert_called_once_with(
                 run_args,
                 stdout=subprocess.PIPE,
@@ -301,7 +316,7 @@ class PdfWeasyPrintCaptureTest:
             )
             assert Path(task.output_path).read_bytes() == b"%PDF-1.7\n"
 
-    def test_run_weasyprint_keeps_existing_pdf_when_output_is_invalid(self) -> None:
+    def test_run_pdf_renderer_keeps_existing_pdf_when_output_is_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task = PdfRenderTask(
                 str(Path(tmp_dir) / "part_0_1.html"),
@@ -318,32 +333,32 @@ class PdfWeasyPrintCaptureTest:
                 check: bool,
             ) -> SimpleNamespace:
                 del stdout, stderr, text, check
-                Path(args[2]).write_bytes(b"not a pdf")
+                Path(args[4]).write_bytes(b"not a pdf")
                 return SimpleNamespace(returncode=0, stdout="")
 
             with patch(
                 "nga_tools.backup.pdf.subprocess.run",
                 side_effect=fake_run,
             ):
-                result = _run_weasyprint(task)
+                result = _run_pdf_renderer(task)
 
             assert result.task == task
             assert result.returncode == 1
             assert result.output_lines == (f"PDF输出无效：{task.output_path}",)
             assert Path(task.output_path).read_bytes() == b"%PDF-old\n"
 
-    def test_run_weasyprint_reports_missing_command(self) -> None:
+    def test_run_pdf_renderer_reports_start_failure(self) -> None:
         task = PdfRenderTask("/tmp/part_0_1.html", "/tmp/part_0_1.pdf")
 
         with patch(
             "nga_tools.backup.pdf.subprocess.run",
             side_effect=FileNotFoundError("missing"),
         ):
-            result = _run_weasyprint(task)
+            result = _run_pdf_renderer(task)
 
         assert result.task == task
         assert result.returncode == 1
-        assert "找不到weasyprint命令" in result.output_lines[0]
+        assert "无法启动PDF渲染子进程" in result.output_lines[0]
 
     def test_reports_weasyprint_output_through_warning_reporter(self) -> None:
         output = io.StringIO()
@@ -376,6 +391,21 @@ class PdfWeasyPrintCaptureTest:
         )
 
 
+class PdfRendererEntrypointTest:
+    def test_render_pdf_registers_openers_and_calls_weasyprint(self) -> None:
+        with (
+            patch(
+                "nga_tools.backup.pdf_renderer.register_pillow_image_openers"
+            ) as register,
+            patch("nga_tools.backup.pdf_renderer.weasyprint.HTML") as html_class,
+        ):
+            pdf_renderer.render_pdf(Path("part.html"), Path("part.pdf"))
+
+        register.assert_called_once_with()
+        html_class.assert_called_once_with(filename="part.html")
+        html_class.return_value.write_pdf.assert_called_once_with("part.pdf")
+
+
 class PdfImageSourceTest:
     def test_slice_image_validation_treats_syntax_error_as_invalid(self) -> None:
         with patch("nga_tools.backup.pdf.Image.open", side_effect=SyntaxError("bad")):
@@ -385,6 +415,75 @@ class PdfImageSourceTest:
         assert _image_path_for_pdf("C:/nga/image.png", Path("html")) == Path(
             "C:/nga/image.png"
         )
+
+    def test_read_pdf_html_converts_avif_image_for_pdf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir) / "output"
+            html_dir = output_dir / "101_all" / "html_modified"
+            unique_dir = output_dir / "images_unique"
+            html_dir.mkdir(parents=True)
+            unique_dir.mkdir(parents=True)
+            unique_image = unique_dir / "hash.avif"
+            _write_avif_image(unique_image)
+            (html_dir / "post_1.html").write_text(
+                '<p><img src="../../images_unique/hash.avif"/></p>',
+                encoding="utf-8",
+            )
+
+            with (
+                patch(
+                    "nga_tools.core.paths.get_config",
+                    return_value=SimpleNamespace(output_dir=str(output_dir)),
+                ),
+                patch("nga_tools.backup.pdf._is_long_image", return_value=False),
+                patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
+            ):
+                html_content_by_lou, folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+
+            converted_paths = list(
+                (Path(folder_pdf) / "converted_images").iterdir()
+            )
+
+            assert len(converted_paths) == 1
+            assert converted_paths[0].suffix == ".jpg"
+            with Image.open(converted_paths[0]) as image:
+                image.verify()
+            assert f'src="converted_images/{converted_paths[0].name}"' in (
+                html_content_by_lou[1]
+            )
+
+    def test_read_pdf_html_keeps_png_image_without_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir) / "output"
+            html_dir = output_dir / "101_all" / "html_modified"
+            unique_dir = output_dir / "images_unique"
+            html_dir.mkdir(parents=True)
+            unique_dir.mkdir(parents=True)
+            unique_image = unique_dir / "hash.png"
+            Image.new("RGB", (2, 2), color="white").save(unique_image)
+            (html_dir / "post_1.html").write_text(
+                '<p><img src="../../images_unique/hash.png"/></p>',
+                encoding="utf-8",
+            )
+
+            with (
+                patch(
+                    "nga_tools.core.paths.get_config",
+                    return_value=SimpleNamespace(output_dir=str(output_dir)),
+                ),
+                patch("nga_tools.backup.pdf._is_long_image", return_value=False),
+                patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
+            ):
+                html_content_by_lou, folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+
+            assert not (Path(folder_pdf) / "converted_images").exists()
+            assert 'src="../../images_unique/hash.png"' in html_content_by_lou[1]
 
     def test_read_pdf_html_does_not_resolve_legacy_global_link_without_mapping(
         self,
