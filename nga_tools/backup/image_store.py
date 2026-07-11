@@ -29,10 +29,12 @@ from nga_tools.core.image_formats import (
 from nga_tools.core.sqlite import (
     SQLITE_BUSY_TIMEOUT_SECONDS,
     configure_connection,
+    iter_in_clause_chunks,
 )
 from nga_tools.backup.image_validation import (
     ImageValidationCache,
     ImageValidationOutcome,
+    PersistentValidationEntry,
     canonical_image_path_key,
     current_image_validation_cache,
     invalidate_current_image_validation,
@@ -125,6 +127,7 @@ class ImagePreparationStats:
     intra_thread_path_dedup_count: int
     batch_validation_cache_hit_path_count: int
     deep_validation_path_count: int
+    persistent_cache_hit_path_count: int
     invalid_mapping_count: int
     pending_download_url_count: int
 
@@ -224,6 +227,17 @@ def _connect_image_index() -> sqlite3.Connection:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS image_validation_cache (
+            canonical_path TEXT PRIMARY KEY,
+            size INTEGER NOT NULL,
+            mtime_ns INTEGER NOT NULL,
+            valid INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     connection.commit()
     return connection
 
@@ -270,6 +284,87 @@ def upsert_image_mappings(
                     rows,
                 )
     return image_mappings
+
+
+def load_persistent_validation_cache(
+    canonical_paths: set[str],
+) -> dict[str, tuple[int, int, bool]]:
+    if not canonical_paths:
+        return {}
+    entries: dict[str, tuple[int, int, bool]] = {}
+    sorted_paths = sorted(canonical_paths)
+    try:
+        with closing(_connect_image_index()) as connection:
+            for chunk in iter_in_clause_chunks(sorted_paths):
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"""
+                    SELECT canonical_path, size, mtime_ns, valid
+                    FROM image_validation_cache
+                    WHERE canonical_path IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                for path, size, mtime_ns, valid in rows:
+                    if (
+                        isinstance(path, str)
+                        and type(size) is int
+                        and type(mtime_ns) is int
+                        and type(valid) is int
+                    ):
+                        entries[path] = (size, mtime_ns, bool(valid))
+    except sqlite3.Error:
+        return {}
+    return entries
+
+
+def save_persistent_validation_entries(
+    entries: list[PersistentValidationEntry],
+) -> None:
+    if not entries:
+        return
+    now = _now_utc_iso()
+    rows = [
+        (entry["canonical_path"], entry["size"], entry["mtime_ns"], int(entry["valid"]), now)
+        for entry in entries
+    ]
+    with _IMAGE_STORE_LOCK:
+        try:
+            with closing(_connect_image_index()) as connection:
+                with connection:
+                    connection.executemany(
+                        """
+                        INSERT INTO image_validation_cache (
+                            canonical_path,
+                            size,
+                            mtime_ns,
+                            valid,
+                            updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(canonical_path) DO UPDATE SET
+                            size = excluded.size,
+                            mtime_ns = excluded.mtime_ns,
+                            valid = excluded.valid,
+                            updated_at = excluded.updated_at
+                        """,
+                        rows,
+                    )
+        except sqlite3.Error:
+            pass
+
+
+def delete_persistent_validation_entry(canonical_path: str) -> None:
+    with _IMAGE_STORE_LOCK:
+        try:
+            with closing(_connect_image_index()) as connection:
+                with connection:
+                    connection.execute(
+                        "DELETE FROM image_validation_cache WHERE canonical_path = ?",
+                        (canonical_path,),
+                    )
+        except sqlite3.Error:
+            pass
 
 
 def image_mapping_for_url(url: str) -> ImageMapping | None:
@@ -383,8 +478,12 @@ def prepare_image_download_tasks(
 
     validation_by_path_key: dict[str, ImageValidationOutcome] = {}
     with time_section("图片缓存文件校验"):
+        validation_cache.preload(set(mapped_paths_by_key.values()))
         for path_key, image_path in mapped_paths_by_key.items():
             validation_by_path_key[path_key] = validation_cache.validate(image_path)
+        validation_cache.flush_new_entries()
+
+    persistent_cache_hit_count = validation_cache.persistent_cache_hit_count
 
     pending_tasks: list[ImageDownloadTask] = []
     invalid_mapping_count = 0
@@ -413,6 +512,7 @@ def prepare_image_download_tasks(
         deep_validation_path_count=sum(
             outcome.deep_validated for outcome in validation_by_path_key.values()
         ),
+        persistent_cache_hit_path_count=persistent_cache_hit_count,
         invalid_mapping_count=invalid_mapping_count,
         pending_download_url_count=len(pending_tasks),
     )

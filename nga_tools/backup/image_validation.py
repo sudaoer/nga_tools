@@ -8,8 +8,16 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 from nga_tools.core.image_formats import image_file_is_valid
+
+
+class PersistentValidationEntry(TypedDict):
+    canonical_path: str
+    size: int
+    mtime_ns: int
+    valid: bool
 
 
 @dataclass(frozen=True)
@@ -51,7 +59,11 @@ def _image_file_fingerprint(path: Path) -> _ImageFileFingerprint | None:
 
 
 class ImageValidationCache:
-    """Command-scoped, thread-safe cache for expensive image validation."""
+    """Command-scoped, thread-safe cache for expensive image validation.
+
+    Backed by an optional persistent SQLite store that survives across
+    process invocations, keyed on ``(canonical_path, size, mtime_ns)``.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -62,6 +74,42 @@ class ImageValidationCache:
             Future[bool | None],
         ] = {}
         self._path_generations: dict[str, int] = {}
+        self._persistent: dict[str, tuple[int, int, bool]] = {}
+        self._new_entries: list[PersistentValidationEntry] = []
+        self._preloaded_paths: set[str] = set()
+        self._persistent_cache_hit_count: int = 0
+
+    @property
+    def persistent_cache_hit_count(self) -> int:
+        return self._persistent_cache_hit_count
+
+    def preload(self, paths: set[Path]) -> None:
+        if not paths:
+            return
+        from nga_tools.backup.image_store import load_persistent_validation_cache
+
+        path_keys: set[str] = set()
+        path_key_to_canonical: dict[str, Path] = {}
+        for raw_path in paths:
+            canonical = canonical_image_path(raw_path)
+            key = str(canonical)
+            path_keys.add(key)
+            path_key_to_canonical[key] = canonical
+
+        loaded = load_persistent_validation_cache(path_keys)
+        with self._lock:
+            for key, entry in loaded.items():
+                self._persistent[key] = entry
+            self._preloaded_paths |= path_keys
+
+    def flush_new_entries(self) -> None:
+        from nga_tools.backup.image_store import save_persistent_validation_entries
+
+        with self._lock:
+            entries = list(self._new_entries)
+            self._new_entries.clear()
+        if entries:
+            save_persistent_validation_entries(entries)
 
     def validate(self, path: Path) -> ImageValidationOutcome:
         canonical_path = canonical_image_path(path)
@@ -83,6 +131,24 @@ class ImageValidationCache:
                     cached_result = self._results[fingerprint]
                     return ImageValidationOutcome(
                         valid=cached_result,
+                        cache_hit=True,
+                        deep_validated=False,
+                    )
+
+                persistent = self._persistent.get(path_key)
+                if (
+                    persistent is not None
+                    and persistent[0] == fingerprint.size
+                    and persistent[1] == fingerprint.mtime_ns
+                    and path_key in self._preloaded_paths
+                ):
+                    self._results[fingerprint] = persistent[2]
+                    self._result_keys_by_path.setdefault(path_key, set()).add(
+                        fingerprint
+                    )
+                    self._persistent_cache_hit_count += 1
+                    return ImageValidationOutcome(
+                        valid=persistent[2],
                         cache_hit=True,
                         deep_validated=False,
                     )
@@ -125,6 +191,14 @@ class ImageValidationCache:
                     self._result_keys_by_path.setdefault(path_key, set()).add(
                         fingerprint
                     )
+                    self._new_entries.append(
+                        PersistentValidationEntry(
+                            canonical_path=path_key,
+                            size=fingerprint.size,
+                            mtime_ns=fingerprint.mtime_ns,
+                            valid=validation_result,
+                        )
+                    )
                     future.set_result(validation_result)
                 else:
                     future.set_result(None)
@@ -144,6 +218,11 @@ class ImageValidationCache:
             )
             for fingerprint in self._result_keys_by_path.pop(path_key, set()):
                 self._results.pop(fingerprint, None)
+            self._persistent.pop(path_key, None)
+            self._preloaded_paths.discard(path_key)
+        from nga_tools.backup.image_store import delete_persistent_validation_entry
+
+        delete_persistent_validation_entry(path_key)
 
 
 _CURRENT_IMAGE_VALIDATION_CACHE: ContextVar[ImageValidationCache | None] = (

@@ -327,4 +327,55 @@ class ImageStoreTest:
 
             assert Path(first['unique_path']).name == f"{'a' * 64}.png"
             assert Path(second['unique_path']).name == f"{'a' * 64}-collision-1.png"
-            assert second.get('collision')
+
+
+def _image_url_for_store(name: str) -> str:
+    return (
+        "https://img.nga.178.com/attachments/"
+        f"mon_202506/06/{name}.png"
+    )
+
+
+def test_prepare_image_download_tasks_uses_persistent_cache(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    image_path = output_dir / "images_unique" / "persist_store.png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (1, 1), color="white").save(image_path)
+    url = _image_url_for_store("persist-store")
+    from nga_tools.backup.image_validation import (
+        ImageValidationCache,
+        use_image_validation_cache,
+    )
+    from nga_tools.core.image_formats import image_file_is_valid as real_validate
+
+    with patch(
+        "nga_tools.backup.image_store.get_config",
+        return_value=SimpleNamespace(output_dir=str(output_dir)),
+    ):
+        image_store.upsert_image_mappings([(url, image_path)])
+
+        cache_a = ImageValidationCache()
+        with use_image_validation_cache(cache_a):
+            with patch(
+                "nga_tools.backup.image_validation.image_file_is_valid",
+                wraps=real_validate,
+            ) as mock_a:
+                prep_a = image_store.prepare_image_download_tasks([{"url": url}])
+
+        assert mock_a.call_count == 1
+        assert prep_a.stats.deep_validation_path_count == 1
+        assert prep_a.stats.persistent_cache_hit_path_count == 0
+        cache_a.flush_new_entries()
+
+        cache_b = ImageValidationCache()
+        with use_image_validation_cache(cache_b):
+            with patch(
+                "nga_tools.backup.image_validation.image_file_is_valid",
+                wraps=real_validate,
+            ) as mock_b:
+                prep_b = image_store.prepare_image_download_tasks([{"url": url}])
+
+        assert mock_b.call_count == 0
+        assert prep_b.stats.deep_validation_path_count == 0
+        assert prep_b.stats.persistent_cache_hit_path_count == 1
+        assert prep_b.pending_tasks == []

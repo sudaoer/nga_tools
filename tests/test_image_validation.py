@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -186,3 +188,169 @@ def test_image_preparation_writes_subphases_and_metrics(tmp_path: Path) -> None:
     assert "指标：图片线程内路径去重数，值：1\n" in timing_text
     assert "指标：图片深度校验路径数，值：1\n" in timing_text
     assert "指标：图片待下载URL数，值：0\n" in timing_text
+    assert "指标：图片持久化缓存命中路径数，值：0\n" in timing_text
+
+
+def _setup_output_dir(tmp_path: Path) -> Path:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def test_persistent_cache_survives_new_cache_instance(tmp_path: Path) -> None:
+    output_dir = _setup_output_dir(tmp_path)
+    image_path = output_dir / "images_unique" / "persist.png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (1, 1), color="white").save(image_path)
+
+    with patch(
+        "nga_tools.backup.image_store.get_config",
+        return_value=SimpleNamespace(output_dir=str(output_dir)),
+    ):
+        cache_a = ImageValidationCache()
+        with patch(
+            "nga_tools.backup.image_validation.image_file_is_valid",
+            wraps=image_file_is_valid,
+        ) as validation_mock:
+            outcome_a = cache_a.validate(image_path)
+            cache_a.flush_new_entries()
+
+        assert outcome_a.deep_validated
+        assert validation_mock.call_count == 1
+
+        cache_b = ImageValidationCache()
+        cache_b.preload({image_path})
+        with patch(
+            "nga_tools.backup.image_validation.image_file_is_valid",
+            wraps=image_file_is_valid,
+        ) as validation_mock_b:
+            outcome_b = cache_b.validate(image_path)
+
+        assert outcome_b.cache_hit
+        assert not outcome_b.deep_validated
+        assert validation_mock_b.call_count == 0
+        assert cache_b.persistent_cache_hit_count == 1
+
+
+def test_persistent_cache_invalidates_on_file_change(tmp_path: Path) -> None:
+    output_dir = _setup_output_dir(tmp_path)
+    image_path = output_dir / "images_unique" / "changed.png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (1, 1), color="white").save(image_path)
+
+    with patch(
+        "nga_tools.backup.image_store.get_config",
+        return_value=SimpleNamespace(output_dir=str(output_dir)),
+    ):
+        cache_a = ImageValidationCache()
+        cache_a.validate(image_path)
+        cache_a.flush_new_entries()
+
+        import os
+        os.utime(image_path, ns=(image_path.stat().st_mtime_ns + 1, image_path.stat().st_mtime_ns + 1))
+
+        cache_b = ImageValidationCache()
+        cache_b.preload({image_path})
+        with patch(
+            "nga_tools.backup.image_validation.image_file_is_valid",
+            wraps=image_file_is_valid,
+        ) as validation_mock:
+            outcome_b = cache_b.validate(image_path)
+
+        assert outcome_b.deep_validated
+        assert validation_mock.call_count == 1
+
+
+def test_persistent_cache_invalidates_on_invalidate_call(tmp_path: Path) -> None:
+    output_dir = _setup_output_dir(tmp_path)
+    image_path = output_dir / "images_unique" / "invalidated.png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (1, 1), color="white").save(image_path)
+
+    with patch(
+        "nga_tools.backup.image_store.get_config",
+        return_value=SimpleNamespace(output_dir=str(output_dir)),
+    ):
+        cache_a = ImageValidationCache()
+        cache_a.validate(image_path)
+        cache_a.flush_new_entries()
+
+        cache_a.invalidate(image_path)
+        cache_a.flush_new_entries()
+
+        cache_b = ImageValidationCache()
+        cache_b.preload({image_path})
+        with patch(
+            "nga_tools.backup.image_validation.image_file_is_valid",
+            wraps=image_file_is_valid,
+        ) as validation_mock:
+            outcome_b = cache_b.validate(image_path)
+
+        assert outcome_b.deep_validated
+        assert validation_mock.call_count == 1
+
+
+def test_persistent_cache_preload_skips_unknown_paths(tmp_path: Path) -> None:
+    output_dir = _setup_output_dir(tmp_path)
+    existing_path = output_dir / "images_unique" / "exists.png"
+    existing_path.parent.mkdir(parents=True)
+    Image.new("RGB", (1, 1), color="white").save(existing_path)
+    unknown_path = output_dir / "images_unique" / "unknown.png"
+
+    with patch(
+        "nga_tools.backup.image_store.get_config",
+        return_value=SimpleNamespace(output_dir=str(output_dir)),
+    ):
+        cache_a = ImageValidationCache()
+        cache_a.validate(existing_path)
+        cache_a.flush_new_entries()
+
+        cache_b = ImageValidationCache()
+        cache_b.preload({existing_path, unknown_path})
+        outcome_existing = cache_b.validate(existing_path)
+        assert outcome_existing.cache_hit
+        assert not outcome_existing.deep_validated
+
+        with patch(
+            "nga_tools.backup.image_validation.image_file_is_valid",
+            wraps=image_file_is_valid,
+        ) as validation_mock:
+            outcome_unknown = cache_b.validate(unknown_path)
+
+        assert not outcome_unknown.valid
+        assert not outcome_unknown.deep_validated
+        assert validation_mock.call_count == 0
+
+
+def test_persistent_cache_flush_writes_only_new_entries(tmp_path: Path) -> None:
+    output_dir = _setup_output_dir(tmp_path)
+    cached_path = output_dir / "images_unique" / "cached.png"
+    new_path = output_dir / "images_unique" / "new.png"
+    cached_path.parent.mkdir(parents=True)
+    Image.new("RGB", (1, 1), color="white").save(cached_path)
+    Image.new("RGB", (2, 2), color="black").save(new_path)
+
+    with patch(
+        "nga_tools.backup.image_store.get_config",
+        return_value=SimpleNamespace(output_dir=str(output_dir)),
+    ):
+        cache_a = ImageValidationCache()
+        cache_a.validate(cached_path)
+        cache_a.flush_new_entries()
+
+        cache_b = ImageValidationCache()
+        cache_b.preload({cached_path, new_path})
+        cache_b.validate(cached_path)
+        cache_b.validate(new_path)
+        cache_b.flush_new_entries()
+
+        import sqlite3
+        from nga_tools.backup.image_store import image_index_path
+        with closing(sqlite3.connect(image_index_path())) as conn:
+            rows = conn.execute(
+                "SELECT canonical_path FROM image_validation_cache ORDER BY canonical_path"
+            ).fetchall()
+        paths = [r[0] for r in rows]
+        assert len(paths) == 2
+        assert any("cached.png" in p for p in paths)
+        assert any("new.png" in p for p in paths)
