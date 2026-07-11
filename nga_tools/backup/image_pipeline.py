@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Optional, cast
 
 from bs4 import BeautifulSoup, Tag
@@ -11,7 +12,20 @@ from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.backup.html_images import effective_image_src
 from nga_tools.backup.models import ParsedPostHtml, PostHtml
 from nga_tools.console import report_info, report_progress, report_warning
-from nga_tools.timing import time_section
+from nga_tools.timing import record_timing_metric, time_section
+
+
+@dataclass(frozen=True)
+class PostImageReference:
+    image_index: int
+    url: str
+    valid: bool
+
+
+@dataclass(frozen=True)
+class PostImageReferenceScan:
+    lou: int
+    references: tuple[PostImageReference, ...]
 
 
 def parse_post_htmls_for_images(htmls: Sequence[PostHtml]) -> list[ParsedPostHtml]:
@@ -27,25 +41,52 @@ def collect_image_download_tasks_from_parsed(
     parsed_htmls: Sequence[ParsedPostHtml],
     floor_labels: FloorLabels,
 ) -> list[image_store.ImageDownloadTask]:
+    return collect_image_download_tasks_from_scans(
+        [scan_post_image_references(item) for item in parsed_htmls],
+        floor_labels,
+    )
+
+
+def scan_post_image_references(
+    parsed_html: ParsedPostHtml,
+) -> PostImageReferenceScan:
+    references: list[PostImageReference] = []
+    for index, image in enumerate(parsed_html.images, start=1):
+        normalized_image_url = effective_image_src(image)
+        if normalized_image_url is None:
+            continue
+        references.append(
+            PostImageReference(
+                image_index=index,
+                url=normalized_image_url,
+                valid=utils.NGA_img_link_verify(normalized_image_url),
+            )
+        )
+    return PostImageReferenceScan(
+        lou=parsed_html.post_html["lou"],
+        references=tuple(references),
+    )
+
+
+def collect_image_download_tasks_from_scans(
+    scans: Sequence[PostImageReferenceScan],
+    floor_labels: FloorLabels,
+) -> list[image_store.ImageDownloadTask]:
     seen_urls: set[str] = set()
     files_to_download: list[image_store.ImageDownloadTask] = []
 
-    for parsed_html in parsed_htmls:
-        for index, image in enumerate(parsed_html.images):
-            normalized_image_url = effective_image_src(image)
-            if normalized_image_url is None:
-                continue
-
-            if not utils.NGA_img_link_verify(normalized_image_url):
+    for scan in scans:
+        for reference in scan.references:
+            if not reference.valid:
                 report_warning(
-                    f"{floor_labels.label(parsed_html.post_html['lou'])}的"
-                    f"第{index + 1}张图片链接无效：{normalized_image_url}"
+                    f"{floor_labels.label(scan.lou)}的"
+                    f"第{reference.image_index}张图片链接无效：{reference.url}"
                 )
                 continue
 
-            if normalized_image_url not in seen_urls:
-                seen_urls.add(normalized_image_url)
-                files_to_download.append({"url": normalized_image_url})
+            if reference.url not in seen_urls:
+                seen_urls.add(reference.url)
+                files_to_download.append({"url": reference.url})
 
     return files_to_download
 
@@ -66,6 +107,22 @@ def pending_download_tasks(
     return image_store.pending_image_download_tasks(files_to_download)
 
 
+def _record_image_preparation_metrics(
+    stats: image_store.ImagePreparationStats,
+) -> None:
+    record_timing_metric("图片任务URL数", stats.task_url_count)
+    record_timing_metric("图片索引命中URL数", stats.mapping_hit_url_count)
+    record_timing_metric("图片唯一物理路径数", stats.unique_physical_path_count)
+    record_timing_metric("图片线程内路径去重数", stats.intra_thread_path_dedup_count)
+    record_timing_metric(
+        "图片批量校验缓存命中路径数",
+        stats.batch_validation_cache_hit_path_count,
+    )
+    record_timing_metric("图片深度校验路径数", stats.deep_validation_path_count)
+    record_timing_metric("图片无效映射数", stats.invalid_mapping_count)
+    record_timing_metric("图片待下载URL数", stats.pending_download_url_count)
+
+
 def download_images(
     tid: int,
     aid: Optional[int],
@@ -73,7 +130,9 @@ def download_images(
 ) -> utils.DownloadSummary:
     del tid, aid
     with time_section("图片下载准备"):
-        pending_downloads = pending_download_tasks(files_to_download)
+        preparation = image_store.prepare_image_download_tasks(files_to_download)
+        pending_downloads = preparation.pending_tasks
+        _record_image_preparation_metrics(preparation.stats)
         total_count = len(files_to_download)
         pending_count = len(pending_downloads)
         existing_count = total_count - pending_count

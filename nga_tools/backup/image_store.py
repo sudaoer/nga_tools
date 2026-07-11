@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 import threading
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, NotRequired, TypedDict
 from urllib.parse import urlsplit
@@ -26,6 +26,14 @@ from nga_tools.core.image_formats import (
     image_extension_from_file as detect_image_extension_from_file,
     image_file_is_valid,
 )
+from nga_tools.backup.image_validation import (
+    ImageValidationCache,
+    ImageValidationOutcome,
+    canonical_image_path_key,
+    current_image_validation_cache,
+    invalidate_current_image_validation,
+)
+from nga_tools.timing import time_section
 
 
 class ImageDownloadTask(TypedDict):
@@ -60,10 +68,19 @@ class ImageMapping:
 @dataclass(frozen=True)
 class ImageLookupCache:
     mappings_by_url: dict[str, ImageMapping]
+    validation_cache: ImageValidationCache = field(
+        default_factory=ImageValidationCache
+    )
 
     @classmethod
     def for_urls(cls, urls: Iterable[str]) -> ImageLookupCache:
-        return cls(image_mappings_for_urls(urls))
+        validation_cache = current_image_validation_cache()
+        return cls(
+            image_mappings_for_urls(urls),
+            validation_cache
+            if validation_cache is not None
+            else ImageValidationCache(),
+        )
 
     @classmethod
     def for_tasks(cls, tasks: Iterable[ImageDownloadTask]) -> ImageLookupCache:
@@ -78,7 +95,7 @@ class ImageLookupCache:
         if mapping is None:
             return None
         image_path = mapping.unique_path
-        if not _image_file_is_valid(image_path):
+        if not self.validation_cache.validate(image_path).valid:
             return None
         return image_path
 
@@ -94,6 +111,24 @@ class ImageLookupCache:
 
     def image_task_is_complete(self, task: ImageDownloadTask) -> bool:
         return self.mapped_image_path_for_url(task["url"]) is not None
+
+
+@dataclass(frozen=True)
+class ImagePreparationStats:
+    task_url_count: int
+    mapping_hit_url_count: int
+    unique_physical_path_count: int
+    intra_thread_path_dedup_count: int
+    batch_validation_cache_hit_path_count: int
+    deep_validation_path_count: int
+    invalid_mapping_count: int
+    pending_download_url_count: int
+
+
+@dataclass(frozen=True)
+class ImageDownloadPreparation:
+    pending_tasks: list[ImageDownloadTask]
+    stats: ImagePreparationStats
 
 
 IMAGE_INDEX_FILENAME = "image_index.sqlite3"
@@ -146,6 +181,7 @@ def placeholder_image_path() -> Path:
         try:
             image.save(temp_path, format="PNG")
             replace_temp_file(temp_path, placeholder_path)
+            invalidate_current_image_validation(placeholder_path)
         except BaseException:
             temp_path.unlink(missing_ok=True)
             raise
@@ -312,8 +348,73 @@ def image_task_is_complete(task: ImageDownloadTask) -> bool:
 def pending_image_download_tasks(
     image_tasks: list[ImageDownloadTask],
 ) -> list[ImageDownloadTask]:
-    image_lookup = ImageLookupCache.for_tasks(image_tasks)
-    return [task for task in image_tasks if not image_lookup.image_task_is_complete(task)]
+    return prepare_image_download_tasks(image_tasks).pending_tasks
+
+
+def prepare_image_download_tasks(
+    image_tasks: list[ImageDownloadTask],
+) -> ImageDownloadPreparation:
+    with time_section("图片索引批量查询"):
+        mappings_by_url = image_mappings_for_urls(
+            task["url"] for task in image_tasks
+        )
+
+    validation_cache = current_image_validation_cache()
+    if validation_cache is None:
+        validation_cache = ImageValidationCache()
+
+    mapped_path_key_by_task_index: dict[int, str] = {}
+    mapped_paths_by_key: dict[str, Path] = {}
+    path_key_by_unique_rel_path: dict[str, str] = {}
+    for index, task in enumerate(image_tasks):
+        normalized_url = normalize_nga_image_url(task["url"])
+        mapping = mappings_by_url.get(normalized_url)
+        if mapping is None:
+            continue
+        image_path = mapping.unique_path
+        path_key = path_key_by_unique_rel_path.get(mapping.unique_rel_path)
+        if path_key is None:
+            path_key = canonical_image_path_key(image_path)
+            path_key_by_unique_rel_path[mapping.unique_rel_path] = path_key
+            mapped_paths_by_key.setdefault(path_key, image_path)
+        mapped_path_key_by_task_index[index] = path_key
+
+    validation_by_path_key: dict[str, ImageValidationOutcome] = {}
+    with time_section("图片缓存文件校验"):
+        for path_key, image_path in mapped_paths_by_key.items():
+            validation_by_path_key[path_key] = validation_cache.validate(image_path)
+
+    pending_tasks: list[ImageDownloadTask] = []
+    invalid_mapping_count = 0
+    for index, task in enumerate(image_tasks):
+        mapped_path_key = mapped_path_key_by_task_index.get(index)
+        if mapped_path_key is None:
+            pending_tasks.append(task)
+            continue
+        validation = validation_by_path_key[mapped_path_key]
+        if not validation.valid:
+            invalid_mapping_count += 1
+            pending_tasks.append(task)
+
+    mapping_hit_url_count = len(mapped_path_key_by_task_index)
+    unique_physical_path_count = len(mapped_paths_by_key)
+    stats = ImagePreparationStats(
+        task_url_count=len(image_tasks),
+        mapping_hit_url_count=mapping_hit_url_count,
+        unique_physical_path_count=unique_physical_path_count,
+        intra_thread_path_dedup_count=(
+            mapping_hit_url_count - unique_physical_path_count
+        ),
+        batch_validation_cache_hit_path_count=sum(
+            outcome.cache_hit for outcome in validation_by_path_key.values()
+        ),
+        deep_validation_path_count=sum(
+            outcome.deep_validated for outcome in validation_by_path_key.values()
+        ),
+        invalid_mapping_count=invalid_mapping_count,
+        pending_download_url_count=len(pending_tasks),
+    )
+    return ImageDownloadPreparation(pending_tasks=pending_tasks, stats=stats)
 
 
 def link_path_for_image_src(image_src: str) -> Path | None:
@@ -353,7 +454,10 @@ def _same_file_content(first: Path, second: Path) -> bool:
 
 
 def _image_file_is_valid(path: Path) -> bool:
-    return image_file_is_valid(path)
+    validation_cache = current_image_validation_cache()
+    if validation_cache is None:
+        return image_file_is_valid(path)
+    return validation_cache.validate(path).valid
 
 
 def _target_path_for_download(
@@ -407,6 +511,8 @@ def _store_image_file(
                 replace_file_atomically(source_path, target_path, move_source=True)
             elif source_path.resolve() != target_path.resolve():
                 replace_file_atomically(source_path, target_path, move_source=False)
+            invalidate_current_image_validation(source_path)
+            invalidate_current_image_validation(target_path)
             if not _image_file_is_valid(target_path):
                 raise ValueError(f"图片保存后无法校验：{target_path}")
 

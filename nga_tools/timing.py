@@ -56,6 +56,10 @@ class TimingLog:
         )
         self._log_file.flush()
 
+    def record_metric(self, metric_name: str, value: int) -> None:
+        self._log_file.write(f"指标：{metric_name}，值：{value}\n")
+        self._log_file.flush()
+
     def finish(self, status: str) -> None:
         if self._finished:
             return
@@ -142,3 +146,10 @@ def record_timing(section_name: str, elapsed_seconds: float) -> None:
     if timing_log is None:
         return
     timing_log.record(section_name, elapsed_seconds)
+
+
+def record_timing_metric(metric_name: str, value: int) -> None:
+    timing_log = _CURRENT_TIMING_LOG.get()
+    if timing_log is None:
+        return
+    timing_log.record_metric(metric_name, value)

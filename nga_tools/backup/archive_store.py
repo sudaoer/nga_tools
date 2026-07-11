@@ -145,6 +145,14 @@ class ArchivePostVersionRow:
     manual_selection: bool
 
 
+@dataclass(frozen=True)
+class PostImageReferenceCacheEntry:
+    cache_key: str
+    source_hash: str
+    extractor_version: int
+    references_json: str
+
+
 @dataclass
 class _MergedPostVersion:
     pid: int
@@ -381,6 +389,23 @@ class ThreadArchiveStore:
             """
         )
 
+    def _create_post_image_reference_cache_table(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS post_image_reference_cache (
+                cache_key TEXT PRIMARY KEY,
+                source_hash TEXT NOT NULL,
+                extractor_version INTEGER NOT NULL,
+                references_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         connection.execute(
             """
@@ -411,6 +436,7 @@ class ThreadArchiveStore:
         self._create_post_latest_metadata_table(connection)
         self._create_post_observations_table(connection)
         self._create_floor_map_tables(connection)
+        self._create_post_image_reference_cache_table(connection)
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_post_versions_latest
@@ -424,6 +450,96 @@ class ThreadArchiveStore:
             """
         )
         connection.commit()
+
+    def read_post_image_reference_cache(
+        self,
+        cache_keys: set[str],
+    ) -> dict[str, PostImageReferenceCacheEntry]:
+        if not cache_keys:
+            return {}
+        self.require_exists()
+
+        entries: dict[str, PostImageReferenceCacheEntry] = {}
+        sorted_cache_keys = sorted(cache_keys)
+        with closing(self._connect()) as connection:
+            for start in range(0, len(sorted_cache_keys), 900):
+                chunk = sorted_cache_keys[start : start + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = cast(
+                    list[tuple[object, object, object, object]],
+                    connection.execute(
+                        f"""
+                        SELECT
+                            cache_key,
+                            source_hash,
+                            extractor_version,
+                            references_json
+                        FROM post_image_reference_cache
+                        WHERE cache_key IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall(),
+                )
+                for cache_key, source_hash, extractor_version, references_json in rows:
+                    if (
+                        not isinstance(cache_key, str)
+                        or not isinstance(source_hash, str)
+                        or type(extractor_version) is not int
+                        or not isinstance(references_json, str)
+                    ):
+                        raise ValueError(
+                            "archive图片引用缓存行字段无效："
+                            f"{(cache_key, source_hash, extractor_version)!r}"
+                        )
+                    entries[cache_key] = PostImageReferenceCacheEntry(
+                        cache_key=cache_key,
+                        source_hash=source_hash,
+                        extractor_version=extractor_version,
+                        references_json=references_json,
+                    )
+        return entries
+
+    def upsert_post_image_reference_cache(
+        self,
+        entries: list[PostImageReferenceCacheEntry],
+    ) -> None:
+        if not entries:
+            return
+        self.require_exists()
+
+        now = _now_utc_iso()
+        rows = [
+            (
+                entry.cache_key,
+                entry.source_hash,
+                entry.extractor_version,
+                entry.references_json,
+                now,
+                now,
+            )
+            for entry in entries
+        ]
+        with closing(self._connect()) as connection:
+            with connection:
+                connection.executemany(
+                    """
+                    INSERT INTO post_image_reference_cache (
+                        cache_key,
+                        source_hash,
+                        extractor_version,
+                        references_json,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(cache_key) DO UPDATE SET
+                        source_hash = excluded.source_hash,
+                        extractor_version = excluded.extractor_version,
+                        references_json = excluded.references_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    rows,
+                )
 
     @staticmethod
     def _validate_floor_map(floor_map: StoredFloorMap) -> None:

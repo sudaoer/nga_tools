@@ -8,6 +8,10 @@ from typing import Protocol
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.archive import backup_thread, backup_thread_sub
 from nga_tools.backup.floor_map import generate_floor_map_from_backup
+from nga_tools.backup.image_validation import (
+    ImageValidationCache,
+    use_image_validation_cache,
+)
 from nga_tools.config import get_config, load_timing_log_enabled
 from nga_tools.console import (
     report_info,
@@ -87,11 +91,13 @@ def _run_backup_fetch_batch(
     app_config = configure_network_limits_from_args(args)
     write_json = optional_bool(args, "write_json")
     worker_count = _batch_worker_count(args, app_config.backup_configs_workers)
+    validation_cache = ImageValidationCache()
 
     def action(thread_config: ThreadConfig) -> None:
         tid = thread_config_tid(thread_config)
         aid = thread_config_aid(thread_config)
-        backup_func(tid, aid, write_json=write_json)
+        with use_image_validation_cache(validation_cache):
+            backup_func(tid, aid, write_json=write_json)
 
     run_thread_config_batch(
         action=action,
@@ -118,11 +124,14 @@ def backup_all(args: CommandArgs) -> None:
     app_config = configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
     write_json = optional_bool(args, "write_json")
-    with _use_thread_output_logs(
-        task_name="backup all",
-        tid=thread_tid,
-        aid=thread_aid,
-        timing_log_enabled=app_config.timing_log_enabled,
+    with (
+        _use_thread_output_logs(
+            task_name="backup all",
+            tid=thread_tid,
+            aid=thread_aid,
+            timing_log_enabled=app_config.timing_log_enabled,
+        ),
+        use_image_validation_cache(),
     ):
         backup_thread(thread_tid, thread_aid, write_json=write_json)
 
@@ -140,11 +149,14 @@ def backup_sub(args: CommandArgs) -> None:
     app_config = configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
     write_json = optional_bool(args, "write_json")
-    with _use_thread_output_logs(
-        task_name="backup sub",
-        tid=thread_tid,
-        aid=thread_aid,
-        timing_log_enabled=app_config.timing_log_enabled,
+    with (
+        _use_thread_output_logs(
+            task_name="backup sub",
+            tid=thread_tid,
+            aid=thread_aid,
+            timing_log_enabled=app_config.timing_log_enabled,
+        ),
+        use_image_validation_cache(),
     ):
         backup_thread_sub(thread_tid, thread_aid, write_json=write_json)
 

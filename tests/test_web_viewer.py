@@ -874,7 +874,7 @@ class WebDatabaseViewerTest:
         assert {"forum_threads", "image_index", "archive:101_201"} <= ids
         by_id = {item["id"]: item for item in payload["items"]}
         assert by_id["forum_threads"]["relativePath"] == "forum_threads.sqlite3"
-        assert by_id["archive:101_201"]["tableCount"] == 7
+        assert by_id["archive:101_201"]["tableCount"] == 8
 
     def test_databases_route_uses_cache_until_refresh(
         self,

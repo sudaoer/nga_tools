@@ -123,7 +123,8 @@ def _run_backup(
         )
         stack.enter_context(
             patch(
-                "nga_tools.backup.archive._parse_post_htmls_for_images",
+                "nga_tools.backup.image_reference_cache."
+                "parse_post_htmls_for_images",
                 side_effect=capture_parse,
             )
         )
@@ -325,7 +326,10 @@ class BackupRawArchiveTest:
 
         assert not (thread_dir / "archive.sqlite3").exists()
 
-    def test_sub_fully_parses_all_effective_records_each_run(self, tmp_path: Path) -> None:
+    def test_sub_only_parses_changed_effective_records_after_cache_warmup(
+        self,
+        tmp_path: Path,
+    ) -> None:
         thread_dir = tmp_path / "123_456"
         client = MutableFakeClient()
         parsed_lous: list[list[int]] = []
@@ -334,7 +338,7 @@ class BackupRawArchiveTest:
 
         _run_backup(thread_dir, client, parsed_lous=parsed_lous)
 
-        assert parsed_lous == [[1, 2], [1, 2]]
+        assert parsed_lous == [[1, 2], [2]]
 
     def test_failed_image_is_reconsidered_on_every_sub_run(self, tmp_path: Path) -> None:
         image_url = (
@@ -432,11 +436,14 @@ class BackupRawArchiveTest:
         for stage_name in (
             "读取完整归档记录",
             "正文解析与图片处理",
+            "图片引用缓存读取",
             "BBCode转临时HTML",
             "图片解析与任务收集",
+            "图片引用缓存写入",
         ):
             assert f"阶段：{stage_name}，开始时间：" in timing_text
             assert f"阶段：{stage_name}，结束时间：" in timing_text
+        assert "指标：图片引用记录数，值：2\n" in timing_text
 
 
 def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(

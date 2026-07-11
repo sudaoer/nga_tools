@@ -13,6 +13,7 @@ from unittest.mock import call, patch
 from rich.console import Console
 
 from nga_tools.backup.pdf import PdfRenderPool
+from nga_tools.backup.image_validation import current_image_validation_cache
 from nga_tools.cli import args_parse
 from nga_tools.console import ConsoleReporter, report_warning, use_reporter
 from nga_tools.commands.backup import (
@@ -519,6 +520,50 @@ class BackupWarningLogTest:
 
 
 class BackupConfigsHandlerTest:
+    def test_parallel_fetch_batch_shares_one_image_validation_cache(self) -> None:
+        thread_configs = [
+            _thread_config(name="first", tid=101, aid=201),
+            _thread_config(name="second", tid=102, aid=None),
+        ]
+        validation_cache_ids: list[int] = []
+
+        def capture_validation_cache(
+            tid: int,
+            aid: int | None,
+            *,
+            write_json: bool,
+        ) -> None:
+            del tid, aid, write_json
+            validation_cache = current_image_validation_cache()
+            assert validation_cache is not None
+            validation_cache_ids.append(id(validation_cache))
+
+        with TemporaryDirectory() as temp_dir_name:
+            base_dir = Path(temp_dir_name)
+            with (
+                patch(
+                    "nga_tools.commands.thread_batch.NGAThreadConfigs"
+                ) as configs_cls,
+                patch(
+                    "nga_tools.commands.backup.backup_thread_sub",
+                    side_effect=capture_validation_cache,
+                ),
+                patch(
+                    "nga_tools.commands.backup.configure_network_limits_from_args",
+                    return_value=_backup_config_app_config(workers=2),
+                ),
+                patch(
+                    "nga_tools.core.paths.get_folder",
+                    side_effect=_fake_get_folder(base_dir),
+                ),
+                _captured_reporter(),
+            ):
+                configs_cls.return_value.get_thread_configs.return_value = thread_configs
+                backup_sub({"all_threads": True, "workers": 2})
+
+        assert len(validation_cache_ids) == 2
+        assert len(set(validation_cache_ids)) == 1
+
     def test_backup_sub_all_threads_uses_batch_sub_backup(self) -> None:
         thread_configs = [
             _thread_config(name="first", tid=101, aid=201),

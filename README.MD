@@ -114,7 +114,7 @@ pixi run python main.py backup all --name 帖子名
 pixi run python main.py backup sub --name 帖子名
 ```
 
-`backup sub` 会补抓缺失的页，并刷新本地尾页到远端最后一页；随后从 archive 全量解析有效正文并补齐缺失图片。只看作者备份还会重试恢复缺失楼内容；从原帖恢复出的匿名正文会写入当前备份的 `archive.sqlite3`。
+`backup sub` 会补抓缺失的页，并刷新本地尾页到远端最后一页；随后复用 `archive.sqlite3` 中的图片引用派生缓存，只重新解析新增或正文、附件、overlay、手动版本选择发生变化的楼层，再补齐缺失图片。下载失败、映射缺失或本地文件损坏的图片仍会在后续运行中重试。只看作者备份还会重试恢复缺失楼内容；从原帖恢复出的匿名正文会写入当前备份的 `archive.sqlite3`。
 增量刷新到的新页会合并进历史楼层库；同一页新响应中消失的旧楼不会从库中删除。尚未迁移的旧备份目录如果含有 `json/page_*.json` 但 `archive.sqlite3` 不完整，正常备份会报错提示先运行 `backup migrate-store`，不会自动读取旧 JSON。
 
 也可以不使用保存的名称，直接指定 `tid` 和可选的 `aid`：
@@ -246,7 +246,7 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `json/`：加 `--write-json` 时输出的接口最近响应分页数据
 - `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照、正文版本和最新展示元数据；
   完整原始分页响应保存在 `page_snapshots.page_json`，`post_versions` 只按正文内容做版本控制；
-  只看作者备份的楼层映射及候选原楼层也保存在此数据库
+  只看作者备份的楼层映射、候选原楼层及可重建的图片引用解析缓存也保存在此数据库
 - `post_version_overrides.json`：管理界面保存的正文历史版本选择；没有选择时可为空
 - `post_overlays.json`：网页阅读页保存的单楼 BBCode overlay；Web 和 PDF 按需渲染
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件

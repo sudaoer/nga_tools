@@ -6,7 +6,12 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from nga_tools.timing import record_timing, time_section, use_timing_log
+from nga_tools.timing import (
+    record_timing,
+    record_timing_metric,
+    time_section,
+    use_timing_log,
+)
 
 
 class TimingLogTest:
@@ -22,6 +27,7 @@ class TimingLogTest:
                 target="tid=101, aid=all",
             ):
                 record_timing("固定阶段", 1.23456)
+                record_timing_metric("缓存命中数", 42)
                 with time_section("即时阶段"):
                     in_progress_text = log_path.read_text(encoding="utf-8")
 
@@ -31,6 +37,7 @@ class TimingLogTest:
         assert "任务：backup sub\n" in log_text
         assert "目标：tid=101, aid=all\n" in log_text
         assert "阶段：固定阶段，耗时：1.235s\n" in log_text
+        assert "指标：缓存命中数，值：42\n" in log_text
         assert "阶段：即时阶段，开始时间：" in in_progress_text
         assert "阶段：即时阶段，结束时间：" not in in_progress_text
         assert "阶段：即时阶段，结束时间：" in log_text
@@ -54,6 +61,7 @@ class TimingLogTest:
                 enabled=False,
             ):
                 record_timing("不会写入", 1)
+                record_timing_metric("不会写入的指标", 1)
 
             assert not log_path.exists()
 

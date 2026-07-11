@@ -15,10 +15,9 @@ from nga_tools.backup.floor_map import (
     load_floor_labels_from_archive,
     read_unresolved_missing_author_lous_from_archive,
 )
-from nga_tools.backup.image_pipeline import (
-    collect_image_download_tasks_from_parsed as _collect_image_download_tasks_from_parsed,
-    download_images as _download_images,
-    parse_post_htmls_for_images as _parse_post_htmls_for_images,
+from nga_tools.backup.image_pipeline import download_images as _download_images
+from nga_tools.backup.image_reference_cache import (
+    collect_image_download_tasks_for_records as _collect_image_download_tasks_for_records,
 )
 from nga_tools.backup.models import PostRecord
 from nga_tools.backup.page_store import (
@@ -31,7 +30,6 @@ from nga_tools.backup.page_store import (
 from nga_tools.backup.post_html import (
     fill_missing_post_records as _fill_missing_post_records,
     find_missing_lou as _find_missing_lou,
-    load_post_htmls_for_records as _load_post_htmls_for_records,
     merge_missing_lou as _merge_missing_lou,
     post_refs_from_posts as _post_refs_from_posts,
 )
@@ -184,20 +182,18 @@ def _download_images_for_records(
     tid: int,
     aid: Optional[int],
     thread_folder: Path,
+    archive_store: ThreadArchiveStore,
     floor_labels: FloorLabels,
     records: list[PostRecord],
 ) -> None:
     with time_section("Overlay应用"):
         effective_records = _apply_post_overlays_to_records(thread_folder, records)
-    with time_section("BBCode转临时HTML"):
-        htmls = _load_post_htmls_for_records(effective_records)
-    with time_section("图片解析与任务收集"):
-        parsed_htmls = _parse_post_htmls_for_images(htmls)
-        files_to_download = _collect_image_download_tasks_from_parsed(
-            parsed_htmls,
-            floor_labels,
-        )
-    _download_images(tid, aid, files_to_download)
+    collection = _collect_image_download_tasks_for_records(
+        archive_store,
+        effective_records,
+        floor_labels,
+    )
+    _download_images(tid, aid, collection.tasks)
 
 
 def backup_thread(
@@ -262,6 +258,7 @@ def backup_thread(
             tid,
             aid,
             thread_folder,
+            archive_store,
             floor_map_result.floor_labels,
             records,
         )
@@ -364,6 +361,7 @@ def backup_thread_sub(
             tid,
             aid,
             thread_folder,
+            archive_store,
             floor_map_result.floor_labels,
             records,
         )
