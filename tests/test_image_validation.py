@@ -274,7 +274,7 @@ def test_image_pipeline_reports_one_detailed_final_failure(tmp_path: Path) -> No
         "url": url,
         "save_path": str(tmp_path / "missing.png"),
         "success": False,
-        "error": "HTTP 404",
+        "error": f"404, message='HTTP 404', url='{url}'",
         "failure_kind": "http_4xx",
         "http_status": 404,
     }
@@ -299,9 +299,11 @@ def test_image_pipeline_reports_one_detailed_final_failure(tmp_path: Path) -> No
     assert result["failed"] == [failure]
     warning_mock.assert_called_once()
     warning_text = warning_mock.call_args.args[0]
-    assert url in warning_text
+    assert warning_text.count(url) == 1
     assert "http_4xx" in warning_text
     assert "HTTP 404" in warning_text
+    assert f"url='{url}'" not in warning_text
+    assert "详情：404, message='HTTP 404'）" in warning_text
     assert (
         "指标：图片下载失败/http_4xx，值：1\n"
         in timing_path.read_text(encoding="utf-8")

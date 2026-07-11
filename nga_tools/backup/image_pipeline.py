@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Optional, cast
@@ -183,14 +184,28 @@ def download_images(
         f"失败{len(download_result['failed'])}个文件。"
     )
     for failed in download_result["failed"]:
+        failed_url = failed["url"]
         failure_kind = failed.get("failure_kind", "unexpected_download")
         record_timing_metric(f"图片下载失败/{failure_kind}", 1)
         status_text = (
             f"，HTTP {failed['http_status']}" if "http_status" in failed else ""
         )
-        error_text = failed.get("error", "unknown")
+        error_text = _clean_repeated_url(failed.get("error", "unknown"), failed_url)
         report_warning(
-            f"下载失败：{failed['url']}（类别：{failure_kind}{status_text}，"
+            f"下载失败：{failed_url}（类别：{failure_kind}{status_text}，"
             f"详情：{error_text}）"
         )
     return download_result
+
+
+def _clean_repeated_url(error_text: str, url: str) -> str:
+    """从错误详情中移除警告开头已经展示的 URL。"""
+    escaped_url = re.escape(url)
+    cleaned = re.sub(
+        rf"(?:,\s*)?\burl\s*=\s*(?P<quote>['\"]?){escaped_url}(?P=quote)",
+        "",
+        error_text,
+        flags=re.IGNORECASE,
+    )
+    cleaned = cleaned.replace(url, "").strip(" ,;")
+    return cleaned or "unknown"
