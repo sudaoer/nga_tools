@@ -271,15 +271,15 @@ def write_batch_timing_summary(
 ) -> None:
     snapshot_list = list(snapshots)
     image_failure_categories: Counter[str] = Counter()
-    fast_path_results: Counter[str] = Counter()
+    processing_reuse_results: Counter[str] = Counter()
     for snapshot in snapshot_list:
         for metric_name, value in snapshot.metrics:
             prefix = "图片下载失败/"
             if metric_name.startswith(prefix):
                 image_failure_categories[metric_name.removeprefix(prefix)] += value
         for label_name, value in snapshot.labels:
-            if label_name == "增量快路径结果":
-                fast_path_results[value] += 1
+            if label_name in {"处理状态复用结果", "增量快路径结果"}:
+                processing_reuse_results[value] += 1
 
     failed_threads = sum(thread_failure_categories.values())
     successful_threads = total_threads - failed_threads
@@ -298,20 +298,24 @@ def write_batch_timing_summary(
         f"帖子：总数{total_threads}，成功{successful_threads}，失败{failed_threads}",
         f"状态：{status}",
         "",
-        "增量快路径：",
+        "处理状态复用：",
     ]
-    if fast_path_results:
-        hit_count = fast_path_results.get("hit", 0)
-        not_applicable_count = fast_path_results.get("not_applicable", 0)
-        miss_count = sum(fast_path_results.values()) - hit_count - not_applicable_count
+    if processing_reuse_results:
+        hit_count = processing_reuse_results.get("hit", 0)
+        not_applicable_count = processing_reuse_results.get("not_applicable", 0)
+        miss_count = (
+            sum(processing_reuse_results.values())
+            - hit_count
+            - not_applicable_count
+        )
         lines.append(
             f"命中{hit_count}，未命中{miss_count}，不适用{not_applicable_count}"
         )
-        for reason, count in sorted(fast_path_results.items()):
+        for reason, count in sorted(processing_reuse_results.items()):
             if reason not in {"hit", "not_applicable"}:
                 lines.append(f"- {reason}: {count}")
     else:
-        lines.append("不适用（本批次未执行增量快路径）")
+        lines.append("不适用（本批次未执行处理状态复用）")
 
     lines.extend(["", "阶段耗时（每帖同名阶段累计）："])
     durations_by_stage = _summed_stage_durations_by_thread(snapshot_list)

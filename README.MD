@@ -114,8 +114,11 @@ pixi run python main.py backup all --name 帖子名
 pixi run python main.py backup sub --name 帖子名
 ```
 
-`backup sub` 会补抓缺失的页，并刷新本地尾页到远端最后一页。只看作者备份在归档修订号、页数、`vrows`、楼层映射、overlay、手动版本选择和图片引用解析版本均未变化时，会使用 `archive.sqlite3` 中的线程级快路径：跳过完整归档读取、楼层映射处理、图片引用扫描和历史图片文件校验，只重试上次未完成的图片 URL。首次升级后的运行会先完整处理并写入数据库状态；原帖完整备份（没有 `aid`）仍保持完整处理。
-任一输入变化后，该线程会回到现有完整流程，并复用图片引用派生缓存，只重新解析新增或正文、附件、overlay、手动版本选择发生变化的楼层。下载失败的图片会保存在数据库待重试队列中，每次未变化的 `backup sub` 仍会重试；线程快路径不会重新校验已成功的历史图片，本地文件后续被删除或损坏时请运行 `image verify` 检测。只看作者备份还会重试恢复缺失楼内容；从原帖恢复出的匿名正文会写入当前备份的 `archive.sqlite3`。
+`backup sub` 会补抓缺失的页，并刷新本地尾页到远端最后一页。`backup all` 仍会完整抓取远端所有页面；抓取完成后，同一主题的本批页面会使用一个归档连接和一个事务写入，任一页面写入失败都会回滚本批全部页面。
+
+完整或增量备份在归档修订号、页数、`vrows`、楼层映射、overlay、手动版本选择和图片引用解析版本均未变化时，会复用 `archive.sqlite3` 中的线程级处理状态：跳过完整归档读取、楼层映射处理、图片引用扫描和历史图片文件校验，只重试上次未完成的图片 URL。该状态同时适用于只看作者和没有 `aid` 的原帖备份；`backup all` 的状态复用判定发生在完整网络抓取及归档写入之后，不会跳过远端刷新。
+
+任一输入变化后，该线程会回到现有完整流程，并复用图片引用派生缓存，只重新解析新增或正文、附件、overlay、手动版本选择发生变化的楼层。下载失败的图片会保存在数据库待重试队列中，每次未变化的备份仍会重试；线程级状态复用不会重新校验已成功的历史图片，本地文件后续被删除或损坏时请运行 `image verify` 检测。只看作者备份还会重试恢复缺失楼内容；从原帖恢复出的匿名正文会写入当前备份的 `archive.sqlite3`。需要忽略线程级状态并强制重新执行完整派生处理时，可给 `backup all` 或 `backup sub` 加 `--force-processing`（兼容 `--force_processing`）；此选项不会禁用帖子级图片引用缓存。
 增量刷新到的新页会合并进历史楼层库；同一页新响应中消失的旧楼不会从库中删除。尚未迁移的旧备份目录如果含有 `json/page_*.json` 但 `archive.sqlite3` 不完整，正常备份会报错提示先运行 `backup migrate-store`，不会自动读取旧 JSON。
 
 也可以不使用保存的名称，直接指定 `tid` 和可选的 `aid`：
@@ -125,6 +128,7 @@ pixi run python main.py backup all --tid 12345678
 pixi run python main.py backup all --tid 12345678 --aid 987654
 pixi run python main.py backup sub --tid 12345678 --aid 987654
 pixi run python main.py backup sub --tid 12345678 --aid 987654 --write-json
+pixi run python main.py backup all --tid 12345678 --force-processing
 ```
 
 批量增量备份 `thread_configs.json` 中的所有帖子：
@@ -133,6 +137,7 @@ pixi run python main.py backup sub --tid 12345678 --aid 987654 --write-json
 pixi run python main.py backup sub --all-threads
 pixi run python main.py backup sub --all-threads --workers 4 --api-concurrency 4 --image-concurrency 50
 pixi run python main.py backup sub --all-threads --write-json
+pixi run python main.py backup all --all-threads --force-processing
 ```
 
 `backup configs` 暂时保留为兼容入口，等价于 `backup sub --all-threads`。
@@ -248,7 +253,7 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照、正文版本和最新展示元数据；
   完整原始分页响应保存在 `page_snapshots.page_json`，`post_versions` 只按正文内容做版本控制；
   只看作者备份的楼层映射、候选原楼层及可重建的图片引用解析缓存也保存在此数据库；
-  `archive_change_state`、`backup_processing_state` 和 `backup_pending_images` 分别保存归档/楼层映射修订号、线程级快路径状态和未完成图片 URL
+  `archive_change_state`、`backup_processing_state` 和 `backup_pending_images` 分别保存归档/楼层映射修订号、线程级处理状态和未完成图片 URL
 - `post_version_overrides.json`：管理界面保存的正文历史版本选择；没有选择时可为空
 - `post_overlays.json`：网页阅读页保存的单楼 BBCode overlay；Web 和 PDF 按需渲染
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件

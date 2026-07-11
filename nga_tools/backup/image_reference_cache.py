@@ -117,32 +117,34 @@ def _read_cached_references(
     archive_store: ThreadArchiveStore,
     targets: list[_RecordCacheTarget],
 ) -> tuple[dict[str, tuple[PostImageReference, ...]], bool]:
-    try:
-        cached_entries = archive_store.read_post_image_reference_cache(
-            {target.cache_key for target in targets}
-        )
-    except Exception as error:
-        report_warning(f"图片引用缓存读取失败，改为完整解析：{error}")
-        return {}, False
+    with time_section("图片引用缓存批量查询"):
+        try:
+            cached_entries = archive_store.read_post_image_reference_cache(
+                {target.cache_key for target in targets}
+            )
+        except Exception as error:
+            report_warning(f"图片引用缓存读取失败，改为完整解析：{error}")
+            return {}, False
 
     references_by_key: dict[str, tuple[PostImageReference, ...]] = {}
     source_hash_by_key = {
         target.cache_key: target.record["source_hash"] for target in targets
     }
-    for cache_key, entry in cached_entries.items():
-        if (
-            entry.extractor_version != IMAGE_REFERENCE_EXTRACTOR_VERSION
-            or entry.source_hash != source_hash_by_key.get(cache_key)
-        ):
-            continue
-        try:
-            references_by_key[cache_key] = deserialize_image_references(
-                entry.references_json
-            )
-        except ValueError as error:
-            report_warning(
-                f"图片引用缓存损坏，重新解析并覆盖：{cache_key}：{error}"
-            )
+    with time_section("图片引用缓存反序列化"):
+        for cache_key, entry in cached_entries.items():
+            if (
+                entry.extractor_version != IMAGE_REFERENCE_EXTRACTOR_VERSION
+                or entry.source_hash != source_hash_by_key.get(cache_key)
+            ):
+                continue
+            try:
+                references_by_key[cache_key] = deserialize_image_references(
+                    entry.references_json
+                )
+            except ValueError as error:
+                report_warning(
+                    f"图片引用缓存损坏，重新解析并覆盖：{cache_key}：{error}"
+                )
     return references_by_key, True
 
 
@@ -163,10 +165,14 @@ def collect_image_download_tasks_for_records(
     floor_labels: FloorLabels,
 ) -> ImageReferenceCollectionResult:
     with time_section("图片引用缓存读取"):
-        targets = [
-            _RecordCacheTarget(record=record, cache_key=image_reference_cache_key(record))
-            for record in records
-        ]
+        with time_section("图片引用缓存键构造"):
+            targets = [
+                _RecordCacheTarget(
+                    record=record,
+                    cache_key=image_reference_cache_key(record),
+                )
+                for record in records
+            ]
         references_by_key, cache_read_succeeded = _read_cached_references(
             archive_store,
             targets,
@@ -189,29 +195,35 @@ def collect_image_download_tasks_for_records(
 
     new_entries: list[PostImageReferenceCacheEntry] = []
     with time_section("图片解析与任务收集"):
-        parsed_htmls = (
-            parse_post_htmls_for_images(missing_htmls) if missing_htmls else []
-        )
-        for target, parsed_html in zip(missing_targets, parsed_htmls, strict=True):
-            scan = scan_post_image_references(parsed_html)
-            references_by_key[target.cache_key] = scan.references
-            new_entries.append(
-                PostImageReferenceCacheEntry(
-                    cache_key=target.cache_key,
-                    source_hash=target.record["source_hash"],
-                    extractor_version=IMAGE_REFERENCE_EXTRACTOR_VERSION,
-                    references_json=serialize_image_references(scan.references),
+        with time_section("图片引用未命中解析"):
+            parsed_htmls = (
+                parse_post_htmls_for_images(missing_htmls) if missing_htmls else []
+            )
+            for target, parsed_html in zip(
+                missing_targets,
+                parsed_htmls,
+                strict=True,
+            ):
+                scan = scan_post_image_references(parsed_html)
+                references_by_key[target.cache_key] = scan.references
+                new_entries.append(
+                    PostImageReferenceCacheEntry(
+                        cache_key=target.cache_key,
+                        source_hash=target.record["source_hash"],
+                        extractor_version=IMAGE_REFERENCE_EXTRACTOR_VERSION,
+                        references_json=serialize_image_references(scan.references),
+                    )
                 )
-            )
 
-        scans = [
-            PostImageReferenceScan(
-                lou=target.record["lou"],
-                references=references_by_key[target.cache_key],
-            )
-            for target in targets
-        ]
-        tasks = collect_image_download_tasks_from_scans(scans, floor_labels)
+        with time_section("图片下载任务重建"):
+            scans = [
+                PostImageReferenceScan(
+                    lou=target.record["lou"],
+                    references=references_by_key[target.cache_key],
+                )
+                for target in targets
+            ]
+            tasks = collect_image_download_tasks_from_scans(scans, floor_labels)
 
     with time_section("图片引用缓存写入"):
         if cache_read_succeeded and new_entries:

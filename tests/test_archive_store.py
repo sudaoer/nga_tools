@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pytest
 
@@ -188,6 +189,153 @@ class ThreadArchiveStoreTest:
                 ).fetchone()
 
         assert row == (WORD_COUNT_VERSION, 2, 3)
+
+    def test_upsert_pages_commits_one_batch_revision_and_preserves_counts(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            pages = {
+                1: {
+                    "currentPage": 1,
+                    "totalPage": 2,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "第一页正文"}
+                    ],
+                },
+                2: {
+                    "currentPage": 2,
+                    "totalPage": 2,
+                    "result": [
+                        {"lou": 2, "pid": 1002, "content": "第二页正文"}
+                    ],
+                },
+            }
+
+            first = store.upsert_pages(
+                pages,
+                observed_at="2026-07-11T01:00:00+00:00",
+            )
+            after_first = store.read_backup_processing_snapshot().change_state
+            repeated = store.upsert_pages(
+                pages,
+                observed_at="2026-07-11T02:00:00+00:00",
+            )
+            after_repeated = store.read_backup_processing_snapshot().change_state
+            records = store.read_effective_post_records()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                page_seen_counts = connection.execute(
+                    "SELECT seen_count FROM page_snapshots ORDER BY page_number"
+                ).fetchall()
+                post_seen_counts = connection.execute(
+                    "SELECT seen_count FROM post_versions ORDER BY lou"
+                ).fetchall()
+                metadata_seen_counts = connection.execute(
+                    "SELECT seen_count FROM post_latest_metadata ORDER BY lou"
+                ).fetchall()
+                observation_count = connection.execute(
+                    "SELECT COUNT(*) FROM post_observations"
+                ).fetchone()
+
+        assert first.pages_processed == 2
+        assert first.page_snapshots_inserted == 2
+        assert first.post_versions_inserted == 2
+        assert first.post_observations == 2
+        assert first.effective_changed_pages == 2
+        assert repeated.page_snapshots_inserted == 0
+        assert repeated.post_versions_inserted == 0
+        assert repeated.effective_changed_pages == 0
+        assert after_first.archive_revision == 1
+        assert after_repeated.archive_revision == 1
+        assert [record["lou"] for record in records] == [1, 2]
+        assert page_seen_counts == [(2,), (2,)]
+        assert post_seen_counts == [(2,), (2,)]
+        assert metadata_seen_counts == [(2,), (2,)]
+        assert observation_count == (2,)
+
+    def test_upsert_pages_rolls_back_every_page_when_one_write_fails(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            original_upsert = store._upsert_post_latest_metadata
+            call_count = 0
+
+            def fail_second_post(*args: object, **kwargs: object) -> None:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 2:
+                    raise RuntimeError("second page failed")
+                original_upsert(*args, **kwargs)  # type: ignore[arg-type]
+
+            with (
+                patch.object(
+                    store,
+                    "_upsert_post_latest_metadata",
+                    side_effect=fail_second_post,
+                ),
+                pytest.raises(RuntimeError, match="second page failed"),
+            ):
+                store.upsert_pages(
+                    {
+                        1: {
+                            "totalPage": 2,
+                            "result": [
+                                {"lou": 1, "pid": 1001, "content": "first"}
+                            ],
+                        },
+                        2: {
+                            "totalPage": 2,
+                            "result": [
+                                {"lou": 2, "pid": 1002, "content": "second"}
+                            ],
+                        },
+                    }
+                )
+
+            snapshot = store.read_backup_processing_snapshot()
+            page_numbers = store.read_page_numbers()
+            records = store.read_latest_post_records()
+
+        assert page_numbers == set()
+        assert records == []
+        assert snapshot.change_state.archive_revision == 0
+
+    def test_schema_initializes_once_and_reads_use_readonly_connections(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            thread_folder = Path(temp_dir_name)
+            store = ThreadArchiveStore(thread_folder)
+            with patch.object(
+                store,
+                "_ensure_schema",
+                wraps=store._ensure_schema,
+            ) as ensure_schema:
+                store.upsert_pages(
+                    {
+                        1: {
+                            "totalPage": 1,
+                            "result": [
+                                {"lou": 1, "pid": 1001, "content": "body"}
+                            ],
+                        }
+                    }
+                )
+                assert store.read_page_numbers() == {1}
+                assert store.refresh_stored_word_counts() == 0
+            assert ensure_schema.call_count == 1
+
+            reader = ThreadArchiveStore(thread_folder)
+            with patch.object(
+                reader,
+                "_ensure_schema",
+                side_effect=AssertionError("read path initialized schema"),
+            ) as ensure_schema_on_read:
+                assert reader.read_page_numbers() == {1}
+                assert len(reader.read_effective_post_records()) == 1
+            ensure_schema_on_read.assert_not_called()
+            with closing(reader._connect_read()) as connection:
+                with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                    connection.execute(
+                        "INSERT INTO backup_pending_images (url) VALUES ('x')"
+                    )
 
     def test_refresh_stored_word_counts_migrates_old_schema(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

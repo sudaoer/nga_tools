@@ -151,6 +151,11 @@ ARG_DEFS: dict[str, ArgDef] = {
         "action": "store_true",
         "help": "备份时额外输出json/page_*.json最近响应缓存",
     },
+    "force_processing": {
+        "flags": ("--force-processing", "--force_processing"),
+        "action": "store_true",
+        "help": "忽略线程级处理状态并重新执行楼层映射和图片派生处理",
+    },
     "host": {
         "flags": ("--host",),
         "type": str,
@@ -247,7 +252,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} backup all "
                 "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
                 "[--workers N] [--api-concurrency N] [--image-concurrency N] "
-                "[--write-json]"
+                "[--write-json] [--force-processing]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} backup all --name 帖子名",
@@ -263,6 +268,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "api_concurrency",
                 "image_concurrency",
                 "write_json",
+                "force_processing",
             ],
             "required_any": ["name", "tid", "all_threads"],
             "positive": ["workers", "api_concurrency", "image_concurrency"],
@@ -274,7 +280,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} backup sub "
                 "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
                 "[--workers N] [--api-concurrency N] [--image-concurrency N] "
-                "[--write-json]"
+                "[--write-json] [--force-processing]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} backup sub --name 帖子名",
@@ -297,6 +303,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "api_concurrency",
                 "image_concurrency",
                 "write_json",
+                "force_processing",
             ],
             "required_any": ["name", "tid", "all_threads"],
             "positive": ["workers", "api_concurrency", "image_concurrency"],

@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from nga_tools import utils
-from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.archive_store import (
+    ArchivePagesUpsertResult,
+    ThreadArchiveStore,
+)
 from nga_tools.backup.floor_map import (
     AuthorPostRef,
     FloorMapBuildResult,
@@ -72,9 +75,9 @@ class _RecordProcessingResult:
     unresolved_missing_lous: list[int]
 
 
-IncrementalFastPathReason = Literal[
+ProcessingStateReuseReason = Literal[
     "hit",
-    "not_applicable",
+    "forced",
     "local_pages_incomplete",
     "state_invalid",
     "state_missing",
@@ -91,21 +94,16 @@ IncrementalFastPathReason = Literal[
 
 
 @dataclass(frozen=True)
-class IncrementalFastPathResult:
+class ProcessingStateReuseResult:
     hit: bool
-    reason: IncrementalFastPathReason
+    reason: ProcessingStateReuseReason
 
 
 def _upsert_archive_pages(
     store: ThreadArchiveStore,
     page_data_by_page: dict[int, PageData],
-) -> int:
-    effective_changed_pages = 0
-    for page_number in sorted(page_data_by_page):
-        result = store.upsert_page(page_number, page_data_by_page[page_number])
-        if result.effective_processing_inputs_changed:
-            effective_changed_pages += 1
-    return effective_changed_pages
+) -> ArchivePagesUpsertResult:
+    return store.upsert_pages(page_data_by_page)
 
 
 def _legacy_page_numbers(folder_json: Path) -> set[int]:
@@ -320,7 +318,7 @@ def _processing_snapshot_miss_reason(
     author_total_lou_count: int | None,
     post_overlays_hash: str,
     post_version_selections_hash: str,
-) -> IncrementalFastPathReason | None:
+) -> ProcessingStateReuseReason | None:
     state = snapshot.processing_state
     if state is None:
         return "state_missing"
@@ -352,27 +350,27 @@ def _failed_image_urls(download_summary: DownloadSummary) -> set[str]:
     return {item["url"] for item in download_summary["failed"]}
 
 
-def _try_incremental_fast_path(
+def _try_processing_state_reuse(
     client: NGAClient,
     tid: int,
-    aid: int,
+    aid: Optional[int],
     thread_folder: Path,
     archive_store: ThreadArchiveStore,
     *,
     page_count: int,
     author_total_lou_count: int | None,
     local_pages_cover_remote: bool,
-) -> IncrementalFastPathResult:
+) -> ProcessingStateReuseResult:
     if not local_pages_cover_remote:
-        return IncrementalFastPathResult(False, "local_pages_incomplete")
+        return ProcessingStateReuseResult(False, "local_pages_incomplete")
 
     try:
         snapshot = archive_store.read_backup_processing_snapshot()
     except ValueError as error:
-        report_warning(f"增量快路径状态无效，改为完整处理：{error}")
-        return IncrementalFastPathResult(False, "state_invalid")
+        report_warning(f"处理状态无效，改为完整处理：{error}")
+        return ProcessingStateReuseResult(False, "state_invalid")
     if snapshot.processing_state is None:
-        return IncrementalFastPathResult(False, "state_missing")
+        return ProcessingStateReuseResult(False, "state_missing")
     post_overlays_hash = post_overlays_fingerprint(thread_folder)
     post_version_selections_hash = selections_fingerprint(thread_folder)
     miss_reason = _processing_snapshot_miss_reason(
@@ -383,25 +381,30 @@ def _try_incremental_fast_path(
         post_version_selections_hash=post_version_selections_hash,
     )
     if miss_reason is not None:
-        return IncrementalFastPathResult(False, miss_reason)
+        return ProcessingStateReuseResult(False, miss_reason)
     state = snapshot.processing_state
 
     with time_section("未完成缺失楼重试"):
-        missing_floor_changed = _retry_unresolved_missing_lous(
-            client,
-            archive_store,
-            tid,
-            aid,
-            author_total_lou_count,
-            snapshot,
-        )
+        if aid is None:
+            record_timing_metric("待恢复缺失楼数", 0)
+            record_timing_metric("本次恢复缺失楼数", 0)
+            missing_floor_changed = False
+        else:
+            missing_floor_changed = _retry_unresolved_missing_lous(
+                client,
+                archive_store,
+                tid,
+                aid,
+                author_total_lou_count,
+                snapshot,
+            )
     record_timing_metric(
         "缺失楼重试引发完整处理",
         int(missing_floor_changed),
     )
     if missing_floor_changed:
         report_info("缺失楼恢复结果已变化，转为完整处理。")
-        return IncrementalFastPathResult(False, "missing_floor_recovered")
+        return ProcessingStateReuseResult(False, "missing_floor_recovered")
 
     report_info("归档与派生输入未变化，跳过完整处理。")
     record_timing_metric("待重试图片URL数", len(snapshot.pending_image_urls))
@@ -414,10 +417,10 @@ def _try_incremental_fast_path(
         state,
         _failed_image_urls(download_summary),
     ):
-        return IncrementalFastPathResult(True, "hit")
+        return ProcessingStateReuseResult(True, "hit")
 
-    report_warning("增量状态在图片重试期间发生变化，改为完整处理。")
-    return IncrementalFastPathResult(False, "state_changed_during_image_retry")
+    report_warning("处理状态在图片重试期间发生变化，改为完整处理。")
+    return ProcessingStateReuseResult(False, "state_changed_during_image_retry")
 
 
 def _commit_completed_processing_state(
@@ -429,14 +432,12 @@ def _commit_completed_processing_state(
     author_total_lou_count: int | None,
     floor_map_processing: FloorMapProcessingResult,
     unresolved_missing_lous: list[int],
-    fingerprints_before: tuple[str, str] | None,
+    fingerprints_before: tuple[str, str],
     download_summary: DownloadSummary,
 ) -> None:
     pending_image_urls = _failed_image_urls(download_summary)
     record_timing_metric("待重试图片URL数", len(pending_image_urls))
-    if aid is None or fingerprints_before is None:
-        return
-    if not floor_map_processing.cacheable:
+    if aid is not None and not floor_map_processing.cacheable:
         report_info("楼层映射本次未形成可复用状态，下次继续完整处理。")
         return
     fingerprints_after = (
@@ -444,7 +445,7 @@ def _commit_completed_processing_state(
         selections_fingerprint(thread_folder),
     )
     if fingerprints_after != fingerprints_before:
-        report_warning("派生输入在处理期间发生变化，未写入增量快路径状态。")
+        report_warning("派生输入在处理期间发生变化，未写入线程级处理状态。")
         return
 
     snapshot = archive_store.read_backup_processing_snapshot()
@@ -467,8 +468,8 @@ def _commit_completed_processing_state(
         pending_image_urls,
     )
     if not committed:
-        report_warning("归档在处理期间发生变化，未写入增量快路径状态。")
-    elif unresolved_missing_lous:
+        report_warning("归档在处理期间发生变化，未写入线程级处理状态。")
+    elif aid is not None and unresolved_missing_lous:
         report_info(
             f"仍有{len(unresolved_missing_lous)}个缺失楼未恢复，"
             "已保存处理状态，下次仅重试缺失楼。"
@@ -485,13 +486,11 @@ def _run_full_processing(
     page_count: int,
     author_total_lou_count: int | None,
 ) -> None:
-    fingerprints_before: tuple[str, str] | None = None
-    if aid is not None:
-        archive_store.clear_backup_processing_state()
-        fingerprints_before = (
-            post_overlays_fingerprint(thread_folder),
-            selections_fingerprint(thread_folder),
-        )
+    archive_store.clear_backup_processing_state()
+    fingerprints_before = (
+        post_overlays_fingerprint(thread_folder),
+        selections_fingerprint(thread_folder),
+    )
 
     report_info("开始处理")
 
@@ -546,17 +545,59 @@ def _run_full_processing(
     )
 
 
+def _record_archive_upsert_metrics(result: ArchivePagesUpsertResult) -> None:
+    record_timing_metric("归档批量写入页数", result.pages_processed)
+    record_timing_metric("归档新增页快照数", result.page_snapshots_inserted)
+    record_timing_metric("归档新增帖子版本数", result.post_versions_inserted)
+    record_timing_metric("归档写入楼层观测数", result.post_observations)
+    record_timing_metric("归档有效变更页数", result.effective_changed_pages)
+
+
+def _reuse_processing_state_after_page_refresh(
+    client: NGAClient,
+    tid: int,
+    aid: Optional[int],
+    thread_folder: Path,
+    archive_store: ThreadArchiveStore,
+    *,
+    page_count: int,
+    author_total_lou_count: int | None,
+    local_pages_cover_remote: bool,
+    force_processing: bool,
+) -> ProcessingStateReuseResult:
+    with time_section("处理状态复用判定"):
+        if force_processing:
+            report_info("已要求强制重处理，跳过处理状态复用。")
+            result = ProcessingStateReuseResult(False, "forced")
+        else:
+            result = _try_processing_state_reuse(
+                client,
+                tid,
+                aid,
+                thread_folder,
+                archive_store,
+                page_count=page_count,
+                author_total_lou_count=author_total_lou_count,
+                local_pages_cover_remote=local_pages_cover_remote,
+            )
+    record_timing_metric("处理状态复用命中", int(result.hit))
+    record_timing_label("处理状态复用结果", result.reason)
+    return result
+
+
 def backup_thread(
     tid: int,
     aid: Optional[int],
     *,
     write_json: bool = False,
+    force_processing: bool = False,
 ) -> None:
     with time_section("客户端初始化"):
         client = NGAClient()
-    with time_section("抓取和写入页面"):
-        thread_folder = Path(utils.get_folder(tid, aid))
-        archive_store = ThreadArchiveStore(thread_folder)
+
+    thread_folder = Path(utils.get_folder(tid, aid))
+    archive_store = ThreadArchiveStore(thread_folder)
+    with time_section("远端页面抓取"):
         first_page_data = client.get_page(tid, aid, 1)
         page_count = _page_count_from_page_data(first_page_data)
         author_total_lou_count = _author_total_lou_count_from_page_data(
@@ -570,10 +611,43 @@ def backup_thread(
             aid,
             page_count,
             first_page_data,
-            write_json=write_json,
+            write_json=False,
         )
-        _upsert_archive_pages(archive_store, page_data_by_page)
-        archive_store.refresh_stored_word_counts()
+
+    with time_section("分页JSON导出"):
+        if write_json:
+            folder_json = Path(utils.get_folder(tid, aid, "json"))
+            for page_number, page_data in sorted(page_data_by_page.items()):
+                _write_page_json(folder_json, page_number, page_data)
+    record_timing_metric(
+        "分页JSON导出页数",
+        len(page_data_by_page) if write_json else 0,
+    )
+
+    with time_section("归档Schema初始化"):
+        archive_store.ensure_schema()
+    with time_section("归档页面准备与事务写入"):
+        upsert_result = _upsert_archive_pages(archive_store, page_data_by_page)
+    _record_archive_upsert_metrics(upsert_result)
+    with time_section("归档字数回填"):
+        refreshed_word_counts = archive_store.refresh_stored_word_counts()
+    record_timing_metric("归档字数回填版本数", refreshed_word_counts)
+
+    reuse_result = _reuse_processing_state_after_page_refresh(
+        client,
+        tid,
+        aid,
+        thread_folder,
+        archive_store,
+        page_count=page_count,
+        author_total_lou_count=author_total_lou_count,
+        local_pages_cover_remote=(
+            set(range(1, page_count + 1)) <= set(page_data_by_page)
+        ),
+        force_processing=force_processing,
+    )
+    if reuse_result.hit:
+        return
 
     _run_full_processing(
         client,
@@ -591,17 +665,25 @@ def backup_thread_sub(
     aid: Optional[int],
     *,
     write_json: bool = False,
+    force_processing: bool = False,
 ) -> None:
     with time_section("客户端初始化"):
         client = NGAClient()
+
+    thread_folder = Path(utils.get_folder(tid, aid))
+    archive_store = ThreadArchiveStore(thread_folder)
+    archive_existed = archive_store.exists()
+    if archive_existed:
+        with time_section("归档Schema初始化"):
+            archive_store.ensure_schema()
     with time_section("增量预检查"):
-        thread_folder = Path(utils.get_folder(tid, aid))
-        archive_store = ThreadArchiveStore(thread_folder)
         existing_page_numbers = archive_store.read_page_numbers()
         _ensure_legacy_json_is_migrated(tid, aid, archive_store, existing_page_numbers)
-        if archive_store.exists():
-            archive_store.refresh_stored_word_counts()
+    if not archive_existed:
+        with time_section("归档Schema初始化"):
+            archive_store.ensure_schema()
 
+    with time_section("远端页面抓取"):
         first_page_data = client.get_page(tid, aid, 1)
         page_count = _page_count_from_page_data(first_page_data)
         author_total_lou_count = _author_total_lou_count_from_page_data(
@@ -617,9 +699,6 @@ def backup_thread_sub(
         refresh_page_numbers = (
             set(range(tail_start, page_count + 1)) | missing_page_numbers
         )
-        folder_json = Path(utils.get_folder(tid, aid, "json")) if write_json else None
-
-    with time_section("抓取和写入页面"):
         report_progress(
             f"准备增量备份：远端{page_count}页，本地{len(existing_page_numbers)}页，"
             f"需获取{len(refresh_page_numbers)}页",
@@ -627,7 +706,7 @@ def backup_thread_sub(
             total=len(refresh_page_numbers),
         )
         sorted_refresh_page_numbers = sorted(refresh_page_numbers)
-        effective_changed_pages = 0
+        page_data_by_page: dict[int, PageData] = {}
         for index, page_number in enumerate(sorted_refresh_page_numbers, start=1):
             report_progress(
                 f"正在获取第{page_number}页",
@@ -642,37 +721,46 @@ def backup_thread_sub(
                 page_count,
                 first_page_data,
             )
-            if folder_json is not None:
-                _write_page_json(folder_json, page_number, page_data)
-            upsert_result = archive_store.upsert_page(page_number, page_data)
-            if upsert_result.effective_processing_inputs_changed:
-                effective_changed_pages += 1
+            page_data_by_page[page_number] = page_data
         report_progress(
             "页面获取完成",
             completed=len(sorted_refresh_page_numbers),
             total=len(sorted_refresh_page_numbers),
         )
 
-    record_timing_metric("增量有效变更页数", effective_changed_pages)
-    with time_section("增量快路径判定"):
-        fast_path_result = IncrementalFastPathResult(False, "not_applicable")
-        if aid is not None:
-            available_page_numbers = existing_page_numbers | refresh_page_numbers
-            fast_path_result = _try_incremental_fast_path(
-                client,
-                tid,
-                aid,
-                thread_folder,
-                archive_store,
-                page_count=page_count,
-                author_total_lou_count=author_total_lou_count,
-                local_pages_cover_remote=(
-                    set(range(1, page_count + 1)) <= available_page_numbers
-                ),
-            )
-    record_timing_metric("增量快路径命中", int(fast_path_result.hit))
-    record_timing_label("增量快路径结果", fast_path_result.reason)
-    if fast_path_result.hit:
+    with time_section("分页JSON导出"):
+        if write_json:
+            folder_json = Path(utils.get_folder(tid, aid, "json"))
+            for page_number, page_data in sorted(page_data_by_page.items()):
+                _write_page_json(folder_json, page_number, page_data)
+    record_timing_metric(
+        "分页JSON导出页数",
+        len(page_data_by_page) if write_json else 0,
+    )
+
+    with time_section("归档页面准备与事务写入"):
+        upsert_result = _upsert_archive_pages(archive_store, page_data_by_page)
+    _record_archive_upsert_metrics(upsert_result)
+    record_timing_metric("增量有效变更页数", upsert_result.effective_changed_pages)
+    with time_section("归档字数回填"):
+        refreshed_word_counts = archive_store.refresh_stored_word_counts()
+    record_timing_metric("归档字数回填版本数", refreshed_word_counts)
+
+    available_page_numbers = existing_page_numbers | refresh_page_numbers
+    reuse_result = _reuse_processing_state_after_page_refresh(
+        client,
+        tid,
+        aid,
+        thread_folder,
+        archive_store,
+        page_count=page_count,
+        author_total_lou_count=author_total_lou_count,
+        local_pages_cover_remote=(
+            set(range(1, page_count + 1)) <= available_page_numbers
+        ),
+        force_processing=force_processing,
+    )
+    if reuse_result.hit:
         return
 
     _run_full_processing(

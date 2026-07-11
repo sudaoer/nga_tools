@@ -45,6 +45,7 @@ class BackupFetchFunc(Protocol):
         aid: int | None,
         *,
         write_json: bool,
+        force_processing: bool = False,
     ) -> None:
         raise NotImplementedError
 
@@ -90,6 +91,7 @@ def _run_backup_fetch_batch(
 ) -> None:
     app_config = configure_network_limits_from_args(args)
     write_json = optional_bool(args, "write_json")
+    force_processing = optional_bool(args, "force_processing")
     worker_count = _batch_worker_count(args, app_config.backup_configs_workers)
     validation_cache = ImageValidationCache()
 
@@ -97,7 +99,15 @@ def _run_backup_fetch_batch(
         tid = thread_config_tid(thread_config)
         aid = thread_config_aid(thread_config)
         with use_image_validation_cache(validation_cache):
-            backup_func(tid, aid, write_json=write_json)
+            if force_processing:
+                backup_func(
+                    tid,
+                    aid,
+                    write_json=write_json,
+                    force_processing=True,
+                )
+            else:
+                backup_func(tid, aid, write_json=write_json)
 
     run_thread_config_batch(
         action=action,
@@ -125,6 +135,7 @@ def backup_all(args: CommandArgs) -> None:
     app_config = configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
     write_json = optional_bool(args, "write_json")
+    force_processing = optional_bool(args, "force_processing")
     with (
         _use_thread_output_logs(
             task_name="backup all",
@@ -134,7 +145,15 @@ def backup_all(args: CommandArgs) -> None:
         ),
         use_image_validation_cache(),
     ):
-        backup_thread(thread_tid, thread_aid, write_json=write_json)
+        if force_processing:
+            backup_thread(
+                thread_tid,
+                thread_aid,
+                write_json=write_json,
+                force_processing=True,
+            )
+        else:
+            backup_thread(thread_tid, thread_aid, write_json=write_json)
 
 
 def backup_sub(args: CommandArgs) -> None:
@@ -150,6 +169,7 @@ def backup_sub(args: CommandArgs) -> None:
     app_config = configure_network_limits_from_args(args)
     thread_tid, thread_aid = resolve_command_thread_target(args)
     write_json = optional_bool(args, "write_json")
+    force_processing = optional_bool(args, "force_processing")
     with (
         _use_thread_output_logs(
             task_name="backup sub",
@@ -159,7 +179,15 @@ def backup_sub(args: CommandArgs) -> None:
         ),
         use_image_validation_cache(),
     ):
-        backup_thread_sub(thread_tid, thread_aid, write_json=write_json)
+        if force_processing:
+            backup_thread_sub(
+                thread_tid,
+                thread_aid,
+                write_json=write_json,
+                force_processing=True,
+            )
+        else:
+            backup_thread_sub(thread_tid, thread_aid, write_json=write_json)
 
 
 def backup_configs(args: CommandArgs) -> None:

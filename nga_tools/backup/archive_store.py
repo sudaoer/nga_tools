@@ -17,6 +17,7 @@ from nga_tools.backup.floor_models import (
 )
 from nga_tools.backup.models import PostData, PostRecord
 from nga_tools.backup.archive_posts import (
+    ArchivePostMetadata,
     image_attachments_from_json,
     metadata_from_raw_post,
 )
@@ -30,13 +31,18 @@ from nga_tools.backup.processing_state import (
     BackupProcessingSnapshot,
     BackupProcessingState,
 )
-from nga_tools.core.hashing import hash_object, hash_text
+from nga_tools.core.hashing import hash_text
 from nga_tools.core.sqlite import (
     SQLITE_BUSY_TIMEOUT_SECONDS,
     configure_connection,
+    configure_readonly_connection,
 )
 from nga_tools.ngaclient.client import PageData
-from nga_tools.word_count import WORD_COUNT_VERSION, count_post_content
+from nga_tools.word_count import (
+    WORD_COUNT_VERSION,
+    TextWordCount,
+    count_post_content,
+)
 
 ARCHIVE_DB_FILENAME = "archive.sqlite3"
 _LATEST_POST_RECORDS_QUERY = """
@@ -126,6 +132,16 @@ class ArchivePageUpsertResult:
 
 
 @dataclass(frozen=True)
+class ArchivePagesUpsertResult:
+    pages_processed: int
+    page_snapshots_inserted: int
+    post_versions_inserted: int
+    post_observations: int
+    effective_processing_inputs_changed: bool
+    effective_changed_pages: int
+
+
+@dataclass(frozen=True)
 class ArchiveMigrationResult:
     page_files: int
     page_snapshots_inserted: int
@@ -186,6 +202,26 @@ class _LatestPostMetadata:
     seen_count: int
     selected_last_seen_at: str
     selected_old_id: int
+
+
+@dataclass(frozen=True)
+class _PreparedArchivePost:
+    raw_post: object
+    post: PostData
+    source_hash: str
+    word_count: TextWordCount
+    metadata: ArchivePostMetadata
+
+
+@dataclass(frozen=True)
+class _PreparedArchivePage:
+    page_number: int
+    page_data: PageData
+    page_json: str
+    response_hash: str
+    observed_at: str
+    count_observation: bool
+    posts: tuple[_PreparedArchivePost, ...]
 
 
 def _now_utc_iso() -> str:
@@ -270,6 +306,7 @@ class ThreadArchiveStore:
     def __init__(self, thread_folder: Path) -> None:
         self.thread_folder = thread_folder
         self.db_path = thread_folder / ARCHIVE_DB_FILENAME
+        self._schema_initialized = False
 
     def exists(self) -> bool:
         return self.db_path.is_file()
@@ -281,18 +318,35 @@ class ThreadArchiveStore:
                 "请先运行 backup migrate-store 或重新运行备份初始化。"
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect_write(self) -> sqlite3.Connection:
         self.thread_folder.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(
             self.db_path,
             timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
         )
         configure_connection(connection)
-        self._ensure_schema(connection)
+        if not self._schema_initialized:
+            try:
+                self._ensure_schema(connection)
+            except BaseException:
+                connection.close()
+                raise
+            self._schema_initialized = True
+        return connection
+
+    def _connect_read(self) -> sqlite3.Connection:
+        self.require_exists()
+        database_uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(
+            database_uri,
+            timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+            uri=True,
+        )
+        configure_readonly_connection(connection)
         return connection
 
     def ensure_schema(self) -> None:
-        with closing(self._connect()):
+        with closing(self._connect_write()):
             pass
 
     def _create_post_versions_table(
@@ -606,7 +660,7 @@ class ThreadArchiveStore:
 
     def read_backup_processing_snapshot(self) -> BackupProcessingSnapshot:
         self.require_exists()
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             change_state = self._read_archive_change_state(connection)
             state_row = cast(
                 Optional[
@@ -683,7 +737,7 @@ class ThreadArchiveStore:
     def clear_backup_processing_state(self) -> None:
         if not self.exists():
             return
-        with closing(self._connect()) as connection:
+        with closing(self._connect_write()) as connection:
             with connection:
                 connection.execute("DELETE FROM backup_pending_images")
                 connection.execute("DELETE FROM backup_processing_state")
@@ -694,7 +748,7 @@ class ThreadArchiveStore:
         pending_image_urls: set[str],
     ) -> bool:
         self.require_exists()
-        with closing(self._connect()) as connection:
+        with closing(self._connect_write()) as connection:
             with connection:
                 change_state = self._read_archive_change_state(connection)
                 if (
@@ -748,7 +802,7 @@ class ThreadArchiveStore:
         pending_image_urls: set[str],
     ) -> bool:
         self.require_exists()
-        with closing(self._connect()) as connection:
+        with closing(self._connect_write()) as connection:
             with connection:
                 change_state = self._read_archive_change_state(connection)
                 if (
@@ -812,7 +866,7 @@ class ThreadArchiveStore:
 
         entries: dict[str, PostImageReferenceCacheEntry] = {}
         sorted_cache_keys = sorted(cache_keys)
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             for start in range(0, len(sorted_cache_keys), 900):
                 chunk = sorted_cache_keys[start : start + 900]
                 placeholders = ",".join("?" for _ in chunk)
@@ -870,7 +924,7 @@ class ThreadArchiveStore:
             )
             for entry in entries
         ]
-        with closing(self._connect()) as connection:
+        with closing(self._connect_write()) as connection:
             with connection:
                 connection.executemany(
                     """
@@ -962,7 +1016,7 @@ class ThreadArchiveStore:
         self._validate_floor_map(floor_map)
         normalized_floor_map = self._normalized_floor_map(floor_map)
         self.require_exists()
-        with closing(self._connect()) as connection:
+        with closing(self._connect_write()) as connection:
             with connection:
                 try:
                     current_floor_map = self._read_floor_map(connection)
@@ -1127,7 +1181,7 @@ class ThreadArchiveStore:
     def read_floor_map(self) -> StoredFloorMap | None:
         if not self.exists():
             return None
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             return self._read_floor_map(connection)
 
     def _ensure_post_version_word_count_columns(
@@ -1484,20 +1538,15 @@ class ThreadArchiveStore:
     def _upsert_page_snapshot(
         self,
         connection: sqlite3.Connection,
-        page_number: int,
-        page_data: PageData,
-        observed_at: str,
-        *,
-        count_observation: bool,
+        page: _PreparedArchivePage,
     ) -> tuple[int, bool]:
-        response_hash = hash_object(page_data)
         inserted = self._page_snapshot_id(
             connection,
-            page_number,
-            response_hash,
+            page.page_number,
+            page.response_hash,
         ) is None
-        seen_increment = 1 if count_observation else 0
-        page_object = cast(dict[str, object], page_data)
+        seen_increment = 1 if page.count_observation else 0
+        page_object = cast(dict[str, object], page.page_data)
         connection.execute(
             """
             INSERT INTO page_snapshots (
@@ -1532,19 +1581,23 @@ class ThreadArchiveStore:
                 seen_count = page_snapshots.seen_count + ?
             """,
             (
-                page_number,
-                response_hash,
-                _json_text(page_data),
+                page.page_number,
+                page.response_hash,
+                page.page_json,
                 _optional_int(page_object, "currentPage"),
                 _optional_int(page_object, "totalPage"),
                 _optional_int(page_object, "vrows"),
                 _optional_str(page_object, "msg"),
-                observed_at,
-                observed_at,
+                page.observed_at,
+                page.observed_at,
                 seen_increment,
             ),
         )
-        snapshot_id = self._page_snapshot_id(connection, page_number, response_hash)
+        snapshot_id = self._page_snapshot_id(
+            connection,
+            page.page_number,
+            page.response_hash,
+        )
         if snapshot_id is None:
             raise RuntimeError("写入page_snapshots后无法读取snapshot id。")
         return snapshot_id, inserted
@@ -1578,9 +1631,13 @@ class ThreadArchiveStore:
         observed_at: str,
         *,
         count_observation: bool,
+        source_hash: str | None = None,
+        word_count: TextWordCount | None = None,
     ) -> tuple[int, bool]:
-        source_hash = post_source_hash(post)
-        word_count = count_post_content(post["content"])
+        if source_hash is None:
+            source_hash = post_source_hash(post)
+        if word_count is None:
+            word_count = count_post_content(post["content"])
         inserted = (
             self._post_version_id(
                 connection,
@@ -1656,8 +1713,10 @@ class ThreadArchiveStore:
         observed_at: str,
         *,
         count_observation: bool,
+        metadata: ArchivePostMetadata | None = None,
     ) -> None:
-        metadata = metadata_from_raw_post(raw_post)
+        if metadata is None:
+            metadata = metadata_from_raw_post(raw_post)
         seen_increment = 1 if count_observation else 0
         connection.execute(
             """
@@ -1767,6 +1826,165 @@ class ThreadArchiveStore:
                 )
         return inputs_by_lou
 
+    @staticmethod
+    def _prepare_archive_page(
+        page_number: int,
+        page_data: PageData,
+        *,
+        observed_at: str,
+        count_observation: bool,
+    ) -> _PreparedArchivePage:
+        raw_posts = page_data.get("result")
+        if not isinstance(raw_posts, list):
+            raise ValueError("NGA响应中缺少帖子列表。")
+        raw_post_items = cast(list[object], raw_posts)
+        page_json = _json_text(page_data)
+        prepared_posts: list[_PreparedArchivePost] = []
+        for raw_post in raw_post_items:
+            post = post_data_from_raw(raw_post)
+            prepared_posts.append(
+                _PreparedArchivePost(
+                    raw_post=raw_post,
+                    post=post,
+                    source_hash=post_source_hash(post),
+                    word_count=count_post_content(post["content"]),
+                    metadata=metadata_from_raw_post(raw_post),
+                )
+            )
+        return _PreparedArchivePage(
+            page_number=page_number,
+            page_data=page_data,
+            page_json=page_json,
+            response_hash=hash_text(page_json),
+            observed_at=observed_at,
+            count_observation=count_observation,
+            posts=tuple(prepared_posts),
+        )
+
+    def upsert_pages(
+        self,
+        page_data_by_page: dict[int, PageData],
+        *,
+        observed_at: str | None = None,
+        count_observation: bool = True,
+    ) -> ArchivePagesUpsertResult:
+        prepared_pages = [
+            self._prepare_archive_page(
+                page_number,
+                page_data_by_page[page_number],
+                observed_at=(
+                    _now_utc_iso() if observed_at is None else observed_at
+                ),
+                count_observation=count_observation,
+            )
+            for page_number in sorted(page_data_by_page)
+        ]
+        if not prepared_pages:
+            return ArchivePagesUpsertResult(
+                pages_processed=0,
+                page_snapshots_inserted=0,
+                post_versions_inserted=0,
+                post_observations=0,
+                effective_processing_inputs_changed=False,
+                effective_changed_pages=0,
+            )
+
+        affected_lous_by_page = {
+            page.page_number: {item.post["lou"] for item in page.posts}
+            for page in prepared_pages
+        }
+        affected_lous: set[int] = {
+            lou
+            for page_lous in affected_lous_by_page.values()
+            for lou in page_lous
+        }
+        page_snapshots_inserted = 0
+        post_versions_inserted = 0
+        post_observations = 0
+        changed_lous: set[int] = set()
+
+        with closing(self._connect_write()) as connection:
+            with connection:
+                inputs_before = self._read_effective_processing_inputs(
+                    connection,
+                    affected_lous,
+                )
+                for page in prepared_pages:
+                    snapshot_id, snapshot_inserted = self._upsert_page_snapshot(
+                        connection,
+                        page,
+                    )
+                    if snapshot_inserted:
+                        page_snapshots_inserted += 1
+                    connection.execute(
+                        "DELETE FROM post_observations WHERE page_snapshot_id = ?",
+                        (snapshot_id,),
+                    )
+                    for position, prepared_post in enumerate(page.posts):
+                        post = prepared_post.post
+                        version_id, version_inserted = self._upsert_post_version(
+                            connection,
+                            post,
+                            page.observed_at,
+                            count_observation=page.count_observation,
+                            source_hash=prepared_post.source_hash,
+                            word_count=prepared_post.word_count,
+                        )
+                        self._upsert_post_latest_metadata(
+                            connection,
+                            prepared_post.raw_post,
+                            post,
+                            page.observed_at,
+                            count_observation=page.count_observation,
+                            metadata=prepared_post.metadata,
+                        )
+                        if version_inserted:
+                            post_versions_inserted += 1
+                        connection.execute(
+                            """
+                            INSERT INTO post_observations (
+                                page_snapshot_id,
+                                position,
+                                pid,
+                                lou,
+                                post_version_id
+                            )
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                snapshot_id,
+                                position,
+                                post["pid"],
+                                post["lou"],
+                                version_id,
+                            ),
+                        )
+                        post_observations += 1
+
+                inputs_after = self._read_effective_processing_inputs(
+                    connection,
+                    affected_lous,
+                )
+                changed_lous = {
+                    lou
+                    for lou in affected_lous
+                    if inputs_before.get(lou) != inputs_after.get(lou)
+                }
+                if changed_lous:
+                    self._increment_archive_revision(connection)
+
+        return ArchivePagesUpsertResult(
+            pages_processed=len(prepared_pages),
+            page_snapshots_inserted=page_snapshots_inserted,
+            post_versions_inserted=post_versions_inserted,
+            post_observations=post_observations,
+            effective_processing_inputs_changed=bool(changed_lous),
+            effective_changed_pages=sum(
+                bool(page_lous & changed_lous)
+                for page_lous in affected_lous_by_page.values()
+            ),
+        )
+
     def upsert_page(
         self,
         page_number: int,
@@ -1775,83 +1993,18 @@ class ThreadArchiveStore:
         observed_at: str | None = None,
         count_observation: bool = True,
     ) -> ArchivePageUpsertResult:
-        observed_at = _now_utc_iso() if observed_at is None else observed_at
-        raw_posts = page_data.get("result")
-        if not isinstance(raw_posts, list):
-            raise ValueError("NGA响应中缺少帖子列表。")
-        raw_post_items = cast(list[object], raw_posts)
-        parsed_post_items = [
-            (raw_post, post_data_from_raw(raw_post)) for raw_post in raw_post_items
-        ]
-        affected_lous = {post["lou"] for _raw_post, post in parsed_post_items}
-
-        with closing(self._connect()) as connection:
-            with connection:
-                inputs_before = self._read_effective_processing_inputs(
-                    connection,
-                    affected_lous,
-                )
-                snapshot_id, snapshot_inserted = self._upsert_page_snapshot(
-                    connection,
-                    page_number,
-                    page_data,
-                    observed_at,
-                    count_observation=count_observation,
-                )
-                connection.execute(
-                    "DELETE FROM post_observations WHERE page_snapshot_id = ?",
-                    (snapshot_id,),
-                )
-                post_versions_inserted = 0
-                for position, (raw_post, post) in enumerate(parsed_post_items):
-                    version_id, version_inserted = self._upsert_post_version(
-                        connection,
-                        post,
-                        observed_at,
-                        count_observation=count_observation,
-                    )
-                    self._upsert_post_latest_metadata(
-                        connection,
-                        raw_post,
-                        post,
-                        observed_at,
-                        count_observation=count_observation,
-                    )
-                    if version_inserted:
-                        post_versions_inserted += 1
-                    connection.execute(
-                        """
-                        INSERT INTO post_observations (
-                            page_snapshot_id,
-                            position,
-                            pid,
-                            lou,
-                            post_version_id
-                        )
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (
-                            snapshot_id,
-                            position,
-                            post["pid"],
-                            post["lou"],
-                            version_id,
-                        ),
-                    )
-                inputs_after = self._read_effective_processing_inputs(
-                    connection,
-                    affected_lous,
-                )
-                effective_processing_inputs_changed = inputs_before != inputs_after
-                if effective_processing_inputs_changed:
-                    self._increment_archive_revision(connection)
+        result = self.upsert_pages(
+            {page_number: page_data},
+            observed_at=observed_at,
+            count_observation=count_observation,
+        )
 
         return ArchivePageUpsertResult(
-            page_snapshot_inserted=snapshot_inserted,
-            post_versions_inserted=post_versions_inserted,
-            post_observations=len(raw_post_items),
+            page_snapshot_inserted=result.page_snapshots_inserted == 1,
+            post_versions_inserted=result.post_versions_inserted,
+            post_observations=result.post_observations,
             effective_processing_inputs_changed=(
-                effective_processing_inputs_changed
+                result.effective_processing_inputs_changed
             ),
         )
 
@@ -1867,7 +2020,7 @@ class ThreadArchiveStore:
         observed_at = _now_utc_iso() if observed_at is None else observed_at
         inserted_count = 0
         affected_lous = set(recovered_posts_by_author_lou)
-        with closing(self._connect()) as connection:
+        with closing(self._connect_write()) as connection:
             with connection:
                 inputs_before = self._read_effective_processing_inputs(
                     connection,
@@ -1915,7 +2068,7 @@ class ThreadArchiveStore:
 
     def refresh_stored_word_counts(self) -> int:
         self.require_exists()
-        with closing(self._connect()) as connection:
+        with closing(self._connect_write()) as connection:
             with connection:
                 rows = cast(
                     list[tuple[int, str]],
@@ -1951,7 +2104,7 @@ class ThreadArchiveStore:
     def read_latest_post_record_summaries(self) -> list[PostRecord]:
         self.require_exists()
 
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             rows = cast(
                 list[tuple[int, int, int, str]],
                 connection.execute(_LATEST_POST_RECORD_SUMMARIES_QUERY).fetchall(),
@@ -2024,12 +2177,12 @@ class ThreadArchiveStore:
 
     def read_valid_post_version_selections(self) -> dict[int, PostVersionSelection]:
         self.require_exists()
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             return self._validated_post_version_selections(connection)
 
     def read_effective_post_stats(self) -> ArchiveEffectivePostStats:
         self.require_exists()
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             row = cast(
                 tuple[int, Optional[int]],
                 connection.execute(
@@ -2054,7 +2207,7 @@ class ThreadArchiveStore:
     def read_effective_post_record_summaries(self) -> list[PostRecord]:
         self.require_exists()
 
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             rows = cast(
                 list[tuple[int, int, int, str]],
                 connection.execute(_LATEST_POST_RECORD_SUMMARIES_QUERY).fetchall(),
@@ -2202,7 +2355,7 @@ class ThreadArchiveStore:
             where_lous = f"WHERE lou IN ({placeholders})"
             params = sorted_lous
 
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             latest_rows = cast(
                 list[
                     tuple[
@@ -2286,7 +2439,7 @@ class ThreadArchiveStore:
         version_id: int,
     ) -> ArchivePostVersionRow | None:
         self.require_exists()
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             row = cast(
                 Optional[
                     tuple[
@@ -2344,7 +2497,7 @@ class ThreadArchiveStore:
             where_lous = f"WHERE lou IN ({placeholders})"
             params = sorted_lous
 
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             rows = cast(
                 list[tuple[int, int, int, str, str, Optional[str]]],
                 connection.execute(
@@ -2397,7 +2550,7 @@ class ThreadArchiveStore:
 
     def read_latest_author_post_refs(self) -> list[AuthorPostRef]:
         self.require_exists()
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             rows = cast(
                 list[tuple[int, int, Optional[int]]],
                 connection.execute(
@@ -2430,7 +2583,7 @@ class ThreadArchiveStore:
 
     def read_latest_author_total_lou_count(self) -> Optional[int]:
         self.require_exists()
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             row = connection.execute(
                 """
                 SELECT vrows
@@ -2453,7 +2606,7 @@ class ThreadArchiveStore:
     def read_page_numbers(self) -> set[int]:
         if not self.exists():
             return set()
-        with closing(self._connect()) as connection:
+        with closing(self._connect_read()) as connection:
             rows = cast(
                 list[tuple[int]],
                 connection.execute(

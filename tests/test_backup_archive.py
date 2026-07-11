@@ -45,6 +45,7 @@ class MutableFakeClient:
         ]
         self.vrows: int | None = 3
         self.total_page = 1
+        self.get_page_calls: list[int] = []
 
     def get_page_count(self, tid: int, aid: int | None) -> int:
         del tid, aid
@@ -57,6 +58,7 @@ class MutableFakeClient:
         page: int,
     ) -> dict[str, object]:
         del tid
+        self.get_page_calls.append(page)
         data: dict[str, object] = {
             "currentPage": page,
             "totalPage": self.total_page,
@@ -99,6 +101,7 @@ def _run_backup(
     full_processing_calls: list[str] | None = None,
     captured_output: io.StringIO | None = None,
     download_error: Exception | None = None,
+    force_processing: bool = False,
 ) -> None:
     floor_map_result = floor_map_result or FloorMapBuildResult(
         FloorLabels.plain(),
@@ -186,9 +189,19 @@ def _run_backup(
             )
         )
         if mode == "all":
-            backup_thread(123, aid, write_json=write_json)
+            backup_thread(
+                123,
+                aid,
+                write_json=write_json,
+                force_processing=force_processing,
+            )
         else:
-            backup_thread_sub(123, aid, write_json=write_json)
+            backup_thread_sub(
+                123,
+                aid,
+                write_json=write_json,
+                force_processing=force_processing,
+            )
 
 
 class ImageReferenceCollectionTest:
@@ -463,6 +476,62 @@ class BackupRawArchiveTest:
         )
 
         assert full_processing_calls == ["full"]
+        assert client.get_page_calls == [1, 1, 1, 1]
+
+    @pytest.mark.parametrize("aid", [456, None])
+    def test_second_unchanged_full_backup_reuses_processing_state(
+        self,
+        tmp_path: Path,
+        aid: int | None,
+    ) -> None:
+        thread_dir = tmp_path / f"123_{aid if aid is not None else 'all'}"
+        client = MutableFakeClient()
+        full_processing_calls: list[str] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            mode="all",
+            aid=aid,
+            full_processing_calls=full_processing_calls,
+        )
+        _run_backup(
+            thread_dir,
+            client,
+            mode="all",
+            aid=aid,
+            full_processing_calls=full_processing_calls,
+        )
+
+        assert full_processing_calls == ["full"]
+        assert client.get_page_calls == [1, 1, 1, 1]
+
+    def test_force_processing_bypasses_reusable_state(self, tmp_path: Path) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        full_processing_calls: list[str] = []
+        timing_path = tmp_path / "forced.timing.log"
+        _run_backup(
+            thread_dir,
+            client,
+            mode="all",
+            full_processing_calls=full_processing_calls,
+        )
+
+        with use_timing_log(timing_path, task_name="backup all forced"):
+            _run_backup(
+                thread_dir,
+                client,
+                mode="all",
+                full_processing_calls=full_processing_calls,
+                force_processing=True,
+            )
+
+        assert full_processing_calls == ["full", "full"]
+        assert (
+            "标签：处理状态复用结果，值：forced\n"
+            in timing_path.read_text(encoding="utf-8")
+        )
 
     @pytest.mark.parametrize("changed_input", ["attachments", "page_count", "vrows"])
     def test_remote_derived_input_changes_invalidate_fast_path(
@@ -563,7 +632,7 @@ class BackupRawArchiveTest:
 
         assert full_processing_calls == ["full", "full"]
 
-    def test_original_thread_backup_never_uses_author_fast_path(
+    def test_original_thread_backup_reuses_processing_state(
         self,
         tmp_path: Path,
     ) -> None:
@@ -587,8 +656,8 @@ class BackupRawArchiveTest:
         snapshot = ThreadArchiveStore(
             thread_dir
         ).read_backup_processing_snapshot()
-        assert full_processing_calls == ["full", "full"]
-        assert snapshot.processing_state is None
+        assert full_processing_calls == ["full"]
+        assert snapshot.processing_state is not None
 
     def test_successful_pending_retry_clears_queue_without_history_scan(
         self,
@@ -916,9 +985,9 @@ class BackupRawArchiveTest:
         ).read_backup_processing_snapshot()
         assert full_processing_calls == ["full", "full"]
         assert snapshot.processing_state is not None
-        assert "增量快路径状态无效，改为完整处理" in output.getvalue()
+        assert "处理状态无效，改为完整处理" in output.getvalue()
         assert (
-            "标签：增量快路径结果，值：state_invalid\n"
+            "标签：处理状态复用结果，值：state_invalid\n"
             in timing_path.read_text(encoding="utf-8")
         )
 
@@ -1057,11 +1126,11 @@ class BackupRawArchiveTest:
             _run_backup(thread_dir, client)
 
         timing_text = timing_path.read_text(encoding="utf-8")
-        assert "阶段：增量快路径判定，开始时间：" in timing_text
+        assert "阶段：处理状态复用判定，开始时间：" in timing_text
         assert "阶段：未完成缺失楼重试，开始时间：" in timing_text
         assert "阶段：未完成图片重试，开始时间：" in timing_text
-        assert "指标：增量快路径命中，值：1\n" in timing_text
-        assert "标签：增量快路径结果，值：hit\n" in timing_text
+        assert "指标：处理状态复用命中，值：1\n" in timing_text
+        assert "标签：处理状态复用结果，值：hit\n" in timing_text
         assert "指标：增量有效变更页数，值：0\n" in timing_text
         assert "指标：待恢复缺失楼数，值：0\n" in timing_text
         assert "指标：缺失楼重试引发完整处理，值：0\n" in timing_text

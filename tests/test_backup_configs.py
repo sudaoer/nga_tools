@@ -163,6 +163,22 @@ class BackupConfigsCliTest:
     @pytest.mark.parametrize(
         "argv",
         [
+            ["backup", "all", "--tid", "123", "--force-processing"],
+            ["backup", "sub", "--tid", "123", "--force_processing"],
+            ["backup", "all", "--all-threads", "--force-processing"],
+        ],
+    )
+    def test_force_processing_parses_for_state_reusing_backups(
+        self,
+        argv: list[str],
+    ) -> None:
+        args = args_parse(argv)
+
+        assert args["force_processing"] is True
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
             ["backup", "floors", "--tid", "123", "--write_json"],
             ["backup", "migrate-store", "--tid", "123", "--write_json"],
             ["backup", "pdf", "--tid", "123", "--write_json"],
@@ -314,6 +330,45 @@ class BackupWarningLogTest:
                 101,
                 None,
                 write_json=True,
+            )
+
+    @pytest.mark.parametrize(
+        ("handler", "implementation_path"),
+        [
+            (backup_all, "nga_tools.commands.backup.backup_thread"),
+            (backup_sub, "nga_tools.commands.backup.backup_thread_sub"),
+        ],
+    )
+    def test_single_thread_backup_passes_force_processing_flag(
+        self,
+        handler: Callable[[dict[str, object]], None],
+        implementation_path: str,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            base_dir = Path(temp_dir_name)
+            with (
+                patch(
+                    "nga_tools.commands.backup.configure_network_limits_from_args",
+                    return_value=_backup_config_app_config(),
+                ),
+                patch(
+                    "nga_tools.commands.backup.resolve_command_thread_target",
+                    return_value=(101, None),
+                ),
+                patch(
+                    "nga_tools.core.paths.get_folder",
+                    side_effect=_fake_get_folder(base_dir),
+                ),
+                patch(implementation_path) as implementation_mock,
+                _captured_reporter(),
+            ):
+                handler({"force_processing": True})
+
+            implementation_mock.assert_called_once_with(
+                101,
+                None,
+                write_json=False,
+                force_processing=True,
             )
 
     @pytest.mark.parametrize(
@@ -546,10 +601,10 @@ class BackupConfigsHandlerTest:
             record_timing("共享阶段", 1.0 if tid == 101 else 4.0)
             if tid == 101:
                 record_timing("共享阶段", 2.0)
-                record_timing_label("增量快路径结果", "hit")
+                record_timing_label("处理状态复用结果", "hit")
                 record_timing_metric("图片下载失败/http_4xx", 2)
             else:
-                record_timing_label("增量快路径结果", "archive_changed")
+                record_timing_label("处理状态复用结果", "archive_changed")
 
         with (
             patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
@@ -576,6 +631,7 @@ class BackupConfigsHandlerTest:
         assert "墙钟时间：" in summary
         assert "帖子：总数2，成功2，失败0" in summary
         assert "状态：完成（含预期图片下载失败，等待后续重试）" in summary
+        assert "处理状态复用：" in summary
         assert "命中1，未命中1，不适用0" in summary
         assert "- archive_changed: 1" in summary
         assert "- 共享阶段: 样本2，P50=3.000s，P95=4.000s" in summary
@@ -731,6 +787,36 @@ class BackupConfigsHandlerTest:
             backup_all({"all_threads": True, "workers": 1, "write_json": True})
 
         assert backup_mock.call_args_list == [call(101, 201, write_json=True), call(102, None, write_json=True)]
+
+    def test_backup_all_all_threads_passes_force_processing(self) -> None:
+        thread_configs = [
+            _thread_config(name="first", tid=101, aid=201),
+            _thread_config(name="second", tid=102, aid=None),
+        ]
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.commands.backup.backup_thread") as backup_mock,
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(),
+            ),
+            _captured_reporter(),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+
+            backup_all(
+                {
+                    "all_threads": True,
+                    "workers": 1,
+                    "force_processing": True,
+                }
+            )
+
+        assert backup_mock.call_args_list == [
+            call(101, 201, write_json=False, force_processing=True),
+            call(102, None, write_json=False, force_processing=True),
+        ]
 
     def test_backup_floors_all_threads_generates_each_floor_map(self) -> None:
         thread_configs = [
