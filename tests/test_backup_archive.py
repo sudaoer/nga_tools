@@ -102,6 +102,7 @@ def _run_backup(
     captured_output: io.StringIO | None = None,
     download_error: Exception | None = None,
     force_processing: bool = False,
+    allow_unchanged_author_fast_path: bool = False,
 ) -> None:
     floor_map_result = floor_map_result or FloorMapBuildResult(
         FloorLabels.plain(),
@@ -201,6 +202,9 @@ def _run_backup(
                 aid,
                 write_json=write_json,
                 force_processing=force_processing,
+                allow_unchanged_author_fast_path=(
+                    allow_unchanged_author_fast_path
+                ),
             )
 
 
@@ -1139,6 +1143,43 @@ class BackupRawArchiveTest:
         assert "阶段：读取完整归档记录，开始时间：" not in timing_text
         assert "阶段：正文解析与图片处理，开始时间：" not in timing_text
         assert "阶段：图片缓存文件校验，开始时间：" not in timing_text
+
+    def test_smart_author_fast_path_does_not_refresh_tail_page(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        client.total_page = 2
+        _run_backup(thread_dir, client)
+        client.get_page_calls.clear()
+
+        _run_backup(
+            thread_dir,
+            client,
+            allow_unchanged_author_fast_path=True,
+        )
+
+        assert client.get_page_calls == [1]
+
+    def test_smart_author_fast_path_refreshes_tail_when_first_page_changes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        client.total_page = 2
+        _run_backup(thread_dir, client)
+        client.get_page_calls.clear()
+        client.posts[0]["content"] = "first edited"
+
+        _run_backup(
+            thread_dir,
+            client,
+            allow_unchanged_author_fast_path=True,
+        )
+
+        assert client.get_page_calls == [1, 2]
 
 
 def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(

@@ -39,6 +39,13 @@ class NGAPageError(Exception):
         self.message = message
 
 
+HIDDEN_THREAD_MESSAGE = "帖子被设为隐藏"
+
+
+def is_hidden_thread_error(error: Exception) -> bool:
+    return isinstance(error, NGAPageError) and error.message == HIDDEN_THREAD_MESSAGE
+
+
 class NGAForumPageError(Exception):
     def __init__(self, code: object, message: str) -> None:
         super().__init__(f"Error fetching forum page: {message}")

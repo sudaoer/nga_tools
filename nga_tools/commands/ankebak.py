@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal
+
+from nga_tools.backup.archive import (
+    backup_local_work_kind,
+    backup_thread,
+    backup_thread_sub,
+    maintain_thread_backup,
+)
+from nga_tools.backup.image_validation import (
+    ImageValidationCache,
+    use_image_validation_cache,
+)
+from nga_tools.commands.forum import sync_default_forum_watch
+from nga_tools.commands.network import configure_network_limits_from_args
+from nga_tools.commands.thread_batch import run_thread_config_batch
+from nga_tools.commands.types import CommandArgs, optional_bool, optional_int
+from nga_tools.console import report_info
+from nga_tools.forum.ankebak_state import (
+    AnkebakStateStore,
+    ankebak_target_key,
+)
+from nga_tools.forum.thread_configs import (
+    NGAThreadConfigs,
+    ThreadConfig,
+    thread_config_aid,
+    thread_config_name,
+    thread_config_tid,
+)
+from nga_tools.ngaclient.client import ForumThread
+
+
+AnkebakMode = Literal["full", "sub", "maintenance"]
+
+
+@dataclass(frozen=True)
+class AnkebakJob:
+    thread_config: ThreadConfig
+    mode: AnkebakMode
+    fresh_thread: ForumThread | None
+
+
+def _worker_count(args: CommandArgs, default_worker_count: int) -> int:
+    worker_arg = optional_int(args, "workers")
+    return default_worker_count if worker_arg is None else worker_arg
+
+
+def _jobs_for_threads(
+    thread_configs: list[ThreadConfig],
+    fresh_threads: tuple[ForumThread, ...],
+    state_store: AnkebakStateStore,
+    *,
+    now: datetime,
+    full_backup_interval_hours: int,
+) -> tuple[list[AnkebakJob], int]:
+    states = state_store.load_states()
+    fresh_by_tid = {thread["tid"]: thread for thread in fresh_threads}
+    jobs: list[AnkebakJob] = []
+    skipped_count = 0
+
+    for thread_config in thread_configs:
+        tid = thread_config_tid(thread_config)
+        aid = thread_config_aid(thread_config)
+        state = states.get(ankebak_target_key(tid, aid))
+        fresh_thread = fresh_by_tid.get(tid)
+        if fresh_thread is not None and fresh_thread["authorid"] != aid:
+            fresh_thread = None
+
+        if state is None or state.full_backup_is_due(
+            now,
+            full_backup_interval_hours,
+        ):
+            jobs.append(AnkebakJob(thread_config, "full", fresh_thread))
+            continue
+
+        if fresh_thread is not None and not state.forum_signature_matches(
+            fresh_thread
+        ):
+            jobs.append(AnkebakJob(thread_config, "sub", fresh_thread))
+            continue
+
+        local_work = backup_local_work_kind(tid, aid)
+        if local_work == "refresh":
+            jobs.append(AnkebakJob(thread_config, "sub", fresh_thread))
+        elif local_work == "maintenance":
+            jobs.append(AnkebakJob(thread_config, "maintenance", fresh_thread))
+        else:
+            skipped_count += 1
+
+    return jobs, skipped_count
+
+
+def backup_auto(args: CommandArgs) -> None:
+    app_config = configure_network_limits_from_args(args)
+    forum_result = sync_default_forum_watch(args)
+    thread_configs = NGAThreadConfigs().get_thread_configs()
+    if not thread_configs:
+        report_info("没有找到任何帖子配置。")
+        return
+
+    now = datetime.now().astimezone()
+    state_store = AnkebakStateStore()
+    jobs, skipped_count = _jobs_for_threads(
+        thread_configs,
+        forum_result.fresh_threads,
+        state_store,
+        now=now,
+        full_backup_interval_hours=(
+            app_config.ankebak_full_backup_interval_hours
+        ),
+    )
+    mode_counts: dict[AnkebakMode, int] = {
+        "full": 0,
+        "sub": 0,
+        "maintenance": 0,
+    }
+    for job in jobs:
+        mode_counts[job.mode] += 1
+    report_info(
+        f"ankebak任务选择：配置{len(thread_configs)}个，"
+        f"本轮新鲜主题{len(forum_result.fresh_threads)}个；"
+        f"周期完整备份{mode_counts['full']}个，"
+        f"增量备份{mode_counts['sub']}个，"
+        f"本地维护{mode_counts['maintenance']}个，"
+        f"无变化跳过{skipped_count}个。"
+    )
+    if not jobs:
+        report_info("没有需要执行的ankebak任务。")
+        return
+
+    jobs_by_target = {
+        ankebak_target_key(
+            thread_config_tid(job.thread_config),
+            thread_config_aid(job.thread_config),
+        ): job
+        for job in jobs
+    }
+    validation_cache = ImageValidationCache()
+    write_json = optional_bool(args, "write_json")
+
+    def action(thread_config: ThreadConfig) -> str:
+        tid = thread_config_tid(thread_config)
+        aid = thread_config_aid(thread_config)
+        job = jobs_by_target[ankebak_target_key(tid, aid)]
+        with use_image_validation_cache(validation_cache):
+            if job.mode == "full":
+                backup_thread(tid, aid, write_json=write_json)
+            elif job.mode == "sub":
+                backup_thread_sub(
+                    tid,
+                    aid,
+                    write_json=write_json,
+                    allow_unchanged_author_fast_path=True,
+                )
+            else:
+                maintain_thread_backup(tid, aid)
+
+        state_store.record_success(
+            tid=tid,
+            aid=aid,
+            forum_thread=job.fresh_thread,
+            completed_at=datetime.now().astimezone(),
+            full_backup=job.mode == "full",
+        )
+        mode_label = {
+            "full": "完整备份",
+            "sub": "增量备份",
+            "maintenance": "本地维护",
+        }[job.mode]
+        return f"{mode_label}完成：{thread_config_name(thread_config)}"
+
+    run_thread_config_batch(
+        action=action,
+        progress_text="正在执行智能备份",
+        failure_text="ankebak失败",
+        summary_name="ankebak",
+        worker_count=_worker_count(args, app_config.backup_configs_workers),
+        write_timing_log=True,
+        timing_log_enabled=app_config.timing_log_enabled,
+        task_name="backup auto",
+        write_batch_timing_log=True,
+        thread_configs=[job.thread_config for job in jobs],
+    )

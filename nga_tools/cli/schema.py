@@ -8,6 +8,7 @@ from nga_tools.commands.backup import (
     backup_sub,
     pdf_generate,
 )
+from nga_tools.commands.ankebak import backup_auto
 from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
 from nga_tools.commands.image import image_verify
 from nga_tools.commands.types import CommandHandler
@@ -243,6 +244,32 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
         },
     },
     "backup": {
+        "auto": {
+            "handler": backup_auto,
+            "summary": "同步版面并智能选择增量或周期完整备份",
+            "usage": (
+                f"{PROGRAM_USAGE} backup auto [--watch-config PATH] "
+                "[--workers N] [--api-concurrency N] "
+                "[--image-concurrency N] [--write-json]"
+            ),
+            "examples": [
+                f"{PROGRAM_USAGE} backup auto",
+                f"{PROGRAM_USAGE} backup auto --workers 4",
+            ],
+            "notes": [
+                "先执行默认forum sync，再仅备份本轮变化或有本地待处理工作的帖子。",
+                "达到config.json中的ankebak_full_backup_interval_hours后执行完整备份。",
+                "首次启用时，缺少ankebak状态的帖子会立即执行完整备份。",
+            ],
+            "args": [
+                "watch_config",
+                "workers",
+                "api_concurrency",
+                "image_concurrency",
+                "write_json",
+            ],
+            "positive": ["workers", "api_concurrency", "image_concurrency"],
+        },
         "all": {
             "handler": backup_all,
             "summary": "抓取帖子内容并下载图片",

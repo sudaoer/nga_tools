@@ -268,6 +268,7 @@ def write_batch_timing_summary(
     total_threads: int,
     snapshots: Iterable[TimingSnapshot],
     thread_failure_categories: Counter[str],
+    expected_thread_failure_categories: Counter[str] | None = None,
 ) -> None:
     snapshot_list = list(snapshots)
     image_failure_categories: Counter[str] = Counter()
@@ -281,21 +282,35 @@ def write_batch_timing_summary(
             if label_name in {"处理状态复用结果", "增量快路径结果"}:
                 processing_reuse_results[value] += 1
 
+    expected_failure_categories: Counter[str] = (
+        Counter[str]()
+        if expected_thread_failure_categories is None
+        else expected_thread_failure_categories
+    )
     failed_threads = sum(thread_failure_categories.values())
-    successful_threads = total_threads - failed_threads
+    expected_failed_threads = sum(expected_failure_categories.values())
+    successful_threads = total_threads - failed_threads - expected_failed_threads
     image_failure_count = sum(image_failure_categories.values())
     if failed_threads:
         status = "失败"
+    elif expected_failed_threads:
+        status = "完成（含隐藏帖跳过）"
     elif image_failure_count:
         status = "完成（含预期图片下载失败，等待后续重试）"
     else:
         status = "完成"
 
+    thread_summary = (
+        f"帖子：总数{total_threads}，成功{successful_threads}，"
+        f"隐藏跳过{expected_failed_threads}，失败{failed_threads}"
+        if expected_failed_threads
+        else f"帖子：总数{total_threads}，成功{successful_threads}，失败{failed_threads}"
+    )
     lines = [
         f"开始时间：{_format_timestamp(started_at)}",
         f"任务：{task_name}",
         f"墙钟时间：{_format_duration(wall_seconds)}",
-        f"帖子：总数{total_threads}，成功{successful_threads}，失败{failed_threads}",
+        thread_summary,
         f"状态：{status}",
         "",
         "处理状态复用：",
@@ -343,5 +358,9 @@ def write_batch_timing_summary(
             lines.append(f"- {category}: {count}")
     else:
         lines.append("线程异常：0")
+    if expected_failure_categories:
+        lines.append(f"预期线程跳过：{expected_failed_threads}")
+        for category, count in sorted(expected_failure_categories.items()):
+            lines.append(f"- {category}: {count}")
 
     write_text_atomically(path, "\n".join(lines) + "\n")

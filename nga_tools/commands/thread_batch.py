@@ -5,6 +5,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime
+from dataclasses import dataclass
 from time import perf_counter
 
 from nga_tools.console import (
@@ -29,6 +30,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_name,
     thread_config_tid,
 )
+from nga_tools.ngaclient import is_hidden_thread_error
 from nga_tools.timing import (
     BatchTimingCollector,
     TimingSnapshot,
@@ -39,6 +41,13 @@ from nga_tools.timing import (
 ThreadConfigAction = Callable[[ThreadConfig], str | None]
 ThreadBatchFailure = tuple[ThreadConfig, Exception]
 ThreadBatchSuccess = tuple[int, str]
+
+
+@dataclass(frozen=True)
+class ThreadBatchResult:
+    successes: tuple[ThreadBatchSuccess, ...]
+    failures: tuple[ThreadBatchFailure, ...]
+    hidden_threads: tuple[ThreadBatchFailure, ...]
 
 
 def thread_config_label(thread_config: ThreadConfig) -> str:
@@ -206,15 +215,30 @@ def _print_thread_batch_summary(
     total: int,
     failures: list[ThreadBatchFailure],
     summary_name: str,
-) -> None:
+) -> tuple[list[ThreadBatchFailure], list[ThreadBatchFailure]]:
+    hidden_threads = [item for item in failures if is_hidden_thread_error(item[1])]
+    unexpected_failures = [
+        item for item in failures if not is_hidden_thread_error(item[1])
+    ]
     success_count = total - len(failures)
-    report_info(
-        f"批量{summary_name}完成：成功{success_count}个，失败{len(failures)}个。"
-    )
-    if failures:
-        for thread_config, error in failures:
+    if hidden_threads:
+        report_info(
+            f"批量{summary_name}完成：成功{success_count}个，"
+            f"隐藏跳过{len(hidden_threads)}个，"
+            f"失败{len(unexpected_failures)}个。"
+        )
+    else:
+        report_info(
+            f"批量{summary_name}完成：成功{success_count}个，"
+            f"失败{len(unexpected_failures)}个。"
+        )
+    if hidden_threads:
+        for thread_config, error in hidden_threads:
+            report_info(f"隐藏跳过：{thread_config_label(thread_config)}：{error}")
+    if unexpected_failures:
+        for thread_config, error in unexpected_failures:
             report_info(f"失败：{thread_config_label(thread_config)}：{error}")
-        raise SystemExit(1)
+    return unexpected_failures, hidden_threads
 
 
 def run_thread_config_batch(
@@ -230,14 +254,19 @@ def run_thread_config_batch(
     task_name: str | None = None,
     lock_thread_output: bool = True,
     write_batch_timing_log: bool = False,
-) -> None:
+    thread_configs: list[ThreadConfig] | None = None,
+) -> ThreadBatchResult:
     if worker_count <= 0:
         raise ValueError("workers必须大于0。")
 
-    thread_configs = NGAThreadConfigs().get_thread_configs()
-    if not thread_configs:
+    selected_thread_configs = (
+        NGAThreadConfigs().get_thread_configs()
+        if thread_configs is None
+        else thread_configs
+    )
+    if not selected_thread_configs:
         report_info("没有找到任何帖子配置。")
-        return
+        return ThreadBatchResult((), (), ())
 
     effective_task_name = task_name if task_name is not None else f"批量{summary_name}"
     batch_collector = (
@@ -248,12 +277,12 @@ def run_thread_config_batch(
     batch_started_at = datetime.now().astimezone()
     batch_wall_start = perf_counter()
     with BackupConfigsProgressDisplay(
-        len(thread_configs),
+        len(selected_thread_configs),
         console=get_reporter().console,
     ) as progress:
-        if worker_count == 1 or len(thread_configs) == 1:
+        if worker_count == 1 or len(selected_thread_configs) == 1:
             successes, failures = _run_thread_configs_sequential(
-                thread_configs,
+                selected_thread_configs,
                 progress,
                 action=action,
                 progress_text=progress_text,
@@ -269,7 +298,7 @@ def run_thread_config_batch(
             )
         else:
             successes, failures = _run_thread_configs_parallel(
-                thread_configs,
+                selected_thread_configs,
                 worker_count,
                 progress,
                 action=action,
@@ -292,17 +321,32 @@ def run_thread_config_batch(
             task_name=effective_task_name,
             started_at=batch_started_at,
             wall_seconds=batch_wall_seconds,
-            total_threads=len(thread_configs),
+            total_threads=len(selected_thread_configs),
             snapshots=batch_collector.snapshots(),
             thread_failure_categories=Counter(
-                type(error).__name__ for _, error in failures
+                type(error).__name__
+                for _, error in failures
+                if not is_hidden_thread_error(error)
+            ),
+            expected_thread_failure_categories=Counter(
+                "hidden_thread"
+                for _, error in failures
+                if is_hidden_thread_error(error)
             ),
         )
 
     for _, message in sorted(successes, key=lambda item: item[0]):
         report_info(message)
-    _print_thread_batch_summary(
-        total=len(thread_configs),
+    unexpected_failures, hidden_threads = _print_thread_batch_summary(
+        total=len(selected_thread_configs),
         failures=failures,
         summary_name=summary_name,
     )
+    result = ThreadBatchResult(
+        tuple(successes),
+        tuple(unexpected_failures),
+        tuple(hidden_threads),
+    )
+    if unexpected_failures:
+        raise SystemExit(1)
+    return result

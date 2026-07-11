@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 
 from nga_tools.commands.types import (
     CommandArgs,
@@ -29,6 +30,16 @@ from nga_tools.console import InlineProgress, report_info
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import ForumThread
 from nga_tools.forum.thread_configs import NGAThreadConfigs
+
+
+@dataclass(frozen=True)
+class DefaultForumSyncResult:
+    fresh_threads: tuple[ForumThread, ...]
+    fetched_count: int
+    db_inserted_count: int
+    db_updated_count: int
+    scanned_count: int
+    matched_count: int
 
 
 def handle_forum_list(args: CommandArgs) -> None:
@@ -128,10 +139,11 @@ def _fetch_default_forum_pages_to_db(
     forum_store: ForumThreadStore,
     watch_configs: list[ForumWatchConfig],
     progress_display: InlineProgress,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, tuple[ForumThread, ...]]:
     fetched_count = 0
     db_inserted_count = 0
     db_updated_count = 0
+    fresh_threads_by_tid: dict[int, ForumThread] = {}
 
     for fid, pages in _max_default_pages_by_fid(watch_configs).items():
         for page in range(1, pages + 1):
@@ -141,6 +153,8 @@ def _fetch_default_forum_pages_to_db(
             )
             threads = client.get_forum_threads(fid, page)
             result = forum_store.upsert_threads(fid, threads)
+            for thread in threads:
+                fresh_threads_by_tid[thread["tid"]] = thread
             fetched_count += len(threads)
             db_inserted_count += result.inserted_count
             db_updated_count += result.updated_count
@@ -149,26 +163,20 @@ def _fetch_default_forum_pages_to_db(
                 f"已保存{fetched_count}个"
             )
 
-    return fetched_count, db_inserted_count, db_updated_count
+    return (
+        fetched_count,
+        db_inserted_count,
+        db_updated_count,
+        tuple(fresh_threads_by_tid.values()),
+    )
 
 
-def handle_forum_sync(args: CommandArgs) -> None:
-    if optional_bool(args, "full_postdate"):
-        _handle_forum_sync_full_postdate(args)
-        return
-
-    if (
-        optional_int(args, "fid") is not None
-        or optional_int(args, "start_page") is not None
-        or optional_bool(args, "refresh")
-    ):
-        raise ValueError("--fid、--refresh和--start-page仅在--full-postdate模式下可用。")
-
+def sync_default_forum_watch(args: CommandArgs) -> DefaultForumSyncResult:
     watch_config_path = optional_str(args, "watch_config") or DEFAULT_WATCH_CONFIG_PATH
     watch_configs = load_forum_watch_configs(watch_config_path)
     if not watch_configs:
         report_info("没有找到任何版面监控配置。")
-        return
+        return DefaultForumSyncResult((), 0, 0, 0, 0, 0)
 
     configure_network_limits_from_args(args)
     client = NGAClient()
@@ -189,7 +197,7 @@ def handle_forum_sync(args: CommandArgs) -> None:
         )
 
     try:
-        fetched_count, db_inserted_count, db_updated_count = (
+        fetched_count, db_inserted_count, db_updated_count, fresh_threads = (
             _fetch_default_forum_pages_to_db(
                 client,
                 forum_store,
@@ -234,3 +242,27 @@ def handle_forum_sync(args: CommandArgs) -> None:
             f"[{outcome.status}] {outcome.match.thread_name} "
             f"(tid={thread['tid']}, aid={thread['authorid']}) - {outcome.message}"
         )
+
+    return DefaultForumSyncResult(
+        fresh_threads=fresh_threads,
+        fetched_count=fetched_count,
+        db_inserted_count=db_inserted_count,
+        db_updated_count=db_updated_count,
+        scanned_count=scanned_count,
+        matched_count=len(matches),
+    )
+
+
+def handle_forum_sync(args: CommandArgs) -> None:
+    if optional_bool(args, "full_postdate"):
+        _handle_forum_sync_full_postdate(args)
+        return
+
+    if (
+        optional_int(args, "fid") is not None
+        or optional_int(args, "start_page") is not None
+        or optional_bool(args, "refresh")
+    ):
+        raise ValueError("--fid、--refresh和--start-page仅在--full-postdate模式下可用。")
+
+    sync_default_forum_watch(args)

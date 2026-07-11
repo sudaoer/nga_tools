@@ -43,9 +43,13 @@ Copy-Item secrets.example.json secrets.json
 {
   "backup_configs_workers": 4,
   "api_concurrency": 4,
-  "image_concurrency": 50
+  "image_concurrency": 50,
+  "ankebak_full_backup_interval_hours": 168
 }
 ```
+
+`ankebak_full_backup_interval_hours` 控制智能备份执行周期性
+`backup all` 的间隔，单位为小时，默认 168 小时（7 天），必须大于 0。
 
 ## 使用
 
@@ -141,6 +145,25 @@ pixi run python main.py backup all --all-threads --force-processing
 ```
 
 需要批量完整刷新时，可运行 `backup all --all-threads`。
+
+推荐日常使用智能备份入口：
+
+```powershell
+pixi run ankebak
+```
+
+该任务等价于 `pixi run python main.py backup auto`：先执行默认的
+`forum sync`，再用本轮实际抓到的主题列表与上次成功备份水位比较。
+`replies` 和 `lastpost` 均未变化且没有本地待重试工作的帖子会跳过；发生变化
+时执行增量备份。只看作者帖若 `vrows` 和分页数也未变化，只校验第一页并处理
+待重试图片、缺失楼或本地派生输入，不再刷新尾页。达到
+`ankebak_full_backup_interval_hours` 后执行 `backup all`，以发现日常增量路径
+无法覆盖的旧页编辑。首次启用时所有尚无 ankebak 成功水位的帖子会立即完整
+备份。成功水位保存在 `output/forum_threads.sqlite3` 的
+`ankebak_thread_state` 表中，单帖失败不会推进水位。
+
+批量备份遇到 NGA 返回“帖子被设为隐藏”时会记录警告并计为隐藏跳过；如果本批
+只有这类跳过，命令仍以 0 退出。其他异常仍会使批量命令最终以非 0 退出。
 
 只看作者备份会在正常备份流程中增量刷新楼层映射。如果已有备份缺少映射，
 可以强制重新执行派生处理：

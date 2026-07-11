@@ -16,6 +16,7 @@ DEFAULT_API_CONCURRENCY = 4
 DEFAULT_IMAGE_CONCURRENCY = 50
 DEFAULT_BACKUP_CONFIGS_WORKERS = 4
 DEFAULT_TIMING_LOG_ENABLED = True
+DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS = 168
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class AppConfig:
     image_concurrency: int
     backup_configs_workers: int
     timing_log_enabled: bool
+    ankebak_full_backup_interval_hours: int
 
     @property
     def html_style(self) -> str:
@@ -314,6 +316,12 @@ def load_config(
             "timing_log_enabled",
             resolved_config_path,
             DEFAULT_TIMING_LOG_ENABLED,
+        ),
+        ankebak_full_backup_interval_hours=_optional_positive_int(
+            config_data,
+            "ankebak_full_backup_interval_hours",
+            resolved_config_path,
+            DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS,
         ),
     )
 

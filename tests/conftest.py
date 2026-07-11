@@ -37,6 +37,9 @@ def isolate_default_output_dir(
         image_concurrency=config.DEFAULT_IMAGE_CONCURRENCY,
         backup_configs_workers=config.DEFAULT_BACKUP_CONFIGS_WORKERS,
         timing_log_enabled=config.DEFAULT_TIMING_LOG_ENABLED,
+        ankebak_full_backup_interval_hours=(
+            config.DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS
+        ),
     )
 
     paths._CREATED_FOLDERS.clear()

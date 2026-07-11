@@ -22,6 +22,7 @@ from nga_tools.commands.backup import (
     pdf_generate,
 )
 from nga_tools.forum.thread_configs import ThreadConfig
+from nga_tools.ngaclient.client import NGAPageError
 from nga_tools.timing import (
     record_timing,
     record_timing_label,
@@ -550,6 +551,64 @@ class BackupWarningLogTest:
 
 
 class BackupBatchHandlerTest:
+    def test_hidden_threads_do_not_make_batch_exit_nonzero(self) -> None:
+        thread_configs = [_thread_config(name="hidden", tid=101, aid=201)]
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch(
+                "nga_tools.commands.backup.backup_thread_sub",
+                side_effect=NGAPageError(None, "帖子被设为隐藏"),
+            ),
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(workers=1),
+            ),
+            _captured_reporter() as output,
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+            backup_sub({"all_threads": True})
+
+        output_text = output.getvalue()
+        assert "隐藏跳过1个，失败0个" in output_text
+        assert "帖子被设为隐藏" in output_text
+
+    def test_hidden_thread_does_not_mask_other_batch_failure(self) -> None:
+        thread_configs = [
+            _thread_config(name="hidden", tid=101, aid=201),
+            _thread_config(name="broken", tid=102, aid=202),
+        ]
+
+        def backup_side_effect(
+            tid: int,
+            aid: int | None,
+            *,
+            write_json: bool,
+        ) -> None:
+            del aid, write_json
+            if tid == 101:
+                raise NGAPageError(None, "帖子被设为隐藏")
+            raise RuntimeError("boom")
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch(
+                "nga_tools.commands.backup.backup_thread_sub",
+                side_effect=backup_side_effect,
+            ),
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(workers=1),
+            ),
+            _captured_reporter() as output,
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+            with pytest.raises(SystemExit) as context:
+                backup_sub({"all_threads": True})
+
+        assert context.value.code == 1
+        assert "隐藏跳过1个，失败1个" in output.getvalue()
+
     def test_backup_fetch_batch_writes_aggregated_timing_summary(
         self,
         tmp_path: Path,
