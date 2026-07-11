@@ -151,6 +151,66 @@ def test_validation_cache_does_not_cache_missing_path(tmp_path: Path) -> None:
     assert validation_mock.call_count == 1
 
 
+def test_persistent_preload_queries_only_unseen_paths(tmp_path: Path) -> None:
+    first_path = tmp_path / "first.png"
+    second_path = tmp_path / "second.png"
+    third_path = tmp_path / "third.png"
+    cache = ImageValidationCache()
+
+    with patch(
+        "nga_tools.backup.image_store.load_persistent_validation_cache",
+        return_value={},
+    ) as load_mock:
+        first_query_count = cache.preload({first_path, second_path})
+        second_query_count = cache.preload({second_path, third_path})
+        third_query_count = cache.preload({first_path, third_path})
+
+    assert first_query_count == 2
+    assert second_query_count == 1
+    assert third_query_count == 0
+    queried_path_sets = [call.args[0] for call in load_mock.call_args_list]
+    assert queried_path_sets == [
+        {
+            canonical_image_path_key(first_path),
+            canonical_image_path_key(second_path),
+        },
+        {canonical_image_path_key(third_path)},
+    ]
+
+
+def test_persistent_preload_single_flights_concurrent_paths(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "shared.png"
+    cache = ImageValidationCache()
+    load_entered = threading.Event()
+    release_load = threading.Event()
+
+    def slow_load(
+        canonical_paths: set[str],
+    ) -> dict[str, tuple[int, int, bool]]:
+        assert canonical_paths == {canonical_image_path_key(image_path)}
+        load_entered.set()
+        assert release_load.wait(timeout=2)
+        return {}
+
+    with (
+        patch(
+            "nga_tools.backup.image_store.load_persistent_validation_cache",
+            side_effect=slow_load,
+        ) as load_mock,
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        first = executor.submit(cache.preload, {image_path})
+        assert load_entered.wait(timeout=2)
+        second = executor.submit(cache.preload, {image_path})
+        release_load.set()
+        query_counts = [first.result(timeout=2), second.result(timeout=2)]
+
+    assert load_mock.call_count == 1
+    assert sorted(query_counts) == [0, 1]
+
+
 def test_image_preparation_writes_subphases_and_metrics(tmp_path: Path) -> None:
     output_dir = tmp_path / "output"
     image_path = output_dir / "images_unique" / "timed.png"
@@ -189,6 +249,7 @@ def test_image_preparation_writes_subphases_and_metrics(tmp_path: Path) -> None:
     assert "指标：图片深度校验路径数，值：1\n" in timing_text
     assert "指标：图片待下载URL数，值：0\n" in timing_text
     assert "指标：图片持久化缓存命中路径数，值：0\n" in timing_text
+    assert "指标：图片持久化缓存查询路径数，值：1\n" in timing_text
 
 
 def _setup_output_dir(tmp_path: Path) -> Path:
@@ -230,6 +291,7 @@ def test_persistent_cache_survives_new_cache_instance(tmp_path: Path) -> None:
         assert not outcome_b.deep_validated
         assert validation_mock_b.call_count == 0
         assert cache_b.persistent_cache_hit_count == 1
+        assert outcome_b.persistent_cache_hit
 
 
 def test_persistent_cache_invalidates_on_file_change(tmp_path: Path) -> None:

@@ -24,7 +24,7 @@ from nga_tools.backup.image_pipeline import (
     collect_image_download_tasks_from_parsed,
     parse_post_htmls_for_images,
 )
-from nga_tools.backup.models import ParsedPostHtml, PostHtml
+from nga_tools.backup.models import ParsedPostHtml, PostHtml, PostRecord
 from nga_tools.backup.page_store import fetch_backup_page
 from nga_tools.backup.post_html import (
     build_post_htmls,
@@ -771,6 +771,85 @@ class BackupRawArchiveTest:
         assert [record["lou"] for record in records] == [1, 2, 3]
         assert records[1]["post"]["content"] == "recovered body"
 
+    def test_full_processing_reuses_initial_records_without_recovery_write(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        original_read = ThreadArchiveStore.read_effective_post_records
+        read_count = 0
+
+        def capture_read(
+            store: ThreadArchiveStore,
+            lous: set[int] | None = None,
+        ) -> list[PostRecord]:
+            nonlocal read_count
+            read_count += 1
+            return original_read(store, lous)
+
+        with patch.object(
+            ThreadArchiveStore,
+            "read_effective_post_records",
+            autospec=True,
+            side_effect=capture_read,
+        ):
+            _run_backup(thread_dir, MutableFakeClient())
+
+        assert read_count == 1
+
+    def test_full_processing_rereads_records_after_recovery_write(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": "first"},
+            {"lou": 3, "pid": 1003, "content": "third"},
+        ]
+        client.vrows = 4
+        recovered: RecoveredMissingPost = {
+            "original_pid": 2002,
+            "original_lou": 11,
+            "content": "recovered body",
+            "raw_post": {
+                "lou": 11,
+                "pid": 2002,
+                "content": "recovered body",
+                "author": {"uid": -1, "username": "匿名"},
+                "postdate": 123456,
+                "attches": [],
+            },
+        }
+        floor_result = FloorMapBuildResult(
+            FloorLabels(
+                original_lou_by_author_lou={1: 10, 2: 11, 3: 12},
+                candidate_original_lous_by_author_lou={},
+                show_original=True,
+            ),
+            {2: recovered},
+        )
+        original_read = ThreadArchiveStore.read_effective_post_records
+        read_count = 0
+
+        def capture_read(
+            store: ThreadArchiveStore,
+            lous: set[int] | None = None,
+        ) -> list[PostRecord]:
+            nonlocal read_count
+            read_count += 1
+            return original_read(store, lous)
+
+        with patch.object(
+            ThreadArchiveStore,
+            "read_effective_post_records",
+            autospec=True,
+            side_effect=capture_read,
+        ):
+            _run_backup(thread_dir, client, floor_map_result=floor_result)
+
+        assert read_count == 2
+
     def test_floor_map_failure_does_not_write_fast_path_state(
         self,
         tmp_path: Path,
@@ -957,6 +1036,7 @@ class BackupRawArchiveTest:
             assert f"阶段：{stage_name}，开始时间：" in timing_text
             assert f"阶段：{stage_name}，结束时间：" in timing_text
         assert "指标：图片引用记录数，值：2\n" in timing_text
+        assert "指标：恢复正文写入引发归档重读，值：0\n" in timing_text
 
     def test_fast_path_timing_omits_full_archive_and_image_stages(
         self,

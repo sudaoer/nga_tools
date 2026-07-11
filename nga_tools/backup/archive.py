@@ -245,12 +245,20 @@ def _records_with_recovered_and_missing_posts(
     archive_store: ThreadArchiveStore,
     floor_map_result: FloorMapBuildResult,
     missing_lous: list[int],
+    records: list[PostRecord],
 ) -> _RecordProcessingResult:
     recovered_count = archive_store.upsert_recovered_posts(
         floor_map_result.recovered_missing_posts_by_author_lou
     )
     record_timing_metric("本次恢复缺失楼数", recovered_count)
-    records = archive_store.read_effective_post_records()
+    archive_reread_required = recovered_count > 0
+    record_timing_metric(
+        "恢复正文写入引发归档重读",
+        int(archive_reread_required),
+    )
+    if archive_reread_required:
+        with time_section("恢复正文写入后重读完整归档"):
+            records = archive_store.read_effective_post_records()
     present_lous = {record["lou"] for record in records}
     unresolved_missing_lous = [
         lou for lou in missing_lous if lou not in present_lous
@@ -482,6 +490,7 @@ def _run_full_processing(
                 archive_store,
                 floor_map_processing.build_result,
                 missing_lous,
+                records,
             )
 
     with time_section("正文解析与图片处理"):

@@ -25,6 +25,7 @@ class ImageValidationOutcome:
     valid: bool
     cache_hit: bool
     deep_validated: bool
+    persistent_cache_hit: bool = False
 
 
 @dataclass(frozen=True)
@@ -77,30 +78,64 @@ class ImageValidationCache:
         self._persistent: dict[str, tuple[int, int, bool]] = {}
         self._new_entries: list[PersistentValidationEntry] = []
         self._preloaded_paths: set[str] = set()
+        self._preload_in_flight: dict[str, Future[None]] = {}
         self._persistent_cache_hit_count: int = 0
 
     @property
     def persistent_cache_hit_count(self) -> int:
         return self._persistent_cache_hit_count
 
-    def preload(self, paths: set[Path]) -> None:
+    def preload(self, paths: set[Path]) -> int:
         if not paths:
-            return
+            return 0
         from nga_tools.backup.image_store import load_persistent_validation_cache
 
         path_keys: set[str] = set()
-        path_key_to_canonical: dict[str, Path] = {}
         for raw_path in paths:
             canonical = canonical_image_path(raw_path)
             key = str(canonical)
             path_keys.add(key)
-            path_key_to_canonical[key] = canonical
 
-        loaded = load_persistent_validation_cache(path_keys)
+        owned_futures: dict[str, Future[None]] = {}
+        owned_generations: dict[str, int] = {}
+        futures_to_wait: set[Future[None]] = set()
         with self._lock:
-            for key, entry in loaded.items():
-                self._persistent[key] = entry
-            self._preloaded_paths |= path_keys
+            for key in path_keys:
+                if key in self._preloaded_paths:
+                    continue
+                existing_future = self._preload_in_flight.get(key)
+                if existing_future is not None:
+                    futures_to_wait.add(existing_future)
+                    continue
+                future = Future[None]()
+                self._preload_in_flight[key] = future
+                owned_futures[key] = future
+                owned_generations[key] = self._path_generations.get(key, 0)
+
+        owned_paths = set(owned_futures)
+        if owned_paths:
+            try:
+                loaded = load_persistent_validation_cache(owned_paths)
+            except BaseException as error:
+                with self._lock:
+                    for key, future in owned_futures.items():
+                        self._preload_in_flight.pop(key, None)
+                        future.set_exception(error)
+                raise
+
+            with self._lock:
+                for key, future in owned_futures.items():
+                    if self._path_generations.get(key, 0) == owned_generations[key]:
+                        entry = loaded.get(key)
+                        if entry is not None:
+                            self._persistent[key] = entry
+                        self._preloaded_paths.add(key)
+                    self._preload_in_flight.pop(key, None)
+                    future.set_result(None)
+
+        for future in futures_to_wait:
+            future.result()
+        return len(owned_paths)
 
     def flush_new_entries(self) -> None:
         from nga_tools.backup.image_store import save_persistent_validation_entries
@@ -126,6 +161,8 @@ class ImageValidationCache:
 
             is_leader = False
             validation_generation = 0
+            preload_future: Future[None] | None = None
+            validation_future: Future[bool | None] | None = None
             with self._lock:
                 if fingerprint in self._results:
                     cached_result = self._results[fingerprint]
@@ -135,33 +172,45 @@ class ImageValidationCache:
                         deep_validated=False,
                     )
 
-                persistent = self._persistent.get(path_key)
-                if (
-                    persistent is not None
-                    and persistent[0] == fingerprint.size
-                    and persistent[1] == fingerprint.mtime_ns
-                    and path_key in self._preloaded_paths
-                ):
-                    self._results[fingerprint] = persistent[2]
-                    self._result_keys_by_path.setdefault(path_key, set()).add(
-                        fingerprint
-                    )
-                    self._persistent_cache_hit_count += 1
-                    return ImageValidationOutcome(
-                        valid=persistent[2],
-                        cache_hit=True,
-                        deep_validated=False,
-                    )
+                preload_future = self._preload_in_flight.get(path_key)
+                if preload_future is None:
+                    persistent = self._persistent.get(path_key)
+                    if (
+                        persistent is not None
+                        and persistent[0] == fingerprint.size
+                        and persistent[1] == fingerprint.mtime_ns
+                        and path_key in self._preloaded_paths
+                    ):
+                        self._results[fingerprint] = persistent[2]
+                        self._result_keys_by_path.setdefault(path_key, set()).add(
+                            fingerprint
+                        )
+                        self._persistent_cache_hit_count += 1
+                        return ImageValidationOutcome(
+                            valid=persistent[2],
+                            cache_hit=True,
+                            deep_validated=False,
+                            persistent_cache_hit=True,
+                        )
 
-                future = self._in_flight.get(fingerprint)
-                if future is None:
-                    future = Future[bool | None]()
-                    self._in_flight[fingerprint] = future
-                    validation_generation = self._path_generations.get(path_key, 0)
-                    is_leader = True
+                    validation_future = self._in_flight.get(fingerprint)
+                    if validation_future is None:
+                        validation_future = Future[bool | None]()
+                        self._in_flight[fingerprint] = validation_future
+                        validation_generation = self._path_generations.get(
+                            path_key,
+                            0,
+                        )
+                        is_leader = True
 
+            if preload_future is not None:
+                preload_future.result()
+                continue
+
+            if validation_future is None:
+                raise RuntimeError("图片校验任务状态无效。")
             if not is_leader:
-                shared_result = future.result()
+                shared_result = validation_future.result()
                 if shared_result is None:
                     continue
                 return ImageValidationOutcome(
@@ -175,7 +224,7 @@ class ImageValidationCache:
             except BaseException as error:
                 with self._lock:
                     self._in_flight.pop(fingerprint, None)
-                    future.set_exception(error)
+                    validation_future.set_exception(error)
                 raise
 
             after_fingerprint = _image_file_fingerprint(canonical_path)
@@ -199,9 +248,9 @@ class ImageValidationCache:
                             valid=validation_result,
                         )
                     )
-                    future.set_result(validation_result)
+                    validation_future.set_result(validation_result)
                 else:
-                    future.set_result(None)
+                    validation_future.set_result(None)
 
             if unchanged:
                 return ImageValidationOutcome(

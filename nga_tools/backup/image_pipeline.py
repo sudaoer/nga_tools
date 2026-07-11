@@ -123,6 +123,10 @@ def _record_image_preparation_metrics(
         "图片持久化缓存命中路径数",
         stats.persistent_cache_hit_path_count,
     )
+    record_timing_metric(
+        "图片持久化缓存查询路径数",
+        stats.persistent_cache_query_path_count,
+    )
     record_timing_metric("图片无效映射数", stats.invalid_mapping_count)
     record_timing_metric("图片待下载URL数", stats.pending_download_url_count)
 

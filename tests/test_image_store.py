@@ -186,6 +186,37 @@ class ImageStoreTest:
             assert set(mappings) == {existing_url}
             assert pending_tasks == [{'url': missing_url}]
 
+    def test_image_index_schema_initializes_once_before_readonly_queries(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        missing_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202506/06/missing.png"
+        )
+
+        with (
+            patch(
+                "nga_tools.backup.image_store.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ),
+            patch(
+                "nga_tools.backup.image_store.configure_connection",
+                wraps=image_store.configure_connection,
+            ) as writable_config_mock,
+            patch(
+                "nga_tools.backup.image_store.configure_readonly_connection",
+                wraps=image_store.configure_readonly_connection,
+            ) as readonly_config_mock,
+        ):
+            assert image_store.image_mappings_for_urls([missing_url]) == {}
+            assert image_store.image_mappings_for_urls([missing_url]) == {}
+
+        assert (output_dir / "image_index.sqlite3").is_file()
+        assert writable_config_mock.call_count == 1
+        assert readonly_config_mock.call_count == 2
+
     def test_pending_image_download_tasks_retries_invalid_mapped_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             output_dir = Path(temp_dir_name) / "output"
@@ -365,6 +396,7 @@ def test_prepare_image_download_tasks_uses_persistent_cache(tmp_path: Path) -> N
         assert mock_a.call_count == 1
         assert prep_a.stats.deep_validation_path_count == 1
         assert prep_a.stats.persistent_cache_hit_path_count == 0
+        assert prep_a.stats.persistent_cache_query_path_count == 1
         cache_a.flush_new_entries()
 
         cache_b = ImageValidationCache()
@@ -378,4 +410,39 @@ def test_prepare_image_download_tasks_uses_persistent_cache(tmp_path: Path) -> N
         assert mock_b.call_count == 0
         assert prep_b.stats.deep_validation_path_count == 0
         assert prep_b.stats.persistent_cache_hit_path_count == 1
+        assert prep_b.stats.persistent_cache_query_path_count == 1
         assert prep_b.pending_tasks == []
+
+
+def test_shared_validation_cache_reports_batch_local_persistent_hits(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    image_path = output_dir / "images_unique" / "shared-persist.png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (1, 1), color="white").save(image_path)
+    url = _image_url_for_store("shared-persist")
+    from nga_tools.backup.image_validation import (
+        ImageValidationCache,
+        use_image_validation_cache,
+    )
+
+    with patch(
+        "nga_tools.backup.image_store.get_config",
+        return_value=SimpleNamespace(output_dir=str(output_dir)),
+    ):
+        image_store.upsert_image_mapping(url, image_path)
+        seed_cache = ImageValidationCache()
+        seed_cache.validate(image_path)
+        seed_cache.flush_new_entries()
+
+        shared_cache = ImageValidationCache()
+        with use_image_validation_cache(shared_cache):
+            first = image_store.prepare_image_download_tasks([{"url": url}])
+            second = image_store.prepare_image_download_tasks([{"url": url}])
+
+    assert first.stats.persistent_cache_query_path_count == 1
+    assert first.stats.persistent_cache_hit_path_count == 1
+    assert second.stats.persistent_cache_query_path_count == 0
+    assert second.stats.persistent_cache_hit_path_count == 0
+    assert second.stats.batch_validation_cache_hit_path_count == 1

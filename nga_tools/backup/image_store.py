@@ -29,6 +29,7 @@ from nga_tools.core.image_formats import (
 from nga_tools.core.sqlite import (
     SQLITE_BUSY_TIMEOUT_SECONDS,
     configure_connection,
+    configure_readonly_connection,
     iter_in_clause_chunks,
 )
 from nga_tools.backup.image_validation import (
@@ -128,6 +129,7 @@ class ImagePreparationStats:
     batch_validation_cache_hit_path_count: int
     deep_validation_path_count: int
     persistent_cache_hit_path_count: int
+    persistent_cache_query_path_count: int
     invalid_mapping_count: int
     pending_download_url_count: int
 
@@ -141,6 +143,7 @@ class ImageDownloadPreparation:
 IMAGE_INDEX_FILENAME = "image_index.sqlite3"
 PLACEHOLDER_IMAGE_FILENAME = "download_failed_placeholder.png"
 _IMAGE_STORE_LOCK = threading.RLock()
+_INITIALIZED_IMAGE_INDEX_PATHS: set[Path] = set()
 
 
 def normalize_nga_image_url(url: str) -> str:
@@ -212,33 +215,60 @@ def _now_utc_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def _connect_image_index() -> sqlite3.Connection:
-    db_path = image_index_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
+def _initialize_image_index() -> Path:
+    db_path = image_index_path().resolve()
+    with _IMAGE_STORE_LOCK:
+        if db_path in _INITIALIZED_IMAGE_INDEX_PATHS and db_path.is_file():
+            return db_path
+
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(
+            sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
+        ) as connection:
+            configure_connection(connection)
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS image_mappings (
+                    url TEXT PRIMARY KEY,
+                    unique_rel_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS image_validation_cache (
+                    canonical_path TEXT PRIMARY KEY,
+                    size INTEGER NOT NULL,
+                    mtime_ns INTEGER NOT NULL,
+                    valid INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.commit()
+        _INITIALIZED_IMAGE_INDEX_PATHS.add(db_path)
+    return db_path
+
+
+def _connect_image_index_writable() -> sqlite3.Connection:
+    connection = sqlite3.connect(
+        _initialize_image_index(),
+        timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+    )
     configure_connection(connection)
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS image_mappings (
-            url TEXT PRIMARY KEY,
-            unique_rel_path TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """
+    return connection
+
+
+def _connect_image_index_readonly() -> sqlite3.Connection:
+    db_uri = f"{_initialize_image_index().as_uri()}?mode=ro"
+    connection = sqlite3.connect(
+        db_uri,
+        timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+        uri=True,
     )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS image_validation_cache (
-            canonical_path TEXT PRIMARY KEY,
-            size INTEGER NOT NULL,
-            mtime_ns INTEGER NOT NULL,
-            valid INTEGER NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.commit()
+    configure_readonly_connection(connection)
     return connection
 
 
@@ -266,7 +296,7 @@ def upsert_image_mappings(
         for mapping in image_mappings
     ]
     with _IMAGE_STORE_LOCK:
-        with closing(_connect_image_index()) as connection:
+        with closing(_connect_image_index_writable()) as connection:
             with connection:
                 connection.executemany(
                     """
@@ -294,7 +324,7 @@ def load_persistent_validation_cache(
     entries: dict[str, tuple[int, int, bool]] = {}
     sorted_paths = sorted(canonical_paths)
     try:
-        with closing(_connect_image_index()) as connection:
+        with closing(_connect_image_index_readonly()) as connection:
             for chunk in iter_in_clause_chunks(sorted_paths):
                 placeholders = ",".join("?" for _ in chunk)
                 rows = connection.execute(
@@ -330,7 +360,7 @@ def save_persistent_validation_entries(
     ]
     with _IMAGE_STORE_LOCK:
         try:
-            with closing(_connect_image_index()) as connection:
+            with closing(_connect_image_index_writable()) as connection:
                 with connection:
                     connection.executemany(
                         """
@@ -357,7 +387,7 @@ def save_persistent_validation_entries(
 def delete_persistent_validation_entry(canonical_path: str) -> None:
     with _IMAGE_STORE_LOCK:
         try:
-            with closing(_connect_image_index()) as connection:
+            with closing(_connect_image_index_writable()) as connection:
                 with connection:
                     connection.execute(
                         "DELETE FROM image_validation_cache WHERE canonical_path = ?",
@@ -372,7 +402,7 @@ def image_mapping_for_url(url: str) -> ImageMapping | None:
     if not utils.NGA_img_link_verify(normalized_url):
         return None
 
-    with closing(_connect_image_index()) as connection:
+    with closing(_connect_image_index_readonly()) as connection:
         row = connection.execute(
             "SELECT unique_rel_path FROM image_mappings WHERE url = ?",
             (normalized_url,),
@@ -387,7 +417,7 @@ def image_mapping_for_url(url: str) -> ImageMapping | None:
 
 
 def image_mappings_by_url() -> dict[str, ImageMapping]:
-    with closing(_connect_image_index()) as connection:
+    with closing(_connect_image_index_readonly()) as connection:
         rows = connection.execute(
             "SELECT url, unique_rel_path FROM image_mappings"
         ).fetchall()
@@ -413,7 +443,7 @@ def image_mappings_for_urls(urls: Iterable[str]) -> dict[str, ImageMapping]:
         return {}
 
     mappings: dict[str, ImageMapping] = {}
-    with closing(_connect_image_index()) as connection:
+    with closing(_connect_image_index_readonly()) as connection:
         for start in range(0, len(normalized_urls), 900):
             chunk = normalized_urls[start : start + 900]
             placeholders = ",".join("?" for _ in chunk)
@@ -478,12 +508,12 @@ def prepare_image_download_tasks(
 
     validation_by_path_key: dict[str, ImageValidationOutcome] = {}
     with time_section("图片缓存文件校验"):
-        validation_cache.preload(set(mapped_paths_by_key.values()))
+        persistent_cache_query_path_count = validation_cache.preload(
+            set(mapped_paths_by_key.values())
+        )
         for path_key, image_path in mapped_paths_by_key.items():
             validation_by_path_key[path_key] = validation_cache.validate(image_path)
         validation_cache.flush_new_entries()
-
-    persistent_cache_hit_count = validation_cache.persistent_cache_hit_count
 
     pending_tasks: list[ImageDownloadTask] = []
     invalid_mapping_count = 0
@@ -512,7 +542,11 @@ def prepare_image_download_tasks(
         deep_validation_path_count=sum(
             outcome.deep_validated for outcome in validation_by_path_key.values()
         ),
-        persistent_cache_hit_path_count=persistent_cache_hit_count,
+        persistent_cache_hit_path_count=sum(
+            outcome.persistent_cache_hit
+            for outcome in validation_by_path_key.values()
+        ),
+        persistent_cache_query_path_count=persistent_cache_query_path_count,
         invalid_mapping_count=invalid_mapping_count,
         pending_download_url_count=len(pending_tasks),
     )
