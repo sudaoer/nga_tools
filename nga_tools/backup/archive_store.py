@@ -810,29 +810,25 @@ class ThreadArchiveStore:
             return {}
         self.require_exists()
 
-        sorted_cache_keys = sorted(cache_keys)
         entries: dict[str, PostImageReferenceCacheEntry] = {}
+        sorted_cache_keys = sorted(cache_keys)
         with closing(self._connect()) as connection:
-            connection.execute(
-                "CREATE TEMP TABLE _key_lookup (cache_key TEXT PRIMARY KEY)"
-            )
-            try:
-                connection.executemany(
-                    "INSERT OR IGNORE INTO _key_lookup (cache_key) VALUES (?)",
-                    [(key,) for key in sorted_cache_keys],
-                )
+            for start in range(0, len(sorted_cache_keys), 900):
+                chunk = sorted_cache_keys[start : start + 900]
+                placeholders = ",".join("?" for _ in chunk)
                 rows = cast(
                     list[tuple[object, object, object, object]],
                     connection.execute(
-                        """
+                        f"""
                         SELECT
-                            c.cache_key,
-                            c.source_hash,
-                            c.extractor_version,
-                            c.references_json
-                        FROM post_image_reference_cache c
-                        JOIN _key_lookup k ON c.cache_key = k.cache_key
-                        """
+                            cache_key,
+                            source_hash,
+                            extractor_version,
+                            references_json
+                        FROM post_image_reference_cache
+                        WHERE cache_key IN ({placeholders})
+                        """,
+                        chunk,
                     ).fetchall(),
                 )
                 for cache_key, source_hash, extractor_version, references_json in rows:
@@ -852,8 +848,6 @@ class ThreadArchiveStore:
                         extractor_version=extractor_version,
                         references_json=references_json,
                     )
-            finally:
-                connection.execute("DROP TABLE _key_lookup")
         return entries
 
     def upsert_post_image_reference_cache(
