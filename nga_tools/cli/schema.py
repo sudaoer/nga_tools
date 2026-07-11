@@ -147,7 +147,7 @@ ARG_DEFS: dict[str, ArgDef] = {
     "write_json": {
         "flags": ("--write-json", "--write_json"),
         "action": "store_true",
-        "help": "备份时额外输出json/page_*.json最近响应缓存",
+        "help": "备份时额外输出debug_json/page_*.json方便查看原始响应",
     },
     "force_processing": {
         "flags": ("--force-processing", "--force_processing"),
@@ -287,7 +287,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "notes": [
                 "此命令会补抓缺失页，并刷新本地尾页到远端最后一页。",
-                "默认只写archive.sqlite3；加--write-json才输出json/page_*.json。",
+                "默认只写archive.sqlite3；加--write-json才输出debug_json/page_*.json。",
                 "随后会从archive全量解析正文并补齐缺失图片，不写入逐楼HTML。",
                 "author-only备份会在archive.sqlite3中增量刷新楼层映射。",
                 "--all-threads会按thread_configs.json中的ThreadList批量执行增量备份。",

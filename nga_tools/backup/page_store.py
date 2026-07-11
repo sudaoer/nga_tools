@@ -68,7 +68,7 @@ def fetch_backup_pages(
     *,
     write_json: bool = False,
 ) -> dict[int, PageData]:
-    folder_json = Path(utils.get_folder(tid, aid, "json")) if write_json else None
+    folder_json = Path(utils.get_folder(tid, aid, "debug_json")) if write_json else None
     page_data_by_page: dict[int, PageData] = {}
     for page_number in range(1, page_count + 1):
         report_progress(

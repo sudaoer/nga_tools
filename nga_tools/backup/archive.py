@@ -616,7 +616,7 @@ def backup_thread(
 
     with time_section("分页JSON导出"):
         if write_json:
-            folder_json = Path(utils.get_folder(tid, aid, "json"))
+            folder_json = Path(utils.get_folder(tid, aid, "debug_json"))
             for page_number, page_data in sorted(page_data_by_page.items()):
                 _write_page_json(folder_json, page_number, page_data)
     record_timing_metric(
@@ -730,7 +730,7 @@ def backup_thread_sub(
 
     with time_section("分页JSON导出"):
         if write_json:
-            folder_json = Path(utils.get_folder(tid, aid, "json"))
+            folder_json = Path(utils.get_folder(tid, aid, "debug_json"))
             for page_number, page_data in sorted(page_data_by_page.items()):
                 _write_page_json(folder_json, page_number, page_data)
     record_timing_metric(

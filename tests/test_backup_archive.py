@@ -336,6 +336,7 @@ class BackupRawArchiveTest:
         assert not (thread_dir / "backup_state.json").exists()
         assert not (thread_dir / "floor_map.json").exists()
         assert not (thread_dir / "json").exists()
+        assert not (thread_dir / "debug_json").exists()
 
     @pytest.mark.parametrize("mode", ["sub", "all"])
     def test_backup_keeps_old_html_artifacts_untouched(
@@ -375,7 +376,8 @@ class BackupRawArchiveTest:
             write_json=True,
         )
 
-        assert (thread_dir / "json" / "page_1.json").is_file()
+        assert (thread_dir / "debug_json" / "page_1.json").is_file()
+        assert not (thread_dir / "json").exists()
 
     def test_sub_requires_explicit_migration_for_legacy_json(self, tmp_path: Path) -> None:
         thread_dir = tmp_path / "123_456"
