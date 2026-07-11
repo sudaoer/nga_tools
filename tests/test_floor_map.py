@@ -12,7 +12,6 @@ from nga_tools.backup.floor_map import (
     FloorLabels,
     build_and_save_floor_map,
     find_missing_author_lous,
-    generate_floor_map_from_backup,
     load_floor_map_build_result_if_current,
     read_author_posts_from_archive,
     read_unresolved_missing_author_lous_from_archive,
@@ -406,47 +405,3 @@ class FloorMapStoredMissingAuthorLousTest:
             )
 
         assert missing_lous == [2]
-
-    def test_generate_floor_map_from_backup_uses_archive_total_lou_count(
-        self,
-    ) -> None:
-        captured_missing_lous: list[int] = []
-
-        def fake_build_floor_map(
-            client: object,
-            archive_store: ThreadArchiveStore,
-            tid: int,
-            aid: int,
-            author_posts: list[AuthorPostRef],
-            missing_author_lous: list[int],
-            *,
-            strict: bool = True,
-        ) -> FloorMapBuildResult:
-            del client, archive_store, tid, aid, author_posts, strict
-            captured_missing_lous[:] = missing_author_lous
-            return FloorMapBuildResult(FloorLabels.plain(), {})
-
-        with TemporaryDirectory() as temp_dir:
-            store = ThreadArchiveStore(Path(temp_dir))
-            store.upsert_page(
-                1,
-                {
-                    "totalPage": 1,
-                    "vrows": 4,
-                    "result": [
-                        {"pid": 1000, "lou": 0, "content": "op"},
-                        {"pid": 1001, "lou": 1, "content": "first"},
-                        {"pid": 1003, "lou": 3, "content": "third"},
-                    ],
-                },
-            )
-            with (
-                patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir),
-                patch(
-                    "nga_tools.backup.floor_map.build_and_save_floor_map",
-                    side_effect=fake_build_floor_map,
-                ),
-            ):
-                generate_floor_map_from_backup(123, 456)
-
-        assert captured_missing_lous == [2]

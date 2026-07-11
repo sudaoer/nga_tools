@@ -7,7 +7,6 @@ from typing import Protocol
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.archive import backup_thread, backup_thread_sub
-from nga_tools.backup.floor_map import generate_floor_map_from_backup
 from nga_tools.backup.image_validation import (
     ImageValidationCache,
     use_image_validation_cache,
@@ -188,50 +187,6 @@ def backup_sub(args: CommandArgs) -> None:
             )
         else:
             backup_thread_sub(thread_tid, thread_aid, write_json=write_json)
-
-
-def backup_configs(args: CommandArgs) -> None:
-    _run_backup_fetch_batch(
-        args,
-        backup_func=backup_thread_sub,
-        progress_text="正在增量备份",
-        task_name="backup configs",
-    )
-
-
-def backup_floors(args: CommandArgs) -> None:
-    app_config = configure_network_limits_from_args(args)
-    if optional_bool(args, "all_threads"):
-        worker_count = _batch_worker_count(args, app_config.backup_configs_workers)
-
-        def action(thread_config: ThreadConfig) -> None:
-            with time_section("楼层映射生成"):
-                generate_floor_map_from_backup(
-                    thread_config_tid(thread_config),
-                    thread_config_aid(thread_config),
-                )
-
-        run_thread_config_batch(
-            action=action,
-            progress_text="正在生成楼层映射",
-            failure_text="楼层映射失败",
-            summary_name="楼层映射",
-            worker_count=worker_count,
-            write_timing_log=True,
-            timing_log_enabled=app_config.timing_log_enabled,
-            task_name="backup floors --all-threads",
-        )
-        return
-
-    thread_tid, thread_aid = resolve_command_thread_target(args)
-    with _use_thread_output_logs(
-        task_name="backup floors",
-        tid=thread_tid,
-        aid=thread_aid,
-        timing_log_enabled=app_config.timing_log_enabled,
-    ):
-        with time_section("楼层映射生成"):
-            generate_floor_map_from_backup(thread_tid, thread_aid)
 
 
 def _migrate_store_for_thread_folder(thread_folder: Path) -> None:

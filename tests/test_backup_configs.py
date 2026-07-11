@@ -14,12 +14,10 @@ from rich.console import Console
 
 from nga_tools.backup.pdf import PdfRenderPool
 from nga_tools.backup.image_validation import current_image_validation_cache
-from nga_tools.cli import args_parse
+from nga_tools.cli import args_parse, format_command_help
 from nga_tools.console import ConsoleReporter, report_warning, use_reporter
 from nga_tools.commands.backup import (
     backup_all,
-    backup_configs,
-    backup_floors,
     backup_sub,
     pdf_generate,
 )
@@ -43,37 +41,26 @@ def _thread_config(
     return thread_config
 
 
-class BackupConfigsCliTest:
-    def test_backup_configs_parses_without_thread_target(self) -> None:
-        args = args_parse(["backup", "configs"])
+class BackupCliTest:
+    @pytest.mark.parametrize("action", ["configs", "floors"])
+    def test_removed_backup_actions_are_rejected(self, action: str) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(["backup", action])
 
-        assert args['command'] == 'backup'
-        assert args['action'] == 'configs'
+        assert context.value.code == 2
 
-    def test_backup_configs_parses_parallel_limits(self) -> None:
-        args = args_parse(
-            [
-                "backup",
-                "configs",
-                "--workers",
-                "2",
-                "--api_concurrency",
-                "3",
-                "--image_concurrency",
-                "20",
-            ]
-        )
+    def test_removed_backup_actions_are_absent_from_help(self) -> None:
+        help_text = format_command_help("backup")
 
-        assert args['workers'] == 2
-        assert args['api_concurrency'] == 3
-        assert args['image_concurrency'] == 20
+        assert "  configs " not in help_text
+        assert "  floors " not in help_text
 
     @pytest.mark.parametrize(
         "argv",
         [
             ["backup", "all", "--all-threads"],
             ["backup", "sub", "--all-threads"],
-            ["backup", "floors", "--all-threads"],
             ["backup", "pdf", "--all-threads"],
         ],
     )
@@ -149,7 +136,6 @@ class BackupConfigsCliTest:
         [
             ["backup", "all", "--tid", "123", "--write_json"],
             ["backup", "sub", "--tid", "123", "--write_json"],
-            ["backup", "configs", "--write_json"],
         ],
     )
     def test_backup_write_json_parses_for_fetch_commands(
@@ -179,7 +165,6 @@ class BackupConfigsCliTest:
     @pytest.mark.parametrize(
         "argv",
         [
-            ["backup", "floors", "--tid", "123", "--write_json"],
             ["backup", "migrate-store", "--tid", "123", "--write_json"],
             ["backup", "pdf", "--tid", "123", "--write_json"],
         ],
@@ -211,25 +196,18 @@ class BackupConfigsCliTest:
     @pytest.mark.parametrize(
         "argv",
         [
-            ["backup", "configs", "--workers", "0"],
-            ["backup", "configs", "--api_concurrency", "0"],
-            ["backup", "configs", "--image_concurrency", "0"],
+            ["backup", "sub", "--all-threads", "--workers", "0"],
+            ["backup", "sub", "--all-threads", "--api_concurrency", "0"],
+            ["backup", "sub", "--all-threads", "--image_concurrency", "0"],
         ],
     )
-    def test_backup_configs_rejects_non_positive_parallel_limits(
+    def test_backup_sub_all_threads_rejects_non_positive_parallel_limits(
         self,
         argv: list[str],
     ) -> None:
         with patch("sys.stderr", new_callable=io.StringIO):
             with pytest.raises(SystemExit) as context:
                 args_parse(argv)
-        assert context.value.code == 2
-
-    def test_backup_configs_rejects_single_thread_arguments(self) -> None:
-        with patch("sys.stderr", new_callable=io.StringIO):
-            with pytest.raises(SystemExit) as context:
-                args_parse(["backup", "configs", "--name", "帖子名"])
-
         assert context.value.code == 2
 
     def test_backup_migrate_store_parses_all(self) -> None:
@@ -376,11 +354,6 @@ class BackupWarningLogTest:
         [
             (backup_all, "nga_tools.commands.backup.backup_thread", "backup all"),
             (backup_sub, "nga_tools.commands.backup.backup_thread_sub", "backup sub"),
-            (
-                backup_floors,
-                "nga_tools.commands.backup.generate_floor_map_from_backup",
-                "backup floors",
-            ),
         ],
     )
     def test_single_thread_backup_commands_write_warning_and_timing_logs(
@@ -404,10 +377,7 @@ class BackupWarningLogTest:
                 **kwargs: object,
             ) -> None:
                 assert (tid, aid) == (101, None)
-                if handler is backup_floors:
-                    assert kwargs == {}
-                else:
-                    assert kwargs == {'write_json': False}
+                assert kwargs == {'write_json': False}
                 report_warning("单帖警告")
 
             with (
@@ -465,7 +435,7 @@ class BackupWarningLogTest:
 
             assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
 
-    def test_backup_configs_writes_per_thread_warning_and_timing_logs(self) -> None:
+    def test_backup_sub_batch_writes_per_thread_warning_and_timing_logs(self) -> None:
         thread_configs = [
             _thread_config(name="first", tid=101, aid=201),
             _thread_config(name="second", tid=102, aid=None),
@@ -511,7 +481,7 @@ class BackupWarningLogTest:
             ):
                 configs_cls.return_value.get_thread_configs.return_value = thread_configs
 
-                backup_configs({})
+                backup_sub({"all_threads": True})
 
             assert (base_dir / '101_201' / 'warnings.log').read_text(encoding='utf-8') == '警告：warning 101 201\n'
             assert (base_dir / '102_all' / 'warnings.log').read_text(encoding='utf-8') == '警告：warning 102 None\n'
@@ -521,11 +491,11 @@ class BackupWarningLogTest:
             second_timing = (base_dir / '102_all' / 'timing.log').read_text(
                 encoding='utf-8'
             )
-            assert "任务：backup configs\n" in first_timing
+            assert "任务：backup sub --all-threads\n" in first_timing
             assert "目标：first (tid: 101, aid: 201)\n" in first_timing
             assert "总耗时：" in first_timing
             assert "状态：完成" in first_timing
-            assert "任务：backup configs\n" in second_timing
+            assert "任务：backup sub --all-threads\n" in second_timing
             assert "目标：second (tid: 102, aid: None)\n" in second_timing
 
     def test_pdf_generate_writes_thread_warning_and_timing_logs(self) -> None:
@@ -579,7 +549,7 @@ class BackupWarningLogTest:
             assert '警告：PDF告警' in output.getvalue()
 
 
-class BackupConfigsHandlerTest:
+class BackupBatchHandlerTest:
     def test_backup_fetch_batch_writes_aggregated_timing_summary(
         self,
         tmp_path: Path,
@@ -623,11 +593,11 @@ class BackupConfigsHandlerTest:
             _captured_reporter(),
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
-            backup_configs({})
+            backup_sub({"all_threads": True})
 
         summary = batch_path.read_text(encoding="utf-8")
         assert "旧汇总" not in summary
-        assert "任务：backup configs\n" in summary
+        assert "任务：backup sub --all-threads\n" in summary
         assert "墙钟时间：" in summary
         assert "帖子：总数2，成功2，失败0" in summary
         assert "状态：完成（含预期图片下载失败，等待后续重试）" in summary
@@ -663,7 +633,7 @@ class BackupConfigsHandlerTest:
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
             with pytest.raises(SystemExit) as context:
-                backup_configs({})
+                backup_sub({"all_threads": True})
 
         assert context.value.code == 1
         summary = batch_path.read_text(encoding="utf-8")
@@ -697,7 +667,7 @@ class BackupConfigsHandlerTest:
             _captured_reporter(),
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
-            backup_configs({})
+            backup_sub({"all_threads": True})
 
         batch_path_mock.assert_not_called()
         assert batch_path.read_text(encoding="utf-8") == "旧汇总\n"
@@ -818,33 +788,6 @@ class BackupConfigsHandlerTest:
             call(102, None, write_json=False, force_processing=True),
         ]
 
-    def test_backup_floors_all_threads_generates_each_floor_map(self) -> None:
-        thread_configs = [
-            _thread_config(name="first", tid=101, aid=201),
-            _thread_config(name="second", tid=102, aid=None),
-        ]
-
-        with (
-            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
-            patch(
-                "nga_tools.commands.backup.generate_floor_map_from_backup",
-            ) as floor_map_mock,
-            patch(
-                "nga_tools.commands.backup.configure_network_limits_from_args",
-                return_value=_backup_config_app_config(),
-            ),
-            patch(
-                "nga_tools.commands.thread_batch.batch_timing_log_path"
-            ) as batch_path_mock,
-            _captured_reporter(),
-        ):
-            configs_cls.return_value.get_thread_configs.return_value = thread_configs
-
-            backup_floors({"all_threads": True, "workers": 1})
-
-        assert floor_map_mock.call_args_list == [call(101, 201), call(102, None)]
-        batch_path_mock.assert_not_called()
-
     def test_backup_pdf_all_threads_generates_each_pdf(self) -> None:
         thread_configs = [
             _thread_config(name="first", tid=101, aid=201),
@@ -932,7 +875,7 @@ class BackupConfigsHandlerTest:
                 release_timer.start()
 
                 with pytest.raises(SystemExit) as context:
-                    backup_configs({"workers": 2})
+                    backup_sub({"all_threads": True, "workers": 2})
         finally:
             release_event.set()
             release_timer.cancel()
@@ -963,11 +906,11 @@ class BackupConfigsHandlerTest:
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
 
-            backup_configs({"workers": 1})
+            backup_sub({"all_threads": True, "workers": 1})
 
         assert backup_mock.call_args_list == [call(101, 201, write_json=False), call(102, None, write_json=False)]
 
-    def test_backup_configs_passes_write_json_to_each_thread(self) -> None:
+    def test_backup_sub_all_threads_passes_write_json_to_each_thread(self) -> None:
         thread_configs = [
             _thread_config(name="first", tid=101, aid=201),
             _thread_config(name="second", tid=102, aid=None),
@@ -984,7 +927,9 @@ class BackupConfigsHandlerTest:
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
 
-            backup_configs({"workers": 1, "write_json": True})
+            backup_sub(
+                {"all_threads": True, "workers": 1, "write_json": True}
+            )
 
         assert backup_mock.call_args_list == [call(101, 201, write_json=True), call(102, None, write_json=True)]
 
@@ -1000,7 +945,7 @@ class BackupConfigsHandlerTest:
         ):
             configs_cls.return_value.get_thread_configs.return_value = []
 
-            backup_configs({})
+            backup_sub({"all_threads": True})
 
         backup_mock.assert_not_called()
         assert '没有找到任何帖子配置。' in output.getvalue()
@@ -1037,7 +982,7 @@ class BackupConfigsHandlerTest:
             backup_mock.side_effect = backup_side_effect
 
             with pytest.raises(SystemExit) as context:
-                backup_configs({})
+                backup_sub({"all_threads": True})
 
         assert context.value.code == 1
         expected_calls = [
@@ -1094,6 +1039,6 @@ class BackupConfigsHandlerTest:
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
 
-            backup_configs({})
+            backup_sub({"all_threads": True})
 
         assert max_active_count == 2

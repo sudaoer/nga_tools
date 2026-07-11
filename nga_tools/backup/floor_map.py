@@ -193,7 +193,8 @@ def load_floor_labels_from_archive(
     if stored_floor_map is None:
         raise RuntimeError(
             f"archive.sqlite3缺少楼层映射：{archive_store.db_path}。"
-            "请先运行 backup floors 生成楼层映射。"
+            "请使用--name或--tid指定该帖子，运行backup sub "
+            "--force-processing刷新备份。"
         )
 
     return _floor_labels_from_entries(stored_floor_map.entries)
@@ -220,7 +221,8 @@ def validate_floor_labels(
         preview += ", ..."
     raise RuntimeError(
         f"楼层映射缺少{len(missing_lous)}个非缺失楼层：{preview}。"
-        "请先运行 backup floors 刷新楼层映射。"
+        "请使用--name或--tid指定该帖子，运行backup sub "
+        "--force-processing刷新备份。"
     )
 
 
@@ -806,36 +808,3 @@ def _infer_missing_original_lous(
             candidates[author_lou] = candidate_lous
 
     return MissingOriginalInference(inferred, candidates)
-
-
-def generate_floor_map_from_backup(tid: int, aid: Optional[int]) -> None:
-    if aid is None:
-        report_info("未指定aid，原帖楼层与当前楼层一致，无需生成楼层映射。")
-        return
-
-    thread_folder = Path(utils.get_folder(tid, aid, create=False))
-    archive_store = ThreadArchiveStore(thread_folder)
-    author_posts = archive_store.read_latest_author_post_refs()
-    author_total_lou_count = archive_store.read_latest_author_total_lou_count()
-    present_lous = {post["author_lou"] for post in author_posts}
-    missing_author_lous = sorted(
-        {
-            *find_missing_author_lous(author_posts, author_total_lou_count),
-            *read_unresolved_missing_author_lous_from_archive(
-                archive_store,
-                present_lous=present_lous,
-                total_lou_count=author_total_lou_count,
-            ),
-        }
-    )
-    result = build_and_save_floor_map(
-        NGAClient(),
-        archive_store,
-        tid,
-        aid,
-        author_posts,
-        missing_author_lous,
-    )
-    archive_store.upsert_recovered_posts(
-        result.recovered_missing_posts_by_author_lou
-    )

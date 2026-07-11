@@ -140,14 +140,14 @@ pixi run python main.py backup sub --all-threads --write-json
 pixi run python main.py backup all --all-threads --force-processing
 ```
 
-`backup configs` 暂时保留为兼容入口，等价于 `backup sub --all-threads`。
 需要批量完整刷新时，可运行 `backup all --all-threads`。
 
-已有只看作者备份缺少楼层映射时，可以单独生成映射：
+只看作者备份会在正常备份流程中增量刷新楼层映射。如果已有备份缺少映射，
+可以强制重新执行派生处理：
 
 ```powershell
-pixi run python main.py backup floors --name 帖子名
-pixi run python main.py backup floors --all-threads
+pixi run python main.py backup sub --name 帖子名 --force-processing
+pixi run python main.py backup sub --all-threads --force-processing
 ```
 
 楼层映射会增量刷新并保存在同一备份的 `archive.sqlite3` 中。缺失楼无法唯一确定原帖楼层时，数据库会保存候选原楼层；若能从匿名原帖恢复正文，正文也会直接写入该数据库。
@@ -160,7 +160,7 @@ pixi run python main.py backup migrate-store --all
 ```
 
 旧目录中的 `floor_map.json` 不参与迁移，也不会被读取；只看作者备份迁移分页数据后，
-请运行 `backup floors` 在 `archive.sqlite3` 中重新生成楼层映射。
+请运行 `backup sub --name 帖子名 --force-processing` 在 `archive.sqlite3` 中重新生成楼层映射。
 
 并行校验所有本地备份中的已下载图片，损坏或无法打开的图片会被删除：
 
@@ -243,7 +243,7 @@ PDF 分段在生成。
 
 PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 `pixi run` 启动时会使用 pixi 环境中的 WeasyPrint、Poppler 和字体依赖，支持 Linux、macOS 和 Windows 的 Pixi 环境。
 生成后的 PDF 会记录输入中间 HTML 的 hash；后续运行时，如果对应 HTML 没有变化且 PDF 文件仍存在，会跳过该分段。需要强制重新生成时，删除 `pdf/` 下对应 PDF 或 `pdf_input_hashes.json`。
-只看作者备份会读取 `archive.sqlite3` 中的楼层映射，在 PDF 标题中显示只看作者楼层和原帖楼层，例如 `第12楼（原86楼）`。如果缺少映射，先运行 `backup floors`。
+只看作者备份会读取 `archive.sqlite3` 中的楼层映射，在 PDF 标题中显示只看作者楼层和原帖楼层，例如 `第12楼（原86楼）`。如果缺少映射，运行 `backup sub --name 帖子名 --force-processing` 刷新备份。
 
 ## 输出目录
 

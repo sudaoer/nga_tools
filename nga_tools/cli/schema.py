@@ -4,8 +4,6 @@ from typing import Literal, NotRequired, TypedDict
 
 from nga_tools.commands.backup import (
     backup_all,
-    backup_configs,
-    backup_floors,
     backup_migrate_store,
     backup_sub,
     pdf_generate,
@@ -308,50 +306,6 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "required_any": ["name", "tid", "all_threads"],
             "positive": ["workers", "api_concurrency", "image_concurrency"],
         },
-        "configs": {
-            "handler": backup_configs,
-            "summary": "兼容入口：增量备份thread_configs.json中的所有帖子",
-            "usage": (
-                f"{PROGRAM_USAGE} backup configs [--workers N] "
-                "[--api-concurrency N] [--image-concurrency N] [--write-json]"
-            ),
-            "examples": [
-                f"{PROGRAM_USAGE} backup configs",
-                f"{PROGRAM_USAGE} backup configs --workers 4",
-            ],
-            "notes": [
-                "此命令是兼容入口，推荐使用 backup sub --all-threads。",
-                "此命令按thread_configs.json中的ThreadList批量执行增量备份。",
-                "默认只写archive.sqlite3；加--write-json才输出json/page_*.json。",
-                "不会修改thread_configs.json，也不会生成PDF。",
-                "单个帖子失败时会继续处理后续配置，最后以非零退出码报告失败。",
-            ],
-            "args": ["workers", "api_concurrency", "image_concurrency", "write_json"],
-            "positive": ["workers", "api_concurrency", "image_concurrency"],
-        },
-        "floors": {
-            "handler": backup_floors,
-            "summary": "根据已有备份生成只看作者楼层到原帖楼层的映射",
-            "usage": (
-                f"{PROGRAM_USAGE} backup floors "
-                "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
-                "[--workers N] [--api-concurrency N]"
-            ),
-            "examples": [
-                f"{PROGRAM_USAGE} backup floors --name 帖子名",
-                f"{PROGRAM_USAGE} backup floors --tid 12345678 --aid 987654",
-                f"{PROGRAM_USAGE} backup floors --all-threads",
-            ],
-            "notes": [
-                "此命令会读取archive.sqlite3并联网扫描原帖，增量刷新数据库中的楼层映射。",
-                "从匿名原帖恢复出的缺失正文会写入同一archive.sqlite3。",
-                "author-only备份生成PDF前必须先在archive.sqlite3中生成楼层映射。",
-                "缺失楼无法唯一确定原楼层时，会在数据库中记录候选原楼层。",
-            ],
-            "args": ["name", "tid", "aid", "all_threads", "workers", "api_concurrency"],
-            "required_any": ["name", "tid", "all_threads"],
-            "positive": ["workers", "api_concurrency"],
-        },
         "migrate-store": {
             "handler": backup_migrate_store,
             "summary": "把旧分页JSON迁移到每帖SQLite存储",
@@ -387,7 +341,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "notes": [
                 "author-only备份会读取archive.sqlite3中的楼层映射，同时显示只看作者楼层和原帖楼层。",
-                f"如缺少楼层映射，先运行 {PROGRAM_USAGE} backup floors --name 帖子名。",
+                f"如缺少楼层映射，运行 {PROGRAM_USAGE} backup sub --name 帖子名 "
+                "--force-processing刷新备份。",
                 "--all-threads会按thread_configs.json中的ThreadList批量生成PDF。",
                 "--workers控制并行处理的帖子数，--pdf-workers控制全命令共享的"
                 "WeasyPrint并发数。",
