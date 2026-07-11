@@ -951,7 +951,6 @@ def _read_image_usage_replies_sync(
                 reference.tid,
                 reference.aid_key,
                 page=page,
-                ensure_schema=False,
             )
             page_cache[cache_key] = posts
         post = next(

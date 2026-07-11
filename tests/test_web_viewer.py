@@ -1279,6 +1279,99 @@ class WebImageUsageTest:
         assert response.status_code == 409
         assert response.json() == {"error": "缺少image_index.sqlite3。"}
 
+    def test_navigation_reads_do_not_invalidate_image_usage_cache(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        image_url = (
+            "https://img.nga.178.com/attachments/mon_202607/11/navigation.png"
+        )
+        _write_image_mapping(
+            output_dir,
+            image_url,
+            "images_unique/navigation.png",
+        )
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, f"[img]{image_url}[/img]")])
+        archive_path = thread_dir / "archive.sqlite3"
+        archive_before = archive_path.read_bytes()
+        calls: list[Path] = []
+        original_build = web_server.build_image_usage_snapshot
+
+        def wrapped_build(path: Path):
+            calls.append(path)
+            return original_build(path)
+
+        monkeypatch.setattr(
+            web_server,
+            "build_image_usage_snapshot",
+            wrapped_build,
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        first = client.get("/api/admin/image-usage")
+        cache = client.app.state.viewer_context.image_usage_cache
+        initial_snapshot = cache._snapshot
+        initial_fingerprint = cache._fingerprint
+        navigation_responses = [
+            client.get("/api/threads", params={"detail": "full"}),
+            client.get("/api/threads/101/201/posts", params={"page": 1}),
+            client.get(
+                "/api/admin/post-version-threads",
+                params={"detail": "full"},
+            ),
+            client.get("/api/admin/threads/101/201/post-versions"),
+            client.get("/api/databases/archive%3A101_201/schema"),
+        ]
+        returned = client.get("/api/admin/image-usage")
+
+        assert first.status_code == 200
+        assert all(response.status_code == 200 for response in navigation_responses)
+        assert returned.status_code == 200
+        assert calls == [output_dir]
+        assert cache._snapshot is initial_snapshot
+        assert cache._fingerprint == initial_fingerprint
+        assert archive_path.read_bytes() == archive_before
+
+        ThreadArchiveStore(thread_dir).upsert_page(
+            1,
+            {"totalPage": 1, "result": [_post(1, "正文已真实更新")]},
+            observed_at="2026-07-11T01:00:00+00:00",
+        )
+        changed = client.get("/api/admin/image-usage")
+
+        assert changed.status_code == 200
+        assert calls == [output_dir, output_dir]
+
+    def test_full_thread_read_does_not_migrate_invalid_archive(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        invalid_dir = output_dir / "101_all"
+        invalid_dir.mkdir(parents=True)
+        archive_path = invalid_dir / "archive.sqlite3"
+        sqlite3.connect(archive_path).close()
+        archive_before = archive_path.read_bytes()
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/api/threads", params={"detail": "full"})
+
+        assert response.status_code == 200
+        assert response.json()["items"][0]["status"] == "invalid"
+        assert archive_path.read_bytes() == archive_before
+        with closing(sqlite3.connect(archive_path)) as connection:
+            tables = connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type = 'table'"
+            ).fetchall()
+        assert tables == []
+
     def test_reuses_memory_cache_until_refresh(
         self,
         tmp_path: Path,

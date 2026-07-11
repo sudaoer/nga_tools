@@ -149,7 +149,13 @@ a:hover {
 }
 
 .version-thread-filter input {
+  flex: 0 0 auto;
+  width: auto;
   margin: 0;
+}
+
+.version-thread-filter span {
+  white-space: nowrap;
 }
 
 h1,

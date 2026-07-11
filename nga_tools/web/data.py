@@ -280,7 +280,6 @@ def _has_word_count_columns(connection: sqlite3.Connection) -> bool:
 
 
 def _read_archive_stats(db_path: Path) -> ArchiveStats:
-    ThreadArchiveStore(db_path.parent).ensure_schema()
     latest_cte = """
         WITH latest AS (
             SELECT
@@ -927,7 +926,6 @@ def read_posts(
     query: str = "",
     lou_from: Optional[int] = None,
     lou_to: Optional[int] = None,
-    ensure_schema: bool = True,
 ) -> PostsResult:
     if page < 1:
         raise ValueError("page必须大于等于1。")
@@ -940,8 +938,6 @@ def read_posts(
     if not db_path.is_file():
         raise ThreadUnavailableError("缺少archive.sqlite3。")
     archive_store = ThreadArchiveStore(thread_folder)
-    if ensure_schema:
-        archive_store.ensure_schema()
     overlays = load_post_overlays(thread_folder)
 
     page_size = ORIGINAL_POSTS_PER_PAGE
@@ -1058,7 +1054,6 @@ def _archive_store_for_thread(
     if not db_path.is_file():
         raise ThreadUnavailableError("缺少archive.sqlite3。")
     archive_store = ThreadArchiveStore(thread_folder)
-    archive_store.ensure_schema()
     return archive_store, thread_folder, aid
 
 

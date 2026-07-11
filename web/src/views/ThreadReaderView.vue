@@ -38,8 +38,6 @@ const SORT_KEYS: SortKey[] = [
   'title',
   'author',
 ]
-const THREAD_STATUSES: ThreadStatus[] = ['ready', 'needs_migration', 'invalid']
-
 const threads = ref<ThreadSummary[]>([])
 const selectedThread = ref<ThreadSummary | null>(null)
 const posts = ref<PostsResult | null>(null)
@@ -66,7 +64,6 @@ const overlayEditor = reactive({
 
 const listFilter = reactive({
   q: '',
-  status: 'all' as ThreadStatus | 'all',
   sortBy: 'authorUpdated' as SortKey,
   sortDirection: 'desc' as SortDirection,
 })
@@ -93,9 +90,6 @@ const sortLabels: Record<SortKey, string> = {
 const visibleThreads = computed(() => {
   const keyword = listFilter.q.trim().toLowerCase()
   const filtered = threads.value.filter((thread) => {
-    if (listFilter.status !== 'all' && thread.status !== listFilter.status) {
-      return false
-    }
     if (!keyword) {
       return true
     }
@@ -409,10 +403,6 @@ function integerFromParam(value: string | null): number | null {
   return numberValue
 }
 
-function isThreadStatus(value: string | null): value is ThreadStatus {
-  return value !== null && THREAD_STATUSES.includes(value as ThreadStatus)
-}
-
 function isSortKey(value: string | null): value is SortKey {
   return value !== null && SORT_KEYS.includes(value as SortKey)
 }
@@ -438,10 +428,6 @@ function hydrateStateFromUrl(): void {
   postQuery.louTo = params.get('lou_to') || ''
   listFilter.q = params.get('list_q') || ''
 
-  const status = params.get('status')
-  if (status === 'all' || isThreadStatus(status)) {
-    listFilter.status = status
-  }
   const sortBy = params.get('sort')
   if (isSortKey(sortBy)) {
     listFilter.sortBy = sortBy
@@ -471,9 +457,6 @@ function syncUrl(): void {
   setParam(params, 'lou_from', postQuery.louFrom.trim())
   setParam(params, 'lou_to', postQuery.louTo.trim())
   setParam(params, 'list_q', listFilter.q.trim())
-  if (listFilter.status !== 'all') {
-    params.set('status', listFilter.status)
-  }
   if (listFilter.sortBy !== 'authorUpdated') {
     params.set('sort', listFilter.sortBy)
   }
@@ -695,7 +678,6 @@ watch(
     postQuery.louFrom,
     postQuery.louTo,
     listFilter.q,
-    listFilter.status,
     listFilter.sortBy,
     listFilter.sortDirection,
   ],
@@ -727,12 +709,6 @@ onMounted(() => {
 
       <div class="filters">
         <input v-model="listFilter.q" type="search" placeholder="搜索标题、名称、作者或tid" />
-        <select v-model="listFilter.status">
-          <option value="all">全部状态</option>
-          <option value="ready">可阅读</option>
-          <option value="needs_migration">需迁移</option>
-          <option value="invalid">无效</option>
-        </select>
         <select v-model="listFilter.sortBy" aria-label="排序字段">
           <option v-for="key in SORT_KEYS" :key="key" :value="key">
             按{{ sortLabels[key] }}

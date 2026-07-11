@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import PaginationControls from '../components/PaginationControls.vue'
 import {
   fetchImageUsage,
   fetchImageUsageDetail,
@@ -180,17 +181,16 @@ async function setSort(metric: ImageUsageSort): Promise<void> {
   await load(false)
 }
 
-async function previousPage(): Promise<void> {
-  offset.value = Math.max(0, offset.value - PAGE_SIZE)
-  syncUrl()
-  await load(false)
-}
-
-async function nextPage(): Promise<void> {
-  if (result.value === null || offset.value + PAGE_SIZE >= result.value.total) {
+async function goToPage(page: number): Promise<void> {
+  if (result.value === null) {
     return
   }
-  offset.value += PAGE_SIZE
+  const nextPage = Math.min(Math.max(Math.floor(page), 1), totalPages.value)
+  const nextOffset = (nextPage - 1) * PAGE_SIZE
+  if (nextOffset === offset.value) {
+    return
+  }
+  offset.value = nextOffset
   syncUrl()
   await load(false)
 }
@@ -333,6 +333,14 @@ onMounted(async () => {
           <span>第 {{ currentPage }} / {{ totalPages }} 页</span>
         </div>
 
+        <PaginationControls
+          :current-page="currentPage"
+          :total-pages="totalPages"
+          :disabled="loading"
+          top
+          @change="goToPage"
+        />
+
         <div v-if="result.items.length === 0" class="empty-state reader-empty">
           图片索引中没有可显示的图片。
         </div>
@@ -361,17 +369,12 @@ onMounted(async () => {
           </button>
         </div>
 
-        <div v-if="result.total > PAGE_SIZE" class="pager">
-          <button type="button" :disabled="loading || offset <= 0" @click="previousPage">上一页</button>
-          <span>第 {{ currentPage }} / {{ totalPages }} 页</span>
-          <button
-            type="button"
-            :disabled="loading || offset + PAGE_SIZE >= result.total"
-            @click="nextPage"
-          >
-            下一页
-          </button>
-        </div>
+        <PaginationControls
+          :current-page="currentPage"
+          :total-pages="totalPages"
+          :disabled="loading"
+          @change="goToPage"
+        />
         <div v-if="loading" class="image-usage-loading">正在更新统计...</div>
       </template>
     </template>

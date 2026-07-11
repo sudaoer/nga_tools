@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import PaginationControls from '../components/PaginationControls.vue'
 import {
   fetchDatabaseSchema,
   fetchDatabases,
@@ -413,19 +414,16 @@ function setSort(column: ColumnInfo): void {
   void loadRows(true)
 }
 
-function previousPage(): void {
-  if (!rows.value || rows.value.offset <= 0) {
+function goToPage(page: number): void {
+  if (!rows.value) {
     return
   }
-  rowQuery.offset = Math.max(0, rows.value.offset - rows.value.limit)
-  void loadRows()
-}
-
-function nextPage(): void {
-  if (!rows.value || rows.value.offset + rows.value.limit >= rows.value.total) {
+  const nextPage = Math.min(Math.max(Math.floor(page), 1), totalPages.value)
+  const nextOffset = (nextPage - 1) * rows.value.limit
+  if (nextOffset === rowQuery.offset) {
     return
   }
-  rowQuery.offset = rows.value.offset + rows.value.limit
+  rowQuery.offset = nextOffset
   void loadRows()
 }
 
@@ -595,6 +593,15 @@ onMounted(() => {
           <span>第 {{ currentPage }} / {{ totalPages }} 页</span>
         </div>
 
+        <PaginationControls
+          v-if="rows"
+          :current-page="currentPage"
+          :total-pages="totalPages"
+          :disabled="loadingRows"
+          top
+          @change="goToPage"
+        />
+
         <div v-if="rows" class="database-table-wrap">
           <table class="database-table">
             <thead>
@@ -632,17 +639,13 @@ onMounted(() => {
           </table>
         </div>
 
-        <div v-if="rows && rows.total > rows.limit" class="pager">
-          <button type="button" :disabled="rows.offset <= 0" @click="previousPage">上一页</button>
-          <span>第 {{ currentPage }} / {{ totalPages }} 页</span>
-          <button
-            type="button"
-            :disabled="rows.offset + rows.limit >= rows.total"
-            @click="nextPage"
-          >
-            下一页
-          </button>
-        </div>
+        <PaginationControls
+          v-if="rows"
+          :current-page="currentPage"
+          :total-pages="totalPages"
+          :disabled="loadingRows"
+          @change="goToPage"
+        />
 
         <div v-if="detailError" class="error-box">{{ detailError }}</div>
         <div v-else-if="loadingDetail" class="empty-state reader-empty">正在读取行详情...</div>
