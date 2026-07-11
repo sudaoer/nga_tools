@@ -14,9 +14,11 @@ from nga_tools.backup.floor_models import (
     FLOOR_MAP_HASH_ALGORITHM,
     FLOOR_MAP_VERSION,
     FloorMapEntry,
+    RecoveredMissingPost,
     StoredFloorMap,
 )
 from nga_tools.backup.post_version_selection import write_selections
+from nga_tools.backup.processing_state import BackupProcessingState
 from nga_tools.core.hashing import hash_text
 from nga_tools.word_count import WORD_COUNT_VERSION
 
@@ -749,3 +751,242 @@ class ThreadArchiveStoreTest:
         assert first.post_versions_inserted == 1
         assert second.page_snapshots_inserted == 0
         assert second.post_versions_inserted == 0
+
+    def test_processing_state_and_pending_images_round_trip_atomically(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            initial = store.read_backup_processing_snapshot()
+            state = BackupProcessingState(
+                format_version=1,
+                processed_archive_revision=initial.change_state.archive_revision,
+                processed_floor_map_revision=(
+                    initial.change_state.floor_map_revision
+                ),
+                page_count=2,
+                author_total_lou_count=21,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
+                floor_map_format_version=1,
+                floor_map_generation_version=1,
+                floor_map_hash_algorithm="sha256",
+                image_reference_extractor_version=1,
+                completed_at="2026-07-11T00:00:00+00:00",
+            )
+
+            assert store.commit_backup_processing_state(
+                state,
+                {"https://example.invalid/b.png", "https://example.invalid/a.png"},
+            )
+            stored = store.read_backup_processing_snapshot()
+            store.clear_backup_processing_state()
+            cleared = store.read_backup_processing_snapshot()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                table_names = {
+                    row[0]
+                    for row in connection.execute(
+                        """
+                        SELECT name
+                        FROM sqlite_schema
+                        WHERE type = 'table' AND name IN (
+                            'archive_change_state',
+                            'backup_processing_state',
+                            'backup_pending_images'
+                        )
+                        """
+                    )
+                }
+
+        assert stored.processing_state == state
+        assert stored.pending_image_urls == (
+            "https://example.invalid/a.png",
+            "https://example.invalid/b.png",
+        )
+        assert cleared.processing_state is None
+        assert cleared.pending_image_urls == ()
+        assert table_names == {
+            "archive_change_state",
+            "backup_processing_state",
+            "backup_pending_images",
+        }
+
+    def test_page_revision_tracks_only_effective_processing_inputs(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            base_page = {
+                "totalPage": 1,
+                "result": [
+                    {
+                        "lou": 1,
+                        "pid": 1001,
+                        "content": "same body",
+                        "author": {"uid": 456},
+                        "attches": [],
+                    }
+                ],
+            }
+
+            first = store.upsert_page(
+                1,
+                base_page,
+                observed_at="2026-07-11T01:00:00+00:00",
+            )
+            after_first = store.read_backup_processing_snapshot().change_state
+            repeated = store.upsert_page(
+                1,
+                base_page,
+                observed_at="2026-07-11T02:00:00+00:00",
+            )
+            after_repeated = store.read_backup_processing_snapshot().change_state
+            changed_attachments = store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {
+                            "lou": 1,
+                            "pid": 1001,
+                            "content": "same body",
+                            "author": {"uid": 456},
+                            "attches": [
+                                {
+                                    "type": "img",
+                                    "attachurl": "mon_202607/11/new.png",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                observed_at="2026-07-11T03:00:00+00:00",
+            )
+            after_attachments = (
+                store.read_backup_processing_snapshot().change_state
+            )
+            changed_author = store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {
+                            "lou": 1,
+                            "pid": 1001,
+                            "content": "same body",
+                            "author": {"uid": -1},
+                            "attches": [
+                                {
+                                    "type": "img",
+                                    "attachurl": "mon_202607/11/new.png",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                observed_at="2026-07-11T04:00:00+00:00",
+            )
+            after_author = store.read_backup_processing_snapshot().change_state
+
+        assert first.effective_processing_inputs_changed
+        assert not repeated.effective_processing_inputs_changed
+        assert changed_attachments.effective_processing_inputs_changed
+        assert changed_author.effective_processing_inputs_changed
+        assert after_first.archive_revision == 1
+        assert after_repeated.archive_revision == 1
+        assert after_attachments.archive_revision == 2
+        assert after_author.archive_revision == 3
+
+    def test_historical_version_becoming_latest_bumps_archive_revision(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            for observed_at, content in (
+                ("2026-07-11T01:00:00+00:00", "version A"),
+                ("2026-07-11T02:00:00+00:00", "version B"),
+                ("2026-07-11T03:00:00+00:00", "version A"),
+            ):
+                result = store.upsert_page(
+                    1,
+                    {
+                        "totalPage": 1,
+                        "result": [
+                            {"lou": 1, "pid": 1001, "content": content}
+                        ],
+                    },
+                    observed_at=observed_at,
+                )
+                assert result.effective_processing_inputs_changed
+
+            snapshot = store.read_backup_processing_snapshot()
+            records = store.read_latest_post_records()
+
+        assert snapshot.change_state.archive_revision == 3
+        assert records[0]["post"]["content"] == "version A"
+
+    def test_floor_map_and_recovered_body_increment_their_revisions(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            store.replace_floor_map(
+                _stored_floor_map(
+                    [{"pid": 1001, "author_lou": 1, "original_lou": 10}]
+                )
+            )
+            after_floor_map = store.read_backup_processing_snapshot().change_state
+            recovered: RecoveredMissingPost = {
+                "original_pid": 2002,
+                "original_lou": 11,
+                "content": "recovered body",
+                "raw_post": {
+                    "lou": 11,
+                    "pid": 2002,
+                    "content": "recovered body",
+                    "author": {"uid": -1},
+                    "attches": [],
+                },
+            }
+            assert store.upsert_recovered_posts({2: recovered}) == 1
+            after_recovery = store.read_backup_processing_snapshot().change_state
+            assert store.upsert_recovered_posts({2: recovered}) == 0
+            after_repeat = store.read_backup_processing_snapshot().change_state
+
+        assert after_floor_map.floor_map_revision == 1
+        assert after_floor_map.archive_revision == 0
+        assert after_recovery.archive_revision == 1
+        assert after_repeat.archive_revision == 1
+
+    def test_processing_state_commit_rejects_stale_archive_revision(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            initial = store.read_backup_processing_snapshot()
+            stale_state = BackupProcessingState(
+                format_version=1,
+                processed_archive_revision=initial.change_state.archive_revision,
+                processed_floor_map_revision=(
+                    initial.change_state.floor_map_revision
+                ),
+                page_count=1,
+                author_total_lou_count=1,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
+                floor_map_format_version=1,
+                floor_map_generation_version=1,
+                floor_map_hash_algorithm="sha256",
+                image_reference_extractor_version=1,
+                completed_at="2026-07-11T00:00:00+00:00",
+            )
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [{"lou": 1, "pid": 1001, "content": "new"}],
+                },
+            )
+
+            committed = store.commit_backup_processing_state(
+                stale_state,
+                {"https://example.invalid/stale.png"},
+            )
+            snapshot = store.read_backup_processing_snapshot()
+
+        assert not committed
+        assert snapshot.processing_state is None
+        assert snapshot.pending_image_urls == ()

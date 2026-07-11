@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from typing import Callable
@@ -9,7 +10,12 @@ from unittest.mock import patch
 
 import pytest
 
-from nga_tools.backup.archive import backup_thread, backup_thread_sub
+from nga_tools.backup import archive as archive_module
+from nga_tools.backup.archive import (
+    FloorMapProcessingResult,
+    backup_thread,
+    backup_thread_sub,
+)
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_map import FloorLabels, FloorMapBuildResult
 from nga_tools.backup.floor_models import RecoveredMissingPost
@@ -25,6 +31,8 @@ from nga_tools.backup.post_html import (
     find_missing_lou,
     merge_missing_lou,
 )
+from nga_tools.backup.post_overlay import save_post_overlay
+from nga_tools.backup.post_version_selection import write_selections
 from nga_tools.ngaclient.client import NGAPageError
 from nga_tools.timing import use_timing_log
 
@@ -36,6 +44,7 @@ class MutableFakeClient:
             {"lou": 2, "pid": 1002, "content": "second"},
         ]
         self.vrows: int | None = 3
+        self.total_page = 1
 
     def get_page_count(self, tid: int, aid: int | None) -> int:
         del tid, aid
@@ -47,10 +56,10 @@ class MutableFakeClient:
         aid: int | None,
         page: int,
     ) -> dict[str, object]:
-        del tid, page
+        del tid
         data: dict[str, object] = {
-            "currentPage": 1,
-            "totalPage": 1,
+            "currentPage": page,
+            "totalPage": self.total_page,
             "result": [dict(post) for post in self.posts],
         }
         if aid is not None and self.vrows is not None:
@@ -84,6 +93,12 @@ def _run_backup(
     floor_map_result: FloorMapBuildResult | None = None,
     parsed_lous: list[list[int]] | None = None,
     downloaded_urls: list[list[str]] | None = None,
+    failed_download_urls: set[str] | None = None,
+    floor_map_cacheable: bool = True,
+    aid: int | None = 456,
+    full_processing_calls: list[str] | None = None,
+    captured_output: io.StringIO | None = None,
+    download_error: Exception | None = None,
 ) -> None:
     floor_map_result = floor_map_result or FloorMapBuildResult(
         FloorLabels.plain(),
@@ -91,6 +106,7 @@ def _run_backup(
     )
 
     original_parse = parse_post_htmls_for_images
+    original_run_full_processing = archive_module._run_full_processing
 
     def capture_parse(htmls: list[PostHtml]) -> list[ParsedPostHtml]:
         if parsed_lous is not None:
@@ -105,7 +121,26 @@ def _run_backup(
         del tid, aid
         if downloaded_urls is not None:
             downloaded_urls.append([task["url"] for task in tasks])
-        return {"succeeded": [], "failed": []}
+        if download_error is not None:
+            raise download_error
+        failed_urls = failed_download_urls or set()
+        return {
+            "succeeded": [
+                {"url": task["url"], "save_path": "", "success": True}
+                for task in tasks
+                if task["url"] not in failed_urls
+            ],
+            "failed": [
+                {"url": task["url"], "save_path": "", "success": False}
+                for task in tasks
+                if task["url"] in failed_urls
+            ],
+        }
+
+    def capture_full_processing(*args: object, **kwargs: object) -> None:
+        if full_processing_calls is not None:
+            full_processing_calls.append("full")
+        original_run_full_processing(*args, **kwargs)  # type: ignore[arg-type]
 
     with ExitStack() as stack:
         stack.enter_context(patch("nga_tools.backup.archive.NGAClient", return_value=client))
@@ -118,7 +153,16 @@ def _run_backup(
         stack.enter_context(
             patch(
                 "nga_tools.backup.archive._build_floor_map_for_post_refs",
-                return_value=floor_map_result,
+                return_value=FloorMapProcessingResult(
+                    floor_map_result,
+                    cacheable=floor_map_cacheable,
+                ),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "nga_tools.backup.archive._run_full_processing",
+                side_effect=capture_full_processing,
             )
         )
         stack.enter_context(
@@ -135,11 +179,16 @@ def _run_backup(
             )
         )
         stack.enter_context(patch("builtins.print"))
-        stack.enter_context(patch("sys.stdout", new_callable=io.StringIO))
+        stack.enter_context(
+            patch(
+                "sys.stdout",
+                new=captured_output if captured_output is not None else io.StringIO(),
+            )
+        )
         if mode == "all":
-            backup_thread(123, 456, write_json=write_json)
+            backup_thread(123, aid, write_json=write_json)
         else:
-            backup_thread_sub(123, 456, write_json=write_json)
+            backup_thread_sub(123, aid, write_json=write_json)
 
 
 class ImageReferenceCollectionTest:
@@ -352,10 +401,366 @@ class BackupRawArchiveTest:
         downloaded_urls: list[list[str]] = []
         thread_dir = tmp_path / "123_456"
 
-        _run_backup(thread_dir, client, downloaded_urls=downloaded_urls)
-        _run_backup(thread_dir, client, downloaded_urls=downloaded_urls)
+        _run_backup(
+            thread_dir,
+            client,
+            downloaded_urls=downloaded_urls,
+            failed_download_urls={image_url},
+        )
+        _run_backup(
+            thread_dir,
+            client,
+            downloaded_urls=downloaded_urls,
+            failed_download_urls={image_url},
+        )
 
         assert downloaded_urls == [[image_url], [image_url]]
+
+    def test_second_unchanged_sub_uses_thread_fast_path(self, tmp_path: Path) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        parsed_lous: list[list[int]] = []
+        full_processing_calls: list[str] = []
+        output = io.StringIO()
+
+        _run_backup(
+            thread_dir,
+            client,
+            parsed_lous=parsed_lous,
+            full_processing_calls=full_processing_calls,
+        )
+        _run_backup(
+            thread_dir,
+            client,
+            parsed_lous=parsed_lous,
+            full_processing_calls=full_processing_calls,
+            captured_output=output,
+        )
+
+        snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+        assert full_processing_calls == ["full"]
+        assert parsed_lous == [[1, 2]]
+        assert snapshot.processing_state is not None
+        assert "归档与派生输入未变化，跳过完整处理" in output.getvalue()
+
+    def test_full_backup_warms_state_for_following_sub(self, tmp_path: Path) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        full_processing_calls: list[str] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            mode="all",
+            full_processing_calls=full_processing_calls,
+        )
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+        )
+
+        assert full_processing_calls == ["full"]
+
+    @pytest.mark.parametrize("changed_input", ["attachments", "page_count", "vrows"])
+    def test_remote_derived_input_changes_invalidate_fast_path(
+        self,
+        tmp_path: Path,
+        changed_input: str,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        full_processing_calls: list[str] = []
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+        )
+
+        if changed_input == "attachments":
+            client.posts[0]["attches"] = [
+                {
+                    "type": "img",
+                    "attachurl": "mon_202607/11/new.png",
+                }
+            ]
+        elif changed_input == "page_count":
+            client.total_page = 2
+        else:
+            client.vrows = 4
+
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+        )
+
+        assert full_processing_calls == ["full", "full"]
+
+    @pytest.mark.parametrize(
+        "changed_input",
+        ["overlay", "selection", "algorithm", "image_extractor"],
+    )
+    def test_local_derived_input_changes_invalidate_fast_path(
+        self,
+        tmp_path: Path,
+        changed_input: str,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        full_processing_calls: list[str] = []
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+        )
+
+        if changed_input == "overlay":
+            save_post_overlay(thread_dir, 1, "overlay replacement")
+            _run_backup(
+                thread_dir,
+                client,
+                full_processing_calls=full_processing_calls,
+            )
+        elif changed_input == "selection":
+            write_selections(
+                thread_dir,
+                {
+                    1: {
+                        "version_id": 999,
+                        "source_hash": "not-a-real-version",
+                        "selected_at": "2026-07-11T00:00:00+00:00",
+                    }
+                },
+            )
+            _run_backup(
+                thread_dir,
+                client,
+                full_processing_calls=full_processing_calls,
+            )
+        elif changed_input == "algorithm":
+            with patch(
+                "nga_tools.backup.archive.FLOOR_MAP_GENERATION_VERSION",
+                999,
+            ):
+                _run_backup(
+                    thread_dir,
+                    client,
+                    full_processing_calls=full_processing_calls,
+                )
+        else:
+            with patch(
+                "nga_tools.backup.archive.IMAGE_REFERENCE_EXTRACTOR_VERSION",
+                999,
+            ):
+                _run_backup(
+                    thread_dir,
+                    client,
+                    full_processing_calls=full_processing_calls,
+                )
+
+        assert full_processing_calls == ["full", "full"]
+
+    def test_original_thread_backup_never_uses_author_fast_path(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_all"
+        client = MutableFakeClient()
+        full_processing_calls: list[str] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            aid=None,
+            full_processing_calls=full_processing_calls,
+        )
+        _run_backup(
+            thread_dir,
+            client,
+            aid=None,
+            full_processing_calls=full_processing_calls,
+        )
+
+        snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+        assert full_processing_calls == ["full", "full"]
+        assert snapshot.processing_state is None
+
+    def test_successful_pending_retry_clears_queue_without_history_scan(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        image_url = (
+            "https://img.nga.178.com/attachments/mon_202506/06/retry.png"
+        )
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": f"[img]{image_url}[/img]"}
+        ]
+        client.vrows = 2
+        downloaded_urls: list[list[str]] = []
+        full_processing_calls: list[str] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            downloaded_urls=downloaded_urls,
+            failed_download_urls={image_url},
+            full_processing_calls=full_processing_calls,
+        )
+        _run_backup(
+            thread_dir,
+            client,
+            downloaded_urls=downloaded_urls,
+            full_processing_calls=full_processing_calls,
+        )
+        after_success = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+        _run_backup(
+            thread_dir,
+            client,
+            downloaded_urls=downloaded_urls,
+            full_processing_calls=full_processing_calls,
+        )
+
+        assert full_processing_calls == ["full"]
+        assert downloaded_urls == [[image_url], [image_url], []]
+        assert after_success.pending_image_urls == ()
+
+    def test_unresolved_missing_floor_does_not_write_fast_path_state(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": "first"},
+            {"lou": 3, "pid": 1003, "content": "third"},
+        ]
+        client.vrows = 4
+        full_processing_calls: list[str] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+        )
+        first_snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+        )
+
+        assert first_snapshot.processing_state is None
+        assert full_processing_calls == ["full", "full"]
+
+    def test_floor_map_failure_does_not_write_fast_path_state(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+
+        _run_backup(thread_dir, client, floor_map_cacheable=False)
+
+        snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+        assert snapshot.processing_state is None
+
+    def test_interrupted_full_processing_leaves_no_fast_path_state(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+
+        with pytest.raises(RuntimeError, match="download interrupted"):
+            _run_backup(
+                thread_dir,
+                MutableFakeClient(),
+                download_error=RuntimeError("download interrupted"),
+            )
+
+        snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+        assert snapshot.processing_state is None
+        assert snapshot.pending_image_urls == ()
+
+    def test_invalid_processing_state_is_treated_as_fast_path_miss(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        full_processing_calls: list[str] = []
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+        )
+        with sqlite3.connect(thread_dir / "archive.sqlite3") as connection:
+            connection.execute(
+                "UPDATE backup_processing_state SET completed_at = ''"
+            )
+            connection.commit()
+        output = io.StringIO()
+
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+            captured_output=output,
+        )
+
+        snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+        assert full_processing_calls == ["full", "full"]
+        assert snapshot.processing_state is not None
+        assert "增量快路径状态无效，改为完整处理" in output.getvalue()
+
+    def test_changed_archive_then_downstream_failure_forces_next_full_run(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        full_processing_calls: list[str] = []
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+        )
+        client.posts[1]["content"] = "changed before failure"
+
+        with pytest.raises(RuntimeError, match="downstream failed"):
+            _run_backup(
+                thread_dir,
+                client,
+                full_processing_calls=full_processing_calls,
+                download_error=RuntimeError("downstream failed"),
+            )
+        failed_snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+        )
+
+        assert failed_snapshot.processing_state is None
+        assert full_processing_calls == ["full", "full", "full"]
 
     def test_archive_keeps_historical_lou_when_latest_page_loses_it(
         self,
@@ -444,6 +849,27 @@ class BackupRawArchiveTest:
             assert f"阶段：{stage_name}，开始时间：" in timing_text
             assert f"阶段：{stage_name}，结束时间：" in timing_text
         assert "指标：图片引用记录数，值：2\n" in timing_text
+
+    def test_fast_path_timing_omits_full_archive_and_image_stages(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        _run_backup(thread_dir, client)
+        timing_path = tmp_path / "fast.timing.log"
+
+        with use_timing_log(timing_path, task_name="backup sub fast"):
+            _run_backup(thread_dir, client)
+
+        timing_text = timing_path.read_text(encoding="utf-8")
+        assert "阶段：增量快路径判定，开始时间：" in timing_text
+        assert "阶段：未完成图片重试，开始时间：" in timing_text
+        assert "指标：增量快路径命中，值：1\n" in timing_text
+        assert "指标：增量有效变更页数，值：0\n" in timing_text
+        assert "阶段：读取完整归档记录，开始时间：" not in timing_text
+        assert "阶段：正文解析与图片处理，开始时间：" not in timing_text
+        assert "阶段：图片缓存文件校验，开始时间：" not in timing_text
 
 
 def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(

@@ -874,7 +874,7 @@ class WebDatabaseViewerTest:
         assert {"forum_threads", "image_index", "archive:101_201"} <= ids
         by_id = {item["id"]: item for item in payload["items"]}
         assert by_id["forum_threads"]["relativePath"] == "forum_threads.sqlite3"
-        assert by_id["archive:101_201"]["tableCount"] == 8
+        assert by_id["archive:101_201"]["tableCount"] == 11
 
     def test_databases_route_uses_cache_until_refresh(
         self,
@@ -928,7 +928,13 @@ class WebDatabaseViewerTest:
 
         assert schema_response.status_code == 200
         table_names = {item["name"] for item in schema_response.json()["tables"]}
-        assert {"page_snapshots", "post_versions"} <= table_names
+        assert {
+            "page_snapshots",
+            "post_versions",
+            "archive_change_state",
+            "backup_processing_state",
+            "backup_pending_images",
+        } <= table_names
 
         rows_response = client.get(
             "/api/databases/archive%3A101_201/tables/post_versions/rows",
