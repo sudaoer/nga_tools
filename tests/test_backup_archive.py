@@ -901,13 +901,15 @@ class BackupRawArchiveTest:
             )
             connection.commit()
         output = io.StringIO()
+        timing_path = tmp_path / "invalid-state.timing.log"
 
-        _run_backup(
-            thread_dir,
-            client,
-            full_processing_calls=full_processing_calls,
-            captured_output=output,
-        )
+        with use_timing_log(timing_path, task_name="invalid state"):
+            _run_backup(
+                thread_dir,
+                client,
+                full_processing_calls=full_processing_calls,
+                captured_output=output,
+            )
 
         snapshot = ThreadArchiveStore(
             thread_dir
@@ -915,6 +917,10 @@ class BackupRawArchiveTest:
         assert full_processing_calls == ["full", "full"]
         assert snapshot.processing_state is not None
         assert "增量快路径状态无效，改为完整处理" in output.getvalue()
+        assert (
+            "标签：增量快路径结果，值：state_invalid\n"
+            in timing_path.read_text(encoding="utf-8")
+        )
 
     def test_changed_archive_then_downstream_failure_forces_next_full_run(
         self,
@@ -1055,6 +1061,7 @@ class BackupRawArchiveTest:
         assert "阶段：未完成缺失楼重试，开始时间：" in timing_text
         assert "阶段：未完成图片重试，开始时间：" in timing_text
         assert "指标：增量快路径命中，值：1\n" in timing_text
+        assert "标签：增量快路径结果，值：hit\n" in timing_text
         assert "指标：增量有效变更页数，值：0\n" in timing_text
         assert "指标：待恢复缺失楼数，值：0\n" in timing_text
         assert "指标：缺失楼重试引发完整处理，值：0\n" in timing_text

@@ -8,6 +8,7 @@ from nga_tools.config import get_config
 
 WARNING_LOG_FILENAME = "warnings.log"
 TIMING_LOG_FILENAME = "timing.log"
+BATCH_TIMING_LOG_FILENAME = "batch_timing.log"
 
 _CREATED_FOLDERS: set[str] = set()
 
@@ -52,6 +53,10 @@ def warning_log_path(tid: int, aid: int | None) -> Path:
 
 def timing_log_path(tid: int, aid: int | None) -> Path:
     return Path(get_folder(tid, aid)) / TIMING_LOG_FILENAME
+
+
+def batch_timing_log_path() -> Path:
+    return Path(get_config().output_dir) / BATCH_TIMING_LOG_FILENAME
 
 
 def list_files_in_folder(folder: str, ends_with: str = "") -> list[str]:

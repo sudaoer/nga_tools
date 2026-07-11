@@ -4,7 +4,7 @@ import asyncio
 import os
 import traceback
 from collections.abc import Callable
-from typing import NotRequired, Optional, TypedDict
+from typing import Literal, NotRequired, Optional, TypedDict
 
 import aiohttp
 
@@ -17,11 +17,24 @@ class DownloadTask(TypedDict):
     save_path: str
 
 
+DownloadFailureKind = Literal[
+    "http_4xx",
+    "http_5xx",
+    "timeout",
+    "connection",
+    "payload",
+    "unexpected_download",
+    "image_store",
+]
+
+
 class DownloadFileResult(TypedDict):
     url: str
     save_path: str
     success: bool
     error: NotRequired[str]
+    failure_kind: NotRequired[DownloadFailureKind]
+    http_status: NotRequired[int]
 
 
 class DownloadSummary(TypedDict):
@@ -92,13 +105,27 @@ def download_files(
                 is_status_retry = status in retry_statuses if status is not None else True
                 can_retry = attempt < retries and is_status_retry
                 if not can_retry:
-                    report_warning(f"Download failed, skipping {url}: {error}")
-                    return {
+                    failure_kind: DownloadFailureKind
+                    if isinstance(error, aiohttp.ClientResponseError):
+                        failure_kind = (
+                            "http_4xx" if 400 <= error.status < 500 else "http_5xx"
+                        )
+                    elif isinstance(error, asyncio.TimeoutError):
+                        failure_kind = "timeout"
+                    elif isinstance(error, aiohttp.ClientConnectorError):
+                        failure_kind = "connection"
+                    else:
+                        failure_kind = "payload"
+                    result: DownloadFileResult = {
                         "url": url,
                         "save_path": save_path,
                         "success": False,
                         "error": str(error),
+                        "failure_kind": failure_kind,
                     }
+                    if status is not None:
+                        result["http_status"] = status
+                    return result
                 wait = backoff_factor * (2**attempt)
                 report_warning(
                     f"Download failed ({error}), retrying {attempt + 1}/{retries} "
@@ -107,29 +134,29 @@ def download_files(
                 await asyncio.sleep(wait)
                 attempt += 1
             except Exception as error:
-                report_warning(
-                    f"Unexpected error downloading {url}, skipping: {error}\n"
-                    f"{traceback.format_exc().rstrip()}"
-                )
                 return {
                     "url": url,
                     "save_path": save_path,
                     "success": False,
-                    "error": str(error),
+                    "error": (
+                        f"{error}\n{traceback.format_exc().rstrip()}"
+                    ),
+                    "failure_kind": "unexpected_download",
                 }
         if last_exc:
-            report_warning(f"Exhausted retries, skipping {url}: {last_exc}")
             return {
                 "url": url,
                 "save_path": save_path,
                 "success": False,
                 "error": str(last_exc),
+                "failure_kind": "unexpected_download",
             }
         return {
             "url": url,
             "save_path": save_path,
             "success": False,
             "error": "unknown",
+            "failure_kind": "unexpected_download",
         }
 
     async def download_all(url_filename_lists: list[DownloadTask]) -> DownloadSummary:

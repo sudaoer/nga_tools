@@ -445,4 +445,4 @@ def test_shared_validation_cache_reports_batch_local_persistent_hits(
     assert first.stats.persistent_cache_hit_path_count == 1
     assert second.stats.persistent_cache_query_path_count == 0
     assert second.stats.persistent_cache_hit_path_count == 0
-    assert second.stats.batch_validation_cache_hit_path_count == 1
+    assert second.stats.memory_cache_hit_path_count == 1

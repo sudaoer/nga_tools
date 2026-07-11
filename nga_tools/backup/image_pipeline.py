@@ -115,8 +115,8 @@ def _record_image_preparation_metrics(
     record_timing_metric("图片唯一物理路径数", stats.unique_physical_path_count)
     record_timing_metric("图片线程内路径去重数", stats.intra_thread_path_dedup_count)
     record_timing_metric(
-        "图片批量校验缓存命中路径数",
-        stats.batch_validation_cache_hit_path_count,
+        "图片内存缓存命中路径数",
+        stats.memory_cache_hit_path_count,
     )
     record_timing_metric("图片深度校验路径数", stats.deep_validation_path_count)
     record_timing_metric(
@@ -126,6 +126,10 @@ def _record_image_preparation_metrics(
     record_timing_metric(
         "图片持久化缓存查询路径数",
         stats.persistent_cache_query_path_count,
+    )
+    record_timing_metric(
+        "图片校验文件缺失路径数",
+        stats.missing_validation_path_count,
     )
     record_timing_metric("图片无效映射数", stats.invalid_mapping_count)
     record_timing_metric("图片待下载URL数", stats.pending_download_url_count)
@@ -179,5 +183,14 @@ def download_images(
         f"失败{len(download_result['failed'])}个文件。"
     )
     for failed in download_result["failed"]:
-        report_warning(f"下载失败：{failed['url']}")
+        failure_kind = failed.get("failure_kind", "unexpected_download")
+        record_timing_metric(f"图片下载失败/{failure_kind}", 1)
+        status_text = (
+            f"，HTTP {failed['http_status']}" if "http_status" in failed else ""
+        )
+        error_text = failed.get("error", "unknown")
+        report_warning(
+            f"下载失败：{failed['url']}（类别：{failure_kind}{status_text}，"
+            f"详情：{error_text}）"
+        )
     return download_result

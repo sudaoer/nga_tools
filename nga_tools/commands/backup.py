@@ -108,6 +108,7 @@ def _run_backup_fetch_batch(
         write_timing_log=True,
         timing_log_enabled=app_config.timing_log_enabled,
         task_name=task_name,
+        write_batch_timing_log=True,
     )
 
 

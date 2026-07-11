@@ -55,6 +55,13 @@ class _DownloadResponse:
         return b"image"
 
 
+class _FailedDownloadResponse(_DownloadResponse):
+    status = 404
+    request_info = MagicMock()
+    history: tuple[object, ...] = ()
+    headers = None
+
+
 class _ClientSession:
     def __init__(self, **kwargs: object) -> None:
         del kwargs
@@ -73,6 +80,12 @@ class _ClientSession:
     def get(self, url: str) -> _DownloadResponse:
         del url
         return _DownloadResponse()
+
+
+class _FailedClientSession(_ClientSession):
+    def get(self, url: str) -> _FailedDownloadResponse:
+        del url
+        return _FailedDownloadResponse()
 
 
 class NetworkLimitsTest:
@@ -138,3 +151,28 @@ class NetworkLimitsTest:
         assert utils._effective_download_concurrency(None) == 100
         assert utils._effective_download_concurrency(50) == 50
 
+    def test_final_download_failure_is_structured_without_bottom_layer_warning(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        with (
+            patch(
+                "nga_tools.core.downloads.aiohttp.ClientSession",
+                _FailedClientSession,
+            ),
+            patch("nga_tools.core.downloads.report_warning") as warning_mock,
+        ):
+            result = utils.download_files(
+                [
+                    {
+                        "url": "https://example.com/missing.png",
+                        "save_path": str(tmp_path / "missing.png"),
+                    }
+                ],
+                retries=0,
+            )
+
+        warning_mock.assert_not_called()
+        assert result["succeeded"] == []
+        assert result["failed"][0]["failure_kind"] == "http_4xx"
+        assert result["failed"][0]["http_status"] == 404

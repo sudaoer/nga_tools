@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from nga_tools import utils
 from nga_tools.backup.archive_store import ThreadArchiveStore
@@ -57,7 +57,7 @@ from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.core.downloads import DownloadSummary
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
-from nga_tools.timing import record_timing_metric, time_section
+from nga_tools.timing import record_timing_label, record_timing_metric, time_section
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,30 @@ class FloorMapProcessingResult:
 class _RecordProcessingResult:
     records: list[PostRecord]
     unresolved_missing_lous: list[int]
+
+
+IncrementalFastPathReason = Literal[
+    "hit",
+    "not_applicable",
+    "local_pages_incomplete",
+    "state_invalid",
+    "state_missing",
+    "processing_version_changed",
+    "archive_changed",
+    "floor_map_changed",
+    "page_count_changed",
+    "author_total_changed",
+    "post_overlays_changed",
+    "post_version_selections_changed",
+    "missing_floor_recovered",
+    "state_changed_during_image_retry",
+]
+
+
+@dataclass(frozen=True)
+class IncrementalFastPathResult:
+    hit: bool
+    reason: IncrementalFastPathReason
 
 
 def _upsert_archive_pages(
@@ -289,34 +313,39 @@ def _download_images_for_records(
     return _download_images(tid, aid, collection.tasks)
 
 
-def _processing_snapshot_matches(
+def _processing_snapshot_miss_reason(
     snapshot: BackupProcessingSnapshot,
     *,
     page_count: int,
     author_total_lou_count: int | None,
     post_overlays_hash: str,
     post_version_selections_hash: str,
-) -> bool:
+) -> IncrementalFastPathReason | None:
     state = snapshot.processing_state
     if state is None:
-        return False
-    return (
-        state.format_version == BACKUP_PROCESSING_STATE_VERSION
-        and state.processed_archive_revision
-        == snapshot.change_state.archive_revision
-        and state.processed_floor_map_revision
-        == snapshot.change_state.floor_map_revision
-        and state.page_count == page_count
-        and state.author_total_lou_count == author_total_lou_count
-        and state.post_overlays_fingerprint == post_overlays_hash
-        and state.post_version_selections_fingerprint
-        == post_version_selections_hash
-        and state.floor_map_format_version == FLOOR_MAP_VERSION
-        and state.floor_map_generation_version == FLOOR_MAP_GENERATION_VERSION
-        and state.floor_map_hash_algorithm == FLOOR_MAP_HASH_ALGORITHM
-        and state.image_reference_extractor_version
-        == IMAGE_REFERENCE_EXTRACTOR_VERSION
-    )
+        return "state_missing"
+    if (
+        state.format_version != BACKUP_PROCESSING_STATE_VERSION
+        or state.floor_map_format_version != FLOOR_MAP_VERSION
+        or state.floor_map_generation_version != FLOOR_MAP_GENERATION_VERSION
+        or state.floor_map_hash_algorithm != FLOOR_MAP_HASH_ALGORITHM
+        or state.image_reference_extractor_version
+        != IMAGE_REFERENCE_EXTRACTOR_VERSION
+    ):
+        return "processing_version_changed"
+    if state.processed_archive_revision != snapshot.change_state.archive_revision:
+        return "archive_changed"
+    if state.processed_floor_map_revision != snapshot.change_state.floor_map_revision:
+        return "floor_map_changed"
+    if state.page_count != page_count:
+        return "page_count_changed"
+    if state.author_total_lou_count != author_total_lou_count:
+        return "author_total_changed"
+    if state.post_overlays_fingerprint != post_overlays_hash:
+        return "post_overlays_changed"
+    if state.post_version_selections_fingerprint != post_version_selections_hash:
+        return "post_version_selections_changed"
+    return None
 
 
 def _failed_image_urls(download_summary: DownloadSummary) -> set[str]:
@@ -333,28 +362,29 @@ def _try_incremental_fast_path(
     page_count: int,
     author_total_lou_count: int | None,
     local_pages_cover_remote: bool,
-) -> bool:
+) -> IncrementalFastPathResult:
     if not local_pages_cover_remote:
-        return False
+        return IncrementalFastPathResult(False, "local_pages_incomplete")
 
     try:
         snapshot = archive_store.read_backup_processing_snapshot()
     except ValueError as error:
         report_warning(f"增量快路径状态无效，改为完整处理：{error}")
-        return False
-    state = snapshot.processing_state
-    if state is None:
-        return False
+        return IncrementalFastPathResult(False, "state_invalid")
+    if snapshot.processing_state is None:
+        return IncrementalFastPathResult(False, "state_missing")
     post_overlays_hash = post_overlays_fingerprint(thread_folder)
     post_version_selections_hash = selections_fingerprint(thread_folder)
-    if not _processing_snapshot_matches(
+    miss_reason = _processing_snapshot_miss_reason(
         snapshot,
         page_count=page_count,
         author_total_lou_count=author_total_lou_count,
         post_overlays_hash=post_overlays_hash,
         post_version_selections_hash=post_version_selections_hash,
-    ):
-        return False
+    )
+    if miss_reason is not None:
+        return IncrementalFastPathResult(False, miss_reason)
+    state = snapshot.processing_state
 
     with time_section("未完成缺失楼重试"):
         missing_floor_changed = _retry_unresolved_missing_lous(
@@ -371,7 +401,7 @@ def _try_incremental_fast_path(
     )
     if missing_floor_changed:
         report_info("缺失楼恢复结果已变化，转为完整处理。")
-        return False
+        return IncrementalFastPathResult(False, "missing_floor_recovered")
 
     report_info("归档与派生输入未变化，跳过完整处理。")
     record_timing_metric("待重试图片URL数", len(snapshot.pending_image_urls))
@@ -384,10 +414,10 @@ def _try_incremental_fast_path(
         state,
         _failed_image_urls(download_summary),
     ):
-        return True
+        return IncrementalFastPathResult(True, "hit")
 
     report_warning("增量状态在图片重试期间发生变化，改为完整处理。")
-    return False
+    return IncrementalFastPathResult(False, "state_changed_during_image_retry")
 
 
 def _commit_completed_processing_state(
@@ -625,10 +655,10 @@ def backup_thread_sub(
 
     record_timing_metric("增量有效变更页数", effective_changed_pages)
     with time_section("增量快路径判定"):
-        fast_path_hit = False
+        fast_path_result = IncrementalFastPathResult(False, "not_applicable")
         if aid is not None:
             available_page_numbers = existing_page_numbers | refresh_page_numbers
-            fast_path_hit = _try_incremental_fast_path(
+            fast_path_result = _try_incremental_fast_path(
                 client,
                 tid,
                 aid,
@@ -640,8 +670,9 @@ def backup_thread_sub(
                     set(range(1, page_count + 1)) <= available_page_numbers
                 ),
             )
-    record_timing_metric("增量快路径命中", int(fast_path_hit))
-    if fast_path_hit:
+    record_timing_metric("增量快路径命中", int(fast_path_result.hit))
+    record_timing_label("增量快路径结果", fast_path_result.reason)
+    if fast_path_result.hit:
         return
 
     _run_full_processing(

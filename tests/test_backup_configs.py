@@ -24,6 +24,11 @@ from nga_tools.commands.backup import (
     pdf_generate,
 )
 from nga_tools.forum.thread_configs import ThreadConfig
+from nga_tools.timing import (
+    record_timing,
+    record_timing_label,
+    record_timing_metric,
+)
 
 
 def _thread_config(
@@ -520,6 +525,127 @@ class BackupWarningLogTest:
 
 
 class BackupConfigsHandlerTest:
+    def test_backup_fetch_batch_writes_aggregated_timing_summary(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_configs = [
+            _thread_config(name="first", tid=101, aid=201),
+            _thread_config(name="second", tid=102, aid=202),
+        ]
+        batch_path = tmp_path / "batch_timing.log"
+        batch_path.write_text("旧汇总\n", encoding="utf-8")
+
+        def backup_side_effect(
+            tid: int,
+            aid: int | None,
+            *,
+            write_json: bool,
+        ) -> None:
+            del aid, write_json
+            record_timing("共享阶段", 1.0 if tid == 101 else 4.0)
+            if tid == 101:
+                record_timing("共享阶段", 2.0)
+                record_timing_label("增量快路径结果", "hit")
+                record_timing_metric("图片下载失败/http_4xx", 2)
+            else:
+                record_timing_label("增量快路径结果", "archive_changed")
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch(
+                "nga_tools.commands.backup.backup_thread_sub",
+                side_effect=backup_side_effect,
+            ),
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(workers=2),
+            ),
+            patch(
+                "nga_tools.commands.thread_batch.batch_timing_log_path",
+                return_value=batch_path,
+            ),
+            _captured_reporter(),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+            backup_configs({})
+
+        summary = batch_path.read_text(encoding="utf-8")
+        assert "旧汇总" not in summary
+        assert "任务：backup configs\n" in summary
+        assert "墙钟时间：" in summary
+        assert "帖子：总数2，成功2，失败0" in summary
+        assert "状态：完成（含预期图片下载失败，等待后续重试）" in summary
+        assert "命中1，未命中1，不适用0" in summary
+        assert "- archive_changed: 1" in summary
+        assert "- 共享阶段: 样本2，P50=3.000s，P95=4.000s" in summary
+        assert "预期图片下载失败：2" in summary
+        assert "- http_4xx: 2" in summary
+
+    def test_failed_backup_batch_writes_summary_before_nonzero_exit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_configs = [_thread_config(name="broken", tid=101, aid=201)]
+        batch_path = tmp_path / "batch_timing.log"
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch(
+                "nga_tools.commands.backup.backup_thread_sub",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(workers=1),
+            ),
+            patch(
+                "nga_tools.commands.thread_batch.batch_timing_log_path",
+                return_value=batch_path,
+            ),
+            _captured_reporter(),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+            with pytest.raises(SystemExit) as context:
+                backup_configs({})
+
+        assert context.value.code == 1
+        summary = batch_path.read_text(encoding="utf-8")
+        assert "帖子：总数1，成功0，失败1" in summary
+        assert "状态：失败" in summary
+        assert "线程异常：1" in summary
+        assert "- RuntimeError: 1" in summary
+
+    def test_disabled_timing_keeps_existing_batch_summary_untouched(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_configs = [_thread_config(name="first", tid=101, aid=201)]
+        batch_path = tmp_path / "batch_timing.log"
+        batch_path.write_text("旧汇总\n", encoding="utf-8")
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch("nga_tools.commands.backup.backup_thread_sub"),
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(
+                    workers=1,
+                    timing_log_enabled=False,
+                ),
+            ),
+            patch(
+                "nga_tools.commands.thread_batch.batch_timing_log_path",
+                return_value=batch_path,
+            ) as batch_path_mock,
+            _captured_reporter(),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+            backup_configs({})
+
+        batch_path_mock.assert_not_called()
+        assert batch_path.read_text(encoding="utf-8") == "旧汇总\n"
+
     def test_parallel_fetch_batch_shares_one_image_validation_cache(self) -> None:
         thread_configs = [
             _thread_config(name="first", tid=101, aid=201),
@@ -621,6 +747,9 @@ class BackupConfigsHandlerTest:
                 "nga_tools.commands.backup.configure_network_limits_from_args",
                 return_value=_backup_config_app_config(),
             ),
+            patch(
+                "nga_tools.commands.thread_batch.batch_timing_log_path"
+            ) as batch_path_mock,
             _captured_reporter(),
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
@@ -628,6 +757,7 @@ class BackupConfigsHandlerTest:
             backup_floors({"all_threads": True, "workers": 1})
 
         assert floor_map_mock.call_args_list == [call(101, 201), call(102, None)]
+        batch_path_mock.assert_not_called()
 
     def test_backup_pdf_all_threads_generates_each_pdf(self) -> None:
         thread_configs = [
@@ -642,6 +772,9 @@ class BackupConfigsHandlerTest:
                 "nga_tools.commands.backup.get_config",
                 return_value=_backup_config_app_config(),
             ),
+            patch(
+                "nga_tools.commands.thread_batch.batch_timing_log_path"
+            ) as batch_path_mock,
             _captured_reporter(),
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
@@ -675,6 +808,7 @@ class BackupConfigsHandlerTest:
                 pdf_renderer=first_renderer,
             ),
         ]
+        batch_path_mock.assert_not_called()
 
     def test_duplicate_parallel_thread_configs_fail_on_output_lock(self) -> None:
         thread_configs = [

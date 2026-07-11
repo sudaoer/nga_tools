@@ -92,8 +92,8 @@ def test_validation_cache_single_flights_concurrent_calls(tmp_path: Path) -> Non
 
     assert validation_mock.call_count == 1
     assert all(outcome.valid for outcome in outcomes)
-    assert sum(outcome.deep_validated for outcome in outcomes) == 1
-    assert sum(outcome.cache_hit for outcome in outcomes) == 1
+    assert sum(outcome.source == "deep" for outcome in outcomes) == 1
+    assert sum(outcome.source == "memory" for outcome in outcomes) == 1
 
 
 def test_validation_cache_revalidates_changed_file(tmp_path: Path) -> None:
@@ -111,7 +111,7 @@ def test_validation_cache_revalidates_changed_file(tmp_path: Path) -> None:
 
     assert first.valid
     assert not second.valid
-    assert second.deep_validated
+    assert second.source == "deep"
     assert validation_mock.call_count == 2
 
 
@@ -125,11 +125,11 @@ def test_validation_cache_invalidation_forces_revalidation(tmp_path: Path) -> No
         wraps=image_file_is_valid,
     ) as validation_mock:
         assert cache.validate(image_path).valid
-        assert cache.validate(image_path).cache_hit
+        assert cache.validate(image_path).source == "memory"
         cache.invalidate(image_path)
         after_invalidation = cache.validate(image_path)
 
-    assert after_invalidation.deep_validated
+    assert after_invalidation.source == "deep"
     assert validation_mock.call_count == 2
 
 
@@ -147,7 +147,7 @@ def test_validation_cache_does_not_cache_missing_path(tmp_path: Path) -> None:
         created = cache.validate(image_path)
 
     assert created.valid
-    assert created.deep_validated
+    assert created.source == "deep"
     assert validation_mock.call_count == 1
 
 
@@ -250,6 +250,62 @@ def test_image_preparation_writes_subphases_and_metrics(tmp_path: Path) -> None:
     assert "指标：图片待下载URL数，值：0\n" in timing_text
     assert "指标：图片持久化缓存命中路径数，值：0\n" in timing_text
     assert "指标：图片持久化缓存查询路径数，值：1\n" in timing_text
+    assert "指标：图片内存缓存命中路径数，值：0\n" in timing_text
+    assert "指标：图片校验文件缺失路径数，值：0\n" in timing_text
+
+
+def test_image_pipeline_reports_one_detailed_final_failure(tmp_path: Path) -> None:
+    url = _image_url("missing")
+    stats = image_store.ImagePreparationStats(
+        task_url_count=1,
+        mapping_hit_url_count=0,
+        unique_physical_path_count=0,
+        intra_thread_path_dedup_count=0,
+        memory_cache_hit_path_count=0,
+        deep_validation_path_count=0,
+        persistent_cache_hit_path_count=0,
+        missing_validation_path_count=0,
+        persistent_cache_query_path_count=0,
+        invalid_mapping_count=0,
+        pending_download_url_count=1,
+    )
+    timing_path = tmp_path / "timing.log"
+    failure: image_store.utils.DownloadFileResult = {
+        "url": url,
+        "save_path": str(tmp_path / "missing.png"),
+        "success": False,
+        "error": "HTTP 404",
+        "failure_kind": "http_4xx",
+        "http_status": 404,
+    }
+
+    with (
+        patch(
+            "nga_tools.backup.image_pipeline.image_store.prepare_image_download_tasks",
+            return_value=image_store.ImageDownloadPreparation(
+                pending_tasks=[{"url": url}],
+                stats=stats,
+            ),
+        ),
+        patch(
+            "nga_tools.backup.image_pipeline.image_store.download_image_tasks",
+            return_value={"succeeded": [], "failed": [failure]},
+        ),
+        patch("nga_tools.backup.image_pipeline.report_warning") as warning_mock,
+        use_timing_log(timing_path, task_name="image failure"),
+    ):
+        result = download_images(123, None, [{"url": url}])
+
+    assert result["failed"] == [failure]
+    warning_mock.assert_called_once()
+    warning_text = warning_mock.call_args.args[0]
+    assert url in warning_text
+    assert "http_4xx" in warning_text
+    assert "HTTP 404" in warning_text
+    assert (
+        "指标：图片下载失败/http_4xx，值：1\n"
+        in timing_path.read_text(encoding="utf-8")
+    )
 
 
 def _setup_output_dir(tmp_path: Path) -> Path:
@@ -276,7 +332,7 @@ def test_persistent_cache_survives_new_cache_instance(tmp_path: Path) -> None:
             outcome_a = cache_a.validate(image_path)
             cache_a.flush_new_entries()
 
-        assert outcome_a.deep_validated
+        assert outcome_a.source == "deep"
         assert validation_mock.call_count == 1
 
         cache_b = ImageValidationCache()
@@ -287,11 +343,8 @@ def test_persistent_cache_survives_new_cache_instance(tmp_path: Path) -> None:
         ) as validation_mock_b:
             outcome_b = cache_b.validate(image_path)
 
-        assert outcome_b.cache_hit
-        assert not outcome_b.deep_validated
+        assert outcome_b.source == "persistent"
         assert validation_mock_b.call_count == 0
-        assert cache_b.persistent_cache_hit_count == 1
-        assert outcome_b.persistent_cache_hit
 
 
 def test_persistent_cache_invalidates_on_file_change(tmp_path: Path) -> None:
@@ -319,7 +372,7 @@ def test_persistent_cache_invalidates_on_file_change(tmp_path: Path) -> None:
         ) as validation_mock:
             outcome_b = cache_b.validate(image_path)
 
-        assert outcome_b.deep_validated
+        assert outcome_b.source == "deep"
         assert validation_mock.call_count == 1
 
 
@@ -348,7 +401,7 @@ def test_persistent_cache_invalidates_on_invalidate_call(tmp_path: Path) -> None
         ) as validation_mock:
             outcome_b = cache_b.validate(image_path)
 
-        assert outcome_b.deep_validated
+        assert outcome_b.source == "deep"
         assert validation_mock.call_count == 1
 
 
@@ -370,8 +423,7 @@ def test_persistent_cache_preload_skips_unknown_paths(tmp_path: Path) -> None:
         cache_b = ImageValidationCache()
         cache_b.preload({existing_path, unknown_path})
         outcome_existing = cache_b.validate(existing_path)
-        assert outcome_existing.cache_hit
-        assert not outcome_existing.deep_validated
+        assert outcome_existing.source == "persistent"
 
         with patch(
             "nga_tools.backup.image_validation.image_file_is_valid",
@@ -380,7 +432,7 @@ def test_persistent_cache_preload_skips_unknown_paths(tmp_path: Path) -> None:
             outcome_unknown = cache_b.validate(unknown_path)
 
         assert not outcome_unknown.valid
-        assert not outcome_unknown.deep_validated
+        assert outcome_unknown.source == "missing"
         assert validation_mock.call_count == 0
 
 

@@ -126,9 +126,10 @@ class ImagePreparationStats:
     mapping_hit_url_count: int
     unique_physical_path_count: int
     intra_thread_path_dedup_count: int
-    batch_validation_cache_hit_path_count: int
+    memory_cache_hit_path_count: int
     deep_validation_path_count: int
     persistent_cache_hit_path_count: int
+    missing_validation_path_count: int
     persistent_cache_query_path_count: int
     invalid_mapping_count: int
     pending_download_url_count: int
@@ -536,15 +537,18 @@ def prepare_image_download_tasks(
         intra_thread_path_dedup_count=(
             mapping_hit_url_count - unique_physical_path_count
         ),
-        batch_validation_cache_hit_path_count=sum(
-            outcome.cache_hit for outcome in validation_by_path_key.values()
+        memory_cache_hit_path_count=sum(
+            outcome.source == "memory" for outcome in validation_by_path_key.values()
         ),
         deep_validation_path_count=sum(
-            outcome.deep_validated for outcome in validation_by_path_key.values()
+            outcome.source == "deep" for outcome in validation_by_path_key.values()
         ),
         persistent_cache_hit_path_count=sum(
-            outcome.persistent_cache_hit
+            outcome.source == "persistent"
             for outcome in validation_by_path_key.values()
+        ),
+        missing_validation_path_count=sum(
+            outcome.source == "missing" for outcome in validation_by_path_key.values()
         ),
         persistent_cache_query_path_count=persistent_cache_query_path_count,
         invalid_mapping_count=invalid_mapping_count,
@@ -720,6 +724,7 @@ def download_image_tasks(
                         "save_path": str(unique_images_dir()),
                         "success": False,
                         "error": str(error),
+                        "failure_kind": "image_store",
                     }
                     failed.append(result)
             else:
@@ -728,7 +733,13 @@ def download_image_tasks(
                     "save_path": str(unique_images_dir()),
                     "success": False,
                     "error": download_result.get("error", "unknown"),
+                    "failure_kind": download_result.get(
+                        "failure_kind",
+                        "unexpected_download",
+                    ),
                 }
+                if "http_status" in download_result:
+                    result["http_status"] = download_result["http_status"]
                 failed.append(result)
 
             if on_progress is not None:

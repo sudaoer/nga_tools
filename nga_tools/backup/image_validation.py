@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from nga_tools.core.image_formats import image_file_is_valid
 
@@ -20,12 +20,13 @@ class PersistentValidationEntry(TypedDict):
     valid: bool
 
 
+ImageValidationSource = Literal["memory", "persistent", "deep", "missing"]
+
+
 @dataclass(frozen=True)
 class ImageValidationOutcome:
     valid: bool
-    cache_hit: bool
-    deep_validated: bool
-    persistent_cache_hit: bool = False
+    source: ImageValidationSource
 
 
 @dataclass(frozen=True)
@@ -79,11 +80,6 @@ class ImageValidationCache:
         self._new_entries: list[PersistentValidationEntry] = []
         self._preloaded_paths: set[str] = set()
         self._preload_in_flight: dict[str, Future[None]] = {}
-        self._persistent_cache_hit_count: int = 0
-
-    @property
-    def persistent_cache_hit_count(self) -> int:
-        return self._persistent_cache_hit_count
 
     def preload(self, paths: set[Path]) -> int:
         if not paths:
@@ -155,8 +151,7 @@ class ImageValidationCache:
             if fingerprint is None:
                 return ImageValidationOutcome(
                     valid=False,
-                    cache_hit=False,
-                    deep_validated=False,
+                    source="missing",
                 )
 
             is_leader = False
@@ -168,8 +163,7 @@ class ImageValidationCache:
                     cached_result = self._results[fingerprint]
                     return ImageValidationOutcome(
                         valid=cached_result,
-                        cache_hit=True,
-                        deep_validated=False,
+                        source="memory",
                     )
 
                 preload_future = self._preload_in_flight.get(path_key)
@@ -185,12 +179,9 @@ class ImageValidationCache:
                         self._result_keys_by_path.setdefault(path_key, set()).add(
                             fingerprint
                         )
-                        self._persistent_cache_hit_count += 1
                         return ImageValidationOutcome(
                             valid=persistent[2],
-                            cache_hit=True,
-                            deep_validated=False,
-                            persistent_cache_hit=True,
+                            source="persistent",
                         )
 
                     validation_future = self._in_flight.get(fingerprint)
@@ -215,8 +206,7 @@ class ImageValidationCache:
                     continue
                 return ImageValidationOutcome(
                     valid=shared_result,
-                    cache_hit=True,
-                    deep_validated=False,
+                    source="memory",
                 )
 
             try:
@@ -255,8 +245,7 @@ class ImageValidationCache:
             if unchanged:
                 return ImageValidationOutcome(
                     valid=validation_result,
-                    cache_hit=False,
-                    deep_validated=True,
+                    source="deep",
                 )
 
     def invalidate(self, path: Path) -> None:
