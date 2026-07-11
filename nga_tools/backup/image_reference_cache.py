@@ -37,6 +37,13 @@ class ImageReferenceCollectionResult:
 
 
 @dataclass(frozen=True)
+class ReadOnlyImageReferenceScanResult:
+    scans: list[PostImageReferenceScan]
+    cache_hit_count: int
+    cache_miss_count: int
+
+
+@dataclass(frozen=True)
 class _RecordCacheTarget:
     record: PostRecord
     cache_key: str
@@ -157,6 +164,52 @@ def _first_missing_target_by_key(
         if target.cache_key not in references_by_key:
             missing_targets.setdefault(target.cache_key, target)
     return missing_targets
+
+
+def scan_image_references_for_records_readonly(
+    archive_store: ThreadArchiveStore,
+    records: list[PostRecord],
+) -> ReadOnlyImageReferenceScanResult:
+    """Read or derive per-occurrence image references without writing caches."""
+    targets = [
+        _RecordCacheTarget(
+            record=record,
+            cache_key=image_reference_cache_key(record),
+        )
+        for record in records
+    ]
+    references_by_key, _cache_read_succeeded = _read_cached_references(
+        archive_store,
+        targets,
+    )
+    cache_hit_count = sum(
+        target.cache_key in references_by_key for target in targets
+    )
+    missing_targets = list(
+        _first_missing_target_by_key(targets, references_by_key).values()
+    )
+    missing_htmls = load_post_htmls_for_records(
+        [target.record for target in missing_targets]
+    )
+    parsed_htmls = (
+        parse_post_htmls_for_images(missing_htmls) if missing_htmls else []
+    )
+    for target, parsed_html in zip(missing_targets, parsed_htmls, strict=True):
+        references_by_key[target.cache_key] = scan_post_image_references(
+            parsed_html
+        ).references
+
+    return ReadOnlyImageReferenceScanResult(
+        scans=[
+            PostImageReferenceScan(
+                lou=target.record["lou"],
+                references=references_by_key[target.cache_key],
+            )
+            for target in targets
+        ],
+        cache_hit_count=cache_hit_count,
+        cache_miss_count=len(targets) - cache_hit_count,
+    )
 
 
 def collect_image_download_tasks_for_records(

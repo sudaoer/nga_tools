@@ -62,11 +62,12 @@ def _post(
 
 
 def _write_image_mapping(output_dir: Path, url: str, unique_rel_path: str) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(output_dir / "image_index.sqlite3")
     try:
         connection.execute(
             """
-            CREATE TABLE image_mappings (
+            CREATE TABLE IF NOT EXISTS image_mappings (
                 url TEXT PRIMARY KEY,
                 unique_rel_path TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -1036,6 +1037,173 @@ class WebDatabaseViewerTest:
 
         assert missing_database.status_code == 404
         assert missing_table.status_code == 404
+
+
+class WebImageUsageTest:
+    def test_counts_each_reference_groups_physical_images_and_includes_zero(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        first_url = (
+            "https://img.nga.178.com/attachments/mon_202607/11/first.png"
+        )
+        alias_url = (
+            "https://img.nga.178.com/attachments/mon_202607/11/alias.png"
+        )
+        unused_url = (
+            "https://img.nga.178.com/attachments/mon_202607/11/unused.png"
+        )
+        unmapped_url = (
+            "https://img.nga.178.com/attachments/mon_202607/11/unmapped.png"
+        )
+        _write_image_mapping(output_dir, first_url, "images_unique/shared.png")
+        _write_image_mapping(output_dir, alias_url, "images_unique/shared.png")
+        _write_image_mapping(output_dir, unused_url, "images_unique/unused.png")
+        _write_archive(
+            output_dir / "101_201",
+            [
+                _post(
+                    1,
+                    f"[img]{first_url}[/img][img]{first_url}[/img]"
+                    f"[img]{alias_url}[/img][img]{unmapped_url}[/img]",
+                )
+            ],
+        )
+        invalid_thread_dir = output_dir / "102_all"
+        invalid_thread_dir.mkdir()
+        sqlite3.connect(invalid_thread_dir / "archive.sqlite3").close()
+        archive_path = output_dir / "101_201" / "archive.sqlite3"
+        image_index_path = output_dir / "image_index.sqlite3"
+        archive_before = archive_path.read_bytes()
+        image_index_before = image_index_path.read_bytes()
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/api/admin/image-usage", params={"limit": 1})
+        second_page = client.get(
+            "/api/admin/image-usage",
+            params={"offset": 1, "limit": 1},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] == 2
+        assert payload["archiveCount"] == 1
+        assert payload["postCount"] == 1
+        assert payload["referenceCount"] == 4
+        assert payload["mappedReferenceCount"] == 3
+        assert payload["unmappedReferenceCount"] == 1
+        assert payload["skippedArchives"][0]["dirName"] == "102_all"
+        assert payload["items"] == [
+            {
+                "relativePath": "images_unique/shared.png",
+                "fileUrl": "/api/files/images_unique/shared.png",
+                "sourceUrl": alias_url,
+                "mappingCount": 2,
+                "usageCount": 3,
+            }
+        ]
+        assert second_page.json()["items"][0]["relativePath"] == (
+            "images_unique/unused.png"
+        )
+        assert second_page.json()["items"][0]["usageCount"] == 0
+        assert archive_path.read_bytes() == archive_before
+        assert image_index_path.read_bytes() == image_index_before
+
+    def test_tracks_effective_version_overlay_and_cache_invalidation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        image_url = (
+            "https://img.nga.178.com/attachments/mon_202607/11/version.png"
+        )
+        _write_image_mapping(output_dir, image_url, "images_unique/version.png")
+        thread_dir = output_dir / "101_201"
+        store = ThreadArchiveStore(thread_dir)
+        store.upsert_page(
+            1,
+            {"totalPage": 1, "result": [_post(1, f"[img]{image_url}[/img]")]},
+            observed_at="2026-07-11T00:00:00+00:00",
+        )
+        store.upsert_page(
+            1,
+            {"totalPage": 1, "result": [_post(1, "当前正文无图片")]},
+            observed_at="2026-07-11T01:00:00+00:00",
+        )
+        with closing(sqlite3.connect(store.db_path)) as connection:
+            old_version_id = connection.execute(
+                "SELECT id FROM post_versions WHERE content LIKE '[img]%'"
+            ).fetchone()[0]
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        latest = client.get("/api/admin/image-usage").json()
+        selected = client.put(
+            "/api/admin/threads/101/201/post-version-selections/1",
+            json={"versionId": old_version_id},
+        )
+        historical = client.get("/api/admin/image-usage").json()
+        overlaid = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": "覆盖正文"},
+        )
+        replaced = client.get("/api/admin/image-usage").json()
+
+        assert latest["items"][0]["usageCount"] == 0
+        assert selected.status_code == 200
+        assert historical["items"][0]["usageCount"] == 1
+        assert overlaid.status_code == 200
+        assert replaced["items"][0]["usageCount"] == 0
+
+    def test_requires_readable_image_index(self, tmp_path: Path) -> None:
+        client = TestClient(
+            create_app(output_dir=tmp_path / "output", static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/api/admin/image-usage")
+
+        assert response.status_code == 409
+        assert response.json() == {"error": "缺少image_index.sqlite3。"}
+
+    def test_reuses_memory_cache_until_refresh(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        _write_image_mapping(
+            output_dir,
+            "https://img.nga.178.com/attachments/mon_202607/11/cache.png",
+            "images_unique/cache.png",
+        )
+        calls: list[Path] = []
+        original_build = web_server.build_image_usage_snapshot
+
+        def wrapped_build(path: Path):
+            calls.append(path)
+            return original_build(path)
+
+        monkeypatch.setattr(
+            web_server,
+            "build_image_usage_snapshot",
+            wrapped_build,
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        first = client.get("/api/admin/image-usage")
+        second = client.get("/api/admin/image-usage")
+        refreshed = client.get("/api/admin/image-usage", params={"refresh": "1"})
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert refreshed.status_code == 200
+        assert calls == [output_dir, output_dir]
 
 
 class WebCliTest:

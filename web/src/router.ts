@@ -37,6 +37,10 @@ const router = createRouter({
           path: 'databases',
           component: () => import('./views/DatabaseView.vue'),
         },
+        {
+          path: 'image-usage',
+          component: () => import('./views/ImageUsageAdminView.vue'),
+        },
       ],
     },
     {

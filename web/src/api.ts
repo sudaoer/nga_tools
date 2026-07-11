@@ -1,6 +1,7 @@
 import type {
   DatabaseSchema,
   DatabaseSummary,
+  ImageUsageResult,
   PostOverlayDetail,
   PostOverlayPreview,
   PostVersionGroup,
@@ -251,6 +252,24 @@ export async function clearPostOverlay(
     { method: 'DELETE' },
   )
   return readResponseJson<PostOverlayDetail>(response)
+}
+
+export interface FetchImageUsageOptions {
+  offset: number
+  limit: number
+  refresh?: boolean
+}
+
+export async function fetchImageUsage(
+  options: FetchImageUsageOptions,
+): Promise<ImageUsageResult> {
+  const params = new URLSearchParams()
+  params.set('offset', String(options.offset))
+  params.set('limit', String(options.limit))
+  if (options.refresh) {
+    params.set('refresh', '1')
+  }
+  return readJson<ImageUsageResult>(`/api/admin/image-usage?${params.toString()}`)
 }
 
 export interface FetchDatabasesOptions {

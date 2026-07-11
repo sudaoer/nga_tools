@@ -105,6 +105,33 @@ export interface PostOverlayPreview {
   html: string
 }
 
+export interface ImageUsageItem {
+  relativePath: string
+  fileUrl: string
+  sourceUrl: string
+  mappingCount: number
+  usageCount: number
+}
+
+export interface SkippedImageUsageArchive {
+  dirName: string
+  message: string
+}
+
+export interface ImageUsageResult {
+  items: ImageUsageItem[]
+  total: number
+  offset: number
+  limit: number
+  computedAt: string
+  archiveCount: number
+  postCount: number
+  referenceCount: number
+  mappedReferenceCount: number
+  unmappedReferenceCount: number
+  skippedArchives: SkippedImageUsageArchive[]
+}
+
 export type DatabaseKind = 'forum_threads' | 'image_index' | 'archive'
 export type DatabaseStatus = 'ready' | 'invalid'
 export type TableKind = 'table' | 'view'

@@ -68,12 +68,21 @@ from nga_tools.web.database import (
     read_table_row_detail,
     read_table_rows,
 )
+from nga_tools.web.image_usage import (
+    ImageIndexUnavailableError,
+    ImageUsageResult,
+    ImageUsageSnapshot,
+    build_image_usage_snapshot,
+    image_usage_result,
+)
 
 _MAX_POST_LIMIT = 200
 _MAX_DATABASE_ROW_LIMIT = 200
+_MAX_IMAGE_USAGE_LIMIT = 200
 ThreadListFingerprint = tuple[str, ...]
 DatabaseListFingerprint = tuple[str, ...]
 DatabaseSchemaFingerprint = str
+ImageUsageFingerprint = tuple[str, ...]
 _DATABASE_ID_FORUM_THREADS = "forum_threads"
 _DATABASE_ID_IMAGE_INDEX = "image_index"
 _ARCHIVE_DATABASE_PREFIX = "archive:"
@@ -211,6 +220,40 @@ def _database_schema_fingerprint(
     return f"{database_id}\0{_file_fingerprint(database_path)}"
 
 
+def _image_usage_fingerprint(output_dir: Path) -> ImageUsageFingerprint:
+    image_index_path = output_dir / image_store.IMAGE_INDEX_FILENAME
+    entries = [
+        f"output:{_file_fingerprint(output_dir)}",
+        f"image:{_file_fingerprint(image_index_path)}",
+        f"image-wal:{_file_fingerprint(Path(str(image_index_path) + '-wal'))}",
+    ]
+    if not output_dir.is_dir():
+        return tuple(entries)
+
+    for thread_folder in sorted(output_dir.iterdir(), key=lambda path: path.name):
+        if not thread_folder.is_dir():
+            continue
+        if parse_thread_dir_name(thread_folder.name) is None:
+            continue
+        archive_path = thread_folder / ARCHIVE_DB_FILENAME
+        if not archive_path.is_file():
+            continue
+        entries.append(
+            "\0".join(
+                [
+                    thread_folder.name,
+                    _file_fingerprint(archive_path),
+                    _file_fingerprint(Path(str(archive_path) + "-wal")),
+                    _file_fingerprint(
+                        thread_folder / POST_VERSION_SELECTIONS_FILENAME
+                    ),
+                    _file_fingerprint(thread_folder / POST_OVERLAYS_FILENAME),
+                ]
+            )
+        )
+    return tuple(entries)
+
+
 @dataclass
 class ThreadSummaryCache:
     _guard: LockType = field(default_factory=_new_lock)
@@ -337,6 +380,36 @@ class DatabaseSchemaCache:
             return _copy_database_schema(schema)
 
 
+@dataclass
+class ImageUsageCache:
+    _guard: LockType = field(default_factory=_new_lock)
+    _fingerprint: Optional[ImageUsageFingerprint] = None
+    _snapshot: Optional[ImageUsageSnapshot] = None
+
+    def read(
+        self,
+        output_dir: Path,
+        *,
+        refresh: bool,
+    ) -> ImageUsageSnapshot:
+        fingerprint = _image_usage_fingerprint(output_dir)
+        with self._guard:
+            if (
+                not refresh
+                and self._fingerprint == fingerprint
+                and self._snapshot is not None
+            ):
+                return self._snapshot
+
+            snapshot = build_image_usage_snapshot(output_dir)
+            # Read-only SQLite access can create or settle WAL sidecar state.
+            # Bind the snapshot to the stable post-build source fingerprint so
+            # the next request does not immediately discard the memory cache.
+            self._fingerprint = _image_usage_fingerprint(output_dir)
+            self._snapshot = snapshot
+            return snapshot
+
+
 @dataclass(frozen=True)
 class PostVersionSelectionLocks:
     _guard: LockType = field(default_factory=_new_lock)
@@ -361,6 +434,7 @@ class ViewerContext:
     post_version_thread_cache: PostVersionThreadCache
     database_summary_cache: DatabaseSummaryCache
     database_schema_cache: DatabaseSchemaCache
+    image_usage_cache: ImageUsageCache
 
 
 def _context(request: Request) -> ViewerContext:
@@ -809,6 +883,24 @@ async def list_databases(
     return {"items": summaries}
 
 
+async def list_image_usage(
+    request: Request,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(gt=0, le=_MAX_IMAGE_USAGE_LIMIT)] = 100,
+    refresh: bool = False,
+) -> ImageUsageResult:
+    context = _context(request)
+    try:
+        snapshot = await run_in_threadpool(
+            context.image_usage_cache.read,
+            context.output_dir,
+            refresh=refresh,
+        )
+    except ImageIndexUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return image_usage_result(snapshot, offset=offset, limit=limit)
+
+
 async def database_schema(
     request: Request,
     db_id: str,
@@ -929,6 +1021,7 @@ def create_app(
         post_version_thread_cache=PostVersionThreadCache(),
         database_summary_cache=DatabaseSummaryCache(),
         database_schema_cache=DatabaseSchemaCache(),
+        image_usage_cache=ImageUsageCache(),
     )
     app = FastAPI()
     app.state.viewer_context = context
@@ -988,6 +1081,11 @@ def create_app(
         methods=["DELETE"],
     )
     app.add_api_route("/api/databases", list_databases, methods=["GET"])
+    app.add_api_route(
+        "/api/admin/image-usage",
+        list_image_usage,
+        methods=["GET"],
+    )
     app.add_api_route("/api/databases/{db_id}/schema", database_schema, methods=["GET"])
     app.add_api_route(
         "/api/databases/{db_id}/tables/{table_name}/rows",

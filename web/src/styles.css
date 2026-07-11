@@ -733,6 +733,123 @@ select {
   height: 100%;
 }
 
+.image-usage-shell {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 22px 28px;
+}
+
+.image-usage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.image-usage-header p {
+  color: var(--nga-text-muted);
+  margin: 4px 0 0;
+}
+
+.image-usage-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  border: 1px solid var(--nga-border-soft);
+  border-radius: 4px;
+  background: var(--nga-surface);
+  margin-bottom: 12px;
+  padding: 10px 12px;
+}
+
+.image-usage-summary strong,
+.image-usage-table .usage-count {
+  color: var(--nga-red);
+  font-weight: 700;
+}
+
+.warning-text {
+  color: var(--nga-warning-text);
+}
+
+.image-usage-warning {
+  border: 1px solid var(--nga-border-muted);
+  border-radius: 4px;
+  background: var(--nga-warning-bg);
+  color: var(--nga-warning-text);
+  margin-bottom: 12px;
+  padding: 8px 10px;
+}
+
+.image-usage-warning summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.image-usage-warning ul {
+  margin: 8px 0 0;
+  padding-left: 22px;
+}
+
+.image-usage-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--nga-border-muted);
+  background: var(--nga-surface-pale);
+}
+
+.image-usage-table {
+  width: 100%;
+  min-width: 900px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.image-usage-table th,
+.image-usage-table td {
+  border-bottom: 1px solid var(--nga-border-soft);
+  border-right: 1px solid var(--nga-border-soft);
+  padding: 7px 8px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.image-usage-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--nga-red);
+  color: var(--nga-nav-text);
+}
+
+.image-usage-table tbody tr:nth-child(even) {
+  background: var(--nga-surface);
+}
+
+.image-usage-table img {
+  display: block;
+  width: 88px;
+  height: 66px;
+  border: 1px solid var(--nga-border-soft);
+  border-radius: 3px;
+  background: var(--nga-surface);
+  object-fit: contain;
+}
+
+.image-usage-table .path-cell,
+.image-usage-table .url-cell {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-usage-loading {
+  color: var(--nga-text-muted);
+  padding-top: 10px;
+  text-align: center;
+}
+
 .version-admin-shell {
   display: grid;
   grid-template-columns: minmax(280px, 330px) minmax(260px, 340px) minmax(0, 1fr);

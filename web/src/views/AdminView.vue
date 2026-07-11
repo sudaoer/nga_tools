@@ -7,6 +7,7 @@ import { RouterLink, RouterView } from 'vue-router'
     <nav class="admin-tabs" aria-label="管理导航">
       <RouterLink to="/admin/post-versions">正文版本</RouterLink>
       <RouterLink to="/admin/databases">数据库</RouterLink>
+      <RouterLink to="/admin/image-usage">图片使用</RouterLink>
     </nav>
     <RouterView />
   </main>
