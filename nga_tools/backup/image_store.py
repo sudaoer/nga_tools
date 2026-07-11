@@ -319,16 +319,20 @@ def image_mappings_for_urls(urls: Iterable[str]) -> dict[str, ImageMapping]:
 
     mappings: dict[str, ImageMapping] = {}
     with closing(_connect_image_index()) as connection:
-        for start in range(0, len(normalized_urls), 900):
-            chunk = normalized_urls[start : start + 900]
-            placeholders = ",".join("?" for _ in chunk)
+        connection.execute(
+            "CREATE TEMP TABLE _url_lookup (url TEXT PRIMARY KEY)"
+        )
+        try:
+            connection.executemany(
+                "INSERT OR IGNORE INTO _url_lookup (url) VALUES (?)",
+                [(url,) for url in normalized_urls],
+            )
             rows = connection.execute(
-                f"""
-                SELECT url, unique_rel_path
-                FROM image_mappings
-                WHERE url IN ({placeholders})
-                """,
-                chunk,
+                """
+                SELECT m.url, m.unique_rel_path
+                FROM image_mappings m
+                JOIN _url_lookup l ON m.url = l.url
+                """
             ).fetchall()
             for url, unique_rel_path in rows:
                 if isinstance(url, str) and isinstance(unique_rel_path, str):
@@ -336,6 +340,8 @@ def image_mappings_for_urls(urls: Iterable[str]) -> dict[str, ImageMapping]:
                         url=url,
                         unique_rel_path=unique_rel_path,
                     )
+        finally:
+            connection.execute("DROP TABLE _url_lookup")
     return mappings
 
 
