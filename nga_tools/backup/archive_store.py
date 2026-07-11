@@ -31,12 +31,14 @@ from nga_tools.backup.processing_state import (
     BackupProcessingState,
 )
 from nga_tools.core.hashing import hash_object, hash_text
+from nga_tools.core.sqlite import (
+    SQLITE_BUSY_TIMEOUT_SECONDS,
+    configure_connection,
+)
 from nga_tools.ngaclient.client import PageData
 from nga_tools.word_count import WORD_COUNT_VERSION, count_post_content
 
 ARCHIVE_DB_FILENAME = "archive.sqlite3"
-_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
-_SQLITE_BUSY_TIMEOUT_MILLISECONDS = int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)
 _LATEST_POST_RECORDS_QUERY = """
     SELECT
         latest.id,
@@ -283,9 +285,9 @@ class ThreadArchiveStore:
         self.thread_folder.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(
             self.db_path,
-            timeout=_SQLITE_BUSY_TIMEOUT_SECONDS,
+            timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
         )
-        connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MILLISECONDS}")
+        configure_connection(connection)
         self._ensure_schema(connection)
         return connection
 

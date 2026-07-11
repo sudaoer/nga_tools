@@ -44,6 +44,7 @@ from nga_tools.backup.post_version_selection import (
     make_selection,
     write_selections,
 )
+from nga_tools.core.sqlite import configure_readonly_connection
 from nga_tools.forum.thread_configs import (
     NGAThreadConfigs,
     ThreadConfig,
@@ -263,7 +264,9 @@ def _metadata_name(metadata: Optional[ThreadConfig]) -> Optional[str]:
 def _connect_readonly(db_path: Path) -> sqlite3.Connection:
     resolved_path = db_path.resolve()
     uri = f"file:{quote(str(resolved_path), safe='/:')}?mode=ro"
-    return sqlite3.connect(uri, uri=True)
+    connection = sqlite3.connect(uri, uri=True)
+    configure_readonly_connection(connection)
+    return connection
 
 
 def _has_word_count_columns(connection: sqlite3.Connection) -> bool:

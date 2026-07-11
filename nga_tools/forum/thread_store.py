@@ -8,11 +8,13 @@ from pathlib import Path
 from typing import Iterable, cast
 
 from nga_tools.config import get_config
+from nga_tools.core.sqlite import (
+    SQLITE_BUSY_TIMEOUT_SECONDS,
+    configure_connection,
+)
 from nga_tools.ngaclient.client import ForumThread
 
 FORUM_THREAD_DB_FILENAME = "forum_threads.sqlite3"
-_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
-_SQLITE_BUSY_TIMEOUT_MILLISECONDS = int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)
 
 
 @dataclass(frozen=True)
@@ -59,8 +61,8 @@ class ForumThreadStore:
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.db_path, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
-        connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MILLISECONDS}")
+        connection = sqlite3.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
+        configure_connection(connection)
         return connection
 
     def _ensure_table(self, connection: sqlite3.Connection, fid: int) -> str:

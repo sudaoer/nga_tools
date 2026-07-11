@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from nga_tools.backup import image_store
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
+from nga_tools.core.sqlite import configure_readonly_connection
 from nga_tools.forum.thread_store import FORUM_THREAD_DB_FILENAME
 from nga_tools.web.data import parse_thread_dir_name
 
@@ -112,7 +113,9 @@ class RowNotFoundError(Exception):
 def _connect_readonly(db_path: Path) -> sqlite3.Connection:
     resolved_path = db_path.resolve()
     uri = f"file:{quote(str(resolved_path), safe='/:')}?mode=ro"
-    return sqlite3.connect(uri, uri=True)
+    connection = sqlite3.connect(uri, uri=True)
+    configure_readonly_connection(connection)
+    return connection
 
 
 def _mtime_utc_iso(path: Path) -> str:

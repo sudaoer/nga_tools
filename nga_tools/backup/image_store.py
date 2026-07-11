@@ -26,6 +26,10 @@ from nga_tools.core.image_formats import (
     image_extension_from_file as detect_image_extension_from_file,
     image_file_is_valid,
 )
+from nga_tools.core.sqlite import (
+    SQLITE_BUSY_TIMEOUT_SECONDS,
+    configure_connection,
+)
 from nga_tools.backup.image_validation import (
     ImageValidationCache,
     ImageValidationOutcome,
@@ -134,8 +138,6 @@ class ImageDownloadPreparation:
 IMAGE_INDEX_FILENAME = "image_index.sqlite3"
 PLACEHOLDER_IMAGE_FILENAME = "download_failed_placeholder.png"
 _IMAGE_STORE_LOCK = threading.RLock()
-_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
-_SQLITE_BUSY_TIMEOUT_MILLISECONDS = int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)
 
 
 def normalize_nga_image_url(url: str) -> str:
@@ -210,8 +212,8 @@ def _now_utc_iso() -> str:
 def _connect_image_index() -> sqlite3.Connection:
     db_path = image_index_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
-    connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MILLISECONDS}")
+    connection = sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
+    configure_connection(connection)
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS image_mappings (
