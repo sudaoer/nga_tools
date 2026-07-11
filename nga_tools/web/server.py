@@ -6,6 +6,7 @@ from _thread import LockType
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Literal, Optional, cast
+from urllib.parse import urlencode
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -70,9 +71,16 @@ from nga_tools.web.database import (
 )
 from nga_tools.web.image_usage import (
     ImageIndexUnavailableError,
+    ImageUsageDetailResult,
+    ImageUsageNotFoundError,
+    ImageUsageRepliesResult,
+    ImageUsageReplyItem,
     ImageUsageResult,
     ImageUsageSnapshot,
+    ImageUsageSort,
     build_image_usage_snapshot,
+    image_reply_references,
+    image_usage_detail,
     image_usage_result,
 )
 
@@ -223,6 +231,7 @@ def _database_schema_fingerprint(
 def _image_usage_fingerprint(output_dir: Path) -> ImageUsageFingerprint:
     image_index_path = output_dir / image_store.IMAGE_INDEX_FILENAME
     entries = [
+        f"config:{_file_fingerprint(Path(get_config().thread_config_file))}",
         f"output:{_file_fingerprint(output_dir)}",
         f"image:{_file_fingerprint(image_index_path)}",
         f"image-wal:{_file_fingerprint(Path(str(image_index_path) + '-wal'))}",
@@ -887,6 +896,7 @@ async def list_image_usage(
     request: Request,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(gt=0, le=_MAX_IMAGE_USAGE_LIMIT)] = 100,
+    sort: ImageUsageSort = "usage",
     refresh: bool = False,
 ) -> ImageUsageResult:
     context = _context(request)
@@ -898,7 +908,121 @@ async def list_image_usage(
         )
     except ImageIndexUnavailableError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    return image_usage_result(snapshot, offset=offset, limit=limit)
+    return image_usage_result(snapshot, offset=offset, limit=limit, sort=sort)
+
+
+async def image_usage_detail_route(
+    request: Request,
+    relative_path: Annotated[str, Query(min_length=1)],
+) -> ImageUsageDetailResult:
+    context = _context(request)
+    try:
+        snapshot = await run_in_threadpool(
+            context.image_usage_cache.read,
+            context.output_dir,
+            refresh=False,
+        )
+        return image_usage_detail(snapshot, relative_path)
+    except ImageIndexUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ImageUsageNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+def _read_image_usage_replies_sync(
+    output_dir: Path,
+    snapshot: ImageUsageSnapshot,
+    relative_path: str,
+    tid: int,
+    offset: int,
+    limit: int,
+) -> ImageUsageRepliesResult:
+    references = image_reply_references(snapshot, relative_path, tid)
+    selected_references = references[offset : offset + limit]
+    page_cache: dict[tuple[int, str, int], PostsResult] = {}
+    items: list[ImageUsageReplyItem] = []
+    for reference in selected_references:
+        page = reference.lou // ORIGINAL_POSTS_PER_PAGE + 1
+        cache_key = (reference.tid, reference.aid_key, page)
+        posts = page_cache.get(cache_key)
+        if posts is None:
+            posts = read_posts(
+                output_dir,
+                reference.tid,
+                reference.aid_key,
+                page=page,
+                ensure_schema=False,
+            )
+            page_cache[cache_key] = posts
+        post = next(
+            (
+                item
+                for item in posts["items"]
+                if item["lou"] == reference.lou and item["pid"] == reference.pid
+            ),
+            None,
+        )
+        if post is None:
+            continue
+        reader_query = urlencode(
+            {
+                "tid": reference.tid,
+                "aid": reference.aid_key,
+                "page": page,
+            }
+        )
+        items.append(
+            {
+                "tid": reference.tid,
+                "aidKey": reference.aid_key,
+                "dirName": reference.dir_name,
+                "pid": reference.pid,
+                "lou": reference.lou,
+                "floorLabel": post["floorLabel"],
+                "authorName": post["authorName"],
+                "postdate": post["postdate"],
+                "occurrenceCount": reference.occurrence_count,
+                "html": post["html"],
+                "readerUrl": f"/threads?{reader_query}",
+            }
+        )
+    return {
+        "items": items,
+        "total": len(references),
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+async def image_usage_replies_route(
+    request: Request,
+    relative_path: Annotated[str, Query(min_length=1)],
+    tid: Annotated[int, Query(gt=0)],
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(gt=0, le=_MAX_POST_LIMIT)] = 20,
+) -> ImageUsageRepliesResult:
+    context = _context(request)
+    try:
+        snapshot = await run_in_threadpool(
+            context.image_usage_cache.read,
+            context.output_dir,
+            refresh=False,
+        )
+        return await run_in_threadpool(
+            _read_image_usage_replies_sync,
+            context.output_dir,
+            snapshot,
+            relative_path,
+            tid,
+            offset,
+            limit,
+        )
+    except ImageIndexUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ImageUsageNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (ThreadNotFoundError, ThreadUnavailableError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 async def database_schema(
@@ -1084,6 +1208,16 @@ def create_app(
     app.add_api_route(
         "/api/admin/image-usage",
         list_image_usage,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/api/admin/image-usage/detail",
+        image_usage_detail_route,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/api/admin/image-usage/replies",
+        image_usage_replies_route,
         methods=["GET"],
     )
     app.add_api_route("/api/databases/{db_id}/schema", database_schema, methods=["GET"])

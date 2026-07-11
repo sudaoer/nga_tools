@@ -1103,6 +1103,8 @@ class WebImageUsageTest:
                 "sourceUrl": alias_url,
                 "mappingCount": 2,
                 "usageCount": 3,
+                "replyCount": 1,
+                "threadCount": 1,
             }
         ]
         assert second_page.json()["items"][0]["relativePath"] == (
@@ -1159,6 +1161,114 @@ class WebImageUsageTest:
         assert overlaid.status_code == 200
         assert replaced["items"][0]["usageCount"] == 0
 
+    def test_sorts_by_usage_or_threads_and_groups_reply_details(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        frequent_url = (
+            "https://img.nga.178.com/attachments/mon_202607/11/frequent.png"
+        )
+        broad_url = (
+            "https://img.nga.178.com/attachments/mon_202607/11/broad.png"
+        )
+        _write_image_mapping(
+            output_dir,
+            frequent_url,
+            "images_unique/frequent.png",
+        )
+        _write_image_mapping(output_dir, broad_url, "images_unique/broad.png")
+        images_dir = output_dir / "images_unique"
+        images_dir.mkdir()
+        (images_dir / "frequent.png").write_bytes(b"frequent")
+        (images_dir / "broad.png").write_bytes(b"broad")
+        _write_archive(
+            output_dir / "101_201",
+            [
+                _post(
+                    1,
+                    f"[img]{frequent_url}[/img]" * 4,
+                    pid=1001,
+                ),
+                _post(2, f"引用B[img]{broad_url}[/img]", pid=1002),
+                _post(4, f"再次引用B[img]{broad_url}[/img]", pid=1004),
+            ],
+        )
+        _write_archive(
+            output_dir / "101_202",
+            [_post(7, f"重复归档[img]{broad_url}[/img]", pid=1002)],
+        )
+        _write_archive(
+            output_dir / "102_all",
+            [_post(3, f"另一个主题[img]{broad_url}[/img]", pid=2003)],
+        )
+        archive_path = output_dir / "101_201" / "archive.sqlite3"
+        archive_before = archive_path.read_bytes()
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        by_usage = client.get(
+            "/api/admin/image-usage",
+            params={"sort": "usage"},
+        )
+        by_threads = client.get(
+            "/api/admin/image-usage",
+            params={"sort": "threads"},
+        )
+        detail = client.get(
+            "/api/admin/image-usage/detail",
+            params={"relative_path": "images_unique/broad.png"},
+        )
+        replies = client.get(
+            "/api/admin/image-usage/replies",
+            params={
+                "relative_path": "images_unique/broad.png",
+                "tid": 101,
+                "limit": 1,
+            },
+        )
+        second_reply_page = client.get(
+            "/api/admin/image-usage/replies",
+            params={
+                "relative_path": "images_unique/broad.png",
+                "tid": 101,
+                "offset": 1,
+                "limit": 1,
+            },
+        )
+        missing_detail = client.get(
+            "/api/admin/image-usage/detail",
+            params={"relative_path": "images_unique/missing.png"},
+        )
+
+        assert by_usage.status_code == 200
+        assert by_usage.json()["sort"] == "usage"
+        assert by_usage.json()["items"][0]["relativePath"] == (
+            "images_unique/frequent.png"
+        )
+        broad_item = by_threads.json()["items"][0]
+        assert broad_item["relativePath"] == "images_unique/broad.png"
+        assert broad_item["usageCount"] == 3
+        assert broad_item["replyCount"] == 3
+        assert broad_item["threadCount"] == 2
+
+        assert detail.status_code == 200
+        assert [group["tid"] for group in detail.json()["threads"]] == [101, 102]
+        assert detail.json()["threads"][0]["replyCount"] == 2
+        assert replies.status_code == 200
+        assert replies.json()["total"] == 2
+        reply = replies.json()["items"][0]
+        assert reply["pid"] == 1002
+        assert reply["occurrenceCount"] == 1
+        assert reply["readerUrl"] == "/threads?tid=101&aid=201&page=1"
+        assert 'src="/api/files/images_unique/broad.png"' in reply["html"]
+        assert "引用B" in reply["html"]
+        assert second_reply_page.status_code == 200
+        assert second_reply_page.json()["items"][0]["pid"] == 1004
+        assert missing_detail.status_code == 404
+        assert archive_path.read_bytes() == archive_before
+
     def test_requires_readable_image_index(self, tmp_path: Path) -> None:
         client = TestClient(
             create_app(output_dir=tmp_path / "output", static_dir=tmp_path / "dist")
@@ -1198,10 +1308,15 @@ class WebImageUsageTest:
 
         first = client.get("/api/admin/image-usage")
         second = client.get("/api/admin/image-usage")
+        detail = client.get(
+            "/api/admin/image-usage/detail",
+            params={"relative_path": "images_unique/cache.png"},
+        )
         refreshed = client.get("/api/admin/image-usage", params={"refresh": "1"})
 
         assert first.status_code == 200
         assert second.status_code == 200
+        assert detail.status_code == 200
         assert refreshed.status_code == 200
         assert calls == [output_dir, output_dir]
 

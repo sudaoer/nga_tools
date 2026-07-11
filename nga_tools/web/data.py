@@ -927,6 +927,7 @@ def read_posts(
     query: str = "",
     lou_from: Optional[int] = None,
     lou_to: Optional[int] = None,
+    ensure_schema: bool = True,
 ) -> PostsResult:
     if page < 1:
         raise ValueError("page必须大于等于1。")
@@ -939,7 +940,8 @@ def read_posts(
     if not db_path.is_file():
         raise ThreadUnavailableError("缺少archive.sqlite3。")
     archive_store = ThreadArchiveStore(thread_folder)
-    archive_store.ensure_schema()
+    if ensure_schema:
+        archive_store.ensure_schema()
     overlays = load_post_overlays(thread_folder)
 
     page_size = ORIGINAL_POSTS_PER_PAGE

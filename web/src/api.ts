@@ -1,7 +1,10 @@
 import type {
   DatabaseSchema,
   DatabaseSummary,
+  ImageUsageDetailResult,
+  ImageUsageRepliesResult,
   ImageUsageResult,
+  ImageUsageSort,
   PostOverlayDetail,
   PostOverlayPreview,
   PostVersionGroup,
@@ -257,6 +260,7 @@ export async function clearPostOverlay(
 export interface FetchImageUsageOptions {
   offset: number
   limit: number
+  sort: ImageUsageSort
   refresh?: boolean
 }
 
@@ -266,10 +270,37 @@ export async function fetchImageUsage(
   const params = new URLSearchParams()
   params.set('offset', String(options.offset))
   params.set('limit', String(options.limit))
+  params.set('sort', options.sort)
   if (options.refresh) {
     params.set('refresh', '1')
   }
   return readJson<ImageUsageResult>(`/api/admin/image-usage?${params.toString()}`)
+}
+
+export async function fetchImageUsageDetail(
+  relativePath: string,
+): Promise<ImageUsageDetailResult> {
+  const params = new URLSearchParams({ relative_path: relativePath })
+  return readJson<ImageUsageDetailResult>(
+    `/api/admin/image-usage/detail?${params.toString()}`,
+  )
+}
+
+export async function fetchImageUsageReplies(
+  relativePath: string,
+  tid: number,
+  offset: number,
+  limit = 20,
+): Promise<ImageUsageRepliesResult> {
+  const params = new URLSearchParams({
+    relative_path: relativePath,
+    tid: String(tid),
+    offset: String(offset),
+    limit: String(limit),
+  })
+  return readJson<ImageUsageRepliesResult>(
+    `/api/admin/image-usage/replies?${params.toString()}`,
+  )
 }
 
 export interface FetchDatabasesOptions {

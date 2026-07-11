@@ -111,7 +111,11 @@ export interface ImageUsageItem {
   sourceUrl: string
   mappingCount: number
   usageCount: number
+  replyCount: number
+  threadCount: number
 }
+
+export type ImageUsageSort = 'usage' | 'threads'
 
 export interface SkippedImageUsageArchive {
   dirName: string
@@ -123,6 +127,7 @@ export interface ImageUsageResult {
   total: number
   offset: number
   limit: number
+  sort: ImageUsageSort
   computedAt: string
   archiveCount: number
   postCount: number
@@ -130,6 +135,39 @@ export interface ImageUsageResult {
   mappedReferenceCount: number
   unmappedReferenceCount: number
   skippedArchives: SkippedImageUsageArchive[]
+}
+
+export interface ImageUsageThreadGroup {
+  tid: number
+  title: string
+  usageCount: number
+  replyCount: number
+}
+
+export interface ImageUsageDetailResult {
+  item: ImageUsageItem
+  threads: ImageUsageThreadGroup[]
+}
+
+export interface ImageUsageReplyItem {
+  tid: number
+  aidKey: string
+  dirName: string
+  pid: number
+  lou: number
+  floorLabel: string
+  authorName: string | null
+  postdate: number | string | null
+  occurrenceCount: number
+  html: string
+  readerUrl: string
+}
+
+export interface ImageUsageRepliesResult {
+  items: ImageUsageReplyItem[]
+  total: number
+  offset: number
+  limit: number
 }
 
 export type DatabaseKind = 'forum_threads' | 'image_index' | 'archive'
