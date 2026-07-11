@@ -109,6 +109,32 @@ class ThreadArchiveStoreTest:
 
         assert actual == replacement
 
+    def test_identical_floor_map_replace_does_not_increment_revision(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            floor_map = _stored_floor_map(
+                [
+                    {"pid": 1002, "author_lou": 2, "original_lou": 12},
+                    {
+                        "pid": None,
+                        "author_lou": 1,
+                        "original_lou": None,
+                        "candidate_original_lous": [10, 11],
+                    },
+                ]
+            )
+
+            first_changed = store.replace_floor_map(floor_map)
+            after_first = store.read_backup_processing_snapshot().change_state
+            repeated_changed = store.replace_floor_map(floor_map)
+            after_repeated = store.read_backup_processing_snapshot().change_state
+
+        assert first_changed
+        assert not repeated_changed
+        assert after_first.floor_map_revision == 1
+        assert after_repeated.floor_map_revision == 1
+
     def test_invalid_floor_map_does_not_replace_existing_data(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))

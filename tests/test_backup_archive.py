@@ -633,7 +633,51 @@ class BackupRawArchiveTest:
         assert downloaded_urls == [[image_url], [image_url], []]
         assert after_success.pending_image_urls == ()
 
-    def test_unresolved_missing_floor_does_not_write_fast_path_state(
+    def test_unresolved_missing_floor_uses_fast_path_after_initial_processing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        image_url = (
+            "https://img.nga.178.com/attachments/mon_202506/06/missing.png"
+        )
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        client.posts = [
+            {
+                "lou": 1,
+                "pid": 1001,
+                "content": f"first [img]{image_url}[/img]",
+            },
+            {"lou": 3, "pid": 1003, "content": "third"},
+        ]
+        client.vrows = 4
+        downloaded_urls: list[list[str]] = []
+        full_processing_calls: list[str] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            downloaded_urls=downloaded_urls,
+            failed_download_urls={image_url},
+            full_processing_calls=full_processing_calls,
+        )
+        first_snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+        _run_backup(
+            thread_dir,
+            client,
+            downloaded_urls=downloaded_urls,
+            failed_download_urls={image_url},
+            full_processing_calls=full_processing_calls,
+        )
+
+        assert first_snapshot.processing_state is not None
+        assert first_snapshot.pending_image_urls == (image_url,)
+        assert downloaded_urls == [[image_url], [image_url]]
+        assert full_processing_calls == ["full"]
+
+    def test_failed_missing_floor_retry_preserves_existing_state(
         self,
         tmp_path: Path,
     ) -> None:
@@ -651,17 +695,81 @@ class BackupRawArchiveTest:
             client,
             full_processing_calls=full_processing_calls,
         )
-        first_snapshot = ThreadArchiveStore(
+        before_retry = ThreadArchiveStore(
             thread_dir
         ).read_backup_processing_snapshot()
         _run_backup(
             thread_dir,
             client,
+            floor_map_cacheable=False,
+            full_processing_calls=full_processing_calls,
+        )
+        after_retry = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+
+        assert before_retry.processing_state is not None
+        assert after_retry.processing_state == before_retry.processing_state
+        assert full_processing_calls == ["full"]
+
+    def test_recovered_missing_floor_triggers_one_new_full_processing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": "first"},
+            {"lou": 3, "pid": 1003, "content": "third"},
+        ]
+        client.vrows = 4
+        recovered: RecoveredMissingPost = {
+            "original_pid": 2002,
+            "original_lou": 11,
+            "content": "recovered body",
+            "raw_post": {
+                "lou": 11,
+                "pid": 2002,
+                "content": "recovered body",
+                "author": {"uid": -1, "username": "匿名"},
+                "postdate": 123456,
+                "attches": [],
+            },
+        }
+        unresolved_result = FloorMapBuildResult(FloorLabels.plain(), {})
+        recovered_result = FloorMapBuildResult(
+            FloorLabels(
+                original_lou_by_author_lou={1: 10, 2: 11, 3: 12},
+                candidate_original_lous_by_author_lou={},
+                show_original=True,
+            ),
+            {2: recovered},
+        )
+        full_processing_calls: list[str] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            floor_map_result=unresolved_result,
+            full_processing_calls=full_processing_calls,
+        )
+        _run_backup(
+            thread_dir,
+            client,
+            floor_map_result=recovered_result,
+            full_processing_calls=full_processing_calls,
+        )
+        _run_backup(
+            thread_dir,
+            client,
+            floor_map_result=recovered_result,
             full_processing_calls=full_processing_calls,
         )
 
-        assert first_snapshot.processing_state is None
+        records = ThreadArchiveStore(thread_dir).read_effective_post_records()
         assert full_processing_calls == ["full", "full"]
+        assert [record["lou"] for record in records] == [1, 2, 3]
+        assert records[1]["post"]["content"] == "recovered body"
 
     def test_floor_map_failure_does_not_write_fast_path_state(
         self,
@@ -864,9 +972,12 @@ class BackupRawArchiveTest:
 
         timing_text = timing_path.read_text(encoding="utf-8")
         assert "阶段：增量快路径判定，开始时间：" in timing_text
+        assert "阶段：未完成缺失楼重试，开始时间：" in timing_text
         assert "阶段：未完成图片重试，开始时间：" in timing_text
         assert "指标：增量快路径命中，值：1\n" in timing_text
         assert "指标：增量有效变更页数，值：0\n" in timing_text
+        assert "指标：待恢复缺失楼数，值：0\n" in timing_text
+        assert "指标：缺失楼重试引发完整处理，值：0\n" in timing_text
         assert "阶段：读取完整归档记录，开始时间：" not in timing_text
         assert "阶段：正文解析与图片处理，开始时间：" not in timing_text
         assert "阶段：图片缓存文件校验，开始时间：" not in timing_text

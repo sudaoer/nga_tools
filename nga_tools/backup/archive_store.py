@@ -943,11 +943,33 @@ class ThreadArchiveStore:
                     f"楼层映射候选楼层必须都是整数：author_lou={author_lou}"
                 )
 
-    def replace_floor_map(self, floor_map: StoredFloorMap) -> None:
+    @staticmethod
+    def _normalized_floor_map(floor_map: StoredFloorMap) -> StoredFloorMap:
+        return StoredFloorMap(
+            version=floor_map.version,
+            generation_version=floor_map.generation_version,
+            algorithm=floor_map.algorithm,
+            tid=floor_map.tid,
+            aid=floor_map.aid,
+            input_signature=floor_map.input_signature,
+            entries=sorted(
+                floor_map.entries,
+                key=lambda entry: entry["author_lou"],
+            ),
+        )
+
+    def replace_floor_map(self, floor_map: StoredFloorMap) -> bool:
         self._validate_floor_map(floor_map)
+        normalized_floor_map = self._normalized_floor_map(floor_map)
         self.require_exists()
         with closing(self._connect()) as connection:
             with connection:
+                try:
+                    current_floor_map = self._read_floor_map(connection)
+                except ValueError:
+                    current_floor_map = None
+                if current_floor_map == normalized_floor_map:
+                    return False
                 connection.execute("DELETE FROM floor_map_candidates")
                 connection.execute("DELETE FROM floor_map_entries")
                 connection.execute("DELETE FROM floor_map_state")
@@ -965,15 +987,15 @@ class ThreadArchiveStore:
                     VALUES (1, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        floor_map.tid,
-                        floor_map.aid,
-                        floor_map.version,
-                        floor_map.generation_version,
-                        floor_map.algorithm,
-                        floor_map.input_signature,
+                        normalized_floor_map.tid,
+                        normalized_floor_map.aid,
+                        normalized_floor_map.version,
+                        normalized_floor_map.generation_version,
+                        normalized_floor_map.algorithm,
+                        normalized_floor_map.input_signature,
                     ),
                 )
-                for entry in floor_map.entries:
+                for entry in normalized_floor_map.entries:
                     author_lou = entry["author_lou"]
                     connection.execute(
                         """
@@ -1007,40 +1029,41 @@ class ThreadArchiveStore:
                             (author_lou, candidate_index, original_lou),
                         )
                 self._increment_floor_map_revision(connection)
+        return True
 
-    def read_floor_map(self) -> StoredFloorMap | None:
-        if not self.exists():
+    def _read_floor_map(
+        self,
+        connection: sqlite3.Connection,
+    ) -> StoredFloorMap | None:
+        state_row = connection.execute(
+            """
+            SELECT
+                format_version,
+                generation_version,
+                hash_algorithm,
+                tid,
+                aid,
+                input_signature
+            FROM floor_map_state
+            WHERE singleton = 1
+            """
+        ).fetchone()
+        if state_row is None:
             return None
-        with closing(self._connect()) as connection:
-            state_row = connection.execute(
-                """
-                SELECT
-                    format_version,
-                    generation_version,
-                    hash_algorithm,
-                    tid,
-                    aid,
-                    input_signature
-                FROM floor_map_state
-                WHERE singleton = 1
-                """
-            ).fetchone()
-            if state_row is None:
-                return None
-            entry_rows = connection.execute(
-                """
-                SELECT author_lou, pid, original_lou, original_pid
-                FROM floor_map_entries
-                ORDER BY author_lou
-                """
-            ).fetchall()
-            candidate_rows = connection.execute(
-                """
-                SELECT author_lou, candidate_index, original_lou
-                FROM floor_map_candidates
-                ORDER BY author_lou, candidate_index
-                """
-            ).fetchall()
+        entry_rows = connection.execute(
+            """
+            SELECT author_lou, pid, original_lou, original_pid
+            FROM floor_map_entries
+            ORDER BY author_lou
+            """
+        ).fetchall()
+        candidate_rows = connection.execute(
+            """
+            SELECT author_lou, candidate_index, original_lou
+            FROM floor_map_candidates
+            ORDER BY author_lou, candidate_index
+            """
+        ).fetchall()
 
         candidates_by_author_lou: dict[int, list[int]] = {}
         for author_lou, candidate_index, original_lou in candidate_rows:
@@ -1100,6 +1123,12 @@ class ThreadArchiveStore:
         )
         self._validate_floor_map(floor_map)
         return floor_map
+
+    def read_floor_map(self) -> StoredFloorMap | None:
+        if not self.exists():
+            return None
+        with closing(self._connect()) as connection:
+            return self._read_floor_map(connection)
 
     def _ensure_post_version_word_count_columns(
         self,

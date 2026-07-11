@@ -173,18 +173,10 @@ def _build_floor_map_for_post_refs(
         )
 
 
-def _post_refs_and_missing_lous(
+def _author_post_refs_and_missing_lous(
     archive_store: ThreadArchiveStore,
-    aid: Optional[int],
     author_total_lou_count: int | None,
-    records: list[PostRecord],
 ) -> tuple[list[AuthorPostRef], list[int]]:
-    if aid is None:
-        return (
-            _post_refs_from_posts(records),
-            _find_missing_lou(records, author_total_lou_count),
-        )
-
     post_refs = archive_store.read_latest_author_post_refs()
     present_lous = {post["author_lou"] for post in post_refs}
     missing_lous = find_missing_author_lous(
@@ -199,14 +191,65 @@ def _post_refs_and_missing_lous(
     return post_refs, _merge_missing_lou(missing_lous, previous_missing_lous)
 
 
+def _post_refs_and_missing_lous(
+    archive_store: ThreadArchiveStore,
+    aid: Optional[int],
+    author_total_lou_count: int | None,
+    records: list[PostRecord],
+) -> tuple[list[AuthorPostRef], list[int]]:
+    if aid is None:
+        return (
+            _post_refs_from_posts(records),
+            _find_missing_lou(records, author_total_lou_count),
+        )
+    return _author_post_refs_and_missing_lous(
+        archive_store,
+        author_total_lou_count,
+    )
+
+
+def _retry_unresolved_missing_lous(
+    client: NGAClient,
+    archive_store: ThreadArchiveStore,
+    tid: int,
+    aid: int,
+    author_total_lou_count: int | None,
+    expected_snapshot: BackupProcessingSnapshot,
+) -> bool:
+    post_refs, missing_lous = _author_post_refs_and_missing_lous(
+        archive_store,
+        author_total_lou_count,
+    )
+    record_timing_metric("待恢复缺失楼数", len(missing_lous))
+    if not missing_lous:
+        record_timing_metric("本次恢复缺失楼数", 0)
+        return False
+
+    floor_map_processing = _build_floor_map_for_post_refs(
+        client,
+        archive_store,
+        tid,
+        aid,
+        post_refs,
+        missing_lous,
+    )
+    recovered_count = archive_store.upsert_recovered_posts(
+        floor_map_processing.build_result.recovered_missing_posts_by_author_lou
+    )
+    record_timing_metric("本次恢复缺失楼数", recovered_count)
+    current_snapshot = archive_store.read_backup_processing_snapshot()
+    return current_snapshot.change_state != expected_snapshot.change_state
+
+
 def _records_with_recovered_and_missing_posts(
     archive_store: ThreadArchiveStore,
     floor_map_result: FloorMapBuildResult,
     missing_lous: list[int],
 ) -> _RecordProcessingResult:
-    archive_store.upsert_recovered_posts(
+    recovered_count = archive_store.upsert_recovered_posts(
         floor_map_result.recovered_missing_posts_by_author_lou
     )
+    record_timing_metric("本次恢复缺失楼数", recovered_count)
     records = archive_store.read_effective_post_records()
     present_lous = {record["lou"] for record in records}
     unresolved_missing_lous = [
@@ -273,6 +316,7 @@ def _failed_image_urls(download_summary: DownloadSummary) -> set[str]:
 
 
 def _try_incremental_fast_path(
+    client: NGAClient,
     tid: int,
     aid: int,
     thread_folder: Path,
@@ -302,6 +346,23 @@ def _try_incremental_fast_path(
         post_overlays_hash=post_overlays_hash,
         post_version_selections_hash=post_version_selections_hash,
     ):
+        return False
+
+    with time_section("未完成缺失楼重试"):
+        missing_floor_changed = _retry_unresolved_missing_lous(
+            client,
+            archive_store,
+            tid,
+            aid,
+            author_total_lou_count,
+            snapshot,
+        )
+    record_timing_metric(
+        "缺失楼重试引发完整处理",
+        int(missing_floor_changed),
+    )
+    if missing_floor_changed:
+        report_info("缺失楼恢复结果已变化，转为完整处理。")
         return False
 
     report_info("归档与派生输入未变化，跳过完整处理。")
@@ -340,13 +401,6 @@ def _commit_completed_processing_state(
     if not floor_map_processing.cacheable:
         report_info("楼层映射本次未形成可复用状态，下次继续完整处理。")
         return
-    if unresolved_missing_lous:
-        report_info(
-            f"仍有{len(unresolved_missing_lous)}个缺失楼未恢复，"
-            "下次继续完整处理。"
-        )
-        return
-
     fingerprints_after = (
         post_overlays_fingerprint(thread_folder),
         selections_fingerprint(thread_folder),
@@ -370,11 +424,17 @@ def _commit_completed_processing_state(
         image_reference_extractor_version=IMAGE_REFERENCE_EXTRACTOR_VERSION,
         completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
-    if not archive_store.commit_backup_processing_state(
+    committed = archive_store.commit_backup_processing_state(
         state,
         pending_image_urls,
-    ):
+    )
+    if not committed:
         report_warning("归档在处理期间发生变化，未写入增量快路径状态。")
+    elif unresolved_missing_lous:
+        report_info(
+            f"仍有{len(unresolved_missing_lous)}个缺失楼未恢复，"
+            "已保存处理状态，下次仅重试缺失楼。"
+        )
 
 
 def _run_full_processing(
@@ -407,6 +467,7 @@ def _run_full_processing(
                 author_total_lou_count,
                 records,
             )
+            record_timing_metric("待恢复缺失楼数", len(missing_lous))
         with time_section("楼层映射生成/复用"):
             floor_map_processing = _build_floor_map_for_post_refs(
                 client,
@@ -559,6 +620,7 @@ def backup_thread_sub(
         if aid is not None:
             available_page_numbers = existing_page_numbers | refresh_page_numbers
             fast_path_hit = _try_incremental_fast_path(
+                client,
                 tid,
                 aid,
                 thread_folder,
