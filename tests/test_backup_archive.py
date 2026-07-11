@@ -13,6 +13,7 @@ import pytest
 from nga_tools.backup import archive as archive_module
 from nga_tools.backup.archive import (
     FloorMapProcessingResult,
+    maintain_thread_backup,
     backup_thread,
     backup_thread_sub,
 )
@@ -63,6 +64,37 @@ class MutableFakeClient:
             "currentPage": page,
             "totalPage": self.total_page,
             "result": [dict(post) for post in self.posts],
+        }
+        if aid is not None and self.vrows is not None:
+            data["vrows"] = self.vrows
+        return data
+
+
+class FailingTailFakeClient(MutableFakeClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.total_page = 2
+        self.vrows = 2
+        self.posts_by_page: dict[int, list[dict[str, object]]] = {
+            1: [{"lou": 1, "pid": 1001, "content": "first"}],
+            2: [{"lou": 2, "pid": 1002, "content": "second"}],
+        }
+        self.fail_tail = False
+
+    def get_page(
+        self,
+        tid: int,
+        aid: int | None,
+        page: int,
+    ) -> dict[str, object]:
+        del tid
+        self.get_page_calls.append(page)
+        if page == 2 and self.fail_tail:
+            raise RuntimeError("tail fetch failed")
+        data: dict[str, object] = {
+            "currentPage": page,
+            "totalPage": self.total_page,
+            "result": [dict(post) for post in self.posts_by_page[page]],
         }
         if aid is not None and self.vrows is not None:
             data["vrows"] = self.vrows
@@ -196,6 +228,8 @@ def _run_backup(
                 write_json=write_json,
                 force_processing=force_processing,
             )
+        elif mode == "maintenance":
+            maintain_thread_backup(123, aid)
         else:
             backup_thread_sub(
                 123,
@@ -1180,6 +1214,84 @@ class BackupRawArchiveTest:
         )
 
         assert client.get_page_calls == [1, 2]
+
+    def test_smart_author_fast_path_retries_tail_before_any_page_commit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = FailingTailFakeClient()
+        _run_backup(thread_dir, client)
+        store = ThreadArchiveStore(thread_dir)
+
+        client.posts_by_page[1][0]["content"] = "first edited"
+        client.posts_by_page[2][0]["content"] = "second edited"
+        client.fail_tail = True
+        client.get_page_calls.clear()
+        with pytest.raises(RuntimeError, match="tail fetch failed"):
+            _run_backup(
+                thread_dir,
+                client,
+                allow_unchanged_author_fast_path=True,
+            )
+
+        records_after_failure = store.read_effective_post_records()
+        assert [record["post"]["content"] for record in records_after_failure] == [
+            "first",
+            "second",
+        ]
+        assert client.get_page_calls == [1, 2]
+
+        client.fail_tail = False
+        client.get_page_calls.clear()
+        _run_backup(
+            thread_dir,
+            client,
+            allow_unchanged_author_fast_path=True,
+        )
+
+        records_after_retry = store.read_effective_post_records()
+        assert [record["post"]["content"] for record in records_after_retry] == [
+            "first edited",
+            "second edited",
+        ]
+        assert client.get_page_calls == [1, 2]
+
+    def test_maintenance_uses_latest_archived_pagination_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        _run_backup(thread_dir, client)
+        store = ThreadArchiveStore(thread_dir)
+        store.upsert_pages(
+            {
+                1: {
+                    "currentPage": 1,
+                    "totalPage": 2,
+                    "vrows": 5,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "first"}
+                    ],
+                },
+                2: {
+                    "currentPage": 2,
+                    "totalPage": 2,
+                    "vrows": 5,
+                    "result": [
+                        {"lou": 2, "pid": 1002, "content": "second"}
+                    ],
+                },
+            }
+        )
+
+        _run_backup(thread_dir, client, mode="maintenance")
+
+        state = store.read_backup_processing_snapshot().processing_state
+        assert state is not None
+        assert state.page_count == 2
+        assert state.author_total_lou_count == 5
 
 
 def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(

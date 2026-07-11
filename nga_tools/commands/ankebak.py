@@ -27,7 +27,6 @@ from nga_tools.forum.thread_configs import (
     NGAThreadConfigs,
     ThreadConfig,
     thread_config_aid,
-    thread_config_name,
     thread_config_tid,
 )
 from nga_tools.ngaclient.client import ForumThread
@@ -39,8 +38,9 @@ AnkebakMode = Literal["full", "sub", "maintenance"]
 @dataclass(frozen=True)
 class AnkebakJob:
     thread_config: ThreadConfig
-    mode: AnkebakMode
+    mode: AnkebakMode | None
     fresh_thread: ForumThread | None
+    planning_error: Exception | None = None
 
 
 def _worker_count(args: CommandArgs, default_worker_count: int) -> int:
@@ -66,7 +66,11 @@ def _jobs_for_threads(
         aid = thread_config_aid(thread_config)
         state = states.get(ankebak_target_key(tid, aid))
         fresh_thread = fresh_by_tid.get(tid)
-        if fresh_thread is not None and fresh_thread["authorid"] != aid:
+        if (
+            fresh_thread is not None
+            and aid is not None
+            and fresh_thread["authorid"] != aid
+        ):
             fresh_thread = None
 
         if state is None or state.full_backup_is_due(
@@ -82,7 +86,18 @@ def _jobs_for_threads(
             jobs.append(AnkebakJob(thread_config, "sub", fresh_thread))
             continue
 
-        local_work = backup_local_work_kind(tid, aid)
+        try:
+            local_work = backup_local_work_kind(tid, aid)
+        except Exception as error:
+            jobs.append(
+                AnkebakJob(
+                    thread_config,
+                    None,
+                    fresh_thread,
+                    planning_error=error,
+                )
+            )
+            continue
         if local_work == "refresh":
             jobs.append(AnkebakJob(thread_config, "sub", fresh_thread))
         elif local_work == "maintenance":
@@ -118,13 +133,18 @@ def backup_auto(args: CommandArgs) -> None:
         "maintenance": 0,
     }
     for job in jobs:
-        mode_counts[job.mode] += 1
+        if job.mode is not None:
+            mode_counts[job.mode] += 1
+    planning_failure_count = sum(
+        job.planning_error is not None for job in jobs
+    )
     report_info(
         f"ankebak任务选择：配置{len(thread_configs)}个，"
         f"本轮新鲜主题{len(forum_result.fresh_threads)}个；"
         f"周期完整备份{mode_counts['full']}个，"
         f"增量备份{mode_counts['sub']}个，"
         f"本地维护{mode_counts['maintenance']}个，"
+        f"本地检查失败{planning_failure_count}个，"
         f"无变化跳过{skipped_count}个。"
     )
     if not jobs:
@@ -141,10 +161,12 @@ def backup_auto(args: CommandArgs) -> None:
     validation_cache = ImageValidationCache()
     write_json = optional_bool(args, "write_json")
 
-    def action(thread_config: ThreadConfig) -> str:
+    def action(thread_config: ThreadConfig) -> None:
         tid = thread_config_tid(thread_config)
         aid = thread_config_aid(thread_config)
         job = jobs_by_target[ankebak_target_key(tid, aid)]
+        if job.planning_error is not None:
+            raise job.planning_error
         with use_image_validation_cache(validation_cache):
             if job.mode == "full":
                 backup_thread(tid, aid, write_json=write_json)
@@ -165,12 +187,6 @@ def backup_auto(args: CommandArgs) -> None:
             completed_at=datetime.now().astimezone(),
             full_backup=job.mode == "full",
         )
-        mode_label = {
-            "full": "完整备份",
-            "sub": "增量备份",
-            "maintenance": "本地维护",
-        }[job.mode]
-        return f"{mode_label}完成：{thread_config_name(thread_config)}"
 
     run_thread_config_batch(
         action=action,

@@ -1,18 +1,34 @@
 from __future__ import annotations
 
+import io
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+from rich.console import Console
+
 from nga_tools.cli import args_parse
-from nga_tools.commands.ankebak import _jobs_for_threads
+from nga_tools.commands.ankebak import _jobs_for_threads, backup_auto
+from nga_tools.commands.forum import DefaultForumSyncResult
+from nga_tools.console import ConsoleReporter, use_reporter
 from nga_tools.forum.ankebak_state import AnkebakStateStore, ankebak_target_key
 from nga_tools.forum.thread_configs import ThreadConfig
 from nga_tools.ngaclient.client import ForumThread
 
 
-def _thread_config(tid: int = 101, aid: int = 201) -> ThreadConfig:
-    return {"thread_name": f"thread-{tid}", "tid": tid, "aid": aid}
+def _thread_config(tid: int = 101, aid: int | None = 201) -> ThreadConfig:
+    thread_config: ThreadConfig = {
+        "thread_name": f"thread-{tid}",
+        "tid": tid,
+    }
+    if aid is not None:
+        thread_config["aid"] = aid
+    return thread_config
 
 
 def _forum_thread(
@@ -33,6 +49,19 @@ def _forum_thread(
         "replies": replies,
         "forumname": "测试版面",
     }
+
+
+@contextmanager
+def _captured_reporter() -> Iterator[io.StringIO]:
+    output = io.StringIO()
+    console = Console(
+        file=output,
+        force_terminal=False,
+        color_system=None,
+        width=120,
+    )
+    with use_reporter(ConsoleReporter(console)):
+        yield output
 
 
 class AnkebakStateStoreTest:
@@ -155,6 +184,37 @@ class AnkebakJobSelectionTest:
         assert [job.mode for job in jobs] == ["sub"]
         assert skipped == 0
 
+    def test_changed_signature_uses_incremental_backup_for_whole_thread(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")
+        completed_at = datetime(2026, 7, 10, tzinfo=timezone.utc)
+        store.record_success(
+            tid=101,
+            aid=None,
+            forum_thread=_forum_thread(),
+            completed_at=completed_at,
+            full_backup=True,
+        )
+        fresh_thread = _forum_thread(replies=101, lastpost=3000)
+
+        with patch(
+            "nga_tools.commands.ankebak.backup_local_work_kind",
+            return_value=None,
+        ):
+            jobs, skipped = _jobs_for_threads(
+                [_thread_config(aid=None)],
+                (fresh_thread,),
+                store,
+                now=completed_at + timedelta(hours=24),
+                full_backup_interval_hours=168,
+            )
+
+        assert [job.mode for job in jobs] == ["sub"]
+        assert jobs[0].fresh_thread == fresh_thread
+        assert skipped == 0
+
     def test_local_pending_work_runs_without_fresh_forum_thread(
         self,
         tmp_path: Path,
@@ -183,6 +243,73 @@ class AnkebakJobSelectionTest:
 
         assert [job.mode for job in jobs] == ["maintenance"]
         assert skipped == 0
+
+
+def test_backup_auto_isolates_planning_failure_and_omits_success_detail(
+    tmp_path: Path,
+) -> None:
+    store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")
+    completed_at = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    bad_config = _thread_config(tid=101, aid=201)
+    good_config = _thread_config(tid=102, aid=202)
+    for tid, aid in ((101, 201), (102, 202)):
+        store.record_success(
+            tid=tid,
+            aid=aid,
+            forum_thread=_forum_thread(tid=tid, aid=aid),
+            completed_at=completed_at,
+            full_backup=True,
+        )
+
+    def local_work_side_effect(tid: int, aid: int | None) -> str:
+        del aid
+        if tid == 101:
+            raise sqlite3.DatabaseError("corrupt archive")
+        return "maintenance"
+
+    app_config = SimpleNamespace(
+        backup_configs_workers=1,
+        timing_log_enabled=False,
+        ankebak_full_backup_interval_hours=168,
+    )
+    forum_result = DefaultForumSyncResult((), 0, 0, 0, 0, 0)
+    with (
+        patch(
+            "nga_tools.commands.ankebak.configure_network_limits_from_args",
+            return_value=app_config,
+        ),
+        patch(
+            "nga_tools.commands.ankebak.sync_default_forum_watch",
+            return_value=forum_result,
+        ),
+        patch("nga_tools.commands.ankebak.NGAThreadConfigs") as configs_cls,
+        patch(
+            "nga_tools.commands.ankebak.AnkebakStateStore",
+            return_value=store,
+        ),
+        patch(
+            "nga_tools.commands.ankebak.backup_local_work_kind",
+            side_effect=local_work_side_effect,
+        ),
+        patch("nga_tools.commands.ankebak.maintain_thread_backup") as maintain,
+        _captured_reporter() as output,
+    ):
+        configs_cls.return_value.get_thread_configs.return_value = [
+            bad_config,
+            good_config,
+        ]
+        with pytest.raises(SystemExit) as context:
+            backup_auto({"workers": 1})
+
+    assert context.value.code == 1
+    maintain.assert_called_once_with(102, 202)
+    states = store.load_states()
+    assert states[ankebak_target_key(101, 201)].last_backup_success_at == completed_at
+    assert states[ankebak_target_key(102, 202)].last_backup_success_at > completed_at
+    output_text = output.getvalue()
+    assert "本地检查失败1个" in output_text
+    assert "本地维护完成：" not in output_text
+    assert "批量ankebak完成：成功1个，失败1个。" in output_text
 
 
 def test_backup_auto_cli_parses_network_and_watch_options() -> None:

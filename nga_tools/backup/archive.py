@@ -603,10 +603,18 @@ def backup_local_work_kind(
     if state is None:
         return "refresh"
 
+    try:
+        pagination = archive_store.read_latest_page_one_pagination()
+    except ValueError:
+        return "refresh"
+    if pagination is None:
+        return "refresh"
+    author_total_lou_count = pagination.vrows if aid is not None else None
+
     miss_reason = _processing_snapshot_miss_reason(
         snapshot,
-        page_count=state.page_count,
-        author_total_lou_count=state.author_total_lou_count,
+        page_count=pagination.page_count,
+        author_total_lou_count=author_total_lou_count,
         post_overlays_hash=post_overlays_fingerprint(thread_folder),
         post_version_selections_hash=selections_fingerprint(thread_folder),
     )
@@ -614,7 +622,7 @@ def backup_local_work_kind(
         return "maintenance"
     if aid is not None and read_unresolved_missing_author_lous_from_archive(
         archive_store,
-        total_lou_count=state.author_total_lou_count,
+        total_lou_count=author_total_lou_count,
     ):
         return "maintenance"
     return None
@@ -627,6 +635,14 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
     state = snapshot.processing_state
     if state is None:
         raise RuntimeError("缺少线程级处理状态，必须先执行增量备份。")
+    pagination = archive_store.read_latest_page_one_pagination()
+    if pagination is None:
+        raise RuntimeError("归档缺少第一页分页元数据，必须先执行增量备份。")
+    author_total_lou_count = pagination.vrows if aid is not None else None
+    existing_page_numbers = archive_store.read_page_numbers()
+    local_pages_cover_remote = set(
+        range(1, pagination.page_count + 1)
+    ) <= existing_page_numbers
 
     with time_section("客户端初始化"):
         client = NGAClient()
@@ -636,9 +652,9 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
         aid,
         thread_folder,
         archive_store,
-        page_count=state.page_count,
-        author_total_lou_count=state.author_total_lou_count,
-        local_pages_cover_remote=True,
+        page_count=pagination.page_count,
+        author_total_lou_count=author_total_lou_count,
+        local_pages_cover_remote=local_pages_cover_remote,
         force_processing=False,
     )
     if reuse_result.hit:
@@ -650,8 +666,8 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
         thread_folder,
         tid,
         aid,
-        page_count=state.page_count,
-        author_total_lou_count=state.author_total_lou_count,
+        page_count=pagination.page_count,
+        author_total_lou_count=author_total_lou_count,
     )
 
 
@@ -796,6 +812,28 @@ def backup_thread_sub(
             )
             page_data_by_page = {1: first_page_data}
             report_progress("第一页校验完成", completed=1, total=1)
+            with time_section("智能增量第一页变更预检"):
+                first_page_changed = (
+                    archive_store.page_effective_processing_inputs_changed(
+                        1,
+                        first_page_data,
+                    )
+                )
+            if first_page_changed:
+                with time_section("智能增量尾页回退抓取"):
+                    tail_start = min(max(existing_page_numbers), page_count)
+                    fallback_page_numbers = (
+                        set(range(tail_start, page_count + 1)) - {1}
+                    )
+                    for page_number in sorted(fallback_page_numbers):
+                        page_data_by_page[page_number] = _fetch_backup_page(
+                            client,
+                            tid,
+                            aid,
+                            page_number,
+                            page_count,
+                            first_page_data,
+                        )
         else:
             if existing_page_numbers:
                 tail_start = min(max(existing_page_numbers), page_count)
@@ -857,44 +895,6 @@ def backup_thread_sub(
     with time_section("归档字数回填"):
         refreshed_word_counts = archive_store.refresh_stored_word_counts()
     record_timing_metric("归档字数回填版本数", refreshed_word_counts)
-
-    if unchanged_author_fast_path and upsert_result.effective_changed_pages > 0:
-        with time_section("智能增量尾页回退抓取"):
-            tail_start = min(max(existing_page_numbers), page_count)
-            fallback_page_numbers = set(range(tail_start, page_count + 1)) - {1}
-            for page_number in sorted(fallback_page_numbers):
-                page_data_by_page[page_number] = _fetch_backup_page(
-                    client,
-                    tid,
-                    aid,
-                    page_number,
-                    page_count,
-                    first_page_data,
-                )
-        if write_json:
-            folder_json = Path(utils.get_folder(tid, aid, "debug_json"))
-            for page_number in sorted(fallback_page_numbers):
-                _write_page_json(
-                    folder_json,
-                    page_number,
-                    page_data_by_page[page_number],
-                )
-        if fallback_page_numbers:
-            with time_section("智能增量尾页回退写入"):
-                fallback_upsert_result = _upsert_archive_pages(
-                    archive_store,
-                    {
-                        page_number: page_data_by_page[page_number]
-                        for page_number in fallback_page_numbers
-                    },
-                )
-            _record_archive_upsert_metrics(fallback_upsert_result)
-            with time_section("智能增量尾页回退字数回填"):
-                fallback_word_counts = archive_store.refresh_stored_word_counts()
-            record_timing_metric(
-                "智能增量尾页回退字数回填版本数",
-                fallback_word_counts,
-            )
 
     available_page_numbers = existing_page_numbers | set(page_data_by_page)
     reuse_result = _reuse_processing_state_after_page_refresh(

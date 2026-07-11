@@ -142,6 +142,12 @@ class ArchivePagesUpsertResult:
 
 
 @dataclass(frozen=True)
+class ArchivePagePagination:
+    page_count: int
+    vrows: Optional[int]
+
+
+@dataclass(frozen=True)
 class ArchiveMigrationResult:
     page_files: int
     page_snapshots_inserted: int
@@ -1861,6 +1867,38 @@ class ThreadArchiveStore:
             posts=tuple(prepared_posts),
         )
 
+    def page_effective_processing_inputs_changed(
+        self,
+        page_number: int,
+        page_data: PageData,
+    ) -> bool:
+        prepared_page = self._prepare_archive_page(
+            page_number,
+            page_data,
+            observed_at=_now_utc_iso(),
+            count_observation=False,
+        )
+        affected_lous = {item.post["lou"] for item in prepared_page.posts}
+        with closing(self._connect_read()) as connection:
+            inputs_before = self._read_effective_processing_inputs(
+                connection,
+                affected_lous,
+            )
+        inputs_after = {
+            item.post["lou"]: (
+                item.post["lou"],
+                item.post["pid"],
+                item.source_hash,
+                item.metadata["author_uid"],
+                item.metadata["image_attachments_json"],
+            )
+            for item in prepared_page.posts
+        }
+        return any(
+            inputs_before.get(lou) != inputs_after.get(lou)
+            for lou in affected_lous
+        )
+
     def upsert_pages(
         self,
         page_data_by_page: dict[int, PageData],
@@ -2602,6 +2640,37 @@ class ThreadArchiveStore:
         if type(value) is int:
             return value
         raise ValueError(f"archive vrows字段无效：{value!r}")
+
+    def read_latest_page_one_pagination(
+        self,
+    ) -> ArchivePagePagination | None:
+        self.require_exists()
+        with closing(self._connect_read()) as connection:
+            row = cast(
+                Optional[tuple[object, object]],
+                connection.execute(
+                    """
+                    SELECT total_page, vrows
+                    FROM page_snapshots
+                    WHERE page_number = 1
+                    ORDER BY last_seen_at DESC, id DESC
+                    LIMIT 1
+                    """
+                ).fetchone(),
+            )
+
+        if row is None:
+            return None
+        total_page, vrows = row
+        if total_page is None:
+            page_count = 1
+        elif type(total_page) is int:
+            page_count = total_page
+        else:
+            raise ValueError(f"archive totalPage字段无效：{total_page!r}")
+        if vrows is not None and type(vrows) is not int:
+            raise ValueError(f"archive vrows字段无效：{vrows!r}")
+        return ArchivePagePagination(page_count, vrows)
 
     def read_page_numbers(self) -> set[int]:
         if not self.exists():

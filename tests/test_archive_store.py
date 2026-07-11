@@ -253,6 +253,76 @@ class ThreadArchiveStoreTest:
         assert metadata_seen_counts == [(2,), (2,)]
         assert observation_count == (2,)
 
+    def test_page_change_preflight_is_read_only_and_matches_effective_inputs(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            first_page = {
+                "currentPage": 1,
+                "totalPage": 2,
+                "vrows": 2,
+                "result": [
+                    {
+                        "lou": 1,
+                        "pid": 1001,
+                        "content": "first",
+                        "author": {"uid": 456},
+                    }
+                ],
+            }
+            store.upsert_page(1, first_page)
+            revision_before = (
+                store.read_backup_processing_snapshot()
+                .change_state.archive_revision
+            )
+
+            unchanged = store.page_effective_processing_inputs_changed(
+                1,
+                first_page,
+            )
+            changed_page = dict(first_page)
+            changed_page["result"] = [
+                {
+                    "lou": 1,
+                    "pid": 1001,
+                    "content": "edited",
+                    "author": {"uid": 456},
+                }
+            ]
+            changed = store.page_effective_processing_inputs_changed(
+                1,
+                changed_page,
+            )
+            revision_after = (
+                store.read_backup_processing_snapshot()
+                .change_state.archive_revision
+            )
+
+        assert not unchanged
+        assert changed
+        assert revision_after == revision_before
+
+    def test_latest_page_one_pagination_uses_newest_snapshot(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.upsert_page(
+                1,
+                {"totalPage": 1, "vrows": 2, "result": []},
+                observed_at="2026-07-11T01:00:00+00:00",
+            )
+            store.upsert_page(
+                1,
+                {"totalPage": 3, "vrows": 8, "result": []},
+                observed_at="2026-07-11T02:00:00+00:00",
+            )
+
+            pagination = store.read_latest_page_one_pagination()
+
+        assert pagination is not None
+        assert pagination.page_count == 3
+        assert pagination.vrows == 8
+
     def test_upsert_pages_rolls_back_every_page_when_one_write_fails(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
