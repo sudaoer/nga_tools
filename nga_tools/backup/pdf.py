@@ -29,7 +29,7 @@ from nga_tools.backup.post_html import (
     find_missing_lou,
     post_html_from_content,
 )
-from nga_tools.backup.post_overlay import load_post_overlays, render_overlay_html
+from nga_tools.backup.post_overlay import render_overlay_html
 from nga_tools.backup.pdf_plan import (
     PdfRenderTask,
     build_render_tasks as _build_render_tasks,
@@ -474,7 +474,7 @@ def _read_pdf_html(
     slice_output_dir = os.path.join(folder_pdf, "long_image_slices")
     os.makedirs(slice_output_dir, exist_ok=True)
 
-    overlays_by_lou = load_post_overlays(thread_folder)
+    overlays_by_lou = archive_store.read_post_overlays()
     applied_overlay_lous = set(overlays_by_lou) & {
         record["lou"] for record in records
     }
@@ -487,7 +487,7 @@ def _read_pdf_html(
         overlay = overlays_by_lou.get(lou)
         if overlay is not None:
             html = render_overlay_html(overlay["bbcode"])
-            source_name = f"post_overlays.json第{lou}楼"
+            source_name = f"archive.sqlite3 post_overlays第{lou}楼"
         elif record["html"] is not None:
             html = record["html"]
             source_name = f"archive缺失占位第{lou}楼"

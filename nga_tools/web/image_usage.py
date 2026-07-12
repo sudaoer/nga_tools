@@ -259,7 +259,10 @@ def _scan_references(
             try:
                 archive_store = ThreadArchiveStore(thread_folder)
                 records = archive_store.read_effective_post_records()
-                records = apply_post_overlays_to_records(thread_folder, records)
+                records = apply_post_overlays_to_records(
+                    archive_store.read_post_overlays(),
+                    records,
+                )
                 scan_result = scan_image_references_for_records_readonly(
                     archive_store,
                     records,

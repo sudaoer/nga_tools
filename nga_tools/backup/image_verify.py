@@ -91,7 +91,10 @@ def _list_thread_referenced_image_paths(
 ) -> list[Path]:
     archive_store = ThreadArchiveStore(thread_folder)
     records = archive_store.read_effective_post_records()
-    records = apply_post_overlays_to_records(thread_folder, records)
+    records = apply_post_overlays_to_records(
+        archive_store.read_post_overlays(),
+        records,
+    )
     htmls = load_post_htmls_for_records(records)
     parsed_htmls = parse_post_htmls_for_images(htmls)
     if aid is None:

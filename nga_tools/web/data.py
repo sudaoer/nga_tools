@@ -31,12 +31,9 @@ from nga_tools.backup.post_data import (
     make_image_src_resolver,
 )
 from nga_tools.backup.post_overlay import (
-    POST_OVERLAYS_FILENAME,
     PostOverlay,
-    clear_post_overlay as _clear_post_overlay,
-    load_post_overlays,
+    make_post_overlay,
     render_overlay_html,
-    save_post_overlay as _save_post_overlay,
 )
 from nga_tools.backup.post_version_selection import (
     POST_VERSION_SELECTIONS_FILENAME,
@@ -539,7 +536,6 @@ def _thread_summary_for_folder(
             db_path,
             warnings_path,
             thread_folder / POST_VERSION_SELECTIONS_FILENAME,
-            thread_folder / POST_OVERLAYS_FILENAME,
         ]
     )
 
@@ -938,7 +934,7 @@ def read_posts(
     if not db_path.is_file():
         raise ThreadUnavailableError("缺少archive.sqlite3。")
     archive_store = ThreadArchiveStore(thread_folder)
-    overlays = load_post_overlays(thread_folder)
+    overlays = archive_store.read_post_overlays()
 
     page_size = ORIGINAL_POSTS_PER_PAGE
     stripped_query = query.strip()
@@ -1073,14 +1069,14 @@ def read_post_overlay(
     raw_aid_key: str,
     lou: int,
 ) -> PostOverlayDetail:
-    archive_store, thread_folder, aid = _archive_store_for_thread(
+    archive_store, _thread_folder, aid = _archive_store_for_thread(
         output_dir,
         tid,
         raw_aid_key,
     )
     row = _read_effective_row_for_lou(archive_store, lou)
     floor_labels = _load_floor_labels(archive_store, aid)
-    overlay = load_post_overlays(thread_folder).get(lou)
+    overlay = archive_store.read_post_overlays({lou}).get(lou)
     if overlay is None:
         return {
             "lou": lou,
@@ -1122,13 +1118,13 @@ def save_thread_post_overlay(
     lou: int,
     bbcode: str,
 ) -> PostOverlayDetail:
-    archive_store, thread_folder, _aid = _archive_store_for_thread(
+    archive_store, _thread_folder, _aid = _archive_store_for_thread(
         output_dir,
         tid,
         raw_aid_key,
     )
     _read_effective_row_for_lou(archive_store, lou)
-    _save_post_overlay(thread_folder, lou, bbcode)
+    archive_store.upsert_post_overlay(lou, make_post_overlay(bbcode))
     return read_post_overlay(output_dir, tid, raw_aid_key, lou)
 
 
@@ -1138,13 +1134,13 @@ def clear_thread_post_overlay(
     raw_aid_key: str,
     lou: int,
 ) -> PostOverlayDetail:
-    archive_store, thread_folder, _aid = _archive_store_for_thread(
+    archive_store, _thread_folder, _aid = _archive_store_for_thread(
         output_dir,
         tid,
         raw_aid_key,
     )
     _read_effective_row_for_lou(archive_store, lou)
-    _clear_post_overlay(thread_folder, lou)
+    archive_store.delete_post_overlay(lou)
     return read_post_overlay(output_dir, tid, raw_aid_key, lou)
 
 

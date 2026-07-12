@@ -16,8 +16,7 @@ from nga_tools.backup.image_reference_cache import (
 from nga_tools.backup.models import ImageAttachment, PostRecord
 from nga_tools.backup.post_overlay import (
     apply_post_overlays_to_records,
-    clear_post_overlay,
-    save_post_overlay,
+    make_post_overlay,
 )
 from nga_tools.console import use_warning_log
 from nga_tools.core.hashing import hash_text
@@ -207,17 +206,27 @@ def test_overlay_add_change_and_remove_select_distinct_cache_identity(
     tmp_path: Path,
 ) -> None:
     thread_folder = tmp_path / "thread"
+    store = ThreadArchiveStore(thread_folder)
     record = _post_record("original")
     original_key = image_reference_cache_key(record)
 
-    save_post_overlay(thread_folder, 1, "first overlay")
-    first_overlay_record = apply_post_overlays_to_records(thread_folder, [record])[0]
+    store.upsert_post_overlay(1, make_post_overlay("first overlay"))
+    first_overlay_record = apply_post_overlays_to_records(
+        store.read_post_overlays(),
+        [record],
+    )[0]
     first_overlay_key = image_reference_cache_key(first_overlay_record)
-    save_post_overlay(thread_folder, 1, "second overlay")
-    second_overlay_record = apply_post_overlays_to_records(thread_folder, [record])[0]
+    store.upsert_post_overlay(1, make_post_overlay("second overlay"))
+    second_overlay_record = apply_post_overlays_to_records(
+        store.read_post_overlays(),
+        [record],
+    )[0]
     second_overlay_key = image_reference_cache_key(second_overlay_record)
-    clear_post_overlay(thread_folder, 1)
-    restored_record = apply_post_overlays_to_records(thread_folder, [record])[0]
+    store.delete_post_overlay(1)
+    restored_record = apply_post_overlays_to_records(
+        store.read_post_overlays(),
+        [record],
+    )[0]
 
     assert first_overlay_key != original_key
     assert second_overlay_key != first_overlay_key

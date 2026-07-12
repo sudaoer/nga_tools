@@ -32,7 +32,7 @@ from nga_tools.backup.post_html import (
     find_missing_lou,
     merge_missing_lou,
 )
-from nga_tools.backup.post_overlay import save_post_overlay
+from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.backup.post_version_selection import write_selections
 from nga_tools.ngaclient.client import NGAPageError
 from nga_tools.timing import use_timing_log
@@ -627,7 +627,10 @@ class BackupRawArchiveTest:
         )
 
         if changed_input == "overlay":
-            save_post_overlay(thread_dir, 1, "overlay replacement")
+            ThreadArchiveStore(thread_dir).upsert_post_overlay(
+                1,
+                make_post_overlay("overlay replacement"),
+            )
             _run_backup(
                 thread_dir,
                 client,

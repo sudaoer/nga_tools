@@ -1,27 +1,33 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.models import PostRecord
 from nga_tools.backup.post_overlay import (
-    POST_OVERLAYS_FILENAME,
     apply_post_overlays_to_records,
-    load_post_overlays,
-    post_overlays_fingerprint,
+    make_post_overlay,
+    post_overlay_from_storage,
     render_overlay_html,
-    save_post_overlay,
     source_hashes_by_lou_with_post_overlays,
 )
+from nga_tools.core.hashing import hash_text
 
 
 def test_save_load_and_apply_post_overlay(tmp_path: Path) -> None:
     thread_dir = tmp_path / "101_201"
     thread_dir.mkdir()
-    before_fingerprint = post_overlays_fingerprint(thread_dir)
+    store = ThreadArchiveStore(thread_dir)
+    store.ensure_schema()
+    before_fingerprint = store.post_overlays_fingerprint()
 
-    overlay = save_post_overlay(thread_dir, 1, "[quote]覆盖[/quote]")
+    overlay = store.upsert_post_overlay(
+        1,
+        make_post_overlay("[quote]覆盖[/quote]"),
+    )
     records: list[PostRecord] = [
         {
             "lou": 1,
@@ -39,18 +45,70 @@ def test_save_load_and_apply_post_overlay(tmp_path: Path) -> None:
         },
     ]
 
-    loaded = load_post_overlays(thread_dir)
-    applied_records = apply_post_overlays_to_records(thread_dir, records)
-    source_hashes = source_hashes_by_lou_with_post_overlays(thread_dir, records)
+    loaded = store.read_post_overlays()
+    applied_records = apply_post_overlays_to_records(loaded, records)
+    source_hashes = source_hashes_by_lou_with_post_overlays(loaded, records)
 
-    assert (thread_dir / POST_OVERLAYS_FILENAME).is_file()
     assert loaded[1] == overlay
-    assert post_overlays_fingerprint(thread_dir) != before_fingerprint
+    assert store.post_overlays_fingerprint() != before_fingerprint
     assert applied_records[0]["post"] is None
     assert '<blockquote class="nga-quote">覆盖</blockquote>' in applied_records[0]["html"]
     assert applied_records[1] == records[1]
     assert source_hashes[1] != "original-hash"
     assert source_hashes[2] == "other-hash"
+
+    assert store.delete_post_overlay(1) is True
+    assert store.delete_post_overlay(1) is False
+    assert store.read_post_overlays() == {}
+
+
+def test_old_archive_without_overlay_table_ignores_legacy_json(tmp_path: Path) -> None:
+    thread_dir = tmp_path / "101_201"
+    thread_dir.mkdir()
+    store = ThreadArchiveStore(thread_dir)
+    sqlite3.connect(store.db_path).close()
+    legacy_path = thread_dir / "post_overlays.json"
+    legacy_text = '{"version":1,"overlays":{"1":{"bbcode":"legacy"}}}\n'
+    legacy_path.write_text(legacy_text, encoding="utf-8")
+
+    assert store.read_post_overlays() == {}
+
+    overlay = store.upsert_post_overlay(1, make_post_overlay("database"))
+
+    assert store.read_post_overlays() == {1: overlay}
+    assert legacy_path.read_text(encoding="utf-8") == legacy_text
+
+
+def test_invalid_stored_overlay_is_rejected(tmp_path: Path) -> None:
+    thread_dir = tmp_path / "101_201"
+    store = ThreadArchiveStore(thread_dir)
+    store.ensure_schema()
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO post_overlays (
+                lou, mode, bbcode, content_hash, updated_at
+            )
+            VALUES (
+                1,
+                'replace',
+                'content',
+                'wrong-hash',
+                '2026-07-12T00:00:00+00:00'
+            )
+            """
+        )
+
+    with pytest.raises(ValueError, match="content_hash"):
+        store.read_post_overlays()
+
+    with pytest.raises(ValueError, match="ISO时间"):
+        post_overlay_from_storage(
+            mode="replace",
+            bbcode="content",
+            content_hash=hash_text("content"),
+            updated_at="not-a-timestamp",
+        )
 
 
 def test_overlay_rendering_sanitizes_html_and_rejects_external_media() -> None:

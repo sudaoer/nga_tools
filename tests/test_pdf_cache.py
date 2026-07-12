@@ -37,7 +37,7 @@ from nga_tools.backup.pdf_plan import (
     build_render_tasks,
     write_pdf_hashes,
 )
-from nga_tools.backup.post_overlay import save_post_overlay
+from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.backup.post_version_selection import write_selections
 from nga_tools.console import ConsoleReporter, use_reporter, use_warning_log
 
@@ -643,7 +643,10 @@ class PdfImageSourceTest:
                 '<p class="legacy-overlay">legacy overlay</p>',
                 encoding="utf-8",
             )
-            save_post_overlay(thread_dir, 1, "bbcode overlay")
+            ThreadArchiveStore(thread_dir).upsert_post_overlay(
+                1,
+                make_post_overlay("bbcode overlay"),
+            )
 
             with patch(
                 "nga_tools.core.paths.get_config",

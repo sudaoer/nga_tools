@@ -233,8 +233,8 @@ Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页�
 都会按需使用这套有效版本；清除选择后回到自动最新版。预览历史版本时，管理页会显示
 该版本与最新版正文的差异，便于判断实际变化。选择文件写入使用原子替换。
 
-普通帖子阅读页支持为单楼添加 BBCode overlay。overlay 是整楼替换，写入
-`post_overlays.json`；网页查看和后续 PDF 导出都会从该 BBCode 按需生成目标 HTML。
+普通帖子阅读页支持为单楼添加 BBCode overlay。overlay 是整楼替换，写入每帖
+`archive.sqlite3` 的 `post_overlays` 表；网页查看和后续 PDF 导出都会从该 BBCode 按需生成目标 HTML。
 当前 overlay 不支持 `[img]`、`[flash]`
 或渲染后产生图片的 HTML。
 
@@ -276,9 +276,9 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照、正文版本和最新展示元数据；
   完整原始分页响应保存在 `page_snapshots.page_json`，`post_versions` 只按正文内容做版本控制；
   只看作者备份的楼层映射、候选原楼层及可重建的图片引用解析缓存也保存在此数据库；
+  网页保存的单楼 BBCode overlay 存在 `post_overlays` 表，Web 和 PDF 按需渲染；
   `archive_change_state`、`backup_processing_state` 和 `backup_pending_images` 分别保存归档/楼层映射修订号、线程级处理状态和未完成图片 URL
 - `post_version_overrides.json`：管理界面保存的正文历史版本选择；没有选择时可为空
-- `post_overlays.json`：网页阅读页保存的单楼 BBCode overlay；Web 和 PDF 按需渲染
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 
 全局图片产物位于 `output/` 根目录：
@@ -287,8 +287,8 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `images_unique/download_failed_placeholder.png`：下载失败图片的占位图，按需生成
 - `image_index.sqlite3`：原始 NGA 图片 URL 到 `images_unique` 文件的映射
 
-旧版本生成的 `html_modified/`、`backup_state.json`、`floor_map.json` 和
-`overlay/post_*.html` 不再读取，
+旧版本生成的 `html_modified/`、`backup_state.json`、`floor_map.json`、
+`post_overlays.json` 和 `overlay/post_*.html` 不再读取，
 程序也不会自动删除或改写这些历史产物。
 
 ## 协议

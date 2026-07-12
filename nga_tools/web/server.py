@@ -19,7 +19,6 @@ from nga_tools.console import report_info
 from nga_tools.backup import image_store
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
-from nga_tools.backup.post_overlay import POST_OVERLAYS_FILENAME
 from nga_tools.backup.post_version_selection import (
     POST_VERSION_SELECTIONS_FILENAME,
 )
@@ -134,6 +133,11 @@ def _file_fingerprint(path: Path) -> str:
     return f"{stat_result.st_mtime_ns}:{stat_result.st_size}"
 
 
+def _sqlite_fingerprint(path: Path) -> str:
+    wal_path = Path(str(path) + "-wal")
+    return f"{_file_fingerprint(path)}:{_file_fingerprint(wal_path)}"
+
+
 def _thread_list_fingerprint(output_dir: Path) -> ThreadListFingerprint:
     entries = [
         f"config:{_file_fingerprint(Path(get_config().thread_config_file))}",
@@ -147,17 +151,17 @@ def _thread_list_fingerprint(output_dir: Path) -> ThreadListFingerprint:
             continue
         if parse_thread_dir_name(thread_folder.name) is None:
             continue
+        archive_path = thread_folder / ARCHIVE_DB_FILENAME
         entries.append(
             "\0".join(
                 [
                     thread_folder.name,
                     _file_fingerprint(thread_folder),
-                    _file_fingerprint(thread_folder / "archive.sqlite3"),
+                    _sqlite_fingerprint(archive_path),
                     _file_fingerprint(thread_folder / "warnings.log"),
                     _file_fingerprint(
                         thread_folder / POST_VERSION_SELECTIONS_FILENAME
                     ),
-                    _file_fingerprint(thread_folder / POST_OVERLAYS_FILENAME),
                     _file_fingerprint(thread_folder / "json"),
                 ]
             )
@@ -200,7 +204,7 @@ def _database_list_fingerprint(output_dir: Path) -> DatabaseListFingerprint:
         archive_db_path = thread_folder / ARCHIVE_DB_FILENAME
         if archive_db_path.is_file():
             entries.append(
-                f"{thread_folder.name}:{_file_fingerprint(archive_db_path)}"
+                f"{thread_folder.name}:{_sqlite_fingerprint(archive_db_path)}"
             )
     return tuple(entries)
 
@@ -225,7 +229,7 @@ def _database_schema_fingerprint(
     database_path = _database_file_for_id(output_dir, database_id)
     if database_path is None:
         return f"{database_id}\0-"
-    return f"{database_id}\0{_file_fingerprint(database_path)}"
+    return f"{database_id}\0{_sqlite_fingerprint(database_path)}"
 
 
 def _image_usage_fingerprint(output_dir: Path) -> ImageUsageFingerprint:
@@ -256,7 +260,6 @@ def _image_usage_fingerprint(output_dir: Path) -> ImageUsageFingerprint:
                     _file_fingerprint(
                         thread_folder / POST_VERSION_SELECTIONS_FILENAME
                     ),
-                    _file_fingerprint(thread_folder / POST_OVERLAYS_FILENAME),
                 ]
             )
         )

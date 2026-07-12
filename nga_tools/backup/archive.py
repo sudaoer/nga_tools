@@ -48,7 +48,6 @@ from nga_tools.backup.post_html import (
 )
 from nga_tools.backup.post_overlay import (
     apply_post_overlays_to_records as _apply_post_overlays_to_records,
-    post_overlays_fingerprint,
 )
 from nga_tools.backup.post_version_selection import selections_fingerprint
 from nga_tools.backup.processing_state import (
@@ -297,13 +296,15 @@ def _records_with_recovered_and_missing_posts(
 def _download_images_for_records(
     tid: int,
     aid: Optional[int],
-    thread_folder: Path,
     archive_store: ThreadArchiveStore,
     floor_labels: FloorLabels,
     records: list[PostRecord],
 ) -> DownloadSummary:
     with time_section("Overlay应用"):
-        effective_records = _apply_post_overlays_to_records(thread_folder, records)
+        effective_records = _apply_post_overlays_to_records(
+            archive_store.read_post_overlays(),
+            records,
+        )
     collection = _collect_image_download_tasks_for_records(
         archive_store,
         effective_records,
@@ -372,7 +373,7 @@ def _try_processing_state_reuse(
         return ProcessingStateReuseResult(False, "state_invalid")
     if snapshot.processing_state is None:
         return ProcessingStateReuseResult(False, "state_missing")
-    post_overlays_hash = post_overlays_fingerprint(thread_folder)
+    post_overlays_hash = archive_store.post_overlays_fingerprint()
     post_version_selections_hash = selections_fingerprint(thread_folder)
     miss_reason = _processing_snapshot_miss_reason(
         snapshot,
@@ -442,7 +443,7 @@ def _commit_completed_processing_state(
         report_info("楼层映射本次未形成可复用状态，下次继续完整处理。")
         return
     fingerprints_after = (
-        post_overlays_fingerprint(thread_folder),
+        archive_store.post_overlays_fingerprint(),
         selections_fingerprint(thread_folder),
     )
     if fingerprints_after != fingerprints_before:
@@ -489,7 +490,7 @@ def _run_full_processing(
 ) -> None:
     archive_store.clear_backup_processing_state()
     fingerprints_before = (
-        post_overlays_fingerprint(thread_folder),
+        archive_store.post_overlays_fingerprint(),
         selections_fingerprint(thread_folder),
     )
 
@@ -527,7 +528,6 @@ def _run_full_processing(
         download_summary = _download_images_for_records(
             tid,
             aid,
-            thread_folder,
             archive_store,
             floor_map_processing.build_result.floor_labels,
             record_processing.records,
@@ -615,7 +615,7 @@ def backup_local_work_kind(
         snapshot,
         page_count=pagination.page_count,
         author_total_lou_count=author_total_lou_count,
-        post_overlays_hash=post_overlays_fingerprint(thread_folder),
+        post_overlays_hash=archive_store.post_overlays_fingerprint(),
         post_version_selections_hash=selections_fingerprint(thread_folder),
     )
     if miss_reason is not None or snapshot.pending_image_urls:

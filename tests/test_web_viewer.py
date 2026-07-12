@@ -19,7 +19,6 @@ from nga_tools.cli.parser import args_parse
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web import data as web_data
 from nga_tools.web import database as web_database
-from nga_tools.backup.post_overlay import POST_OVERLAYS_FILENAME
 from nga_tools.backup.post_version_selection import POST_VERSION_SELECTIONS_FILENAME
 from nga_tools.web.data import (
     ThreadConfig,
@@ -826,7 +825,10 @@ class WebServerTest:
         assert save_payload["hasOverlay"] is True
         assert save_payload["bbcode"] == "[quote]覆盖[/quote]"
         assert '<blockquote class="nga-quote">覆盖</blockquote>' in save_payload["html"]
-        assert (thread_dir / POST_OVERLAYS_FILENAME).is_file()
+        assert ThreadArchiveStore(thread_dir).read_post_overlays()[1]["bbcode"] == (
+            "[quote]覆盖[/quote]"
+        )
+        assert not (thread_dir / "post_overlays.json").exists()
         assert not (thread_dir / "html_modified").exists()
         assert posts_response.status_code == 200
         post_payload = posts_response.json()
@@ -875,7 +877,7 @@ class WebDatabaseViewerTest:
         assert {"forum_threads", "image_index", "archive:101_201"} <= ids
         by_id = {item["id"]: item for item in payload["items"]}
         assert by_id["forum_threads"]["relativePath"] == "forum_threads.sqlite3"
-        assert by_id["archive:101_201"]["tableCount"] == 11
+        assert by_id["archive:101_201"]["tableCount"] == 12
 
     def test_databases_route_uses_cache_until_refresh(
         self,
@@ -909,6 +911,38 @@ class WebDatabaseViewerTest:
         assert refreshed_response.status_code == 200
         assert len(calls) == 2
 
+    def test_overlay_write_invalidates_database_list_cache(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "hello")])
+        with sqlite3.connect(thread_dir / "archive.sqlite3") as connection:
+            connection.execute("DROP TABLE post_overlays")
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        before_response = client.get("/api/databases")
+        save_response = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": "database overlay"},
+        )
+        after_response = client.get("/api/databases")
+
+        assert before_response.status_code == 200
+        assert save_response.status_code == 200
+        assert after_response.status_code == 200
+        before_items = {
+            item["id"]: item for item in before_response.json()["items"]
+        }
+        after_items = {
+            item["id"]: item for item in after_response.json()["items"]
+        }
+        assert before_items["archive:101_201"]["tableCount"] == 11
+        assert after_items["archive:101_201"]["tableCount"] == 12
+
     def test_database_schema_and_rows_support_search_sort_and_detail(
         self,
         tmp_path: Path,
@@ -935,6 +969,7 @@ class WebDatabaseViewerTest:
             "archive_change_state",
             "backup_processing_state",
             "backup_pending_images",
+            "post_overlays",
         } <= table_names
 
         rows_response = client.get(

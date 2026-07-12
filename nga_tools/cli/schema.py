@@ -373,8 +373,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "--all-threads会按thread_configs.json中的ThreadList批量生成PDF。",
                 "--workers控制并行处理的帖子数，--pdf-workers控制全命令共享的"
                 "WeasyPrint并发数。",
-                "网页管理页保存的BBCode overlay会写入post_overlays.json，"
-                "普通查看和PDF都会按需渲染同一份overlay。",
+                "网页管理页保存的BBCode overlay会写入每帖archive.sqlite3的"
+                "post_overlays表，普通查看和PDF都会按需渲染同一份overlay。",
                 "旧overlay/post_<楼层>.html不再读取。",
             ],
             "args": [
