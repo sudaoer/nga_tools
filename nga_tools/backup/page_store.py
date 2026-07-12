@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from nga_tools import utils
-from nga_tools.console import report_progress, report_warning
+from nga_tools.console import WarningCategory, report_progress, report_warning
 from nga_tools.core.atomic import write_json_atomically
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import NGAPageError, PageData
@@ -55,7 +55,10 @@ def fetch_backup_page(
     except NGAPageError as error:
         if not _is_author_empty_page_error(error, aid, page_number, page_count):
             raise
-        report_warning(f"只看作者第{page_number}页为空，继续获取后续页面。")
+        report_warning(
+            WarningCategory.POST_CONTENT,
+            f"只看作者第{page_number}页为空，继续获取后续页面。",
+        )
         return _empty_author_page_data(first_page_data, page_number)
 
 

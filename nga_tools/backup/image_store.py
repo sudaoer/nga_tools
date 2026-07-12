@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw
 
 from nga_tools import utils
 from nga_tools.config import get_config
-from nga_tools.console import report_warning
+from nga_tools.console import WarningCategory, report_warning
 from nga_tools.core.atomic import (
     replace_file_atomically,
     replace_temp_file,
@@ -692,10 +692,16 @@ def _target_path_for_download(
     while True:
         collision_path = unique_dir / f"{image_hash}-collision-{collision_index}.{extension}"
         if not collision_path.exists():
-            report_warning(f"图片SHA-256 hash碰撞，保存为：{collision_path}")
+            report_warning(
+                WarningCategory.IMAGE_PROCESSING,
+                f"图片SHA-256 hash碰撞，保存为：{collision_path}",
+            )
             return collision_path, False, True
         if not _image_file_is_valid(collision_path):
-            report_warning(f"图片SHA-256 hash碰撞，保存为：{collision_path}")
+            report_warning(
+                WarningCategory.IMAGE_PROCESSING,
+                f"图片SHA-256 hash碰撞，保存为：{collision_path}",
+            )
             return collision_path, False, True
         if _same_file_content(collision_path, temp_path):
             return collision_path, True, True

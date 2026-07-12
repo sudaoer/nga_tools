@@ -621,7 +621,11 @@ class BackupRawArchiveTest:
             full_processing_calls=full_processing_calls,
         )
 
-        with use_timing_log(timing_path, task_name="backup all forced"):
+        with use_timing_log(
+            timing_path,
+            task_name="backup all forced",
+        ) as timing_log:
+            assert timing_log is not None
             _run_backup(
                 thread_dir,
                 client,
@@ -633,7 +637,7 @@ class BackupRawArchiveTest:
         assert full_processing_calls == ["full", "full"]
         assert (
             "标签：处理状态复用结果，值：forced\n"
-            in timing_path.read_text(encoding="utf-8")
+            in timing_log.path.read_text(encoding="utf-8")
         )
 
     @pytest.mark.parametrize("changed_input", ["attachments", "page_count", "vrows"])
@@ -1128,7 +1132,11 @@ class BackupRawArchiveTest:
         output = io.StringIO()
         timing_path = tmp_path / "invalid-state.timing.log"
 
-        with use_timing_log(timing_path, task_name="invalid state"):
+        with use_timing_log(
+            timing_path,
+            task_name="invalid state",
+        ) as timing_log:
+            assert timing_log is not None
             _run_backup(
                 thread_dir,
                 client,
@@ -1144,7 +1152,7 @@ class BackupRawArchiveTest:
         assert "处理状态无效，改为完整处理" in output.getvalue()
         assert (
             "标签：处理状态复用结果，值：state_invalid\n"
-            in timing_path.read_text(encoding="utf-8")
+            in timing_log.path.read_text(encoding="utf-8")
         )
 
     def test_changed_archive_then_downstream_failure_forces_next_full_run(
@@ -1256,10 +1264,14 @@ class BackupRawArchiveTest:
         thread_dir = tmp_path / "123_456"
         timing_path = tmp_path / f"{mode}.timing.log"
 
-        with use_timing_log(timing_path, task_name=f"backup {mode}"):
+        with use_timing_log(
+            timing_path,
+            task_name=f"backup {mode}",
+        ) as timing_log:
+            assert timing_log is not None
             _run_backup(thread_dir, MutableFakeClient(), mode=mode)
 
-        timing_text = timing_path.read_text(encoding="utf-8")
+        timing_text = timing_log.path.read_text(encoding="utf-8")
         for stage_name in (
             "读取完整归档记录",
             "正文解析与图片处理",
@@ -1282,10 +1294,14 @@ class BackupRawArchiveTest:
         _run_backup(thread_dir, client)
         timing_path = tmp_path / "fast.timing.log"
 
-        with use_timing_log(timing_path, task_name="backup sub fast"):
+        with use_timing_log(
+            timing_path,
+            task_name="backup sub fast",
+        ) as timing_log:
+            assert timing_log is not None
             _run_backup(thread_dir, client)
 
-        timing_text = timing_path.read_text(encoding="utf-8")
+        timing_text = timing_log.path.read_text(encoding="utf-8")
         assert "阶段：处理状态复用判定，开始时间：" in timing_text
         assert "阶段：未完成缺失楼重试，开始时间：" in timing_text
         assert "阶段：未完成图片重试，开始时间：" in timing_text

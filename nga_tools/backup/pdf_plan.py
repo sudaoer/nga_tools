@@ -9,7 +9,7 @@ from typing import TypedDict, cast
 
 from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.config import get_config
-from nga_tools.console import report_warning
+from nga_tools.console import WarningCategory, report_warning
 from nga_tools.core.atomic import (
     write_json_atomically,
     write_text_if_changed_atomically,
@@ -56,11 +56,17 @@ def load_pdf_hashes(folder_pdf: str) -> dict[str, str]:
     except FileNotFoundError:
         return {}
     except json.JSONDecodeError as error:
-        report_warning(f"PDF hash缓存文件无效，按空缓存处理：{manifest_path}: {error}")
+        report_warning(
+            WarningCategory.PDF,
+            f"PDF hash缓存文件无效，按空缓存处理：{manifest_path}: {error}",
+        )
         return {}
 
     if not isinstance(raw_data, dict):
-        report_warning(f"PDF hash缓存文件格式无效，按空缓存处理：{manifest_path}")
+        report_warning(
+            WarningCategory.PDF,
+            f"PDF hash缓存文件格式无效，按空缓存处理：{manifest_path}",
+        )
         return {}
 
     data = cast(dict[object, object], raw_data)
@@ -71,7 +77,10 @@ def load_pdf_hashes(folder_pdf: str) -> dict[str, str]:
 
     raw_files = data.get("files")
     if not isinstance(raw_files, dict):
-        report_warning(f"PDF hash缓存文件缺少files对象，按空缓存处理：{manifest_path}")
+        report_warning(
+            WarningCategory.PDF,
+            f"PDF hash缓存文件缺少files对象，按空缓存处理：{manifest_path}",
+        )
         return {}
 
     files = cast(dict[object, object], raw_files)
@@ -79,7 +88,10 @@ def load_pdf_hashes(folder_pdf: str) -> dict[str, str]:
         isinstance(key, str) and isinstance(value, str)
         for key, value in files.items()
     ):
-        report_warning(f"PDF hash缓存文件files格式无效，按空缓存处理：{manifest_path}")
+        report_warning(
+            WarningCategory.PDF,
+            f"PDF hash缓存文件files格式无效，按空缓存处理：{manifest_path}",
+        )
         return {}
 
     return cast(dict[str, str], files)

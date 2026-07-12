@@ -8,7 +8,12 @@ from typing import Optional, cast
 
 from nga_tools import utils
 from nga_tools.backup.archive_store import ThreadArchiveStore
-from nga_tools.console import report_info, report_progress, report_warning
+from nga_tools.console import (
+    WarningCategory,
+    report_info,
+    report_progress,
+    report_warning,
+)
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
 from nga_tools.backup.floor_models import (
@@ -40,7 +45,10 @@ def _page_post_dicts(
 ) -> list[dict[str, object]]:
     raw_posts = page_data.get("result")
     if raw_posts is None and allow_missing_posts:
-        report_warning(f"{source} 缺少帖子列表，按空页处理。")
+        report_warning(
+            WarningCategory.POST_CONTENT,
+            f"{source} 缺少帖子列表，按空页处理。",
+        )
         return []
 
     if not isinstance(raw_posts, list):
@@ -93,6 +101,7 @@ def read_unresolved_missing_author_lous_from_archive(
         stored_floor_map = archive_store.read_floor_map()
     except ValueError as error:
         report_warning(
+            WarningCategory.FLOOR_MAP,
             f"楼层映射缺失楼缓存无效，忽略：{archive_store.db_path}: {error}"
         )
         return []
@@ -256,6 +265,7 @@ def load_floor_map_build_result_if_current(
         stored_floor_map = archive_store.read_floor_map()
     except ValueError as error:
         report_warning(
+            WarningCategory.FLOOR_MAP,
             f"楼层映射缓存无效，重新生成：{archive_store.db_path}: {error}"
         )
         return None
@@ -368,7 +378,7 @@ def build_and_save_floor_map(
         message = f"有{len(unmapped_author_lous)}个只看作者楼层未找到原帖楼层：{preview}。"
         if strict:
             raise RuntimeError(message)
-        report_warning(message)
+        report_warning(WarningCategory.FLOOR_MAP, message)
 
     missing_inference = _infer_missing_original_lous(
         client,
@@ -728,7 +738,10 @@ def _infer_missing_original_lous(
             existing_candidate_lous = existing_candidates.get(missing_lou)
             if existing_candidate_lous:
                 candidates[missing_lou] = existing_candidate_lous
-            report_warning(f"无法推断第{missing_lou}楼的原帖楼层。")
+            report_warning(
+                WarningCategory.FLOOR_MAP,
+                f"无法推断第{missing_lou}楼的原帖楼层。",
+            )
             continue
 
         prev_author_lou = prev_candidates[-1]
@@ -785,6 +798,7 @@ def _infer_missing_original_lous(
                 possible_original_lous,
             )
             report_warning(
+                WarningCategory.FLOOR_MAP,
                 f"无法唯一推断第{missing_lou}楼的原帖楼层，"
                 f"只看作者缺失{len(author_gap_lous)}楼，"
                 f"原帖区间缺失{len(original_gap_lous)}楼，"

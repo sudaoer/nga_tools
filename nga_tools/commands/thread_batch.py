@@ -10,11 +10,16 @@ from time import perf_counter
 
 from nga_tools.console import (
     BackupConfigsProgressDisplay,
+    Reporter,
+    WarningCategory,
+    WarningSummaryCollector,
     get_reporter,
+    get_warning_collector,
     report_info,
     report_progress,
     report_warning,
     use_reporter,
+    use_thread_warning_summary,
     use_warning_log,
 )
 from nga_tools.core.output_lock import use_thread_output_lock
@@ -74,6 +79,8 @@ def _run_thread_config_with_progress(
     task_name: str,
     lock_thread_output: bool,
     timing_snapshot_callback: Callable[[TimingSnapshot], None] | None,
+    command_reporter: Reporter,
+    command_warning_collector: WarningSummaryCollector | None,
 ) -> str | None:
     tid = thread_config_tid(thread_config)
     aid = thread_config_aid(thread_config)
@@ -85,6 +92,13 @@ def _run_thread_config_with_progress(
     )
     with ExitStack() as stack:
         stack.enter_context(use_reporter(task_reporter))
+        stack.enter_context(
+            use_thread_warning_summary(
+                label,
+                parent_collector=command_warning_collector,
+                summary_reporter=command_reporter,
+            )
+        )
         try:
             if lock_thread_output:
                 stack.enter_context(use_thread_output_lock(tid, aid))
@@ -103,7 +117,10 @@ def _run_thread_config_with_progress(
             report_progress(progress_text)
             result = action(thread_config)
         except Exception as error:
-            report_warning(f"{failure_text}：{error}")
+            report_warning(
+                WarningCategory.TASK_FAILURE,
+                f"{failure_text}：{error}",
+            )
             progress.finish_thread(task_reporter, status="失败")
             raise
 
@@ -124,6 +141,8 @@ def _run_thread_configs_sequential(
     task_name: str,
     lock_thread_output: bool,
     timing_snapshot_callback: Callable[[TimingSnapshot], None] | None,
+    command_reporter: Reporter,
+    command_warning_collector: WarningSummaryCollector | None,
 ) -> tuple[list[ThreadBatchSuccess], list[ThreadBatchFailure]]:
     successes: list[ThreadBatchSuccess] = []
     failures: list[ThreadBatchFailure] = []
@@ -144,6 +163,8 @@ def _run_thread_configs_sequential(
                 task_name=task_name,
                 lock_thread_output=lock_thread_output,
                 timing_snapshot_callback=timing_snapshot_callback,
+                command_reporter=command_reporter,
+                command_warning_collector=command_warning_collector,
             )
         except Exception as error:
             failures.append((thread_config, error))
@@ -168,6 +189,8 @@ def _run_thread_configs_parallel(
     task_name: str,
     lock_thread_output: bool,
     timing_snapshot_callback: Callable[[TimingSnapshot], None] | None,
+    command_reporter: Reporter,
+    command_warning_collector: WarningSummaryCollector | None,
 ) -> tuple[list[ThreadBatchSuccess], list[ThreadBatchFailure]]:
     successes: list[ThreadBatchSuccess] = []
     failures: list[tuple[int, ThreadConfig, Exception]] = []
@@ -190,6 +213,8 @@ def _run_thread_configs_parallel(
                 task_name=task_name,
                 lock_thread_output=lock_thread_output,
                 timing_snapshot_callback=timing_snapshot_callback,
+                command_reporter=command_reporter,
+                command_warning_collector=command_warning_collector,
             )
             future_context[future] = (index, thread_config)
 
@@ -281,6 +306,8 @@ def run_thread_config_batch(
     )
     batch_started_at = datetime.now().astimezone()
     batch_wall_start = perf_counter()
+    command_reporter = get_reporter()
+    command_warning_collector = get_warning_collector()
     with BackupConfigsProgressDisplay(
         len(selected_thread_configs),
         console=get_reporter().console,
@@ -300,6 +327,8 @@ def run_thread_config_batch(
                 timing_snapshot_callback=(
                     batch_collector.add if batch_collector is not None else None
                 ),
+                command_reporter=command_reporter,
+                command_warning_collector=command_warning_collector,
             )
         else:
             successes, failures = _run_thread_configs_parallel(
@@ -317,6 +346,8 @@ def run_thread_config_batch(
                 timing_snapshot_callback=(
                     batch_collector.add if batch_collector is not None else None
                 ),
+                command_reporter=command_reporter,
+                command_warning_collector=command_warning_collector,
             )
 
     batch_wall_seconds = perf_counter() - batch_wall_start

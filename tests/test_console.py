@@ -11,9 +11,12 @@ from nga_tools.console import (
     BackupConfigsProgressDisplay,
     ConsoleReporter,
     InlineProgress,
+    WarningCategory,
     report_info,
     report_warning,
+    use_command_warning_summary,
     use_reporter,
+    use_thread_warning_summary,
     use_warning_log,
 )
 
@@ -51,9 +54,59 @@ class ConsoleReporterTest:
         reporter = ConsoleReporter(console)
 
         reporter.info("[攻略] foo [/x]")
-        reporter.warning("[公告] bar [/b]")
+        reporter.warning(WarningCategory.POST_CONTENT, "[公告] bar [/b]")
 
         assert output.getvalue() == '[攻略] foo [/x]\n警告：[公告] bar [/b]\n'
+
+    def test_command_and_thread_warning_summaries_hide_details(self) -> None:
+        output = io.StringIO()
+        console = Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=120,
+        )
+
+        with (
+            use_reporter(ConsoleReporter(console)),
+            use_command_warning_summary(),
+        ):
+            report_warning(WarningCategory.CACHE, "命令级缓存详情")
+            with use_thread_warning_summary("thread-1"):
+                report_warning(WarningCategory.IMAGE_DOWNLOAD, "url-1")
+                report_warning(WarningCategory.IMAGE_DOWNLOAD, "url-2")
+                report_warning(WarningCategory.FLOOR_MAP, "floor-1")
+
+        output_text = output.getvalue()
+        assert "命令级缓存详情" not in output_text
+        assert "url-1" not in output_text
+        assert "floor-1" not in output_text
+        assert (
+            "警告汇总：thread-1：共3条；图片下载2条，楼层映射1条。"
+            in output_text
+        )
+        assert (
+            "警告总计：共4条，涉及1个帖子；"
+            "图片下载2条，楼层映射1条，缓存1条。"
+            in output_text
+        )
+
+    def test_command_warning_summary_prints_zero(self) -> None:
+        output = io.StringIO()
+        console = Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=120,
+        )
+
+        with (
+            use_reporter(ConsoleReporter(console)),
+            use_command_warning_summary(),
+        ):
+            report_info("完成")
+
+        assert output.getvalue() == "完成\n警告总计：共0条。\n"
 
     def test_warning_log_mirrors_warnings_and_overwrites_file(self) -> None:
         output = io.StringIO()
@@ -74,7 +127,7 @@ class ConsoleReporterTest:
                 use_warning_log(log_path),
             ):
                 report_info("[攻略] foo [/x]")
-                report_warning("[公告] bar [/b]")
+                report_warning(WarningCategory.POST_CONTENT, "[公告] bar [/b]")
 
             assert log_path.read_text(encoding='utf-8') == '警告：[公告] bar [/b]\n'
 
@@ -93,13 +146,15 @@ class BackupConfigsProgressDisplayTest:
 
         with BackupConfigsProgressDisplay(2, console=console) as display:
             reporter = display.start_thread(index=1, total=2, label="first")
-            reporter.warning("图片链接无效")
+            reporter.warning(WarningCategory.IMAGE_DOWNLOAD, "图片链接无效")
             reporter.progress("正在获取第1页", completed=0, total=2)
             display.finish_thread(reporter, status="完成")
             visible_tasks = display.visible_task_descriptions()
 
         assert visible_tasks == ['总进度']
-        assert '警告：first：图片链接无效' in output.getvalue()
+        assert (
+            "警告汇总：first：共1条；图片下载1条。" in output.getvalue()
+        )
 
     def test_stage_completion_does_not_finish_thread_task(self) -> None:
         output = io.StringIO()
@@ -195,12 +250,16 @@ class BackupConfigsProgressDisplayTest:
                 label="[攻] foo [/x]",
             )
             reporter.progress("取 [p] [/x]", completed=1, total=2)
-            reporter.warning("坏 [b] [/x]")
+            reporter.warning(WarningCategory.POST_CONTENT, "坏 [b] [/x]")
             visible_tasks = display.visible_task_descriptions()
+            display.finish_thread(reporter, status="完成")
 
         output_text = output.getvalue()
         assert '[1/1] [攻] foo [/x]' in visible_tasks
-        assert '警告：[攻] foo [/x]：坏 [b] [/x]' in output_text
+        assert (
+            "警告汇总：[攻] foo [/x]：共1条；帖子内容1条。"
+            in output_text
+        )
 
     def test_long_task_label_stays_on_one_named_progress_row(self) -> None:
         output = io.StringIO()

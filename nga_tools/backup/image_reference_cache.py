@@ -20,7 +20,7 @@ from nga_tools.backup.image_pipeline import (
 from nga_tools.backup.image_store import ImageDownloadTask
 from nga_tools.backup.models import PostRecord
 from nga_tools.backup.post_html import load_post_htmls_for_records
-from nga_tools.console import report_warning
+from nga_tools.console import WarningCategory, report_warning
 from nga_tools.core.hashing import hash_object, hash_text
 from nga_tools.timing import record_timing_metric, time_section
 
@@ -130,7 +130,10 @@ def _read_cached_references(
                 {target.cache_key for target in targets}
             )
         except Exception as error:
-            report_warning(f"图片引用缓存读取失败，改为完整解析：{error}")
+            report_warning(
+                WarningCategory.CACHE,
+                f"图片引用缓存读取失败，改为完整解析：{error}",
+            )
             return {}, False
 
     references_by_key: dict[str, tuple[PostImageReference, ...]] = {}
@@ -150,6 +153,7 @@ def _read_cached_references(
                 )
             except ValueError as error:
                 report_warning(
+                    WarningCategory.CACHE,
                     f"图片引用缓存损坏，重新解析并覆盖：{cache_key}：{error}"
                 )
     return references_by_key, True
@@ -283,7 +287,10 @@ def collect_image_download_tasks_for_records(
             try:
                 archive_store.upsert_post_image_reference_cache(new_entries)
             except Exception as error:
-                report_warning(f"图片引用缓存写入失败，本次继续备份：{error}")
+                report_warning(
+                    WarningCategory.CACHE,
+                    f"图片引用缓存写入失败，本次继续备份：{error}",
+                )
 
     record_timing_metric("图片引用记录数", len(records))
     record_timing_metric("图片引用缓存命中记录数", cache_hit_count)

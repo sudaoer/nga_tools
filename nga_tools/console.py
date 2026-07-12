@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from enum import StrEnum
 from pathlib import Path
 import sys
 from threading import RLock
@@ -21,6 +23,19 @@ from rich.progress import (
 )
 from rich.progress_bar import ProgressBar
 from rich.table import Column
+
+
+class WarningCategory(StrEnum):
+    DOWNLOAD_RETRY = "下载重试"
+    IMAGE_DOWNLOAD = "图片下载"
+    IMAGE_PROCESSING = "图片处理"
+    FLOOR_MAP = "楼层映射"
+    POST_CONTENT = "帖子内容"
+    PROCESSING_STATE = "处理状态"
+    CACHE = "缓存"
+    PDF = "PDF生成"
+    MIGRATION = "数据迁移"
+    TASK_FAILURE = "任务失败"
 
 
 def _display_width(text: str) -> int:
@@ -68,7 +83,7 @@ class Reporter(Protocol):
     def info(self, message: str) -> None:
         raise NotImplementedError
 
-    def warning(self, message: str) -> None:
+    def warning(self, category: WarningCategory, message: str) -> None:
         raise NotImplementedError
 
     def progress(
@@ -97,7 +112,8 @@ class ConsoleReporter:
     def info(self, message: str) -> None:
         self._active_console().print(message, markup=False)
 
-    def warning(self, message: str) -> None:
+    def warning(self, category: WarningCategory, message: str) -> None:
+        del category
         self._active_console().print(f"警告：{message}", markup=False)
 
     def progress(
@@ -125,8 +141,8 @@ class WarningLogReporter:
     def info(self, message: str) -> None:
         self._reporter.info(message)
 
-    def warning(self, message: str) -> None:
-        self._reporter.warning(message)
+    def warning(self, category: WarningCategory, message: str) -> None:
+        self._reporter.warning(category, message)
         self._log_file.write(f"警告：{message}\n")
         self._log_file.flush()
 
@@ -147,6 +163,76 @@ _CURRENT_REPORTER: ContextVar[Reporter | None] = ContextVar(
 )
 
 
+class WarningSummaryCollector:
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._counts: Counter[WarningCategory] = Counter()
+        self._thread_labels: set[str] = set()
+
+    def record(
+        self,
+        category: WarningCategory,
+        *,
+        thread_label: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._counts[category] += 1
+            if thread_label is not None:
+                self._thread_labels.add(thread_label)
+
+    def snapshot(self) -> tuple[Counter[WarningCategory], int]:
+        with self._lock:
+            return self._counts.copy(), len(self._thread_labels)
+
+
+class WarningSummaryReporter:
+    def __init__(
+        self,
+        reporter: Reporter,
+        collector: WarningSummaryCollector,
+        *,
+        thread_label: str | None = None,
+        parent_collector: WarningSummaryCollector | None = None,
+    ) -> None:
+        self._reporter = reporter
+        self._collector = collector
+        self._thread_label = thread_label
+        self._parent_collector = parent_collector
+
+    @property
+    def console(self) -> Console:
+        return self._reporter.console
+
+    def info(self, message: str) -> None:
+        self._reporter.info(message)
+
+    def warning(self, category: WarningCategory, message: str) -> None:
+        del message
+        self._collector.record(category, thread_label=self._thread_label)
+        if self._parent_collector is not None:
+            self._parent_collector.record(
+                category,
+                thread_label=self._thread_label,
+            )
+
+    def progress(
+        self,
+        message: str,
+        *,
+        completed: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        self._reporter.progress(message, completed=completed, total=total)
+
+
+_CURRENT_WARNING_COLLECTOR: ContextVar[WarningSummaryCollector | None] = (
+    ContextVar(
+        "nga_tools_warning_collector",
+        default=None,
+    )
+)
+
+
 def get_reporter() -> Reporter:
     reporter = _CURRENT_REPORTER.get()
     return _DEFAULT_REPORTER if reporter is None else reporter
@@ -159,6 +245,103 @@ def use_reporter(reporter: Reporter) -> Generator[None]:
         yield
     finally:
         _CURRENT_REPORTER.reset(token)
+
+
+def get_warning_collector() -> WarningSummaryCollector | None:
+    return _CURRENT_WARNING_COLLECTOR.get()
+
+
+def _warning_counts_text(counts: Counter[WarningCategory]) -> str:
+    return "，".join(
+        f"{category.value}{count}条"
+        for category, count in sorted(
+            counts.items(),
+            key=lambda item: (-item[1], item[0].value),
+        )
+    )
+
+
+def _report_thread_warning_summary(
+    reporter: Reporter,
+    label: str,
+    collector: WarningSummaryCollector,
+) -> None:
+    counts, _ = collector.snapshot()
+    total = sum(counts.values())
+    if total == 0:
+        return
+    reporter.info(
+        f"警告汇总：{label}：共{total}条；{_warning_counts_text(counts)}。"
+    )
+
+
+def _report_command_warning_summary(
+    reporter: Reporter,
+    collector: WarningSummaryCollector,
+) -> None:
+    counts, affected_thread_count = collector.snapshot()
+    total = sum(counts.values())
+    if total == 0:
+        reporter.info("警告总计：共0条。")
+        return
+    affected_text = (
+        f"，涉及{affected_thread_count}个帖子"
+        if affected_thread_count
+        else ""
+    )
+    reporter.info(
+        f"警告总计：共{total}条{affected_text}；"
+        f"{_warning_counts_text(counts)}。"
+    )
+
+
+@contextmanager
+def use_command_warning_summary() -> Generator[WarningSummaryCollector]:
+    reporter = get_reporter()
+    collector = WarningSummaryCollector()
+    summary_reporter = WarningSummaryReporter(reporter, collector)
+    reporter_token = _CURRENT_REPORTER.set(summary_reporter)
+    collector_token = _CURRENT_WARNING_COLLECTOR.set(collector)
+    try:
+        yield collector
+    finally:
+        _CURRENT_WARNING_COLLECTOR.reset(collector_token)
+        _CURRENT_REPORTER.reset(reporter_token)
+        _report_command_warning_summary(reporter, collector)
+
+
+@contextmanager
+def use_thread_warning_summary(
+    label: str,
+    *,
+    parent_collector: WarningSummaryCollector | None = None,
+    summary_reporter: Reporter | None = None,
+) -> Generator[WarningSummaryCollector]:
+    reporter = get_reporter()
+    collector = WarningSummaryCollector()
+    effective_parent = (
+        get_warning_collector()
+        if parent_collector is None
+        else parent_collector
+    )
+    grouped_reporter = WarningSummaryReporter(
+        reporter,
+        collector,
+        thread_label=label,
+        parent_collector=effective_parent,
+    )
+    reporter_token = _CURRENT_REPORTER.set(grouped_reporter)
+    collector_token = _CURRENT_WARNING_COLLECTOR.set(collector)
+    try:
+        yield collector
+    finally:
+        _CURRENT_WARNING_COLLECTOR.reset(collector_token)
+        _CURRENT_REPORTER.reset(reporter_token)
+        _report_thread_warning_summary(
+            reporter if summary_reporter is None else summary_reporter,
+            label,
+            collector,
+        )
 
 
 @contextmanager
@@ -175,8 +358,8 @@ def report_info(message: str) -> None:
     get_reporter().info(message)
 
 
-def report_warning(message: str) -> None:
-    get_reporter().warning(message)
+def report_warning(category: WarningCategory, message: str) -> None:
+    get_reporter().warning(category, message)
 
 
 def report_progress(
@@ -249,6 +432,7 @@ class BackupConfigTaskReporter:
         self._parent = parent
         self._task_id = task_id
         self._label = label
+        self._warning_collector = WarningSummaryCollector()
 
     @property
     def console(self) -> Console:
@@ -258,11 +442,20 @@ class BackupConfigTaskReporter:
     def task_id(self) -> TaskID:
         return self._task_id
 
+    @property
+    def label(self) -> str:
+        return self._label
+
+    @property
+    def warning_collector(self) -> WarningSummaryCollector:
+        return self._warning_collector
+
     def info(self, message: str) -> None:
         self._parent.update_task(self._task_id, message)
 
-    def warning(self, message: str) -> None:
-        self._parent.warning(self._label, message)
+    def warning(self, category: WarningCategory, message: str) -> None:
+        del message
+        self._warning_collector.record(category, thread_label=self._label)
 
     def progress(
         self,
@@ -386,6 +579,14 @@ class BackupConfigsProgressDisplay:
         status: str,
     ) -> None:
         with self._lock:
+            counts, _ = reporter.warning_collector.snapshot()
+            warning_total = sum(counts.values())
+            if warning_total:
+                self._progress.console.print(
+                    f"警告汇总：{reporter.label}：共{warning_total}条；"
+                    f"{_warning_counts_text(counts)}。",
+                    markup=False,
+                )
             total_task = self._progress.tasks[self._total_task]
             completed = int(total_task.completed) + 1
             total = int(total_task.total or completed)
@@ -396,13 +597,6 @@ class BackupConfigsProgressDisplay:
                 status=status,
             )
             self._progress.update(reporter.task_id, visible=False)
-
-    def warning(self, label: str, message: str) -> None:
-        with self._lock:
-            self._progress.console.print(
-                f"警告：{label}：{message}",
-                markup=False,
-            )
 
     def visible_task_descriptions(self) -> list[str]:
         with self._lock:

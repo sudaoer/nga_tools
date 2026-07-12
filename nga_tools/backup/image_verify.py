@@ -20,7 +20,7 @@ from nga_tools.backup.post_overlay import (
     overlay_image_sources,
 )
 from nga_tools.config import get_config
-from nga_tools.console import report_info, report_warning
+from nga_tools.console import WarningCategory, report_info, report_warning
 from nga_tools.core.image_formats import image_file_error
 from nga_tools.timing import time_section
 
@@ -108,7 +108,10 @@ def _list_thread_referenced_image_paths(
         try:
             floor_labels = load_floor_labels_from_archive(archive_store, aid)
         except Exception as error:
-            report_warning(f"无法加载楼层映射，使用普通楼层标签：{error}")
+            report_warning(
+                WarningCategory.FLOOR_MAP,
+                f"无法加载楼层映射，使用普通楼层标签：{error}",
+            )
             floor_labels = FloorLabels.plain()
     tasks = collect_image_download_tasks_from_parsed(parsed_htmls, floor_labels)
     task_urls = {task["url"] for task in tasks}
@@ -128,7 +131,10 @@ def _list_thread_referenced_image_paths(
         normalized_url = image_store.normalize_nga_image_url(task["url"])
         mapping = mappings.get(normalized_url)
         if mapping is None:
-            report_warning(f"帖子图片未找到本地映射：{normalized_url}")
+            report_warning(
+                WarningCategory.IMAGE_PROCESSING,
+                f"帖子图片未找到本地映射：{normalized_url}",
+            )
             continue
         image_path = mapping.unique_path
         target_path = image_path.resolve() if image_path.exists() else image_path
@@ -159,6 +165,7 @@ def _verify_images_in_folder(folder_images: str) -> ImageVerifyResult:
         if result.error is None:
             continue
         report_warning(
+            WarningCategory.IMAGE_PROCESSING,
             f"图片文件损坏或无法打开：{result.image_file}，错误信息：{result.error}"
         )
         if result.removed:
@@ -187,6 +194,7 @@ def _verify_image_paths(folder_label: str, image_paths: list[Path]) -> ImageVeri
         if result.error is None:
             continue
         report_warning(
+            WarningCategory.IMAGE_PROCESSING,
             f"图片文件损坏或无法打开：{result.image_file}，错误信息：{result.error}"
         )
         if result.removed:

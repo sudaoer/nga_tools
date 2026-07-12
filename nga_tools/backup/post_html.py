@@ -14,7 +14,7 @@ from nga_tools.backup.post_data import (
     post_source_hash,
 )
 from nga_tools.bbcode_convert import bbcode_to_html
-from nga_tools.console import report_warning
+from nga_tools.console import WarningCategory, report_warning
 from nga_tools.core.hashing import hash_object
 from nga_tools.ngaclient.client import PageData
 
@@ -112,7 +112,10 @@ def fill_missing_lou(
     floor_labels: FloorLabels,
 ) -> None:
     for lou in missing_lou:
-        report_warning(f"缺失{floor_labels.label(lou)}！")
+        report_warning(
+            WarningCategory.POST_CONTENT,
+            f"缺失{floor_labels.label(lou)}！",
+        )
 
     for lou in missing_lou:
         htmls.append(
@@ -132,7 +135,10 @@ def fill_missing_post_records(
     floor_labels: FloorLabels,
 ) -> None:
     for lou in missing_lou:
-        report_warning(f"缺失{floor_labels.label(lou)}！")
+        report_warning(
+            WarningCategory.POST_CONTENT,
+            f"缺失{floor_labels.label(lou)}！",
+        )
 
     for lou in missing_lou:
         post_html = MISSING_POST_HTML

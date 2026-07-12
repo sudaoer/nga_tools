@@ -5,7 +5,7 @@ from nga_tools.backup.image_verify import (
     verify_downloaded_images,
 )
 from nga_tools.config import load_timing_log_enabled
-from nga_tools.console import use_warning_log
+from nga_tools.console import use_thread_warning_summary, use_warning_log
 from nga_tools.commands.resolve import resolve_command_thread_target
 from nga_tools.commands.types import CommandArgs, optional_int, optional_str
 from nga_tools.core.output_lock import use_thread_output_lock
@@ -27,6 +27,7 @@ def image_verify(args: CommandArgs) -> None:
     aid_text = str(thread_aid) if thread_aid is not None else "all"
     with (
         use_thread_output_lock(thread_tid, thread_aid),
+        use_thread_warning_summary(f"tid={thread_tid}, aid={aid_text}"),
         use_warning_log(warning_log_path(thread_tid, thread_aid)),
         use_timing_log(
             timing_log_path(thread_tid, thread_aid),

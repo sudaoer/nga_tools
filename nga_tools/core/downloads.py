@@ -9,7 +9,7 @@ from typing import Literal, NotRequired, Optional, TypedDict
 import aiohttp
 
 from nga_tools import network_limits
-from nga_tools.console import report_warning
+from nga_tools.console import WarningCategory, report_warning
 
 
 class DownloadTask(TypedDict):
@@ -128,6 +128,7 @@ def download_files(
                     return result
                 wait = backoff_factor * (2**attempt)
                 report_warning(
+                    WarningCategory.DOWNLOAD_RETRY,
                     f"Download failed ({error}), retrying {attempt + 1}/{retries} "
                     f"after {wait:.1f}s: {url}"
                 )

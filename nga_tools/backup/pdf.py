@@ -40,7 +40,7 @@ from nga_tools.backup.pdf_plan import (
     write_pdf_hashes as _write_pdf_hashes,
 )
 from nga_tools.config import get_config
-from nga_tools.console import report_info, report_warning
+from nga_tools.console import WarningCategory, report_info, report_warning
 from nga_tools.core.atomic import replace_temp_file, temporary_sibling_path
 from nga_tools.core.image_formats import (
     image_extension_from_file,
@@ -423,7 +423,10 @@ def _report_weasyprint_output(render_results: list[PdfRenderResult]) -> None:
     for render_result in render_results:
         pdf_name = Path(render_result.task.output_path).name
         for line in render_result.output_lines:
-            report_warning(f"WeasyPrint {pdf_name}: {line}")
+            report_warning(
+                WarningCategory.PDF,
+                f"WeasyPrint {pdf_name}: {line}",
+            )
 
 
 def _image_path_for_pdf(
@@ -566,6 +569,7 @@ def _read_pdf_html(
                 )
             except Exception as error:
                 report_warning(
+                    WarningCategory.PDF,
                     f"{floor_labels.label(lou)}跳过PDF图片转换 "
                     f"{image_path}: {error}"
                 )
@@ -576,6 +580,7 @@ def _read_pdf_html(
                 width, height = _get_image_size(str(image_path), image_size_cache)
             except (OSError, SyntaxError, ValueError) as error:
                 report_warning(
+                    WarningCategory.PDF,
                     f"{floor_labels.label(lou)}跳过无法识别尺寸的图片 "
                     f"{image_path}: {error}"
                 )

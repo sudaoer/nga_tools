@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import re
+import subprocess
 import threading
 from collections import Counter, defaultdict
 from collections.abc import Callable, Generator, Iterable
@@ -8,11 +10,77 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 from time import perf_counter
 from typing import TextIO
 
 from nga_tools.core.atomic import write_text_atomically
+
+
+TIMING_LOG_RETENTION_COUNT = 5
+_COMMIT_ID_RE = re.compile(r"^[0-9a-f]{40}$")
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+@cache
+def git_commit_id() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_PROJECT_ROOT,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit_id = result.stdout.strip().lower()
+    if result.returncode != 0 or _COMMIT_ID_RE.fullmatch(commit_id) is None:
+        return None
+    return commit_id
+
+
+def _timestamped_log_path(path: Path, started_at: datetime) -> Path:
+    timestamp = started_at.strftime("%Y%m%dT%H%M%S%f")
+    base_name = f"{path.stem}-{timestamp}"
+    candidate = path.with_name(f"{base_name}{path.suffix}")
+    collision_index = 2
+    while candidate.exists():
+        candidate = path.with_name(
+            f"{base_name}-{collision_index}{path.suffix}"
+        )
+        collision_index += 1
+    return candidate
+
+
+def _timing_log_candidates(path: Path) -> list[Path]:
+    candidates = [
+        candidate
+        for candidate in path.parent.glob(f"{path.stem}-*{path.suffix}")
+        if candidate.is_file()
+    ]
+    if path.is_file():
+        candidates.append(path)
+    return candidates
+
+
+def _prune_timing_logs(path: Path) -> None:
+    candidates: list[tuple[int, str, Path]] = []
+    for candidate in _timing_log_candidates(path):
+        try:
+            modified_ns = candidate.stat().st_mtime_ns
+        except OSError:
+            continue
+        candidates.append((modified_ns, candidate.name, candidate))
+    candidates.sort(reverse=True)
+    for _, _, stale_path in candidates[TIMING_LOG_RETENTION_COUNT:]:
+        try:
+            stale_path.unlink()
+        except OSError:
+            continue
 
 
 @dataclass(frozen=True)
@@ -55,25 +123,40 @@ class TimingLog:
         *,
         task_name: str,
         target: str | None,
+        started_at: datetime,
+        path: Path,
+        commit_id: str | None,
     ) -> None:
         self._log_file = log_file
         self._task_name = task_name
         self._target = target
-        self._started_at = datetime.now().astimezone()
+        self._started_at = started_at
+        self._path = path
         self._start = perf_counter()
         self._finished = False
         self._snapshot: TimingSnapshot | None = None
         self._sections: list[TimingSectionRecord] = []
         self._metrics: list[tuple[str, int]] = []
         self._labels: list[tuple[str, str]] = []
-        self._write_header(task_name, target)
+        self._write_header(task_name, target, commit_id)
 
-    def _write_header(self, task_name: str, target: str | None) -> None:
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def _write_header(
+        self,
+        task_name: str,
+        target: str | None,
+        commit_id: str | None,
+    ) -> None:
         started_at = _format_timestamp(self._started_at)
         self._log_file.write(f"开始时间：{started_at}\n")
         self._log_file.write(f"任务：{task_name}\n")
         if target is not None:
             self._log_file.write(f"目标：{target}\n")
+        if commit_id is not None:
+            self._log_file.write(f"Commit ID：{commit_id}\n")
         self._log_file.flush()
 
     def start_section(self, section_name: str, started_at: datetime) -> None:
@@ -169,24 +252,36 @@ def use_timing_log(
         yield None
         return
 
-    log_path = Path(path)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8") as log_file:
-        timing_log = TimingLog(log_file, task_name=task_name, target=target)
-        token = _CURRENT_TIMING_LOG.set(timing_log)
-        try:
-            yield timing_log
-        except BaseException:
-            snapshot = timing_log.finish("失败")
-            if on_finish is not None:
-                on_finish(snapshot)
-            raise
-        else:
-            snapshot = timing_log.finish("完成")
-            if on_finish is not None:
-                on_finish(snapshot)
-        finally:
-            _CURRENT_TIMING_LOG.reset(token)
+    base_log_path = Path(path)
+    base_log_path.parent.mkdir(parents=True, exist_ok=True)
+    started_at = datetime.now().astimezone()
+    log_path = _timestamped_log_path(base_log_path, started_at)
+    try:
+        with log_path.open("x", encoding="utf-8") as log_file:
+            timing_log = TimingLog(
+                log_file,
+                task_name=task_name,
+                target=target,
+                started_at=started_at,
+                path=log_path,
+                commit_id=git_commit_id(),
+            )
+            token = _CURRENT_TIMING_LOG.set(timing_log)
+            try:
+                yield timing_log
+            except BaseException:
+                snapshot = timing_log.finish("失败")
+                if on_finish is not None:
+                    on_finish(snapshot)
+                raise
+            else:
+                snapshot = timing_log.finish("完成")
+                if on_finish is not None:
+                    on_finish(snapshot)
+            finally:
+                _CURRENT_TIMING_LOG.reset(token)
+    finally:
+        _prune_timing_logs(base_log_path)
 
 
 @contextmanager
@@ -313,12 +408,19 @@ def write_batch_timing_summary(
     lines = [
         f"开始时间：{_format_timestamp(started_at)}",
         f"任务：{task_name}",
-        f"墙钟时间：{_format_duration(wall_seconds)}",
-        thread_summary,
-        f"状态：{status}",
-        "",
-        "处理状态复用：",
     ]
+    commit_id = git_commit_id()
+    if commit_id is not None:
+        lines.append(f"Commit ID：{commit_id}")
+    lines.extend(
+        [
+            f"墙钟时间：{_format_duration(wall_seconds)}",
+            thread_summary,
+            f"状态：{status}",
+            "",
+            "处理状态复用：",
+        ]
+    )
     if processing_reuse_results:
         hit_count = processing_reuse_results.get("hit", 0)
         not_applicable_count = processing_reuse_results.get("not_applicable", 0)
@@ -391,4 +493,6 @@ def write_batch_timing_summary(
         for category, count in sorted(expected_failure_categories.items()):
             lines.append(f"- {category}: {count}")
 
-    write_text_atomically(path, "\n".join(lines) + "\n")
+    started_log_path = _timestamped_log_path(path, started_at)
+    write_text_atomically(started_log_path, "\n".join(lines) + "\n")
+    _prune_timing_logs(path)

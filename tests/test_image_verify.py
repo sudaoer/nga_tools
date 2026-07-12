@@ -24,7 +24,12 @@ from nga_tools.backup.image_verify import (
 )
 from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.cli import args_parse
-from nga_tools.console import ConsoleReporter, report_warning, use_reporter
+from nga_tools.console import (
+    ConsoleReporter,
+    WarningCategory,
+    report_warning,
+    use_reporter,
+)
 from nga_tools.commands.image import image_verify
 
 
@@ -157,7 +162,10 @@ class ImageVerifyHandlerTest:
 
             def verify_side_effect(tid: int, aid: int | None) -> None:
                 assert (tid, aid) == (101, 201)
-                report_warning("单帖图片告警")
+                report_warning(
+                    WarningCategory.IMAGE_PROCESSING,
+                    "单帖图片告警",
+                )
 
             with (
                 patch(
@@ -181,13 +189,19 @@ class ImageVerifyHandlerTest:
                 image_verify(args)
 
             assert log_path.read_text(encoding='utf-8') == '警告：单帖图片告警\n'
-            timing_text = timing_path.read_text(encoding="utf-8")
-            assert "旧耗时" not in timing_text
+            timing_paths = list(thread_dir.glob("timing-*.log"))
+            assert len(timing_paths) == 1
+            timing_text = timing_paths[0].read_text(encoding="utf-8")
+            assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
             assert "任务：image verify\n" in timing_text
             assert "目标：tid=101, aid=201\n" in timing_text
             assert "总耗时：" in timing_text
             assert "状态：完成" in timing_text
-            assert '警告：单帖图片告警' in output.getvalue()
+            assert "警告：单帖图片告警" not in output.getvalue()
+            assert (
+                "警告汇总：tid=101, aid=201：共1条；图片处理1条。"
+                in output.getvalue()
+            )
 
     def test_aid_without_thread_target_is_rejected(self) -> None:
         with patch("nga_tools.commands.image.verify_all_downloaded_images") as all_mock:

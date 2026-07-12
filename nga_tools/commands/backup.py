@@ -13,8 +13,10 @@ from nga_tools.backup.image_validation import (
 )
 from nga_tools.config import get_config, load_timing_log_enabled
 from nga_tools.console import (
+    WarningCategory,
     report_info,
     report_warning,
+    use_thread_warning_summary,
     use_warning_log,
 )
 from nga_tools.backup.pdf import PdfRenderPool, generate_pdf
@@ -70,6 +72,9 @@ def _use_thread_output_logs(
 ) -> Generator[None]:
     with ExitStack() as stack:
         stack.enter_context(use_thread_output_lock(tid, aid))
+        stack.enter_context(
+            use_thread_warning_summary(_thread_target_label(tid, aid))
+        )
         stack.enter_context(use_warning_log(warning_log_path(tid, aid)))
         stack.enter_context(
             use_timing_log(
@@ -226,21 +231,28 @@ def backup_migrate_store(args: CommandArgs) -> None:
             return
 
         for folder in folders:
-            try:
-                with (
-                    use_output_folder_lock(folder),
-                    use_timing_log(
-                        folder / "timing.log",
-                        task_name="backup migrate-store --all",
-                        target=f"folder={folder.name}",
-                        enabled=app_config.timing_log_enabled,
-                    ),
-                ):
-                    with time_section("归档迁移"):
-                        _migrate_store_for_thread_folder(folder)
-            except Exception as error:
-                failures.append((folder, error))
-                report_warning(f"迁移失败：{folder}：{error}")
+            with (
+                use_thread_warning_summary(f"folder={folder.name}"),
+                use_warning_log(folder / "warnings.log"),
+            ):
+                try:
+                    with (
+                        use_output_folder_lock(folder),
+                        use_timing_log(
+                            folder / "timing.log",
+                            task_name="backup migrate-store --all",
+                            target=f"folder={folder.name}",
+                            enabled=app_config.timing_log_enabled,
+                        ),
+                    ):
+                        with time_section("归档迁移"):
+                            _migrate_store_for_thread_folder(folder)
+                except Exception as error:
+                    failures.append((folder, error))
+                    report_warning(
+                        WarningCategory.MIGRATION,
+                        f"迁移失败：{folder}：{error}",
+                    )
 
         report_info(
             f"批量迁移完成：成功{len(folders) - len(failures)}个，"

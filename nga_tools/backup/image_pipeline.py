@@ -12,7 +12,12 @@ from nga_tools.backup import image_store
 from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.backup.html_images import effective_image_src
 from nga_tools.backup.models import ParsedPostHtml, PostHtml
-from nga_tools.console import report_info, report_progress, report_warning
+from nga_tools.console import (
+    WarningCategory,
+    report_info,
+    report_progress,
+    report_warning,
+)
 from nga_tools.timing import record_timing_metric, time_section
 
 
@@ -80,6 +85,7 @@ def collect_image_download_tasks_from_scans(
         for reference in scan.references:
             if not reference.valid:
                 report_warning(
+                    WarningCategory.IMAGE_DOWNLOAD,
                     f"{floor_labels.label(scan.lou)}的"
                     f"第{reference.image_index}张图片链接无效：{reference.url}"
                 )
@@ -192,6 +198,7 @@ def download_images(
         )
         error_text = _clean_repeated_url(failed.get("error", "unknown"), failed_url)
         report_warning(
+            WarningCategory.IMAGE_DOWNLOAD,
             f"下载失败：{failed_url}（类别：{failure_kind}{status_text}，"
             f"详情：{error_text}）"
         )

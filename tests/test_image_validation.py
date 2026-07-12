@@ -227,14 +227,18 @@ def test_image_preparation_writes_subphases_and_metrics(tmp_path: Path) -> None:
         image_store.upsert_image_mappings(
             [(first_url, image_path), (second_url, image_path)]
         )
-        with use_timing_log(timing_path, task_name="image preparation"):
+        with use_timing_log(
+            timing_path,
+            task_name="image preparation",
+        ) as timing_log:
+            assert timing_log is not None
             download_images(
                 123,
                 None,
                 [{"url": first_url}, {"url": second_url}],
             )
 
-    timing_text = timing_path.read_text(encoding="utf-8")
+    timing_text = timing_log.path.read_text(encoding="utf-8")
     for stage_name in (
         "图片下载准备",
         "图片索引批量查询",
@@ -292,13 +296,14 @@ def test_image_pipeline_reports_one_detailed_final_failure(tmp_path: Path) -> No
             return_value={"succeeded": [], "failed": [failure]},
         ),
         patch("nga_tools.backup.image_pipeline.report_warning") as warning_mock,
-        use_timing_log(timing_path, task_name="image failure"),
+        use_timing_log(timing_path, task_name="image failure") as timing_log,
     ):
+        assert timing_log is not None
         result = download_images(123, None, [{"url": url}])
 
     assert result["failed"] == [failure]
     warning_mock.assert_called_once()
-    warning_text = warning_mock.call_args.args[0]
+    warning_text = warning_mock.call_args.args[1]
     assert warning_text.count(url) == 1
     assert "http_4xx" in warning_text
     assert "HTTP 404" in warning_text
@@ -306,7 +311,7 @@ def test_image_pipeline_reports_one_detailed_final_failure(tmp_path: Path) -> No
     assert "详情：404, message='HTTP 404'）" in warning_text
     assert (
         "指标：图片下载失败/http_4xx，值：1\n"
-        in timing_path.read_text(encoding="utf-8")
+        in timing_log.path.read_text(encoding="utf-8")
     )
 
 

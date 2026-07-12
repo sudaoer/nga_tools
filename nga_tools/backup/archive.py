@@ -57,7 +57,12 @@ from nga_tools.backup.processing_state import (
     FloorProcessingState,
     ImageReferenceState,
 )
-from nga_tools.console import report_info, report_progress, report_warning
+from nga_tools.console import (
+    WarningCategory,
+    report_info,
+    report_progress,
+    report_warning,
+)
 from nga_tools.core.downloads import DownloadSummary
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
@@ -185,11 +190,17 @@ def _build_floor_map_for_post_refs(
             cacheable=True,
         )
     except Exception as error:
-        report_warning(f"楼层映射生成失败，继续生成备份：{error}")
+        report_warning(
+            WarningCategory.FLOOR_MAP,
+            f"楼层映射生成失败，继续生成备份：{error}",
+        )
         try:
             floor_labels = load_floor_labels_from_archive(archive_store, aid)
         except Exception as load_error:
-            report_warning(f"无法加载已有楼层映射，使用普通楼层标签：{load_error}")
+            report_warning(
+                WarningCategory.FLOOR_MAP,
+                f"无法加载已有楼层映射，使用普通楼层标签：{load_error}",
+            )
             floor_labels = FloorLabels.plain()
         return FloorMapProcessingResult(
             FloorMapBuildResult(floor_labels, {}),
@@ -411,7 +422,10 @@ def _rebuild_image_reference_state(
             try:
                 floor_labels = load_floor_labels_from_archive(archive_store, aid)
             except Exception as error:
-                report_warning(f"无法加载楼层映射，使用普通楼层标签：{error}")
+                report_warning(
+                    WarningCategory.FLOOR_MAP,
+                    f"无法加载楼层映射，使用普通楼层标签：{error}",
+                )
                 floor_labels = FloorLabels.plain()
         download_summary = _download_images_for_records(
             tid,
@@ -466,7 +480,10 @@ def _try_processing_state_reuse(
         else:
             snapshot = processing_snapshot
     except ValueError as error:
-        report_warning(f"处理状态无效，改为完整处理：{error}")
+        report_warning(
+            WarningCategory.PROCESSING_STATE,
+            f"处理状态无效，改为完整处理：{error}",
+        )
         archive_store.clear_backup_processing_state()
         return ProcessingStateReuseResult(False, "state_invalid")
     post_overlays_hash = archive_store.post_overlays_fingerprint()
@@ -551,7 +568,10 @@ def _try_processing_state_reuse(
     ):
         return ProcessingStateReuseResult(True, "hit")
 
-    report_warning("处理状态在图片重试期间发生变化，改为完整处理。")
+    report_warning(
+        WarningCategory.PROCESSING_STATE,
+        "处理状态在图片重试期间发生变化，改为完整处理。",
+    )
     return ProcessingStateReuseResult(False, "state_changed_during_image_retry")
 
 
@@ -577,7 +597,10 @@ def _commit_completed_processing_state(
         selections_fingerprint(thread_folder),
     )
     if fingerprints_after != fingerprints_before:
-        report_warning("派生输入在处理期间发生变化，未写入线程级处理状态。")
+        report_warning(
+            WarningCategory.PROCESSING_STATE,
+            "派生输入在处理期间发生变化，未写入线程级处理状态。",
+        )
         return
 
     snapshot = archive_store.read_backup_processing_snapshot()
@@ -600,7 +623,10 @@ def _commit_completed_processing_state(
         pending_image_urls,
     )
     if not floor_committed or not image_committed:
-        report_warning("归档在处理期间发生变化，未写入线程级处理状态。")
+        report_warning(
+            WarningCategory.PROCESSING_STATE,
+            "归档在处理期间发生变化，未写入线程级处理状态。",
+        )
     elif aid is not None and unresolved_missing_lous:
         report_info(
             f"仍有{len(unresolved_missing_lous)}个缺失楼未恢复，"

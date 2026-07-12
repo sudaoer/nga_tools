@@ -15,7 +15,13 @@ from rich.console import Console
 from nga_tools.backup.pdf import PdfRenderPool
 from nga_tools.backup.image_validation import current_image_validation_cache
 from nga_tools.cli import args_parse, format_command_help
-from nga_tools.console import ConsoleReporter, report_warning, use_reporter
+from nga_tools.console import (
+    ConsoleReporter,
+    WarningCategory,
+    report_warning,
+    use_command_warning_summary,
+    use_reporter,
+)
 from nga_tools.commands.backup import (
     backup_all,
     backup_sub,
@@ -41,6 +47,14 @@ def _thread_config(
     if aid is not None:
         thread_config["aid"] = aid
     return thread_config
+
+
+def _only_versioned_log(base_path: Path) -> Path:
+    paths = list(
+        base_path.parent.glob(f"{base_path.stem}-*{base_path.suffix}")
+    )
+    assert len(paths) == 1
+    return paths[0]
 
 
 class BackupCliTest:
@@ -380,7 +394,7 @@ class BackupWarningLogTest:
             ) -> None:
                 assert (tid, aid) == (101, None)
                 assert kwargs == {'write_json': False}
-                report_warning("单帖警告")
+                report_warning(WarningCategory.POST_CONTENT, "单帖警告")
 
             with (
                 patch(
@@ -401,13 +415,19 @@ class BackupWarningLogTest:
                 handler({})
 
             assert log_path.read_text(encoding='utf-8') == '警告：单帖警告\n'
-            timing_text = timing_path.read_text(encoding="utf-8")
-            assert "旧耗时" not in timing_text
+            timing_text = _only_versioned_log(timing_path).read_text(
+                encoding="utf-8"
+            )
+            assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
             assert f"任务：{expected_task_name}\n" in timing_text
             assert "目标：tid=101, aid=all\n" in timing_text
             assert "总耗时：" in timing_text
             assert "状态：完成" in timing_text
-            assert '警告：单帖警告' in output.getvalue()
+            assert "警告：单帖警告" not in output.getvalue()
+            assert (
+                "警告汇总：tid=101, aid=all：共1条；帖子内容1条。"
+                in output.getvalue()
+            )
 
     def test_single_thread_backup_respects_disabled_timing_log(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -463,7 +483,10 @@ class BackupWarningLogTest:
                 write_json: bool,
             ) -> None:
                 assert write_json is False
-                report_warning(f"warning {tid} {aid}")
+                report_warning(
+                    WarningCategory.POST_CONTENT,
+                    f"warning {tid} {aid}",
+                )
 
             with (
                 patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
@@ -479,7 +502,8 @@ class BackupWarningLogTest:
                     "nga_tools.core.paths.get_folder",
                     side_effect=_fake_get_folder(base_dir),
                 ),
-                _captured_reporter(),
+                _captured_reporter() as output,
+                use_command_warning_summary(),
             ):
                 configs_cls.return_value.get_thread_configs.return_value = thread_configs
 
@@ -487,12 +511,18 @@ class BackupWarningLogTest:
 
             assert (base_dir / '101_201' / 'warnings.log').read_text(encoding='utf-8') == '警告：warning 101 201\n'
             assert (base_dir / '102_all' / 'warnings.log').read_text(encoding='utf-8') == '警告：warning 102 None\n'
-            first_timing = (base_dir / '101_201' / 'timing.log').read_text(
-                encoding='utf-8'
+            assert "警告：warning" not in output.getvalue()
+            assert output.getvalue().count("警告汇总：") == 2
+            assert (
+                "警告总计：共2条，涉及2个帖子；帖子内容2条。"
+                in output.getvalue()
             )
-            second_timing = (base_dir / '102_all' / 'timing.log').read_text(
-                encoding='utf-8'
-            )
+            first_timing = _only_versioned_log(
+                base_dir / "101_201" / "timing.log"
+            ).read_text(encoding="utf-8")
+            second_timing = _only_versioned_log(
+                base_dir / "102_all" / "timing.log"
+            ).read_text(encoding="utf-8")
             assert "任务：backup sub --all-threads\n" in first_timing
             assert "目标：first (tid: 101, aid: 201)\n" in first_timing
             assert "总耗时：" in first_timing
@@ -518,7 +548,7 @@ class BackupWarningLogTest:
                 pdf_workers: int | None,
             ) -> None:
                 assert (tid, aid, lou_per_pdf, pdf_workers) == (101, 201, 50, 2)
-                report_warning("PDF告警")
+                report_warning(WarningCategory.PDF, "PDF告警")
 
             with (
                 patch(
@@ -542,13 +572,19 @@ class BackupWarningLogTest:
                 pdf_generate({"lou_per_pdf": 50, "pdf_workers": 2})
 
             assert log_path.read_text(encoding='utf-8') == '警告：PDF告警\n'
-            timing_text = timing_path.read_text(encoding="utf-8")
-            assert "旧耗时" not in timing_text
+            timing_text = _only_versioned_log(timing_path).read_text(
+                encoding="utf-8"
+            )
+            assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
             assert "任务：backup pdf\n" in timing_text
             assert "目标：tid=101, aid=201\n" in timing_text
             assert "总耗时：" in timing_text
             assert "状态：完成" in timing_text
-            assert '警告：PDF告警' in output.getvalue()
+            assert "警告：PDF告警" not in output.getvalue()
+            assert (
+                "警告汇总：tid=101, aid=201：共1条；PDF生成1条。"
+                in output.getvalue()
+            )
 
 
 class BackupBatchHandlerTest:
@@ -715,8 +751,8 @@ class BackupBatchHandlerTest:
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
             backup_sub({"all_threads": True})
 
-        summary = batch_path.read_text(encoding="utf-8")
-        assert "旧汇总" not in summary
+        summary = _only_versioned_log(batch_path).read_text(encoding="utf-8")
+        assert batch_path.read_text(encoding="utf-8") == "旧汇总\n"
         assert "任务：backup sub --all-threads\n" in summary
         assert "墙钟时间：" in summary
         assert "帖子：总数2，成功2，失败0" in summary
@@ -756,7 +792,7 @@ class BackupBatchHandlerTest:
                 backup_sub({"all_threads": True})
 
         assert context.value.code == 1
-        summary = batch_path.read_text(encoding="utf-8")
+        summary = _only_versioned_log(batch_path).read_text(encoding="utf-8")
         assert "帖子：总数1，成功0，失败1" in summary
         assert "状态：失败" in summary
         assert "线程异常：1" in summary
