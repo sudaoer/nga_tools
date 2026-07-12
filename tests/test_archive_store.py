@@ -1029,7 +1029,6 @@ class ThreadArchiveStoreTest:
             assert store.commit_floor_processing_state(floor_state)
             assert store.commit_image_reference_state(
                 image_state,
-                {"https://example.invalid/ref.png"},
                 {"https://example.invalid/b.png", "https://example.invalid/a.png"},
             )
             stored = store.read_backup_processing_snapshot()
@@ -1046,7 +1045,6 @@ class ThreadArchiveStoreTest:
                             'archive_change_state',
                             'backup_floor_processing_state',
                             'backup_image_reference_state',
-                            'backup_image_references',
                             'backup_pending_images'
                         )
                         """
@@ -1055,22 +1053,53 @@ class ThreadArchiveStoreTest:
 
         assert stored.floor_state == floor_state
         assert stored.image_state == image_state
-        assert stored.image_reference_urls == ("https://example.invalid/ref.png",)
         assert stored.pending_image_urls == (
             "https://example.invalid/a.png",
             "https://example.invalid/b.png",
         )
         assert cleared.floor_state is None
         assert cleared.image_state is None
-        assert cleared.image_reference_urls == ()
         assert cleared.pending_image_urls == ()
         assert table_names == {
             "archive_change_state",
             "backup_floor_processing_state",
             "backup_image_reference_state",
-            "backup_image_references",
             "backup_pending_images",
         }
+
+    def test_legacy_image_reference_rows_are_not_read_or_modified(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            initial = store.read_backup_processing_snapshot()
+            image_state = ImageReferenceState(
+                format_version=1,
+                processed_archive_revision=initial.change_state.archive_revision,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
+                image_reference_extractor_version=1,
+                completed_at="2026-07-11T00:00:00+00:00",
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                connection.execute(
+                    "CREATE TABLE backup_image_references (url TEXT PRIMARY KEY)"
+                )
+                connection.execute(
+                    "INSERT INTO backup_image_references VALUES (?)",
+                    ("https://example.invalid/legacy.png",),
+                )
+                connection.commit()
+
+            assert store.commit_image_reference_state(image_state, set())
+            snapshot = store.read_backup_processing_snapshot()
+            store.clear_backup_processing_state()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                legacy_rows = connection.execute(
+                    "SELECT url FROM backup_image_references"
+                ).fetchall()
+
+        assert snapshot.image_state == image_state
+        assert legacy_rows == [("https://example.invalid/legacy.png",)]
 
     def test_legacy_processing_state_migrates_floor_state_and_drops_table(
         self,
@@ -1121,6 +1150,36 @@ class ThreadArchiveStoreTest:
         assert snapshot.floor_state.author_total_lou_count == 21
         assert snapshot.image_state is None
         assert legacy_exists is None
+
+    def test_current_processing_schema_skips_full_schema_initialization(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            thread_folder = Path(temp_dir_name)
+            ThreadArchiveStore(thread_folder).ensure_schema()
+            store = ThreadArchiveStore(thread_folder)
+
+            with patch.object(
+                ThreadArchiveStore,
+                "_ensure_schema",
+                autospec=True,
+            ) as ensure_schema:
+                store.ensure_backup_processing_schema()
+                snapshot = store.read_backup_processing_snapshot()
+                committed = store.commit_image_reference_state(
+                    ImageReferenceState(
+                        format_version=1,
+                        processed_archive_revision=(
+                            snapshot.change_state.archive_revision
+                        ),
+                        post_overlays_fingerprint="overlay-hash",
+                        post_version_selections_fingerprint="selection-hash",
+                        image_reference_extractor_version=1,
+                        completed_at="2026-07-11T00:00:00+00:00",
+                    ),
+                    set(),
+                )
+
+        assert committed
+        ensure_schema.assert_not_called()
 
     def test_page_revision_tracks_only_effective_processing_inputs(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1287,7 +1346,6 @@ class ThreadArchiveStoreTest:
 
             committed = store.commit_image_reference_state(
                 stale_state,
-                {"https://example.invalid/ref.png"},
                 {"https://example.invalid/stale.png"},
             )
             snapshot = store.read_backup_processing_snapshot()
@@ -1295,3 +1353,39 @@ class ThreadArchiveStoreTest:
         assert not committed
         assert snapshot.image_state is None
         assert snapshot.pending_image_urls == ()
+
+    def test_pending_retry_update_rejects_changed_archive(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            initial = store.read_backup_processing_snapshot()
+            image_state = ImageReferenceState(
+                format_version=1,
+                processed_archive_revision=initial.change_state.archive_revision,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
+                image_reference_extractor_version=1,
+                completed_at="2026-07-11T00:00:00+00:00",
+            )
+            assert store.commit_image_reference_state(
+                image_state,
+                {"https://example.invalid/original.png"},
+            )
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [{"lou": 1, "pid": 1001, "content": "new"}],
+                },
+            )
+
+            replaced = store.replace_pending_images_for_image_state(
+                image_state,
+                {"https://example.invalid/replacement.png"},
+            )
+            snapshot = store.read_backup_processing_snapshot()
+
+        assert not replaced
+        assert snapshot.pending_image_urls == (
+            "https://example.invalid/original.png",
+        )

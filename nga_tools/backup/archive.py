@@ -268,7 +268,7 @@ def _download_images_for_records(
     archive_store: ThreadArchiveStore,
     floor_labels: FloorLabels,
     records: list[PostRecord],
-) -> tuple[DownloadSummary, set[str]]:
+) -> DownloadSummary:
     with time_section("Overlay应用"):
         effective_records = _apply_post_overlays_to_records(
             archive_store.read_post_overlays(),
@@ -280,10 +280,7 @@ def _download_images_for_records(
         effective_records,
         floor_labels,
     )
-    return (
-        _download_images(tid, aid, collection.tasks),
-        {task["url"] for task in collection.tasks},
-    )
+    return _download_images(tid, aid, collection.tasks)
 
 
 def _failed_image_urls(download_summary: DownloadSummary) -> set[str]:
@@ -355,14 +352,18 @@ def _refresh_author_floor_state(
     *,
     page_count: int,
     author_total_lou_count: int | None,
+    expected_snapshot: BackupProcessingSnapshot,
     commit_even_if_unchanged: bool = True,
-) -> bool:
-    before_snapshot = archive_store.read_backup_processing_snapshot()
+) -> tuple[bool, BackupProcessingSnapshot]:
     post_refs, missing_lous = _author_post_refs_and_missing_lous(
         archive_store,
         author_total_lou_count,
     )
     record_timing_metric("待恢复缺失楼数", len(missing_lous))
+    if not missing_lous and not commit_even_if_unchanged:
+        record_timing_metric("本次恢复缺失楼数", 0)
+        return True, expected_snapshot
+
     floor_processing = _build_floor_map_for_post_refs(
         client,
         archive_store,
@@ -376,20 +377,21 @@ def _refresh_author_floor_state(
     )
     record_timing_metric("本次恢复缺失楼数", recovered_count)
     if not floor_processing.cacheable:
-        return False
+        return False, expected_snapshot
     snapshot = archive_store.read_backup_processing_snapshot()
     if (
         not commit_even_if_unchanged
-        and snapshot.change_state == before_snapshot.change_state
+        and snapshot.change_state == expected_snapshot.change_state
     ):
-        return True
-    return archive_store.commit_floor_processing_state(
+        return True, snapshot
+    committed = archive_store.commit_floor_processing_state(
         _new_floor_state(
             snapshot,
             page_count=page_count,
             author_total_lou_count=author_total_lou_count,
         )
     )
+    return committed, snapshot
 
 
 def _rebuild_image_reference_state(
@@ -411,7 +413,7 @@ def _rebuild_image_reference_state(
             except Exception as error:
                 report_warning(f"无法加载楼层映射，使用普通楼层标签：{error}")
                 floor_labels = FloorLabels.plain()
-        download_summary, image_reference_urls = _download_images_for_records(
+        download_summary = _download_images_for_records(
             tid,
             aid,
             archive_store,
@@ -438,7 +440,6 @@ def _rebuild_image_reference_state(
     )
     return archive_store.commit_image_reference_state(
         state,
-        image_reference_urls,
         _failed_image_urls(download_summary),
     )
 
@@ -453,12 +454,17 @@ def _try_processing_state_reuse(
     page_count: int,
     author_total_lou_count: int | None,
     local_pages_cover_remote: bool,
+    processing_snapshot: BackupProcessingSnapshot | None = None,
 ) -> ProcessingStateReuseResult:
     if not local_pages_cover_remote:
         return ProcessingStateReuseResult(False, "local_pages_incomplete")
 
     try:
-        snapshot = archive_store.read_backup_processing_snapshot()
+        if processing_snapshot is None:
+            with time_section("处理状态元数据读取"):
+                snapshot = archive_store.read_backup_processing_snapshot()
+        else:
+            snapshot = processing_snapshot
     except ValueError as error:
         report_warning(f"处理状态无效，改为完整处理：{error}")
         archive_store.clear_backup_processing_state()
@@ -476,33 +482,35 @@ def _try_processing_state_reuse(
             record_timing_label("楼层状态复用结果", "rebuild_required")
             return ProcessingStateReuseResult(False, "state_missing")
         with time_section("楼层派生状态刷新"):
-            if not _refresh_author_floor_state(
+            floor_refresh_succeeded, snapshot = _refresh_author_floor_state(
                 client,
                 archive_store,
                 tid,
                 aid,
                 page_count=page_count,
                 author_total_lou_count=author_total_lou_count,
-            ):
+                expected_snapshot=snapshot,
+            )
+            if not floor_refresh_succeeded:
                 return ProcessingStateReuseResult(False, "floor_map_changed")
         record_timing_label("楼层状态复用结果", "floor_only_refresh")
-        snapshot = archive_store.read_backup_processing_snapshot()
     else:
         record_timing_label("楼层状态复用结果", "hit")
         if aid is not None:
             with time_section("未完成缺失楼重试"):
                 before_archive_revision = snapshot.change_state.archive_revision
-                if not _refresh_author_floor_state(
+                floor_refresh_succeeded, snapshot = _refresh_author_floor_state(
                     client,
                     archive_store,
                     tid,
                     aid,
                     page_count=page_count,
                     author_total_lou_count=author_total_lou_count,
+                    expected_snapshot=snapshot,
                     commit_even_if_unchanged=False,
-                ):
+                )
+                if not floor_refresh_succeeded:
                     return ProcessingStateReuseResult(False, "floor_map_changed")
-                snapshot = archive_store.read_backup_processing_snapshot()
                 record_timing_metric(
                     "缺失楼重试引发完整处理",
                     int(snapshot.change_state.archive_revision != before_archive_revision),
@@ -558,7 +566,6 @@ def _commit_completed_processing_state(
     unresolved_missing_lous: list[int],
     fingerprints_before: tuple[str, str],
     download_summary: DownloadSummary,
-    image_reference_urls: set[str],
 ) -> None:
     pending_image_urls = _failed_image_urls(download_summary)
     record_timing_metric("待重试图片URL数", len(pending_image_urls))
@@ -590,7 +597,6 @@ def _commit_completed_processing_state(
     floor_committed = archive_store.commit_floor_processing_state(floor_state)
     image_committed = archive_store.commit_image_reference_state(
         image_state,
-        image_reference_urls,
         pending_image_urls,
     )
     if not floor_committed or not image_committed:
@@ -648,7 +654,7 @@ def _run_full_processing(
             )
 
     with time_section("正文解析与图片处理"):
-        download_summary, image_reference_urls = _download_images_for_records(
+        download_summary = _download_images_for_records(
             tid,
             aid,
             archive_store,
@@ -666,7 +672,6 @@ def _run_full_processing(
         unresolved_missing_lous=record_processing.unresolved_missing_lous,
         fingerprints_before=fingerprints_before,
         download_summary=download_summary,
-        image_reference_urls=image_reference_urls,
     )
 
 
@@ -689,6 +694,7 @@ def _reuse_processing_state_after_page_refresh(
     author_total_lou_count: int | None,
     local_pages_cover_remote: bool,
     force_processing: bool,
+    processing_snapshot: BackupProcessingSnapshot | None = None,
 ) -> ProcessingStateReuseResult:
     with time_section("处理状态复用判定"):
         if force_processing:
@@ -704,6 +710,7 @@ def _reuse_processing_state_after_page_refresh(
                 page_count=page_count,
                 author_total_lou_count=author_total_lou_count,
                 local_pages_cover_remote=local_pages_cover_remote,
+                processing_snapshot=processing_snapshot,
             )
     record_timing_metric("处理状态复用命中", int(result.hit))
     record_timing_label("处理状态复用结果", result.reason)
@@ -718,7 +725,7 @@ def backup_local_work_kind(
     archive_store = ThreadArchiveStore(thread_folder)
     if not archive_store.exists():
         return "refresh"
-    archive_store.ensure_schema()
+    archive_store.ensure_backup_processing_schema()
 
     try:
         snapshot = archive_store.read_backup_processing_snapshot()
@@ -758,8 +765,10 @@ def backup_local_work_kind(
 def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
     thread_folder = Path(utils.get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
-    archive_store.ensure_schema()
-    snapshot = archive_store.read_backup_processing_snapshot()
+    with time_section("处理状态Schema兼容检查"):
+        archive_store.ensure_backup_processing_schema()
+    with time_section("处理状态元数据读取"):
+        snapshot = archive_store.read_backup_processing_snapshot()
     if snapshot.floor_state is None or snapshot.image_state is None:
         raise RuntimeError("缺少线程级处理状态，必须先执行增量备份。")
     pagination = archive_store.read_latest_page_one_pagination()
@@ -783,6 +792,7 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
         author_total_lou_count=author_total_lou_count,
         local_pages_cover_remote=local_pages_cover_remote,
         force_processing=False,
+        processing_snapshot=snapshot,
     )
     if reuse_result.hit:
         return

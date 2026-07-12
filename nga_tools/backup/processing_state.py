@@ -42,4 +42,3 @@ class BackupProcessingSnapshot:
     pending_image_urls: tuple[str, ...]
     floor_state: FloorProcessingState | None = None
     image_state: ImageReferenceState | None = None
-    image_reference_urls: tuple[str, ...] = ()

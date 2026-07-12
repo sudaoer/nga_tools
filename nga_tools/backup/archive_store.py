@@ -51,6 +51,15 @@ from nga_tools.word_count import (
 )
 
 ARCHIVE_DB_FILENAME = "archive.sqlite3"
+_BACKUP_PROCESSING_TABLES = frozenset(
+    {
+        "archive_change_state",
+        "backup_floor_processing_state",
+        "backup_image_reference_state",
+        "backup_pending_images",
+    }
+)
+_LEGACY_BACKUP_PROCESSING_TABLE = "backup_processing_state"
 _LATEST_POST_RECORDS_QUERY = """
     SELECT
         latest.id,
@@ -361,6 +370,36 @@ class ThreadArchiveStore:
         with closing(self._connect_write()):
             pass
 
+    def ensure_backup_processing_schema(self) -> None:
+        """Run the full schema migration only when processing-state tables need it."""
+        if not self.exists():
+            self.ensure_schema()
+            return
+
+        tracked_tables = (*_BACKUP_PROCESSING_TABLES, _LEGACY_BACKUP_PROCESSING_TABLE)
+        placeholders = ", ".join("?" for _item in tracked_tables)
+        with closing(self._connect_read()) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT name
+                FROM sqlite_schema
+                WHERE type = 'table' AND name IN ({placeholders})
+                """,
+                tracked_tables,
+            ).fetchall()
+        table_names = {
+            row[0]
+            for row in rows
+            if row and isinstance(row[0], str)
+        }
+        if (
+            _BACKUP_PROCESSING_TABLES <= table_names
+            and _LEGACY_BACKUP_PROCESSING_TABLE not in table_names
+        ):
+            self._schema_initialized = True
+            return
+        self.ensure_schema()
+
     def _create_post_versions_table(
         self,
         connection: sqlite3.Connection,
@@ -593,13 +632,6 @@ class ThreadArchiveStore:
         )
         connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS backup_image_references (
-                url TEXT PRIMARY KEY
-            )
-            """
-        )
-        connection.execute(
-            """
             INSERT INTO archive_change_state (
                 singleton,
                 archive_revision,
@@ -616,7 +648,7 @@ class ThreadArchiveStore:
             )
             """
         )
-        if _table_exists(connection, "backup_processing_state"):
+        if _table_exists(connection, _LEGACY_BACKUP_PROCESSING_TABLE):
             connection.execute(
                 """
                 INSERT INTO backup_floor_processing_state (
@@ -636,7 +668,7 @@ class ThreadArchiveStore:
                 ON CONFLICT(singleton) DO NOTHING
                 """
             )
-            connection.execute("DROP TABLE backup_processing_state")
+            connection.execute(f"DROP TABLE {_LEGACY_BACKUP_PROCESSING_TABLE}")
 
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -840,21 +872,11 @@ class ThreadArchiveStore:
                 FROM backup_image_reference_state WHERE singleton = 1
                 """
             ).fetchone()
-            image_reference_rows = connection.execute(
-                "SELECT url FROM backup_image_references ORDER BY url"
-            ).fetchall()
-
         pending_image_urls: list[str] = []
         for (url,) in pending_rows:
             if not isinstance(url, str) or not url:
                 raise ValueError(f"backup待重试图片URL无效：{url!r}")
             pending_image_urls.append(url)
-        image_reference_urls: list[str] = []
-        for (url,) in image_reference_rows:
-            if not isinstance(url, str) or not url:
-                raise ValueError(f"backup图片引用URL无效：{url!r}")
-            image_reference_urls.append(url)
-
         floor_state: FloorProcessingState | None = None
         if floor_row is not None:
             if any(type(value) is not int for value in floor_row[:4] + floor_row[5:7]):
@@ -877,7 +899,6 @@ class ThreadArchiveStore:
             pending_image_urls=tuple(pending_image_urls),
             floor_state=floor_state,
             image_state=image_state,
-            image_reference_urls=tuple(image_reference_urls),
         )
 
     @staticmethod
@@ -901,7 +922,6 @@ class ThreadArchiveStore:
                 connection.execute("DELETE FROM backup_pending_images")
                 connection.execute("DELETE FROM backup_floor_processing_state")
                 connection.execute("DELETE FROM backup_image_reference_state")
-                connection.execute("DELETE FROM backup_image_references")
 
     def commit_floor_processing_state(self, state: FloorProcessingState) -> bool:
         self.require_exists()
@@ -936,11 +956,8 @@ class ThreadArchiveStore:
     def commit_image_reference_state(
         self,
         state: ImageReferenceState,
-        image_reference_urls: set[str],
         pending_image_urls: set[str],
     ) -> bool:
-        if any(not url for url in image_reference_urls):
-            raise ValueError("backup图片引用URL不能为空。")
         self.require_exists()
         with closing(self._connect_write()) as connection:
             with connection:
@@ -959,11 +976,6 @@ class ThreadArchiveStore:
                         state.completed_at,
                     ),
                 )
-                connection.execute("DELETE FROM backup_image_references")
-                connection.executemany(
-                    "INSERT INTO backup_image_references (url) VALUES (?)",
-                    [(url,) for url in sorted(image_reference_urls)],
-                )
                 self._replace_pending_images(connection, pending_image_urls)
         return True
 
@@ -975,6 +987,12 @@ class ThreadArchiveStore:
         self.require_exists()
         with closing(self._connect_write()) as connection:
             with connection:
+                change_state = self._read_archive_change_state(connection)
+                if (
+                    change_state.archive_revision
+                    != expected_state.processed_archive_revision
+                ):
+                    return False
                 row = connection.execute(
                     """
                     SELECT format_version, processed_archive_revision, completed_at

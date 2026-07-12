@@ -35,6 +35,7 @@ from nga_tools.backup.post_html import (
 )
 from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.backup.post_version_selection import write_selections
+from nga_tools.backup.processing_state import BackupProcessingSnapshot
 from nga_tools.ngaclient.client import NGAPageError
 from nga_tools.timing import use_timing_log
 
@@ -132,6 +133,7 @@ def _run_backup(
     floor_map_cacheable: bool = True,
     aid: int | None = 456,
     full_processing_calls: list[str] | None = None,
+    floor_map_calls: list[str] | None = None,
     captured_output: io.StringIO | None = None,
     download_error: Exception | None = None,
     force_processing: bool = False,
@@ -179,6 +181,15 @@ def _run_backup(
             full_processing_calls.append("full")
         original_run_full_processing(*args, **kwargs)  # type: ignore[arg-type]
 
+    def capture_floor_map(*args: object, **kwargs: object) -> FloorMapProcessingResult:
+        del args, kwargs
+        if floor_map_calls is not None:
+            floor_map_calls.append("build")
+        return FloorMapProcessingResult(
+            floor_map_result,
+            cacheable=floor_map_cacheable,
+        )
+
     with ExitStack() as stack:
         stack.enter_context(patch("nga_tools.backup.archive.NGAClient", return_value=client))
         stack.enter_context(
@@ -190,10 +201,7 @@ def _run_backup(
         stack.enter_context(
             patch(
                 "nga_tools.backup.archive._build_floor_map_for_post_refs",
-                return_value=FloorMapProcessingResult(
-                    floor_map_result,
-                    cacheable=floor_map_cacheable,
-                ),
+                side_effect=capture_floor_map,
             )
         )
         stack.enter_context(
@@ -399,7 +407,6 @@ class BackupRawArchiveTest:
             )
             connection.execute("DROP TABLE backup_floor_processing_state")
             connection.execute("DROP TABLE backup_image_reference_state")
-            connection.execute("DROP TABLE backup_image_references")
             connection.commit()
 
         with patch.object(
@@ -765,6 +772,44 @@ class BackupRawArchiveTest:
         assert full_processing_calls == ["full"]
         assert snapshot.floor_state is not None
         assert snapshot.image_state is not None
+
+    def test_floor_state_hit_without_missing_lous_skips_floor_map_refresh(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        floor_map_calls: list[str] = []
+
+        _run_backup(thread_dir, client, floor_map_calls=floor_map_calls)
+        _run_backup(thread_dir, client, floor_map_calls=floor_map_calls)
+
+        assert floor_map_calls == ["build"]
+
+    def test_maintenance_reuses_preloaded_processing_snapshot(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        _run_backup(thread_dir, client)
+        original_read = ThreadArchiveStore.read_backup_processing_snapshot
+        read_count = 0
+
+        def capture_read(store: ThreadArchiveStore) -> BackupProcessingSnapshot:
+            nonlocal read_count
+            read_count += 1
+            return original_read(store)
+
+        with patch.object(
+            ThreadArchiveStore,
+            "read_backup_processing_snapshot",
+            autospec=True,
+            side_effect=capture_read,
+        ):
+            _run_backup(thread_dir, client, mode="maintenance")
+
+        assert read_count == 1
 
     def test_successful_pending_retry_clears_queue_without_history_scan(
         self,
