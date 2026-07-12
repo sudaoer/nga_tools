@@ -32,6 +32,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_tid,
 )
 from nga_tools.ngaclient.client import ForumThread
+from nga_tools.ngaclient.session import ThreadLocalAPISessionPool, use_api_session
 
 
 AnkebakMode = Literal["full", "sub", "maintenance"]
@@ -174,6 +175,7 @@ def backup_auto(args: CommandArgs) -> None:
         for job in jobs
     }
     validation_cache = ImageValidationCache()
+    session_pool = ThreadLocalAPISessionPool()
     write_json = optional_bool(args, "write_json")
 
     def action(thread_config: ThreadConfig) -> None:
@@ -182,7 +184,10 @@ def backup_auto(args: CommandArgs) -> None:
         job = jobs_by_target[ankebak_target_key(tid, aid)]
         if job.planning_error is not None:
             raise job.planning_error
-        with use_image_validation_cache(validation_cache):
+        with (
+            use_api_session(session_pool.session()),
+            use_image_validation_cache(validation_cache),
+        ):
             if job.mode == "full":
                 backup_thread(tid, aid, write_json=write_json)
             elif job.mode == "sub":
@@ -203,20 +208,21 @@ def backup_auto(args: CommandArgs) -> None:
             full_backup=job.mode == "full",
         )
 
-    run_thread_config_batch(
-        action=action,
-        progress_text="正在执行智能备份",
-        failure_text="ankebak失败",
-        summary_name="ankebak",
-        worker_count=_worker_count(args, app_config.backup_configs_workers),
-        write_timing_log=True,
-        timing_log_enabled=app_config.timing_log_enabled,
-        task_name="backup auto",
-        write_batch_timing_log=True,
-        thread_configs=[job.thread_config for job in jobs],
-        command_started_at=command_started_at,
-        command_wall_start=command_wall_start,
-        forum_sync_seconds=forum_sync_seconds,
-        planning_seconds=planning_seconds,
-        water_level_seconds=water_level_seconds,
-    )
+    with session_pool:
+        run_thread_config_batch(
+            action=action,
+            progress_text="正在执行智能备份",
+            failure_text="ankebak失败",
+            summary_name="ankebak",
+            worker_count=_worker_count(args, app_config.backup_configs_workers),
+            write_timing_log=True,
+            timing_log_enabled=app_config.timing_log_enabled,
+            task_name="backup auto",
+            write_batch_timing_log=True,
+            thread_configs=[job.thread_config for job in jobs],
+            command_started_at=command_started_at,
+            command_wall_start=command_wall_start,
+            forum_sync_seconds=forum_sync_seconds,
+            planning_seconds=planning_seconds,
+            water_level_seconds=water_level_seconds,
+        )

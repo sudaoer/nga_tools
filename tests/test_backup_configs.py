@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
 from rich.console import Console
 
@@ -23,6 +23,7 @@ from nga_tools.commands.backup import (
 )
 from nga_tools.forum.thread_configs import ThreadConfig
 from nga_tools.ngaclient.client import NGAPageError
+from nga_tools.ngaclient.session import current_api_session
 from nga_tools.timing import (
     record_timing,
     record_timing_label,
@@ -551,6 +552,66 @@ class BackupWarningLogTest:
 
 
 class BackupBatchHandlerTest:
+    def test_parallel_fetch_batch_reuses_one_api_session_per_worker(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_configs = [
+            _thread_config(name=f"thread-{tid}", tid=tid, aid=None)
+            for tid in range(101, 105)
+        ]
+        first_workers_ready = threading.Barrier(2)
+        observations: dict[int, list[object]] = {}
+        observations_lock = threading.Lock()
+        sessions = [MagicMock(), MagicMock()]
+
+        def backup_side_effect(
+            tid: int,
+            aid: int | None,
+            *,
+            write_json: bool,
+        ) -> None:
+            del aid, write_json
+            if tid <= 102:
+                first_workers_ready.wait()
+            session = current_api_session()
+            assert session is not None
+            with observations_lock:
+                observations.setdefault(threading.get_ident(), []).append(session)
+
+        with (
+            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
+            patch(
+                "nga_tools.commands.backup.backup_thread_sub",
+                side_effect=backup_side_effect,
+            ),
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(
+                    workers=2,
+                    timing_log_enabled=False,
+                ),
+            ),
+            patch(
+                "nga_tools.ngaclient.session.create_api_session",
+                side_effect=sessions,
+            ),
+            patch(
+                "nga_tools.core.paths.get_folder",
+                side_effect=_fake_get_folder(tmp_path),
+            ),
+            _captured_reporter(),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = thread_configs
+            backup_sub({"all_threads": True})
+
+        assert len(observations) == 2
+        sessions_by_worker = [set(map(id, items)) for items in observations.values()]
+        assert sessions_by_worker[0] != sessions_by_worker[1]
+        assert all(len(items) == 1 for items in sessions_by_worker)
+        for session in sessions:
+            session.close.assert_called_once_with()
+
     def test_hidden_threads_do_not_make_batch_exit_nonzero(self) -> None:
         thread_configs = [_thread_config(name="hidden", tid=101, aid=201)]
 

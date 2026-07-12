@@ -34,6 +34,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_aid,
     thread_config_tid,
 )
+from nga_tools.ngaclient.session import ThreadLocalAPISessionPool, use_api_session
 from nga_tools.timing import time_section, use_timing_log
 
 
@@ -93,11 +94,15 @@ def _run_backup_fetch_batch(
     force_processing = optional_bool(args, "force_processing")
     worker_count = _batch_worker_count(args, app_config.backup_configs_workers)
     validation_cache = ImageValidationCache()
+    session_pool = ThreadLocalAPISessionPool()
 
     def action(thread_config: ThreadConfig) -> None:
         tid = thread_config_tid(thread_config)
         aid = thread_config_aid(thread_config)
-        with use_image_validation_cache(validation_cache):
+        with (
+            use_api_session(session_pool.session()),
+            use_image_validation_cache(validation_cache),
+        ):
             if force_processing:
                 backup_func(
                     tid,
@@ -108,17 +113,18 @@ def _run_backup_fetch_batch(
             else:
                 backup_func(tid, aid, write_json=write_json)
 
-    run_thread_config_batch(
-        action=action,
-        progress_text=progress_text,
-        failure_text="备份失败",
-        summary_name="备份",
-        worker_count=worker_count,
-        write_timing_log=True,
-        timing_log_enabled=app_config.timing_log_enabled,
-        task_name=task_name,
-        write_batch_timing_log=True,
-    )
+    with session_pool:
+        run_thread_config_batch(
+            action=action,
+            progress_text=progress_text,
+            failure_text="备份失败",
+            summary_name="备份",
+            worker_count=worker_count,
+            write_timing_log=True,
+            timing_log_enabled=app_config.timing_log_enabled,
+            task_name=task_name,
+            write_batch_timing_log=True,
+        )
 
 
 def backup_all(args: CommandArgs) -> None:

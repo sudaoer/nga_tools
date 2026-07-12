@@ -4,6 +4,7 @@ import requests
 
 from nga_tools.config import get_config
 from nga_tools.network_limits import api_request_slot
+from nga_tools.ngaclient.session import create_api_session, current_api_session
 
 Tid: TypeAlias = int | str
 Aid: TypeAlias = Optional[int | str]
@@ -105,17 +106,11 @@ def _parse_forum_thread(raw_thread: object, *, default_forumname: str) -> ForumT
 
 
 class NGAClient:
-    def __init__(self) -> None:
+    def __init__(self, session: requests.Session | None = None) -> None:
         app_config = get_config()
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "User-Agent": app_config.user_agent,
-                "Cookie": (
-                    f"ngaPassportUid={app_config.nga_passport_uid}; "
-                    f"ngaPassportCid={app_config.nga_passport_cid};"
-                ),
-            }
+        selected_session = session if session is not None else current_api_session()
+        self.session = (
+            selected_session if selected_session is not None else create_api_session()
         )
         self.base_url = app_config.base_url
         self.page_cache: dict[str, PageData] = {}
