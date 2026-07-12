@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_models import (
@@ -840,7 +841,25 @@ class WebServerTest:
         assert filtered_response.status_code == 200
         assert filtered_response.json()["matchingPostCount"] == 0
         assert rejected_response.status_code == 400
-        assert "图片或媒体外链" in rejected_response.json()["error"]
+        assert "完整的NGA图片URL" in rejected_response.json()["error"]
+
+        empty_response = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": ""},
+        )
+        empty_posts_response = client.get(
+            "/api/threads/101/201/posts",
+            params={"page": "1"},
+        )
+
+        assert empty_response.status_code == 200
+        assert empty_response.json()["hasOverlay"] is True
+        assert empty_response.json()["bbcode"] == ""
+        assert empty_response.json()["html"] == ""
+        empty_post = empty_posts_response.json()["items"][0]
+        assert empty_post["hasOverlay"] is True
+        assert empty_post["html"] == ""
+        assert ThreadArchiveStore(thread_dir).read_post_overlays()[1]["bbcode"] == ""
 
         clear_response = client.delete("/api/admin/threads/101/201/overlays/1")
         refreshed_posts_response = client.get(
@@ -853,6 +872,65 @@ class WebServerTest:
         refreshed_payload = refreshed_posts_response.json()
         assert refreshed_payload["items"][0]["hasOverlay"] is False
         assert "original" in refreshed_payload["items"][0]["html"]
+
+    def test_overlay_uses_only_existing_local_nga_images(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "original")])
+        image_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/12/overlay.png"
+        )
+        missing_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/12/missing.png"
+        )
+        image_path = output_dir / "images_unique" / "overlay.png"
+        image_path.parent.mkdir(parents=True)
+        Image.new("RGB", (2, 2), color="white").save(image_path)
+        _write_image_mapping(
+            output_dir,
+            image_url,
+            "images_unique/overlay.png",
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        preview_response = client.post(
+            "/api/admin/threads/101/201/overlays/1/preview",
+            json={"bbcode": f"[img]{image_url}[/img]"},
+        )
+        save_response = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": f"[img]{image_url}[/img]"},
+        )
+        posts_response = client.get(
+            "/api/threads/101/201/posts",
+            params={"page": "1"},
+        )
+        missing_response = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": f"[img]{missing_url}[/img]"},
+        )
+        raw_html_response = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": f'<img src="{image_url}">'},
+        )
+
+        expected_src = '/api/files/images_unique/overlay.png'
+        assert preview_response.status_code == 200
+        assert f'src="{expected_src}"' in preview_response.json()["html"]
+        assert save_response.status_code == 200
+        assert f'src="{expected_src}"' in save_response.json()["html"]
+        assert f'src="{expected_src}"' in posts_response.json()["items"][0]["html"]
+        assert missing_response.status_code == 400
+        assert "尚未下载" in missing_response.json()["error"]
+        assert raw_html_response.status_code == 400
+        assert "只支持[img]" in raw_html_response.json()["error"]
 
 
 class WebDatabaseViewerTest:
@@ -1158,6 +1236,9 @@ class WebImageUsageTest:
             "https://img.nga.178.com/attachments/mon_202607/11/version.png"
         )
         _write_image_mapping(output_dir, image_url, "images_unique/version.png")
+        image_path = output_dir / "images_unique" / "version.png"
+        image_path.parent.mkdir(parents=True)
+        Image.new("RGB", (2, 2), color="white").save(image_path)
         thread_dir = output_dir / "101_201"
         store = ThreadArchiveStore(thread_dir)
         store.upsert_page(
@@ -1189,12 +1270,19 @@ class WebImageUsageTest:
             json={"bbcode": "覆盖正文"},
         )
         replaced = client.get("/api/admin/image-usage").json()
+        image_overlaid = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": f"[img]{image_url}[/img]"},
+        )
+        restored_by_overlay = client.get("/api/admin/image-usage").json()
 
         assert latest["items"][0]["usageCount"] == 0
         assert selected.status_code == 200
         assert historical["items"][0]["usageCount"] == 1
         assert overlaid.status_code == 200
         assert replaced["items"][0]["usageCount"] == 0
+        assert image_overlaid.status_code == 200
+        assert restored_by_overlay["items"][0]["usageCount"] == 1
 
     def test_sorts_by_usage_or_threads_and_groups_reply_details(
         self,

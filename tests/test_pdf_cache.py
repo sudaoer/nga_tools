@@ -662,6 +662,51 @@ class PdfImageSourceTest:
         assert "old materialized html" not in html_content_by_lou[1]
         assert "original body" not in html_content_by_lou[1]
 
+    def test_read_pdf_html_uses_empty_and_existing_image_overlays(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir) / "output"
+            thread_dir = output_dir / "101_all"
+            unique_image = output_dir / "images_unique" / "overlay.png"
+            unique_image.parent.mkdir(parents=True)
+            Image.new("RGB", (2, 2), color="white").save(unique_image)
+            image_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202607/12/overlay.png"
+            )
+            _write_pdf_archive(thread_dir, "original body")
+            config = SimpleNamespace(output_dir=str(output_dir))
+
+            with (
+                patch("nga_tools.core.paths.get_config", return_value=config),
+                patch(
+                    "nga_tools.backup.image_store.get_config",
+                    return_value=config,
+                ),
+                patch("nga_tools.backup.pdf._is_long_image", return_value=False),
+                patch(
+                    "nga_tools.backup.pdf._is_speaker_portrait",
+                    return_value=False,
+                ),
+            ):
+                image_store.upsert_image_mapping(image_url, unique_image)
+                store = ThreadArchiveStore(thread_dir)
+                store.upsert_post_overlay(
+                    1,
+                    make_post_overlay(f"[img]{image_url}[/img]"),
+                )
+                image_html_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+                store.upsert_post_overlay(1, make_post_overlay(""))
+                empty_html_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+
+        assert 'src="../../images_unique/overlay.png"' in image_html_by_lou[1]
+        assert empty_html_by_lou[1] == ""
+
     def test_read_pdf_html_uses_lazy_about_blank_data_srcorg(self) -> None:
         image_url = (
             "https://img.nga.178.com/attachments/"

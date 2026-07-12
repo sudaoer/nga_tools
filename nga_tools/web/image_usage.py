@@ -262,6 +262,7 @@ def _scan_references(
                 records = apply_post_overlays_to_records(
                     archive_store.read_post_overlays(),
                     records,
+                    output_dir=thread_folder.parent,
                 )
                 scan_result = scan_image_references_for_records_readonly(
                     archive_store,

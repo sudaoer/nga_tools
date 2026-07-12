@@ -33,6 +33,7 @@ from nga_tools.backup.post_data import (
 from nga_tools.backup.post_overlay import (
     PostOverlay,
     make_post_overlay,
+    make_existing_overlay_image_src_resolver,
     render_overlay_html,
 )
 from nga_tools.backup.post_version_selection import (
@@ -742,6 +743,27 @@ def _output_image_url(
     return _safe_output_url(output_dir / unique_rel_path, output_dir)
 
 
+def _render_overlay_for_web(
+    bbcode: str,
+    output_dir: Path,
+    *,
+    require_all_images: bool = False,
+) -> str:
+    image_src_resolver = make_existing_overlay_image_src_resolver(
+        bbcode,
+        output_dir,
+        image_src_from_path=lambda _url, image_path: _safe_output_url(
+            image_path,
+            output_dir,
+        ),
+        require_all=require_all_images,
+    )
+    return render_overlay_html(
+        bbcode,
+        image_src_resolver=image_src_resolver,
+    )
+
+
 def _attachment_urls(
     content: str,
     image_attachments_json: Optional[str],
@@ -854,7 +876,7 @@ def _post_item_from_row(
             ),
         )
     else:
-        html = render_overlay_html(overlay["bbcode"])
+        html = _render_overlay_for_web(overlay["bbcode"], output_dir)
     html = _normalize_nga_fold_boxes(html)
 
     return {
@@ -1091,7 +1113,7 @@ def read_post_overlay(
         "floorLabel": floor_labels.label(lou),
         "hasOverlay": True,
         "bbcode": overlay["bbcode"],
-        "html": render_overlay_html(overlay["bbcode"]),
+        "html": _render_overlay_for_web(overlay["bbcode"], output_dir),
     }
 
 
@@ -1108,7 +1130,13 @@ def preview_post_overlay(
         raw_aid_key,
     )
     _read_effective_row_for_lou(archive_store, lou)
-    return {"html": render_overlay_html(bbcode)}
+    return {
+        "html": _render_overlay_for_web(
+            bbcode,
+            output_dir,
+            require_all_images=True,
+        )
+    }
 
 
 def save_thread_post_overlay(
@@ -1124,6 +1152,11 @@ def save_thread_post_overlay(
         raw_aid_key,
     )
     _read_effective_row_for_lou(archive_store, lou)
+    _render_overlay_for_web(
+        bbcode,
+        output_dir,
+        require_all_images=True,
+    )
     archive_store.upsert_post_overlay(lou, make_post_overlay(bbcode))
     return read_post_overlay(output_dir, tid, raw_aid_key, lou)
 

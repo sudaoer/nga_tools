@@ -877,6 +877,10 @@ onMounted(() => {
                 rows="8"
                 spellcheck="false"
               ></textarea>
+              <p class="overlay-editor-hint">
+                空内容会保留为空白覆盖；图片仅支持已下载的完整
+                <code>[img]NGA图片URL[/img]</code>。
+              </p>
               <div class="overlay-editor-actions">
                 <button
                   type="button"
@@ -903,10 +907,12 @@ onMounted(() => {
               <div v-if="overlayEditor.error" class="error-box">{{ overlayEditor.error }}</div>
               <div v-else-if="overlayEditor.loading" class="empty-state">正在读取overlay...</div>
               <div
-                v-if="overlayEditor.previewHtml"
+                v-if="overlayEditor.previewHtml !== null"
                 class="post-body overlay-preview"
-                v-html="overlayEditor.previewHtml"
-              ></div>
+              >
+                <p v-if="overlayEditor.previewHtml === ''"><em>预览为空内容。</em></p>
+                <div v-else v-html="overlayEditor.previewHtml"></div>
+              </div>
             </form>
             <div class="post-body" v-html="post.html"></div>
           </div>

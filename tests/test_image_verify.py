@@ -22,6 +22,7 @@ from nga_tools.backup.image_verify import (
     _verify_images_in_folder,
     verify_all_downloaded_images,
 )
+from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.cli import args_parse
 from nga_tools.console import ConsoleReporter, report_warning, use_reporter
 from nga_tools.commands.image import image_verify
@@ -254,7 +255,7 @@ class ImageVerifyAllTest:
 
         assert resolved_path is None
 
-    def test_thread_reference_listing_resolves_direct_unique_image_path(self) -> None:
+    def test_thread_reference_listing_resolves_overlay_unique_image_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir) / "output"
             thread_dir = output_dir / "101_all"
@@ -274,10 +275,14 @@ class ImageVerifyAllTest:
                         {
                             "lou": 1,
                             "pid": 1001,
-                            "content": f"[img]{image_url}[/img]",
+                            "content": "original without image",
                         }
                     ],
                 },
+            )
+            ThreadArchiveStore(thread_dir).upsert_post_overlay(
+                1,
+                make_post_overlay(f"[img]{image_url}[/img]"),
             )
             config = SimpleNamespace(output_dir=str(output_dir))
 
@@ -286,6 +291,7 @@ class ImageVerifyAllTest:
                 return_value=config,
             ):
                 image_store.upsert_image_mapping(image_url, unique_image)
+                unique_image.write_bytes(b"corrupted after overlay save")
                 paths = _list_thread_referenced_image_paths(
                     101,
                     None,

@@ -375,6 +375,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "WeasyPrint并发数。",
                 "网页管理页保存的BBCode overlay会写入每帖archive.sqlite3的"
                 "post_overlays表，普通查看和PDF都会按需渲染同一份overlay。",
+                "overlay允许空内容；[img]仅接受已下载且本地文件有效的完整NGA图片URL。",
                 "旧overlay/post_<楼层>.html不再读取。",
             ],
             "args": [

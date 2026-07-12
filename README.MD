@@ -235,8 +235,9 @@ Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页�
 
 普通帖子阅读页支持为单楼添加 BBCode overlay。overlay 是整楼替换，写入每帖
 `archive.sqlite3` 的 `post_overlays` 表；网页查看和后续 PDF 导出都会从该 BBCode 按需生成目标 HTML。
-当前 overlay 不支持 `[img]`、`[flash]`
-或渲染后产生图片的 HTML。
+overlay 可以保存空内容；空内容仍是有效覆盖，清除 overlay 后才恢复原正文。图片仅支持
+`[img]完整NGA图片URL[/img]`，并且该 URL 必须已存在于 `image_index.sqlite3`、对应
+`images_unique` 文件有效。overlay 不会下载新图片，也不允许 `[flash]`、外站图片或直接写入 `<img>` HTML。
 
 ## 生成 PDF
 

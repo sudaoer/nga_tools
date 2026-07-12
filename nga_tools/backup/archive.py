@@ -304,6 +304,7 @@ def _download_images_for_records(
         effective_records = _apply_post_overlays_to_records(
             archive_store.read_post_overlays(),
             records,
+            output_dir=archive_store.thread_folder.parent,
         )
     collection = _collect_image_download_tasks_for_records(
         archive_store,

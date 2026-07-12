@@ -15,7 +15,10 @@ from nga_tools.backup.image_pipeline import (
     parse_post_htmls_for_images,
 )
 from nga_tools.backup.post_html import load_post_htmls_for_records
-from nga_tools.backup.post_overlay import apply_post_overlays_to_records
+from nga_tools.backup.post_overlay import (
+    apply_post_overlays_to_records,
+    overlay_image_sources,
+)
 from nga_tools.config import get_config
 from nga_tools.console import report_info, report_warning
 from nga_tools.core.image_formats import image_file_error
@@ -91,9 +94,11 @@ def _list_thread_referenced_image_paths(
 ) -> list[Path]:
     archive_store = ThreadArchiveStore(thread_folder)
     records = archive_store.read_effective_post_records()
+    overlays = archive_store.read_post_overlays()
     records = apply_post_overlays_to_records(
-        archive_store.read_post_overlays(),
+        overlays,
         records,
+        output_dir=thread_folder.parent,
     )
     htmls = load_post_htmls_for_records(records)
     parsed_htmls = parse_post_htmls_for_images(htmls)
@@ -106,6 +111,16 @@ def _list_thread_referenced_image_paths(
             report_warning(f"无法加载楼层映射，使用普通楼层标签：{error}")
             floor_labels = FloorLabels.plain()
     tasks = collect_image_download_tasks_from_parsed(parsed_htmls, floor_labels)
+    task_urls = {task["url"] for task in tasks}
+    for overlay in overlays.values():
+        for image_src in overlay_image_sources(overlay["bbcode"]):
+            normalized_url = image_store.normalize_nga_image_url(image_src)
+            if (
+                utils.NGA_img_link_verify(normalized_url)
+                and normalized_url not in task_urls
+            ):
+                task_urls.add(normalized_url)
+                tasks.append({"url": normalized_url})
     mappings = image_store.image_mappings_for_urls(task["url"] for task in tasks)
     image_paths: list[Path] = []
     seen_paths: set[str] = set()

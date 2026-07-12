@@ -29,7 +29,10 @@ from nga_tools.backup.post_html import (
     find_missing_lou,
     post_html_from_content,
 )
-from nga_tools.backup.post_overlay import render_overlay_html
+from nga_tools.backup.post_overlay import (
+    make_existing_overlay_image_src_resolver,
+    render_overlay_html,
+)
 from nga_tools.backup.pdf_plan import (
     PdfRenderTask,
     build_render_tasks as _build_render_tasks,
@@ -486,7 +489,18 @@ def _read_pdf_html(
         lou = record["lou"]
         overlay = overlays_by_lou.get(lou)
         if overlay is not None:
-            html = render_overlay_html(overlay["bbcode"])
+            image_src_resolver = make_existing_overlay_image_src_resolver(
+                overlay["bbcode"],
+                thread_folder.parent,
+                image_src_from_path=lambda _url, image_path: os.path.relpath(
+                    image_path,
+                    thread_folder,
+                ).replace("\\", "/"),
+            )
+            html = render_overlay_html(
+                overlay["bbcode"],
+                image_src_resolver=image_src_resolver,
+            )
             source_name = f"archive.sqlite3 post_overlays第{lou}楼"
         elif record["html"] is not None:
             html = record["html"]

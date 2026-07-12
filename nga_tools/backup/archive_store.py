@@ -488,12 +488,65 @@ class ThreadArchiveStore:
             CREATE TABLE IF NOT EXISTS post_overlays (
                 lou INTEGER PRIMARY KEY CHECK(lou >= 0),
                 mode TEXT NOT NULL CHECK(mode = 'replace'),
-                bbcode TEXT NOT NULL CHECK(length(trim(bbcode)) > 0),
+                bbcode TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+
+    def _ensure_post_overlays_table(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        if not _table_exists(connection, "post_overlays"):
+            self._create_post_overlays_table(connection)
+            return
+
+        schema_row = connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_schema
+            WHERE type = 'table' AND name = 'post_overlays'
+            """
+        ).fetchone()
+        schema_sql = schema_row[0] if schema_row is not None else None
+        if not isinstance(schema_sql, str):
+            raise ValueError(
+                f"archive post_overlays表结构无效：{self.db_path}"
+            )
+        normalized_schema = "".join(schema_sql.lower().split())
+        if "check(length(trim(bbcode))>0)" not in normalized_schema:
+            return
+
+        legacy_table = "post_overlays_nonempty_legacy"
+        if _table_exists(connection, legacy_table):
+            raise ValueError(
+                f"archive overlay迁移临时表已存在：{self.db_path} {legacy_table}"
+            )
+        connection.execute(
+            f"ALTER TABLE post_overlays RENAME TO {legacy_table}"
+        )
+        self._create_post_overlays_table(connection)
+        connection.execute(
+            f"""
+            INSERT INTO post_overlays (
+                lou,
+                mode,
+                bbcode,
+                content_hash,
+                updated_at
+            )
+            SELECT
+                lou,
+                mode,
+                bbcode,
+                content_hash,
+                updated_at
+            FROM {legacy_table}
+            """
+        )
+        connection.execute(f"DROP TABLE {legacy_table}")
 
     def _create_backup_processing_tables(
         self,
@@ -577,7 +630,7 @@ class ThreadArchiveStore:
         self._create_post_observations_table(connection)
         self._create_floor_map_tables(connection)
         self._create_post_image_reference_cache_table(connection)
-        self._create_post_overlays_table(connection)
+        self._ensure_post_overlays_table(connection)
         self._create_backup_processing_tables(connection)
         connection.execute(
             """

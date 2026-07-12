@@ -151,6 +151,78 @@ def normalize_nga_image_url(url: str) -> str:
     return url.replace(",", "")
 
 
+def existing_image_paths_for_urls(
+    output_root: Path,
+    urls: Iterable[str],
+) -> dict[str, Path]:
+    """Return valid, already-downloaded NGA images under ``output_root``.
+
+    Unlike the command-oriented image-store helpers, this lookup never creates
+    the image index and does not depend on the process-global configured output
+    directory.  That makes it safe for the web viewer's explicit output root.
+    """
+    normalized_urls = sorted(
+        {
+            normalized_url
+            for url in urls
+            if utils.NGA_img_link_verify(
+                normalized_url := normalize_nga_image_url(url.strip())
+            )
+        }
+    )
+    if not normalized_urls:
+        return {}
+
+    resolved_output_root = output_root.resolve()
+    images_root = (resolved_output_root / "images_unique").resolve()
+    db_path = resolved_output_root / IMAGE_INDEX_FILENAME
+    if not db_path.is_file():
+        return {}
+
+    rows: list[tuple[object, object]] = []
+    try:
+        database_uri = f"{db_path.as_uri()}?mode=ro"
+        with closing(
+            sqlite3.connect(
+                database_uri,
+                timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+                uri=True,
+            )
+        ) as connection:
+            configure_readonly_connection(connection)
+            for chunk in iter_in_clause_chunks(normalized_urls):
+                placeholders = ",".join("?" for _ in chunk)
+                rows.extend(
+                    connection.execute(
+                        f"""
+                        SELECT url, unique_rel_path
+                        FROM image_mappings
+                        WHERE url IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
+    except sqlite3.Error:
+        return {}
+
+    paths_by_url: dict[str, Path] = {}
+    for raw_url, raw_relative_path in rows:
+        if not isinstance(raw_url, str) or not isinstance(raw_relative_path, str):
+            continue
+        relative_path = Path(raw_relative_path)
+        if relative_path.is_absolute() or not relative_path.parts:
+            continue
+        if relative_path.parts[0] != "images_unique":
+            continue
+        image_path = (resolved_output_root / relative_path).resolve()
+        if not image_path.is_relative_to(images_root):
+            continue
+        if not _image_file_is_valid(image_path):
+            continue
+        paths_by_url[raw_url] = image_path
+    return paths_by_url
+
+
 def parse_nga_image_url(url: str) -> NgaImageUrl:
     if not utils.NGA_img_link_verify(url):
         raise ValueError(f"NGA图片链接无效：{url}")
