@@ -27,6 +27,7 @@ from nga_tools.commands.backup import (
     backup_sub,
     pdf_generate,
 )
+from nga_tools.commands.thread_batch import run_thread_config_batch
 from nga_tools.forum.thread_configs import ThreadConfig
 from nga_tools.ngaclient.client import NGAPageError
 from nga_tools.ngaclient.session import current_api_session
@@ -287,6 +288,43 @@ def _captured_reporter() -> Iterator[io.StringIO]:
 
 
 class BackupWarningLogTest:
+    def test_batch_warning_summaries_use_the_live_progress_console(self) -> None:
+        output = io.StringIO()
+        console = Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=120,
+        )
+        thread_config = _thread_config(name="first", tid=101, aid=201)
+
+        def action(config: ThreadConfig) -> None:
+            assert config is thread_config
+            report_warning(WarningCategory.POST_CONTENT, "detail")
+
+        with (
+            use_reporter(ConsoleReporter(console)),
+            use_command_warning_summary(),
+            patch(
+                "nga_tools.commands.thread_batch.ConsoleReporter",
+                side_effect=lambda active_console: ConsoleReporter(active_console),
+            ) as summary_reporter_cls,
+        ):
+            run_thread_config_batch(
+                action=action,
+                progress_text="running",
+                failure_text="failed",
+                summary_name="test",
+                worker_count=1,
+                write_warning_log=False,
+                lock_thread_output=False,
+                thread_configs=[thread_config],
+            )
+
+        summary_reporter_cls.assert_called_once_with(console)
+        assert "detail" not in output.getvalue()
+        assert "警告汇总：first (tid: 101, aid: 201)" in output.getvalue()
+
     @pytest.mark.parametrize(
         ("handler", "implementation_path"),
         [

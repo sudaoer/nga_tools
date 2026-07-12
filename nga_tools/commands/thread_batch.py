@@ -10,6 +10,7 @@ from time import perf_counter
 
 from nga_tools.console import (
     BackupConfigsProgressDisplay,
+    ConsoleReporter,
     Reporter,
     WarningCategory,
     WarningSummaryCollector,
@@ -79,7 +80,7 @@ def _run_thread_config_with_progress(
     task_name: str,
     lock_thread_output: bool,
     timing_snapshot_callback: Callable[[TimingSnapshot], None] | None,
-    command_reporter: Reporter,
+    thread_summary_reporter: Reporter,
     command_warning_collector: WarningSummaryCollector | None,
 ) -> str | None:
     tid = thread_config_tid(thread_config)
@@ -96,7 +97,7 @@ def _run_thread_config_with_progress(
             use_thread_warning_summary(
                 label,
                 parent_collector=command_warning_collector,
-                summary_reporter=command_reporter,
+                summary_reporter=thread_summary_reporter,
             )
         )
         try:
@@ -141,7 +142,7 @@ def _run_thread_configs_sequential(
     task_name: str,
     lock_thread_output: bool,
     timing_snapshot_callback: Callable[[TimingSnapshot], None] | None,
-    command_reporter: Reporter,
+    thread_summary_reporter: Reporter,
     command_warning_collector: WarningSummaryCollector | None,
 ) -> tuple[list[ThreadBatchSuccess], list[ThreadBatchFailure]]:
     successes: list[ThreadBatchSuccess] = []
@@ -163,7 +164,7 @@ def _run_thread_configs_sequential(
                 task_name=task_name,
                 lock_thread_output=lock_thread_output,
                 timing_snapshot_callback=timing_snapshot_callback,
-                command_reporter=command_reporter,
+                thread_summary_reporter=thread_summary_reporter,
                 command_warning_collector=command_warning_collector,
             )
         except Exception as error:
@@ -189,7 +190,7 @@ def _run_thread_configs_parallel(
     task_name: str,
     lock_thread_output: bool,
     timing_snapshot_callback: Callable[[TimingSnapshot], None] | None,
-    command_reporter: Reporter,
+    thread_summary_reporter: Reporter,
     command_warning_collector: WarningSummaryCollector | None,
 ) -> tuple[list[ThreadBatchSuccess], list[ThreadBatchFailure]]:
     successes: list[ThreadBatchSuccess] = []
@@ -213,7 +214,7 @@ def _run_thread_configs_parallel(
                 task_name=task_name,
                 lock_thread_output=lock_thread_output,
                 timing_snapshot_callback=timing_snapshot_callback,
-                command_reporter=command_reporter,
+                thread_summary_reporter=thread_summary_reporter,
                 command_warning_collector=command_warning_collector,
             )
             future_context[future] = (index, thread_config)
@@ -306,12 +307,12 @@ def run_thread_config_batch(
     )
     batch_started_at = datetime.now().astimezone()
     batch_wall_start = perf_counter()
-    command_reporter = get_reporter()
     command_warning_collector = get_warning_collector()
     with BackupConfigsProgressDisplay(
         len(selected_thread_configs),
         console=get_reporter().console,
     ) as progress:
+        thread_summary_reporter = ConsoleReporter(progress.console)
         if worker_count == 1 or len(selected_thread_configs) == 1:
             successes, failures = _run_thread_configs_sequential(
                 selected_thread_configs,
@@ -327,7 +328,7 @@ def run_thread_config_batch(
                 timing_snapshot_callback=(
                     batch_collector.add if batch_collector is not None else None
                 ),
-                command_reporter=command_reporter,
+                thread_summary_reporter=thread_summary_reporter,
                 command_warning_collector=command_warning_collector,
             )
         else:
@@ -346,7 +347,7 @@ def run_thread_config_batch(
                 timing_snapshot_callback=(
                     batch_collector.add if batch_collector is not None else None
                 ),
-                command_reporter=command_reporter,
+                thread_summary_reporter=thread_summary_reporter,
                 command_warning_collector=command_warning_collector,
             )
 
