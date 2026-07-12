@@ -4,6 +4,7 @@ import requests
 
 from nga_tools.config import get_config
 from nga_tools.network_limits import api_request_slot
+from nga_tools.ngaclient.session_context import current_shared_api_session
 
 Tid: TypeAlias = int | str
 Aid: TypeAlias = Optional[int | str]
@@ -105,19 +106,25 @@ def _parse_forum_thread(raw_thread: object, *, default_forumname: str) -> ForumT
 
 
 class NGAClient:
-    def __init__(self) -> None:
-        app_config = get_config()
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "User-Agent": app_config.user_agent,
-                "Cookie": (
-                    f"ngaPassportUid={app_config.nga_passport_uid}; "
-                    f"ngaPassportCid={app_config.nga_passport_cid};"
-                ),
-            }
-        )
-        self.base_url = app_config.base_url
+    def __init__(self, session: requests.Session | None = None) -> None:
+        shared = current_shared_api_session()
+        if session is not None:
+            self.session = session
+        elif shared is not None:
+            self.session = shared
+        else:
+            app_config = get_config()
+            self.session = requests.Session()
+            self.session.headers.update(
+                {
+                    "User-Agent": app_config.user_agent,
+                    "Cookie": (
+                        f"ngaPassportUid={app_config.nga_passport_uid}; "
+                        f"ngaPassportCid={app_config.nga_passport_cid};"
+                    ),
+                }
+            )
+        self.base_url = get_config().base_url
         self.page_cache: dict[str, PageData] = {}
 
     def page_cache_key(self, tid: Tid, aid: Aid, page: int) -> str:
