@@ -19,7 +19,10 @@ from nga_tools.backup.floor_models import (
     StoredFloorMap,
 )
 from nga_tools.backup.post_version_selection import write_selections
-from nga_tools.backup.processing_state import BackupProcessingState
+from nga_tools.backup.processing_state import (
+    FloorProcessingState,
+    ImageReferenceState,
+)
 from nga_tools.core.hashing import hash_text
 from nga_tools.word_count import WORD_COUNT_VERSION
 
@@ -1001,7 +1004,7 @@ class ThreadArchiveStoreTest:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
             initial = store.read_backup_processing_snapshot()
-            state = BackupProcessingState(
+            floor_state = FloorProcessingState(
                 format_version=1,
                 processed_archive_revision=initial.change_state.archive_revision,
                 processed_floor_map_revision=(
@@ -1009,17 +1012,24 @@ class ThreadArchiveStoreTest:
                 ),
                 page_count=2,
                 author_total_lou_count=21,
-                post_overlays_fingerprint="overlay-hash",
-                post_version_selections_fingerprint="selection-hash",
                 floor_map_format_version=1,
                 floor_map_generation_version=1,
                 floor_map_hash_algorithm="sha256",
+                completed_at="2026-07-11T00:00:00+00:00",
+            )
+            image_state = ImageReferenceState(
+                format_version=1,
+                processed_archive_revision=initial.change_state.archive_revision,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
                 image_reference_extractor_version=1,
                 completed_at="2026-07-11T00:00:00+00:00",
             )
 
-            assert store.commit_backup_processing_state(
-                state,
+            assert store.commit_floor_processing_state(floor_state)
+            assert store.commit_image_reference_state(
+                image_state,
+                {"https://example.invalid/ref.png"},
                 {"https://example.invalid/b.png", "https://example.invalid/a.png"},
             )
             stored = store.read_backup_processing_snapshot()
@@ -1034,25 +1044,83 @@ class ThreadArchiveStoreTest:
                         FROM sqlite_schema
                         WHERE type = 'table' AND name IN (
                             'archive_change_state',
-                            'backup_processing_state',
+                            'backup_floor_processing_state',
+                            'backup_image_reference_state',
+                            'backup_image_references',
                             'backup_pending_images'
                         )
                         """
                     )
                 }
 
-        assert stored.processing_state == state
+        assert stored.floor_state == floor_state
+        assert stored.image_state == image_state
+        assert stored.image_reference_urls == ("https://example.invalid/ref.png",)
         assert stored.pending_image_urls == (
             "https://example.invalid/a.png",
             "https://example.invalid/b.png",
         )
-        assert cleared.processing_state is None
+        assert cleared.floor_state is None
+        assert cleared.image_state is None
+        assert cleared.image_reference_urls == ()
         assert cleared.pending_image_urls == ()
         assert table_names == {
             "archive_change_state",
-            "backup_processing_state",
+            "backup_floor_processing_state",
+            "backup_image_reference_state",
+            "backup_image_references",
             "backup_pending_images",
         }
+
+    def test_legacy_processing_state_migrates_floor_state_and_drops_table(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE backup_processing_state (
+                        singleton INTEGER PRIMARY KEY,
+                        format_version INTEGER NOT NULL,
+                        processed_archive_revision INTEGER NOT NULL,
+                        processed_floor_map_revision INTEGER NOT NULL,
+                        page_count INTEGER NOT NULL,
+                        author_total_lou_count INTEGER,
+                        post_overlays_fingerprint TEXT NOT NULL,
+                        post_version_selections_fingerprint TEXT NOT NULL,
+                        floor_map_format_version INTEGER NOT NULL,
+                        floor_map_generation_version INTEGER NOT NULL,
+                        floor_map_hash_algorithm TEXT NOT NULL,
+                        image_reference_extractor_version INTEGER NOT NULL,
+                        completed_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO backup_processing_state VALUES
+                    (1, 1, 0, 0, 2, 21, 'overlay', 'selection',
+                     1, 1, 'sha256', 1, '2026-07-11T00:00:00+00:00')
+                    """
+                )
+                connection.commit()
+
+            store.ensure_schema()
+            snapshot = store.read_backup_processing_snapshot()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                legacy_exists = connection.execute(
+                    """
+                    SELECT 1 FROM sqlite_schema
+                    WHERE type = 'table' AND name = 'backup_processing_state'
+                    """
+                ).fetchone()
+
+        assert snapshot.floor_state is not None
+        assert snapshot.floor_state.page_count == 2
+        assert snapshot.floor_state.author_total_lou_count == 21
+        assert snapshot.image_state is None
+        assert legacy_exists is None
 
     def test_page_revision_tracks_only_effective_processing_inputs(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1201,19 +1269,11 @@ class ThreadArchiveStoreTest:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
             initial = store.read_backup_processing_snapshot()
-            stale_state = BackupProcessingState(
+            stale_state = ImageReferenceState(
                 format_version=1,
                 processed_archive_revision=initial.change_state.archive_revision,
-                processed_floor_map_revision=(
-                    initial.change_state.floor_map_revision
-                ),
-                page_count=1,
-                author_total_lou_count=1,
                 post_overlays_fingerprint="overlay-hash",
                 post_version_selections_fingerprint="selection-hash",
-                floor_map_format_version=1,
-                floor_map_generation_version=1,
-                floor_map_hash_algorithm="sha256",
                 image_reference_extractor_version=1,
                 completed_at="2026-07-11T00:00:00+00:00",
             )
@@ -1225,12 +1285,13 @@ class ThreadArchiveStoreTest:
                 },
             )
 
-            committed = store.commit_backup_processing_state(
+            committed = store.commit_image_reference_state(
                 stale_state,
+                {"https://example.invalid/ref.png"},
                 {"https://example.invalid/stale.png"},
             )
             snapshot = store.read_backup_processing_snapshot()
 
         assert not committed
-        assert snapshot.processing_state is None
+        assert snapshot.image_state is None
         assert snapshot.pending_image_urls == ()

@@ -51,9 +51,11 @@ from nga_tools.backup.post_overlay import (
 )
 from nga_tools.backup.post_version_selection import selections_fingerprint
 from nga_tools.backup.processing_state import (
-    BACKUP_PROCESSING_STATE_VERSION,
+    FLOOR_PROCESSING_STATE_VERSION,
+    IMAGE_REFERENCE_STATE_VERSION,
     BackupProcessingSnapshot,
-    BackupProcessingState,
+    FloorProcessingState,
+    ImageReferenceState,
 )
 from nga_tools.console import report_info, report_progress, report_warning
 from nga_tools.core.downloads import DownloadSummary
@@ -230,39 +232,6 @@ def _post_refs_and_missing_lous(
     )
 
 
-def _retry_unresolved_missing_lous(
-    client: NGAClient,
-    archive_store: ThreadArchiveStore,
-    tid: int,
-    aid: int,
-    author_total_lou_count: int | None,
-    expected_snapshot: BackupProcessingSnapshot,
-) -> bool:
-    post_refs, missing_lous = _author_post_refs_and_missing_lous(
-        archive_store,
-        author_total_lou_count,
-    )
-    record_timing_metric("待恢复缺失楼数", len(missing_lous))
-    if not missing_lous:
-        record_timing_metric("本次恢复缺失楼数", 0)
-        return False
-
-    floor_map_processing = _build_floor_map_for_post_refs(
-        client,
-        archive_store,
-        tid,
-        aid,
-        post_refs,
-        missing_lous,
-    )
-    recovered_count = archive_store.upsert_recovered_posts(
-        floor_map_processing.build_result.recovered_missing_posts_by_author_lou
-    )
-    record_timing_metric("本次恢复缺失楼数", recovered_count)
-    current_snapshot = archive_store.read_backup_processing_snapshot()
-    return current_snapshot.change_state != expected_snapshot.change_state
-
-
 def _records_with_recovered_and_missing_posts(
     archive_store: ThreadArchiveStore,
     floor_map_result: FloorMapBuildResult,
@@ -299,7 +268,7 @@ def _download_images_for_records(
     archive_store: ThreadArchiveStore,
     floor_labels: FloorLabels,
     records: list[PostRecord],
-) -> DownloadSummary:
+) -> tuple[DownloadSummary, set[str]]:
     with time_section("Overlay应用"):
         effective_records = _apply_post_overlays_to_records(
             archive_store.read_post_overlays(),
@@ -311,46 +280,167 @@ def _download_images_for_records(
         effective_records,
         floor_labels,
     )
-    return _download_images(tid, aid, collection.tasks)
-
-
-def _processing_snapshot_miss_reason(
-    snapshot: BackupProcessingSnapshot,
-    *,
-    page_count: int,
-    author_total_lou_count: int | None,
-    post_overlays_hash: str,
-    post_version_selections_hash: str,
-) -> ProcessingStateReuseReason | None:
-    state = snapshot.processing_state
-    if state is None:
-        return "state_missing"
-    if (
-        state.format_version != BACKUP_PROCESSING_STATE_VERSION
-        or state.floor_map_format_version != FLOOR_MAP_VERSION
-        or state.floor_map_generation_version != FLOOR_MAP_GENERATION_VERSION
-        or state.floor_map_hash_algorithm != FLOOR_MAP_HASH_ALGORITHM
-        or state.image_reference_extractor_version
-        != IMAGE_REFERENCE_EXTRACTOR_VERSION
-    ):
-        return "processing_version_changed"
-    if state.processed_archive_revision != snapshot.change_state.archive_revision:
-        return "archive_changed"
-    if state.processed_floor_map_revision != snapshot.change_state.floor_map_revision:
-        return "floor_map_changed"
-    if state.page_count != page_count:
-        return "page_count_changed"
-    if state.author_total_lou_count != author_total_lou_count:
-        return "author_total_changed"
-    if state.post_overlays_fingerprint != post_overlays_hash:
-        return "post_overlays_changed"
-    if state.post_version_selections_fingerprint != post_version_selections_hash:
-        return "post_version_selections_changed"
-    return None
+    return (
+        _download_images(tid, aid, collection.tasks),
+        {task["url"] for task in collection.tasks},
+    )
 
 
 def _failed_image_urls(download_summary: DownloadSummary) -> set[str]:
     return {item["url"] for item in download_summary["failed"]}
+
+
+def _new_floor_state(
+    snapshot: BackupProcessingSnapshot,
+    *,
+    page_count: int,
+    author_total_lou_count: int | None,
+) -> FloorProcessingState:
+    return FloorProcessingState(
+        format_version=FLOOR_PROCESSING_STATE_VERSION,
+        processed_archive_revision=snapshot.change_state.archive_revision,
+        processed_floor_map_revision=snapshot.change_state.floor_map_revision,
+        page_count=page_count,
+        author_total_lou_count=author_total_lou_count,
+        floor_map_format_version=FLOOR_MAP_VERSION,
+        floor_map_generation_version=FLOOR_MAP_GENERATION_VERSION,
+        floor_map_hash_algorithm=FLOOR_MAP_HASH_ALGORITHM,
+        completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+
+
+def _floor_state_is_current(
+    snapshot: BackupProcessingSnapshot,
+    *,
+    page_count: int,
+    author_total_lou_count: int | None,
+) -> bool:
+    state = snapshot.floor_state
+    return state is not None and (
+        state.format_version == FLOOR_PROCESSING_STATE_VERSION
+        and state.processed_archive_revision == snapshot.change_state.archive_revision
+        and state.processed_floor_map_revision
+        == snapshot.change_state.floor_map_revision
+        and state.page_count == page_count
+        and state.author_total_lou_count == author_total_lou_count
+        and state.floor_map_format_version == FLOOR_MAP_VERSION
+        and state.floor_map_generation_version == FLOOR_MAP_GENERATION_VERSION
+        and state.floor_map_hash_algorithm == FLOOR_MAP_HASH_ALGORITHM
+    )
+
+
+def _image_state_is_current(
+    snapshot: BackupProcessingSnapshot,
+    *,
+    post_overlays_hash: str,
+    post_version_selections_hash: str,
+) -> bool:
+    state = snapshot.image_state
+    return state is not None and (
+        state.format_version == IMAGE_REFERENCE_STATE_VERSION
+        and state.processed_archive_revision == snapshot.change_state.archive_revision
+        and state.post_overlays_fingerprint == post_overlays_hash
+        and state.post_version_selections_fingerprint
+        == post_version_selections_hash
+        and state.image_reference_extractor_version
+        == IMAGE_REFERENCE_EXTRACTOR_VERSION
+    )
+
+
+def _refresh_author_floor_state(
+    client: NGAClient,
+    archive_store: ThreadArchiveStore,
+    tid: int,
+    aid: int,
+    *,
+    page_count: int,
+    author_total_lou_count: int | None,
+    commit_even_if_unchanged: bool = True,
+) -> bool:
+    before_snapshot = archive_store.read_backup_processing_snapshot()
+    post_refs, missing_lous = _author_post_refs_and_missing_lous(
+        archive_store,
+        author_total_lou_count,
+    )
+    record_timing_metric("待恢复缺失楼数", len(missing_lous))
+    floor_processing = _build_floor_map_for_post_refs(
+        client,
+        archive_store,
+        tid,
+        aid,
+        post_refs,
+        missing_lous,
+    )
+    recovered_count = archive_store.upsert_recovered_posts(
+        floor_processing.build_result.recovered_missing_posts_by_author_lou
+    )
+    record_timing_metric("本次恢复缺失楼数", recovered_count)
+    if not floor_processing.cacheable:
+        return False
+    snapshot = archive_store.read_backup_processing_snapshot()
+    if (
+        not commit_even_if_unchanged
+        and snapshot.change_state == before_snapshot.change_state
+    ):
+        return True
+    return archive_store.commit_floor_processing_state(
+        _new_floor_state(
+            snapshot,
+            page_count=page_count,
+            author_total_lou_count=author_total_lou_count,
+        )
+    )
+
+
+def _rebuild_image_reference_state(
+    tid: int,
+    aid: Optional[int],
+    thread_folder: Path,
+    archive_store: ThreadArchiveStore,
+    *,
+    post_overlays_hash: str,
+    post_version_selections_hash: str,
+) -> bool:
+    with time_section("图片引用集合重建"):
+        records = archive_store.read_effective_post_records()
+        if aid is None:
+            floor_labels = FloorLabels.plain()
+        else:
+            try:
+                floor_labels = load_floor_labels_from_archive(archive_store, aid)
+            except Exception as error:
+                report_warning(f"无法加载楼层映射，使用普通楼层标签：{error}")
+                floor_labels = FloorLabels.plain()
+        download_summary, image_reference_urls = _download_images_for_records(
+            tid,
+            aid,
+            archive_store,
+            floor_labels,
+            records,
+        )
+    fingerprints_after = (
+        archive_store.post_overlays_fingerprint(),
+        selections_fingerprint(thread_folder),
+    )
+    if fingerprints_after != (
+        post_overlays_hash,
+        post_version_selections_hash,
+    ):
+        return False
+    snapshot = archive_store.read_backup_processing_snapshot()
+    state = ImageReferenceState(
+        format_version=IMAGE_REFERENCE_STATE_VERSION,
+        processed_archive_revision=snapshot.change_state.archive_revision,
+        post_overlays_fingerprint=post_overlays_hash,
+        post_version_selections_fingerprint=post_version_selections_hash,
+        image_reference_extractor_version=IMAGE_REFERENCE_EXTRACTOR_VERSION,
+        completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    return archive_store.commit_image_reference_state(
+        state,
+        image_reference_urls,
+        _failed_image_urls(download_summary),
+    )
 
 
 def _try_processing_state_reuse(
@@ -371,43 +461,74 @@ def _try_processing_state_reuse(
         snapshot = archive_store.read_backup_processing_snapshot()
     except ValueError as error:
         report_warning(f"处理状态无效，改为完整处理：{error}")
+        archive_store.clear_backup_processing_state()
         return ProcessingStateReuseResult(False, "state_invalid")
-    if snapshot.processing_state is None:
-        return ProcessingStateReuseResult(False, "state_missing")
     post_overlays_hash = archive_store.post_overlays_fingerprint()
     post_version_selections_hash = selections_fingerprint(thread_folder)
-    miss_reason = _processing_snapshot_miss_reason(
+    floor_hit = _floor_state_is_current(
         snapshot,
         page_count=page_count,
         author_total_lou_count=author_total_lou_count,
-        post_overlays_hash=post_overlays_hash,
-        post_version_selections_hash=post_version_selections_hash,
     )
-    if miss_reason is not None:
-        return ProcessingStateReuseResult(False, miss_reason)
-    state = snapshot.processing_state
-
-    with time_section("未完成缺失楼重试"):
-        if aid is None:
-            record_timing_metric("待恢复缺失楼数", 0)
-            record_timing_metric("本次恢复缺失楼数", 0)
-            missing_floor_changed = False
-        else:
-            missing_floor_changed = _retry_unresolved_missing_lous(
+    record_timing_metric("楼层状态复用命中", int(floor_hit))
+    if not floor_hit:
+        if aid is None or snapshot.floor_state is None:
+            record_timing_label("楼层状态复用结果", "rebuild_required")
+            return ProcessingStateReuseResult(False, "state_missing")
+        with time_section("楼层派生状态刷新"):
+            if not _refresh_author_floor_state(
                 client,
                 archive_store,
                 tid,
                 aid,
-                author_total_lou_count,
-                snapshot,
-            )
-    record_timing_metric(
-        "缺失楼重试引发完整处理",
-        int(missing_floor_changed),
+                page_count=page_count,
+                author_total_lou_count=author_total_lou_count,
+            ):
+                return ProcessingStateReuseResult(False, "floor_map_changed")
+        record_timing_label("楼层状态复用结果", "floor_only_refresh")
+        snapshot = archive_store.read_backup_processing_snapshot()
+    else:
+        record_timing_label("楼层状态复用结果", "hit")
+        if aid is not None:
+            with time_section("未完成缺失楼重试"):
+                before_archive_revision = snapshot.change_state.archive_revision
+                if not _refresh_author_floor_state(
+                    client,
+                    archive_store,
+                    tid,
+                    aid,
+                    page_count=page_count,
+                    author_total_lou_count=author_total_lou_count,
+                    commit_even_if_unchanged=False,
+                ):
+                    return ProcessingStateReuseResult(False, "floor_map_changed")
+                snapshot = archive_store.read_backup_processing_snapshot()
+                record_timing_metric(
+                    "缺失楼重试引发完整处理",
+                    int(snapshot.change_state.archive_revision != before_archive_revision),
+                )
+
+    image_hit = _image_state_is_current(
+        snapshot,
+        post_overlays_hash=post_overlays_hash,
+        post_version_selections_hash=post_version_selections_hash,
     )
-    if missing_floor_changed:
-        report_info("缺失楼恢复结果已变化，转为完整处理。")
-        return ProcessingStateReuseResult(False, "missing_floor_recovered")
+    record_timing_metric("图片引用状态复用命中", int(image_hit))
+    record_timing_label(
+        "图片引用状态复用结果",
+        "image_collection_hit" if image_hit else "image_collection_rebuilt",
+    )
+    if not image_hit or snapshot.image_state is None:
+        if not _rebuild_image_reference_state(
+            tid,
+            aid,
+            thread_folder,
+            archive_store,
+            post_overlays_hash=post_overlays_hash,
+            post_version_selections_hash=post_version_selections_hash,
+        ):
+            return ProcessingStateReuseResult(False, "archive_changed")
+        return ProcessingStateReuseResult(True, "hit")
 
     report_info("归档与派生输入未变化，跳过完整处理。")
     record_timing_metric("待重试图片URL数", len(snapshot.pending_image_urls))
@@ -416,8 +537,8 @@ def _try_processing_state_reuse(
     ]
     with time_section("未完成图片重试"):
         download_summary = _download_images(tid, aid, pending_tasks)
-    if archive_store.replace_backup_pending_images(
-        state,
+    if archive_store.replace_pending_images_for_image_state(
+        snapshot.image_state,
         _failed_image_urls(download_summary),
     ):
         return ProcessingStateReuseResult(True, "hit")
@@ -437,6 +558,7 @@ def _commit_completed_processing_state(
     unresolved_missing_lous: list[int],
     fingerprints_before: tuple[str, str],
     download_summary: DownloadSummary,
+    image_reference_urls: set[str],
 ) -> None:
     pending_image_urls = _failed_image_urls(download_summary)
     record_timing_metric("待重试图片URL数", len(pending_image_urls))
@@ -452,25 +574,26 @@ def _commit_completed_processing_state(
         return
 
     snapshot = archive_store.read_backup_processing_snapshot()
-    state = BackupProcessingState(
-        format_version=BACKUP_PROCESSING_STATE_VERSION,
-        processed_archive_revision=snapshot.change_state.archive_revision,
-        processed_floor_map_revision=snapshot.change_state.floor_map_revision,
+    floor_state = _new_floor_state(
+        snapshot,
         page_count=page_count,
         author_total_lou_count=author_total_lou_count,
+    )
+    image_state = ImageReferenceState(
+        format_version=IMAGE_REFERENCE_STATE_VERSION,
+        processed_archive_revision=snapshot.change_state.archive_revision,
         post_overlays_fingerprint=fingerprints_before[0],
         post_version_selections_fingerprint=fingerprints_before[1],
-        floor_map_format_version=FLOOR_MAP_VERSION,
-        floor_map_generation_version=FLOOR_MAP_GENERATION_VERSION,
-        floor_map_hash_algorithm=FLOOR_MAP_HASH_ALGORITHM,
         image_reference_extractor_version=IMAGE_REFERENCE_EXTRACTOR_VERSION,
         completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
-    committed = archive_store.commit_backup_processing_state(
-        state,
+    floor_committed = archive_store.commit_floor_processing_state(floor_state)
+    image_committed = archive_store.commit_image_reference_state(
+        image_state,
+        image_reference_urls,
         pending_image_urls,
     )
-    if not committed:
+    if not floor_committed or not image_committed:
         report_warning("归档在处理期间发生变化，未写入线程级处理状态。")
     elif aid is not None and unresolved_missing_lous:
         report_info(
@@ -489,7 +612,6 @@ def _run_full_processing(
     page_count: int,
     author_total_lou_count: int | None,
 ) -> None:
-    archive_store.clear_backup_processing_state()
     fingerprints_before = (
         archive_store.post_overlays_fingerprint(),
         selections_fingerprint(thread_folder),
@@ -526,7 +648,7 @@ def _run_full_processing(
             )
 
     with time_section("正文解析与图片处理"):
-        download_summary = _download_images_for_records(
+        download_summary, image_reference_urls = _download_images_for_records(
             tid,
             aid,
             archive_store,
@@ -544,6 +666,7 @@ def _run_full_processing(
         unresolved_missing_lous=record_processing.unresolved_missing_lous,
         fingerprints_before=fingerprints_before,
         download_summary=download_summary,
+        image_reference_urls=image_reference_urls,
     )
 
 
@@ -595,13 +718,13 @@ def backup_local_work_kind(
     archive_store = ThreadArchiveStore(thread_folder)
     if not archive_store.exists():
         return "refresh"
+    archive_store.ensure_schema()
 
     try:
         snapshot = archive_store.read_backup_processing_snapshot()
     except ValueError:
         return "refresh"
-    state = snapshot.processing_state
-    if state is None:
+    if snapshot.floor_state is None or snapshot.image_state is None:
         return "refresh"
 
     try:
@@ -612,14 +735,17 @@ def backup_local_work_kind(
         return "refresh"
     author_total_lou_count = pagination.vrows if aid is not None else None
 
-    miss_reason = _processing_snapshot_miss_reason(
+    floor_current = _floor_state_is_current(
         snapshot,
         page_count=pagination.page_count,
         author_total_lou_count=author_total_lou_count,
+    )
+    image_current = _image_state_is_current(
+        snapshot,
         post_overlays_hash=archive_store.post_overlays_fingerprint(),
         post_version_selections_hash=selections_fingerprint(thread_folder),
     )
-    if miss_reason is not None or snapshot.pending_image_urls:
+    if not floor_current or not image_current or snapshot.pending_image_urls:
         return "maintenance"
     if aid is not None and read_unresolved_missing_author_lous_from_archive(
         archive_store,
@@ -632,9 +758,9 @@ def backup_local_work_kind(
 def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
     thread_folder = Path(utils.get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
+    archive_store.ensure_schema()
     snapshot = archive_store.read_backup_processing_snapshot()
-    state = snapshot.processing_state
-    if state is None:
+    if snapshot.floor_state is None or snapshot.image_state is None:
         raise RuntimeError("缺少线程级处理状态，必须先执行增量备份。")
     pagination = archive_store.read_latest_page_one_pagination()
     if pagination is None:
@@ -777,13 +903,13 @@ def backup_thread_sub(
         else None
     )
     try:
-        previous_processing_state = (
-            archive_store.read_backup_processing_snapshot().processing_state
+        previous_floor_state = (
+            archive_store.read_backup_processing_snapshot().floor_state
             if existing_page_numbers
             else None
         )
     except ValueError:
-        previous_processing_state = None
+        previous_floor_state = None
 
     with time_section("远端页面抓取"):
         first_page_data = client.get_page(tid, aid, 1)
@@ -799,8 +925,8 @@ def backup_thread_sub(
         unchanged_author_fast_path = (
             allow_unchanged_author_fast_path
             and aid is not None
-            and previous_processing_state is not None
-            and previous_processing_state.page_count == page_count
+            and previous_floor_state is not None
+            and previous_floor_state.page_count == page_count
             and previous_author_total_lou_count == author_total_lou_count
             and local_pages_cover_remote
         )

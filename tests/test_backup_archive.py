@@ -13,6 +13,7 @@ import pytest
 from nga_tools.backup import archive as archive_module
 from nga_tools.backup.archive import (
     FloorMapProcessingResult,
+    backup_local_work_kind,
     maintain_thread_backup,
     backup_thread,
     backup_thread_sub,
@@ -359,6 +360,60 @@ class SparseAuthorPageTest:
 
 
 class BackupRawArchiveTest:
+    def test_local_work_planning_migrates_legacy_processing_schema(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        _run_backup(thread_dir, MutableFakeClient())
+        with sqlite3.connect(thread_dir / "archive.sqlite3") as connection:
+            connection.execute(
+                """
+                CREATE TABLE backup_processing_state (
+                    singleton INTEGER PRIMARY KEY,
+                    format_version INTEGER NOT NULL,
+                    processed_archive_revision INTEGER NOT NULL,
+                    processed_floor_map_revision INTEGER NOT NULL,
+                    page_count INTEGER NOT NULL,
+                    author_total_lou_count INTEGER,
+                    post_overlays_fingerprint TEXT NOT NULL,
+                    post_version_selections_fingerprint TEXT NOT NULL,
+                    floor_map_format_version INTEGER NOT NULL,
+                    floor_map_generation_version INTEGER NOT NULL,
+                    floor_map_hash_algorithm TEXT NOT NULL,
+                    image_reference_extractor_version INTEGER NOT NULL,
+                    completed_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO backup_processing_state
+                SELECT 1, 1, processed_archive_revision,
+                       processed_floor_map_revision, page_count,
+                       author_total_lou_count, 'overlay', 'selection',
+                       floor_map_format_version, floor_map_generation_version,
+                       floor_map_hash_algorithm, 1, completed_at
+                FROM backup_floor_processing_state WHERE singleton = 1
+                """
+            )
+            connection.execute("DROP TABLE backup_floor_processing_state")
+            connection.execute("DROP TABLE backup_image_reference_state")
+            connection.execute("DROP TABLE backup_image_references")
+            connection.commit()
+
+        with patch.object(
+            archive_module.utils,
+            "get_folder",
+            side_effect=_fake_get_folder(thread_dir),
+        ):
+            work_kind = backup_local_work_kind(123, 456)
+
+        snapshot = ThreadArchiveStore(thread_dir).read_backup_processing_snapshot()
+        assert work_kind == "refresh"
+        assert snapshot.floor_state is not None
+        assert snapshot.image_state is None
+
     @pytest.mark.parametrize("mode", ["sub", "all"])
     def test_backup_writes_archive_without_intermediate_html(
         self,
@@ -495,7 +550,8 @@ class BackupRawArchiveTest:
         ).read_backup_processing_snapshot()
         assert full_processing_calls == ["full"]
         assert parsed_lous == [[1, 2]]
-        assert snapshot.processing_state is not None
+        assert snapshot.floor_state is not None
+        assert snapshot.image_state is not None
         assert "归档与派生输入未变化，跳过完整处理" in output.getvalue()
 
     def test_full_backup_warms_state_for_following_sub(self, tmp_path: Path) -> None:
@@ -582,10 +638,12 @@ class BackupRawArchiveTest:
         thread_dir = tmp_path / "123_456"
         client = MutableFakeClient()
         full_processing_calls: list[str] = []
+        parsed_lous: list[list[int]] = []
         _run_backup(
             thread_dir,
             client,
             full_processing_calls=full_processing_calls,
+            parsed_lous=parsed_lous,
         )
 
         if changed_input == "attachments":
@@ -604,9 +662,14 @@ class BackupRawArchiveTest:
             thread_dir,
             client,
             full_processing_calls=full_processing_calls,
+            parsed_lous=parsed_lous,
         )
 
-        assert full_processing_calls == ["full", "full"]
+        assert full_processing_calls == ["full"]
+        if changed_input == "attachments":
+            assert parsed_lous == [[1, 2], [1]]
+        else:
+            assert parsed_lous == [[1, 2]]
 
     @pytest.mark.parametrize(
         "changed_input",
@@ -673,7 +736,7 @@ class BackupRawArchiveTest:
                     full_processing_calls=full_processing_calls,
                 )
 
-        assert full_processing_calls == ["full", "full"]
+        assert full_processing_calls == ["full"]
 
     def test_original_thread_backup_reuses_processing_state(
         self,
@@ -700,7 +763,8 @@ class BackupRawArchiveTest:
             thread_dir
         ).read_backup_processing_snapshot()
         assert full_processing_calls == ["full"]
-        assert snapshot.processing_state is not None
+        assert snapshot.floor_state is not None
+        assert snapshot.image_state is not None
 
     def test_successful_pending_retry_clears_queue_without_history_scan(
         self,
@@ -784,7 +848,8 @@ class BackupRawArchiveTest:
             full_processing_calls=full_processing_calls,
         )
 
-        assert first_snapshot.processing_state is not None
+        assert first_snapshot.floor_state is not None
+        assert first_snapshot.image_state is not None
         assert first_snapshot.pending_image_urls == (image_url,)
         assert downloaded_urls == [[image_url], [image_url]]
         assert full_processing_calls == ["full"]
@@ -820,9 +885,11 @@ class BackupRawArchiveTest:
             thread_dir
         ).read_backup_processing_snapshot()
 
-        assert before_retry.processing_state is not None
-        assert after_retry.processing_state == before_retry.processing_state
-        assert full_processing_calls == ["full"]
+        assert before_retry.floor_state is not None
+        assert before_retry.image_state is not None
+        assert after_retry.floor_state == before_retry.floor_state
+        assert after_retry.image_state == before_retry.image_state
+        assert full_processing_calls == ["full", "full"]
 
     def test_recovered_missing_floor_triggers_one_new_full_processing(
         self,
@@ -879,7 +946,7 @@ class BackupRawArchiveTest:
         )
 
         records = ThreadArchiveStore(thread_dir).read_effective_post_records()
-        assert full_processing_calls == ["full", "full"]
+        assert full_processing_calls == ["full"]
         assert [record["lou"] for record in records] == [1, 2, 3]
         assert records[1]["post"]["content"] == "recovered body"
 
@@ -974,7 +1041,7 @@ class BackupRawArchiveTest:
         snapshot = ThreadArchiveStore(
             thread_dir
         ).read_backup_processing_snapshot()
-        assert snapshot.processing_state is None
+        assert snapshot.floor_state is None
 
     def test_interrupted_full_processing_leaves_no_fast_path_state(
         self,
@@ -992,7 +1059,8 @@ class BackupRawArchiveTest:
         snapshot = ThreadArchiveStore(
             thread_dir
         ).read_backup_processing_snapshot()
-        assert snapshot.processing_state is None
+        assert snapshot.floor_state is None
+        assert snapshot.image_state is None
         assert snapshot.pending_image_urls == ()
 
     def test_invalid_processing_state_is_treated_as_fast_path_miss(
@@ -1009,7 +1077,7 @@ class BackupRawArchiveTest:
         )
         with sqlite3.connect(thread_dir / "archive.sqlite3") as connection:
             connection.execute(
-                "UPDATE backup_processing_state SET completed_at = ''"
+                "UPDATE backup_image_reference_state SET completed_at = ''"
             )
             connection.commit()
         output = io.StringIO()
@@ -1027,7 +1095,7 @@ class BackupRawArchiveTest:
             thread_dir
         ).read_backup_processing_snapshot()
         assert full_processing_calls == ["full", "full"]
-        assert snapshot.processing_state is not None
+        assert snapshot.image_state is not None
         assert "处理状态无效，改为完整处理" in output.getvalue()
         assert (
             "标签：处理状态复用结果，值：state_invalid\n"
@@ -1064,8 +1132,12 @@ class BackupRawArchiveTest:
             full_processing_calls=full_processing_calls,
         )
 
-        assert failed_snapshot.processing_state is None
-        assert full_processing_calls == ["full", "full", "full"]
+        assert failed_snapshot.image_state is not None
+        assert (
+            failed_snapshot.image_state.processed_archive_revision
+            != failed_snapshot.change_state.archive_revision
+        )
+        assert full_processing_calls == ["full"]
 
     def test_archive_keeps_historical_lou_when_latest_page_loses_it(
         self,
@@ -1291,7 +1363,7 @@ class BackupRawArchiveTest:
 
         _run_backup(thread_dir, client, mode="maintenance")
 
-        state = store.read_backup_processing_snapshot().processing_state
+        state = store.read_backup_processing_snapshot().floor_state
         assert state is not None
         assert state.page_count == 2
         assert state.author_total_lou_count == 5

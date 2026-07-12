@@ -34,7 +34,8 @@ from nga_tools.backup.post_version_selection import (
 from nga_tools.backup.processing_state import (
     ArchiveChangeState,
     BackupProcessingSnapshot,
-    BackupProcessingState,
+    FloorProcessingState,
+    ImageReferenceState,
 )
 from nga_tools.core.hashing import hash_text
 from nga_tools.core.sqlite import (
@@ -563,6 +564,42 @@ class ThreadArchiveStore:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS backup_floor_processing_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                format_version INTEGER NOT NULL,
+                processed_archive_revision INTEGER NOT NULL,
+                processed_floor_map_revision INTEGER NOT NULL,
+                page_count INTEGER NOT NULL,
+                author_total_lou_count INTEGER,
+                floor_map_format_version INTEGER NOT NULL,
+                floor_map_generation_version INTEGER NOT NULL,
+                floor_map_hash_algorithm TEXT NOT NULL,
+                completed_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backup_image_reference_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                format_version INTEGER NOT NULL,
+                processed_archive_revision INTEGER NOT NULL,
+                post_overlays_fingerprint TEXT NOT NULL,
+                post_version_selections_fingerprint TEXT NOT NULL,
+                image_reference_extractor_version INTEGER NOT NULL,
+                completed_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backup_image_references (
+                url TEXT PRIMARY KEY
+            )
+            """
+        )
+        connection.execute(
+            """
             INSERT INTO archive_change_state (
                 singleton,
                 archive_revision,
@@ -574,30 +611,32 @@ class ThreadArchiveStore:
         )
         connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS backup_processing_state (
-                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                format_version INTEGER NOT NULL,
-                processed_archive_revision INTEGER NOT NULL,
-                processed_floor_map_revision INTEGER NOT NULL,
-                page_count INTEGER NOT NULL,
-                author_total_lou_count INTEGER,
-                post_overlays_fingerprint TEXT NOT NULL,
-                post_version_selections_fingerprint TEXT NOT NULL,
-                floor_map_format_version INTEGER NOT NULL,
-                floor_map_generation_version INTEGER NOT NULL,
-                floor_map_hash_algorithm TEXT NOT NULL,
-                image_reference_extractor_version INTEGER NOT NULL,
-                completed_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
             CREATE TABLE IF NOT EXISTS backup_pending_images (
                 url TEXT PRIMARY KEY
             )
             """
         )
+        if _table_exists(connection, "backup_processing_state"):
+            connection.execute(
+                """
+                INSERT INTO backup_floor_processing_state (
+                    singleton, format_version, processed_archive_revision,
+                    processed_floor_map_revision, page_count,
+                    author_total_lou_count, floor_map_format_version,
+                    floor_map_generation_version, floor_map_hash_algorithm,
+                    completed_at
+                )
+                SELECT singleton, 1, processed_archive_revision,
+                       processed_floor_map_revision, page_count,
+                       author_total_lou_count, floor_map_format_version,
+                       floor_map_generation_version, floor_map_hash_algorithm,
+                       completed_at
+                FROM backup_processing_state
+                WHERE singleton = 1
+                ON CONFLICT(singleton) DO NOTHING
+                """
+            )
+            connection.execute("DROP TABLE backup_processing_state")
 
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -772,139 +811,73 @@ class ThreadArchiveStore:
             floor_map_revision=row[1],
         )
 
-    @staticmethod
-    def _backup_processing_state_from_row(
-        row: tuple[
-            object,
-            object,
-            object,
-            object,
-            object,
-            object,
-            object,
-            object,
-            object,
-            object,
-            object,
-            object,
-        ],
-    ) -> BackupProcessingState:
-        (
-            format_version,
-            processed_archive_revision,
-            processed_floor_map_revision,
-            page_count,
-            author_total_lou_count,
-            post_overlays_fingerprint,
-            post_version_selections_fingerprint,
-            floor_map_format_version,
-            floor_map_generation_version,
-            floor_map_hash_algorithm,
-            image_reference_extractor_version,
-            completed_at,
-        ) = row
-        integer_values = (
-            format_version,
-            processed_archive_revision,
-            processed_floor_map_revision,
-            page_count,
-            floor_map_format_version,
-            floor_map_generation_version,
-            image_reference_extractor_version,
-        )
-        if any(type(value) is not int for value in integer_values):
-            raise ValueError(f"backup处理状态整数列无效：{row!r}")
-        if author_total_lou_count is not None and type(author_total_lou_count) is not int:
-            raise ValueError(f"backup处理状态vrows无效：{row!r}")
-        string_values = (
-            post_overlays_fingerprint,
-            post_version_selections_fingerprint,
-            floor_map_hash_algorithm,
-            completed_at,
-        )
-        if any(not isinstance(value, str) or not value for value in string_values):
-            raise ValueError(f"backup处理状态文本列无效：{row!r}")
-        return BackupProcessingState(
-            format_version=cast(int, format_version),
-            processed_archive_revision=cast(int, processed_archive_revision),
-            processed_floor_map_revision=cast(int, processed_floor_map_revision),
-            page_count=cast(int, page_count),
-            author_total_lou_count=author_total_lou_count,
-            post_overlays_fingerprint=cast(str, post_overlays_fingerprint),
-            post_version_selections_fingerprint=(
-                cast(str, post_version_selections_fingerprint)
-            ),
-            floor_map_format_version=cast(int, floor_map_format_version),
-            floor_map_generation_version=cast(int, floor_map_generation_version),
-            floor_map_hash_algorithm=cast(str, floor_map_hash_algorithm),
-            image_reference_extractor_version=cast(
-                int,
-                image_reference_extractor_version,
-            ),
-            completed_at=cast(str, completed_at),
-        )
-
     def read_backup_processing_snapshot(self) -> BackupProcessingSnapshot:
         self.require_exists()
         with closing(self._connect_read()) as connection:
             change_state = self._read_archive_change_state(connection)
-            state_row = cast(
-                Optional[
-                    tuple[
-                        object,
-                        object,
-                        object,
-                        object,
-                        object,
-                        object,
-                        object,
-                        object,
-                        object,
-                        object,
-                        object,
-                        object,
-                    ]
-                ],
-                connection.execute(
-                    """
-                    SELECT
-                        format_version,
-                        processed_archive_revision,
-                        processed_floor_map_revision,
-                        page_count,
-                        author_total_lou_count,
-                        post_overlays_fingerprint,
-                        post_version_selections_fingerprint,
-                        floor_map_format_version,
-                        floor_map_generation_version,
-                        floor_map_hash_algorithm,
-                        image_reference_extractor_version,
-                        completed_at
-                    FROM backup_processing_state
-                    WHERE singleton = 1
-                    """
-                ).fetchone(),
-            )
             pending_rows = cast(
                 list[tuple[object]],
                 connection.execute(
                     "SELECT url FROM backup_pending_images ORDER BY url"
                 ).fetchall(),
             )
+            floor_row = connection.execute(
+                """
+                SELECT format_version, processed_archive_revision,
+                       processed_floor_map_revision, page_count,
+                       author_total_lou_count, floor_map_format_version,
+                       floor_map_generation_version, floor_map_hash_algorithm,
+                       completed_at
+                FROM backup_floor_processing_state WHERE singleton = 1
+                """
+            ).fetchone()
+            image_row = connection.execute(
+                """
+                SELECT format_version, processed_archive_revision,
+                       post_overlays_fingerprint,
+                       post_version_selections_fingerprint,
+                       image_reference_extractor_version, completed_at
+                FROM backup_image_reference_state WHERE singleton = 1
+                """
+            ).fetchone()
+            image_reference_rows = connection.execute(
+                "SELECT url FROM backup_image_references ORDER BY url"
+            ).fetchall()
 
         pending_image_urls: list[str] = []
         for (url,) in pending_rows:
             if not isinstance(url, str) or not url:
                 raise ValueError(f"backup待重试图片URL无效：{url!r}")
             pending_image_urls.append(url)
+        image_reference_urls: list[str] = []
+        for (url,) in image_reference_rows:
+            if not isinstance(url, str) or not url:
+                raise ValueError(f"backup图片引用URL无效：{url!r}")
+            image_reference_urls.append(url)
+
+        floor_state: FloorProcessingState | None = None
+        if floor_row is not None:
+            if any(type(value) is not int for value in floor_row[:4] + floor_row[5:7]):
+                raise ValueError(f"backup楼层处理状态整数列无效：{floor_row!r}")
+            if floor_row[4] is not None and type(floor_row[4]) is not int:
+                raise ValueError(f"backup楼层处理状态vrows无效：{floor_row!r}")
+            if not isinstance(floor_row[7], str) or not floor_row[7] or not isinstance(floor_row[8], str) or not floor_row[8]:
+                raise ValueError(f"backup楼层处理状态文本列无效：{floor_row!r}")
+            floor_state = FloorProcessingState(*floor_row)
+
+        image_state: ImageReferenceState | None = None
+        if image_row is not None:
+            if type(image_row[0]) is not int or type(image_row[1]) is not int or type(image_row[4]) is not int:
+                raise ValueError(f"backup图片引用状态整数列无效：{image_row!r}")
+            if any(not isinstance(value, str) or not value for value in (image_row[2], image_row[3], image_row[5])):
+                raise ValueError(f"backup图片引用状态文本列无效：{image_row!r}")
+            image_state = ImageReferenceState(*image_row)
         return BackupProcessingSnapshot(
             change_state=change_state,
-            processing_state=(
-                None
-                if state_row is None
-                else self._backup_processing_state_from_row(state_row)
-            ),
             pending_image_urls=tuple(pending_image_urls),
+            floor_state=floor_state,
+            image_state=image_state,
+            image_reference_urls=tuple(image_reference_urls),
         )
 
     @staticmethod
@@ -926,43 +899,25 @@ class ThreadArchiveStore:
         with closing(self._connect_write()) as connection:
             with connection:
                 connection.execute("DELETE FROM backup_pending_images")
-                connection.execute("DELETE FROM backup_processing_state")
+                connection.execute("DELETE FROM backup_floor_processing_state")
+                connection.execute("DELETE FROM backup_image_reference_state")
+                connection.execute("DELETE FROM backup_image_references")
 
-    def commit_backup_processing_state(
-        self,
-        state: BackupProcessingState,
-        pending_image_urls: set[str],
-    ) -> bool:
+    def commit_floor_processing_state(self, state: FloorProcessingState) -> bool:
         self.require_exists()
         with closing(self._connect_write()) as connection:
             with connection:
                 change_state = self._read_archive_change_state(connection)
-                if (
-                    change_state.archive_revision
-                    != state.processed_archive_revision
-                    or change_state.floor_map_revision
-                    != state.processed_floor_map_revision
+                if change_state != ArchiveChangeState(
+                    state.processed_archive_revision,
+                    state.processed_floor_map_revision,
                 ):
                     return False
-                connection.execute("DELETE FROM backup_processing_state")
+                connection.execute("DELETE FROM backup_floor_processing_state")
                 connection.execute(
                     """
-                    INSERT INTO backup_processing_state (
-                        singleton,
-                        format_version,
-                        processed_archive_revision,
-                        processed_floor_map_revision,
-                        page_count,
-                        author_total_lou_count,
-                        post_overlays_fingerprint,
-                        post_version_selections_fingerprint,
-                        floor_map_format_version,
-                        floor_map_generation_version,
-                        floor_map_hash_algorithm,
-                        image_reference_extractor_version,
-                        completed_at
-                    )
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO backup_floor_processing_state VALUES
+                    (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state.format_version,
@@ -970,52 +925,65 @@ class ThreadArchiveStore:
                         state.processed_floor_map_revision,
                         state.page_count,
                         state.author_total_lou_count,
-                        state.post_overlays_fingerprint,
-                        state.post_version_selections_fingerprint,
                         state.floor_map_format_version,
                         state.floor_map_generation_version,
                         state.floor_map_hash_algorithm,
+                        state.completed_at,
+                    ),
+                )
+        return True
+
+    def commit_image_reference_state(
+        self,
+        state: ImageReferenceState,
+        image_reference_urls: set[str],
+        pending_image_urls: set[str],
+    ) -> bool:
+        if any(not url for url in image_reference_urls):
+            raise ValueError("backup图片引用URL不能为空。")
+        self.require_exists()
+        with closing(self._connect_write()) as connection:
+            with connection:
+                change_state = self._read_archive_change_state(connection)
+                if change_state.archive_revision != state.processed_archive_revision:
+                    return False
+                connection.execute("DELETE FROM backup_image_reference_state")
+                connection.execute(
+                    "INSERT INTO backup_image_reference_state VALUES (1, ?, ?, ?, ?, ?, ?)",
+                    (
+                        state.format_version,
+                        state.processed_archive_revision,
+                        state.post_overlays_fingerprint,
+                        state.post_version_selections_fingerprint,
                         state.image_reference_extractor_version,
                         state.completed_at,
                     ),
                 )
+                connection.execute("DELETE FROM backup_image_references")
+                connection.executemany(
+                    "INSERT INTO backup_image_references (url) VALUES (?)",
+                    [(url,) for url in sorted(image_reference_urls)],
+                )
                 self._replace_pending_images(connection, pending_image_urls)
         return True
 
-    def replace_backup_pending_images(
+    def replace_pending_images_for_image_state(
         self,
-        expected_state: BackupProcessingState,
+        expected_state: ImageReferenceState,
         pending_image_urls: set[str],
     ) -> bool:
         self.require_exists()
         with closing(self._connect_write()) as connection:
             with connection:
-                change_state = self._read_archive_change_state(connection)
-                if (
-                    change_state.archive_revision
-                    != expected_state.processed_archive_revision
-                    or change_state.floor_map_revision
-                    != expected_state.processed_floor_map_revision
-                ):
-                    return False
-                state_identity = cast(
-                    Optional[tuple[object, object, object, object]],
-                    connection.execute(
-                        """
-                        SELECT
-                            format_version,
-                            processed_archive_revision,
-                            processed_floor_map_revision,
-                            completed_at
-                        FROM backup_processing_state
-                        WHERE singleton = 1
-                        """
-                    ).fetchone(),
-                )
-                if state_identity != (
+                row = connection.execute(
+                    """
+                    SELECT format_version, processed_archive_revision, completed_at
+                    FROM backup_image_reference_state WHERE singleton = 1
+                    """
+                ).fetchone()
+                if row != (
                     expected_state.format_version,
                     expected_state.processed_archive_revision,
-                    expected_state.processed_floor_map_revision,
                     expected_state.completed_at,
                 ):
                     return False

@@ -955,7 +955,7 @@ class WebDatabaseViewerTest:
         assert {"forum_threads", "image_index", "archive:101_201"} <= ids
         by_id = {item["id"]: item for item in payload["items"]}
         assert by_id["forum_threads"]["relativePath"] == "forum_threads.sqlite3"
-        assert by_id["archive:101_201"]["tableCount"] == 12
+        assert by_id["archive:101_201"]["tableCount"] == 14
 
     def test_databases_route_uses_cache_until_refresh(
         self,
@@ -1018,8 +1018,8 @@ class WebDatabaseViewerTest:
         after_items = {
             item["id"]: item for item in after_response.json()["items"]
         }
-        assert before_items["archive:101_201"]["tableCount"] == 11
-        assert after_items["archive:101_201"]["tableCount"] == 12
+        assert before_items["archive:101_201"]["tableCount"] == 13
+        assert after_items["archive:101_201"]["tableCount"] == 14
 
     def test_database_schema_and_rows_support_search_sort_and_detail(
         self,
@@ -1045,7 +1045,9 @@ class WebDatabaseViewerTest:
             "page_snapshots",
             "post_versions",
             "archive_change_state",
-            "backup_processing_state",
+            "backup_floor_processing_state",
+            "backup_image_reference_state",
+            "backup_image_references",
             "backup_pending_images",
             "post_overlays",
         } <= table_names
