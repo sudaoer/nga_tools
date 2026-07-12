@@ -11,8 +11,10 @@ from nga_tools.commands.backup import (
 from nga_tools.commands.ankebak import backup_auto
 from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
 from nga_tools.commands.image import image_verify
+from nga_tools.commands.replay import replay_serve
 from nga_tools.commands.types import CommandHandler
 from nga_tools.commands.web import web_serve
+from nga_tools.replay.server import DEFAULT_REPLAY_HOST, DEFAULT_REPLAY_PORT
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 
 PROGRAM_USAGE = "python main.py"
@@ -172,6 +174,24 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": str,
         "metavar": "PATH",
         "help": "前端dist目录",
+    },
+    "source_output": {
+        "flags": ("--source-output",),
+        "type": str,
+        "metavar": "PATH",
+        "help": "只读重放语料所在的output目录",
+    },
+    "thread_config": {
+        "flags": ("--thread-config",),
+        "type": str,
+        "metavar": "PATH",
+        "help": "重放语料对应的帖子配置JSON路径",
+    },
+    "profile": {
+        "flags": ("--profile",),
+        "type": str,
+        "metavar": "PATH",
+        "help": "重放延迟、带宽与最大并发配置JSON路径",
     },
 }
 
@@ -432,6 +452,48 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "host": DEFAULT_WEB_HOST,
                 "port": DEFAULT_WEB_PORT,
                 "static_dir": DEFAULT_WEB_STATIC_DIR,
+            },
+            "positive": ["port"],
+        },
+    },
+    "replay": {
+        "serve": {
+            "handler": replay_serve,
+            "summary": "从现有归档和图片启动只读NGA重放服务",
+            "usage": (
+                f"{PROGRAM_USAGE} replay serve --source-output PATH "
+                "--profile PATH [--thread-config PATH] "
+                "[--host HOST] [--port PORT]"
+            ),
+            "examples": [
+                (
+                    f"{PROGRAM_USAGE} replay serve --source-output output "
+                    "--profile replay_profile.json"
+                ),
+                (
+                    f"{PROGRAM_USAGE} replay serve --source-output output "
+                    "--thread-config thread_configs.json "
+                    "--profile replay_profile.json --port 8765"
+                ),
+            ],
+            "notes": [
+                "启动时冻结每页最新响应并将API分页预载入内存。",
+                "源SQLite以immutable只读方式打开，要求WAL已完成检查点。",
+                "图片文件仅流式读取，不修改源数据库或图片内容。",
+                "缺少原帖归档时会根据楼层映射合成最小原帖分页。",
+                "默认只监听本机地址；此命令不会访问NGA或其他公网地址。",
+            ],
+            "args": [
+                "source_output",
+                "thread_config",
+                "profile",
+                "host",
+                "port",
+            ],
+            "required": ["source_output", "profile"],
+            "defaults": {
+                "host": DEFAULT_REPLAY_HOST,
+                "port": DEFAULT_REPLAY_PORT,
             },
             "positive": ["port"],
         },

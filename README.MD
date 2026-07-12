@@ -165,6 +165,58 @@ pixi run ankebak
 批量备份遇到 NGA 返回“帖子被设为隐藏”时会记录警告并计为隐藏跳过；如果本批
 只有这类跳过，命令仍以 0 退出。其他异常仍会使批量命令最终以非 0 退出。
 
+### 离线重放服务
+
+已有备份可以作为只读语料启动本地 NGA 重放服务，用于后续在不访问公网的
+情况下压测完整抓取路径。先复制并调整限速配置：
+
+```powershell
+Copy-Item replay_profile.example.json replay_profile.json
+pixi run python main.py replay serve --source-output output --profile replay_profile.json
+```
+
+`--thread-config` 默认使用 `config.json` 中的 `thread_config_file`，也可以显式
+指定：
+
+```powershell
+pixi run python main.py replay serve --source-output output `
+  --thread-config thread_configs.json --profile replay_profile.json --port 8765
+```
+
+服务启动时以 SQLite `immutable` 只读模式打开各帖 `archive.sqlite3` 和全局
+`image_index.sqlite3`，冻结每页最新响应并把 API 分页预载入内存；图片仍从
+`images_unique/` 流式读取。源数据库必须已经完成 WAL 检查点；如果 WAL 仍有
+内容，说明快照尚未静止，服务会拒绝启动。启动后源目录应保持不变，图片若被
+删除、替换或修改，该 URL 会按缺失处理。服务不会访问 NGA，也不会修改源数据
+库或图片内容。
+
+当 `thread_configs.json` 中的帖子只有 `tid_aid` 归档而没有 `tid_all` 归档时，
+服务会根据楼层映射生成可供完整抓取流程消费的最小原帖分页。已知作者楼会按
+`pid` 和作者身份放回对应原楼层，但不复制正文；已恢复的匿名楼会保留正文，其余
+楼层只是空正文占位。因此这部分只适合测量分页数量、请求、归档写入和基础派生
+处理开销，不代表真实原帖正文或图片负载。如果存在
+`tid_all/archive.sqlite3`，则优先原样重放其中的最新分页。
+
+限速配置分为 `api` 和 `image` 两组：`latency_ms` 是每个请求的固定首包延迟，
+`bandwidth_bytes_per_second` 是该组所有并发请求共享的全局带宽，设为 `0` 表示
+不限带宽；`max_inflight` 是该组最大在途请求数，`chunk_bytes` 是流式发送块
+大小。限速不加入随机抖动，因此同一语料和配置适合做稳定的 A/B 对比。
+
+重放端点如下：
+
+- `POST /app_api.php?__lib=post&__act=list`：按 `tid`、`page` 和可选
+  `authorid` 返回帖子分页。
+- `GET /__replay__/image?url=<原始图片URL>`：按全局图片索引返回图片。
+- `GET /__replay__/health`：健康状态、语料 ID、限速配置 ID 和在途请求数。
+- `GET /__replay__/manifest`：语料范围、分页与图片统计以及完整限速配置。
+- `GET /__replay__/metrics`：API/图片请求数、字节数、状态码和等待耗时。
+- `POST /__replay__/reset`：无在途请求时清空指标并重置带宽时间线。
+
+`corpus_id` 标识本次冻结的分页、楼层映射和图片索引状态，`profile_id` 标识规范化
+后的限速配置。基准结果应同时记录这两个 ID。当前命令只实现重放服务；把备份
+进程的 API 和图片请求改接到该服务、选择初始状态及记录整轮耗时属于模拟备份
+端的实现。
+
 ### 运行日志
 
 警告详情仍写入每帖输出目录的 `warnings.log`，每次帖子任务开始时覆盖旧内容。

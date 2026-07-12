@@ -1,0 +1,13 @@
+{
+  "api": {
+    "latency_ms": 150,
+    "bandwidth_bytes_per_second": 2097152,
+    "max_inflight": 4
+  },
+  "image": {
+    "latency_ms": 100,
+    "bandwidth_bytes_per_second": 20971520,
+    "max_inflight": 50
+  },
+  "chunk_bytes": 65536
+}
