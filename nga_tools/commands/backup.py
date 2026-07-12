@@ -5,8 +5,6 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Protocol
 
-import requests
-
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.archive import backup_thread, backup_thread_sub
 from nga_tools.backup.image_validation import (
@@ -36,7 +34,6 @@ from nga_tools.forum.thread_configs import (
     thread_config_aid,
     thread_config_tid,
 )
-from nga_tools.ngaclient.session_context import use_shared_api_session
 from nga_tools.timing import time_section, use_timing_log
 
 
@@ -84,21 +81,6 @@ def _use_thread_output_logs(
         yield
 
 
-def _create_shared_api_session() -> requests.Session:
-    app_config = get_config()
-    session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": app_config.user_agent,
-            "Cookie": (
-                f"ngaPassportUid={app_config.nga_passport_uid}; "
-                f"ngaPassportCid={app_config.nga_passport_cid};"
-            ),
-        }
-    )
-    return session
-
-
 def _run_backup_fetch_batch(
     args: CommandArgs,
     *,
@@ -126,18 +108,17 @@ def _run_backup_fetch_batch(
             else:
                 backup_func(tid, aid, write_json=write_json)
 
-    with use_shared_api_session(_create_shared_api_session()):
-        run_thread_config_batch(
-            action=action,
-            progress_text=progress_text,
-            failure_text="备份失败",
-            summary_name="备份",
-            worker_count=worker_count,
-            write_timing_log=True,
-            timing_log_enabled=app_config.timing_log_enabled,
-            task_name=task_name,
-            write_batch_timing_log=True,
-        )
+    run_thread_config_batch(
+        action=action,
+        progress_text=progress_text,
+        failure_text="备份失败",
+        summary_name="备份",
+        worker_count=worker_count,
+        write_timing_log=True,
+        timing_log_enabled=app_config.timing_log_enabled,
+        task_name=task_name,
+        write_batch_timing_log=True,
+    )
 
 
 def backup_all(args: CommandArgs) -> None:

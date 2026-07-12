@@ -19,7 +19,6 @@ from nga_tools.commands.forum import sync_default_forum_watch
 from nga_tools.commands.network import configure_network_limits_from_args
 from nga_tools.commands.thread_batch import run_thread_config_batch
 from nga_tools.commands.types import CommandArgs, optional_bool, optional_int
-from nga_tools.config import get_config
 from nga_tools.console import report_info
 from nga_tools.forum.ankebak_state import (
     AnkebakStateStore,
@@ -33,8 +32,6 @@ from nga_tools.forum.thread_configs import (
     thread_config_tid,
 )
 from nga_tools.ngaclient.client import ForumThread
-from nga_tools.ngaclient.session_context import use_shared_api_session
-import requests
 
 
 AnkebakMode = Literal["full", "sub", "maintenance"]
@@ -110,21 +107,6 @@ def _jobs_for_threads(
             skipped_count += 1
 
     return jobs, skipped_count
-
-
-def _create_shared_api_session() -> requests.Session:
-    app_config = get_config()
-    session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": app_config.user_agent,
-            "Cookie": (
-                f"ngaPassportUid={app_config.nga_passport_uid}; "
-                f"ngaPassportCid={app_config.nga_passport_cid};"
-            ),
-        }
-    )
-    return session
 
 
 def backup_auto(args: CommandArgs) -> None:
@@ -221,21 +203,20 @@ def backup_auto(args: CommandArgs) -> None:
             full_backup=job.mode == "full",
         )
 
-    with use_shared_api_session(_create_shared_api_session()):
-        run_thread_config_batch(
-            action=action,
-            progress_text="正在执行智能备份",
-            failure_text="ankebak失败",
-            summary_name="ankebak",
-            worker_count=_worker_count(args, app_config.backup_configs_workers),
-            write_timing_log=True,
-            timing_log_enabled=app_config.timing_log_enabled,
-            task_name="backup auto",
-            write_batch_timing_log=True,
-            thread_configs=[job.thread_config for job in jobs],
-            command_started_at=command_started_at,
-            command_wall_start=command_wall_start,
-            forum_sync_seconds=forum_sync_seconds,
-            planning_seconds=planning_seconds,
-            water_level_seconds=water_level_seconds,
-        )
+    run_thread_config_batch(
+        action=action,
+        progress_text="正在执行智能备份",
+        failure_text="ankebak失败",
+        summary_name="ankebak",
+        worker_count=_worker_count(args, app_config.backup_configs_workers),
+        write_timing_log=True,
+        timing_log_enabled=app_config.timing_log_enabled,
+        task_name="backup auto",
+        write_batch_timing_log=True,
+        thread_configs=[job.thread_config for job in jobs],
+        command_started_at=command_started_at,
+        command_wall_start=command_wall_start,
+        forum_sync_seconds=forum_sync_seconds,
+        planning_seconds=planning_seconds,
+        water_level_seconds=water_level_seconds,
+    )
