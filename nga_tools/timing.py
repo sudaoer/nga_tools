@@ -269,6 +269,10 @@ def write_batch_timing_summary(
     snapshots: Iterable[TimingSnapshot],
     thread_failure_categories: Counter[str],
     expected_thread_failure_categories: Counter[str] | None = None,
+    forum_sync_seconds: float | None = None,
+    planning_seconds: float | None = None,
+    water_level_seconds: float | None = None,
+    batch_execution_seconds: float | None = None,
 ) -> None:
     snapshot_list = list(snapshots)
     image_failure_categories: Counter[str] = Counter()
@@ -331,6 +335,30 @@ def write_batch_timing_summary(
                 lines.append(f"- {reason}: {count}")
     else:
         lines.append("不适用（本批次未执行处理状态复用）")
+
+    has_command_phases = (
+        forum_sync_seconds is not None
+        or planning_seconds is not None
+        or water_level_seconds is not None
+    )
+    if has_command_phases:
+        lines.extend(["", "命令阶段耗时："])
+        if forum_sync_seconds is not None:
+            lines.append(f"- 论坛同步：{_format_duration(forum_sync_seconds)}")
+        planning_line = (
+            f"- 任务选择：{_format_duration(planning_seconds)}"
+            if planning_seconds is not None
+            else "- 任务选择：不适用"
+        )
+        if water_level_seconds is not None:
+            planning_line += f"（含水位读取 {_format_duration(water_level_seconds)}）"
+        lines.append(planning_line)
+        batch_execution_value = (
+            batch_execution_seconds
+            if batch_execution_seconds is not None
+            else wall_seconds
+        )
+        lines.append(f"- 批次执行：{_format_duration(batch_execution_value)}")
 
     lines.extend(["", "阶段耗时（每帖同名阶段累计）："])
     durations_by_stage = _summed_stage_durations_by_thread(snapshot_list)

@@ -255,6 +255,11 @@ def run_thread_config_batch(
     lock_thread_output: bool = True,
     write_batch_timing_log: bool = False,
     thread_configs: list[ThreadConfig] | None = None,
+    command_started_at: datetime | None = None,
+    command_wall_start: float | None = None,
+    forum_sync_seconds: float | None = None,
+    planning_seconds: float | None = None,
+    water_level_seconds: float | None = None,
 ) -> ThreadBatchResult:
     if worker_count <= 0:
         raise ValueError("workers必须大于0。")
@@ -315,12 +320,22 @@ def run_thread_config_batch(
             )
 
     batch_wall_seconds = perf_counter() - batch_wall_start
+    effective_started_at = (
+        command_started_at
+        if command_started_at is not None
+        else batch_started_at
+    )
+    effective_wall_seconds = (
+        perf_counter() - command_wall_start
+        if command_wall_start is not None
+        else batch_wall_seconds
+    )
     if batch_collector is not None:
         write_batch_timing_summary(
             batch_timing_log_path(),
             task_name=effective_task_name,
-            started_at=batch_started_at,
-            wall_seconds=batch_wall_seconds,
+            started_at=effective_started_at,
+            wall_seconds=effective_wall_seconds,
             total_threads=len(selected_thread_configs),
             snapshots=batch_collector.snapshots(),
             thread_failure_categories=Counter(
@@ -332,6 +347,14 @@ def run_thread_config_batch(
                 "hidden_thread"
                 for _, error in failures
                 if is_hidden_thread_error(error)
+            ),
+            forum_sync_seconds=forum_sync_seconds,
+            planning_seconds=planning_seconds,
+            water_level_seconds=water_level_seconds,
+            batch_execution_seconds=(
+                batch_wall_seconds
+                if command_wall_start is not None
+                else None
             ),
         )
 

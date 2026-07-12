@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from time import perf_counter
 from typing import Literal
 
 from nga_tools.backup.archive import (
@@ -21,6 +22,7 @@ from nga_tools.commands.types import CommandArgs, optional_bool, optional_int
 from nga_tools.console import report_info
 from nga_tools.forum.ankebak_state import (
     AnkebakStateStore,
+    AnkebakThreadState,
     ankebak_target_key,
 )
 from nga_tools.forum.thread_configs import (
@@ -51,12 +53,11 @@ def _worker_count(args: CommandArgs, default_worker_count: int) -> int:
 def _jobs_for_threads(
     thread_configs: list[ThreadConfig],
     fresh_threads: tuple[ForumThread, ...],
-    state_store: AnkebakStateStore,
+    states: dict[str, AnkebakThreadState],
     *,
     now: datetime,
     full_backup_interval_hours: int,
 ) -> tuple[list[AnkebakJob], int]:
-    states = state_store.load_states()
     fresh_by_tid = {thread["tid"]: thread for thread in fresh_threads}
     jobs: list[AnkebakJob] = []
     skipped_count = 0
@@ -109,19 +110,32 @@ def _jobs_for_threads(
 
 
 def backup_auto(args: CommandArgs) -> None:
+    command_started_at = datetime.now().astimezone()
+    command_wall_start = perf_counter()
+
     app_config = configure_network_limits_from_args(args)
+
+    forum_sync_start = perf_counter()
     forum_result = sync_default_forum_watch(args)
+    forum_sync_seconds = perf_counter() - forum_sync_start
+
     thread_configs = NGAThreadConfigs().get_thread_configs()
     if not thread_configs:
         report_info("没有找到任何帖子配置。")
         return
 
+    planning_start = perf_counter()
     now = datetime.now().astimezone()
     state_store = AnkebakStateStore()
+
+    water_level_start = perf_counter()
+    states = state_store.load_states()
+    water_level_seconds = perf_counter() - water_level_start
+
     jobs, skipped_count = _jobs_for_threads(
         thread_configs,
         forum_result.fresh_threads,
-        state_store,
+        states,
         now=now,
         full_backup_interval_hours=(
             app_config.ankebak_full_backup_interval_hours
@@ -147,6 +161,7 @@ def backup_auto(args: CommandArgs) -> None:
         f"本地检查失败{planning_failure_count}个，"
         f"无变化跳过{skipped_count}个。"
     )
+    planning_seconds = perf_counter() - planning_start
     if not jobs:
         report_info("没有需要执行的ankebak任务。")
         return
@@ -199,4 +214,9 @@ def backup_auto(args: CommandArgs) -> None:
         task_name="backup auto",
         write_batch_timing_log=True,
         thread_configs=[job.thread_config for job in jobs],
+        command_started_at=command_started_at,
+        command_wall_start=command_wall_start,
+        forum_sync_seconds=forum_sync_seconds,
+        planning_seconds=planning_seconds,
+        water_level_seconds=water_level_seconds,
     )

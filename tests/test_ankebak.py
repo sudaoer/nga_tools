@@ -125,7 +125,7 @@ class AnkebakJobSelectionTest:
         jobs, skipped = _jobs_for_threads(
             [_thread_config()],
             (_forum_thread(),),
-            store,
+            store.load_states(),
             now=datetime(2026, 7, 11, tzinfo=timezone.utc),
             full_backup_interval_hours=168,
         )
@@ -154,7 +154,7 @@ class AnkebakJobSelectionTest:
             jobs, skipped = _jobs_for_threads(
                 [_thread_config()],
                 (_forum_thread(),),
-                store,
+                store.load_states(),
                 now=completed_at + timedelta(hours=24),
                 full_backup_interval_hours=168,
             )
@@ -176,7 +176,7 @@ class AnkebakJobSelectionTest:
         jobs, skipped = _jobs_for_threads(
             [_thread_config()],
             (_forum_thread(replies=101, lastpost=3000),),
-            store,
+            store.load_states(),
             now=completed_at + timedelta(hours=24),
             full_backup_interval_hours=168,
         )
@@ -206,7 +206,7 @@ class AnkebakJobSelectionTest:
             jobs, skipped = _jobs_for_threads(
                 [_thread_config(aid=None)],
                 (fresh_thread,),
-                store,
+                store.load_states(),
                 now=completed_at + timedelta(hours=24),
                 full_backup_interval_hours=168,
             )
@@ -236,7 +236,7 @@ class AnkebakJobSelectionTest:
             jobs, skipped = _jobs_for_threads(
                 [_thread_config()],
                 (),
-                store,
+                store.load_states(),
                 now=completed_at + timedelta(hours=24),
                 full_backup_interval_hours=168,
             )
