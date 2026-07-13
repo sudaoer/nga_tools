@@ -632,24 +632,37 @@ def _apply_original_page(
 
 def _record_pending_scan_metrics(
     *,
-    sequential_pages: int,
-    zero_hit_pages: int,
+    targeted_pages: int,
+    range_pages: int,
     pid_requests: int,
     pid_hits: int,
-    skipped_pages: int,
     recovered_author_lous: int,
     peak_page_recovery: int,
     fallback_reason: str,
 ) -> None:
-    record_timing_metric("楼层映射顺序原帖页数", sequential_pages)
-    record_timing_metric("楼层映射零命中原帖页数", zero_hit_pages)
+    record_timing_metric("楼层映射PID定点原帖页数", targeted_pages)
+    record_timing_metric("楼层映射回退顺扫原帖页数", range_pages)
     record_timing_metric("楼层映射PID定位请求数", pid_requests)
     record_timing_metric("楼层映射PID定位命中数", pid_hits)
-    record_timing_metric("楼层映射PID跳过页数", skipped_pages)
     record_timing_metric("楼层映射本次恢复作者楼数", recovered_author_lous)
-    record_timing_metric("楼层映射单页最多恢复作者楼数", peak_page_recovery)
-    record_timing_metric("楼层映射PID定位回退数", int(fallback_reason != "none"))
+    record_timing_metric("楼层映射PID单页最多恢复作者楼数", peak_page_recovery)
+    record_timing_metric(
+        "楼层映射PID定位回退数",
+        int(pid_requests > 0 and fallback_reason != "none"),
+    )
     record_timing_label("楼层映射PID定位结果", fallback_reason)
+
+
+def _spaced_author_lous(author_lous: Sequence[int], count: int) -> list[int]:
+    if count <= 0:
+        raise ValueError("PID定位批次大小必须大于0。")
+    if len(author_lous) <= count:
+        return list(author_lous)
+    indices = [
+        ((2 * index + 1) * len(author_lous)) // (2 * count)
+        for index in range(count)
+    ]
+    return [author_lous[index] for index in dict.fromkeys(indices)]
 
 
 def _scan_pending_author_pages(
@@ -671,9 +684,7 @@ def _scan_pending_author_pages(
             if page_number not in scanned_pages
         )
     )
-    page_index = {
-        page_number: index for index, page_number in enumerate(pages_to_scan)
-    }
+    pages_in_scan = set(pages_to_scan)
     target_author_lous = {
         author_lou
         for author_lous in pid_to_author_lous.values()
@@ -693,94 +704,64 @@ def _scan_pending_author_pages(
     next_seen_original_lous = set(seen_original_lous)
     next_original_posts_by_lou = dict(original_posts_by_lou)
     next_original_lou_by_author_lou = dict(original_lou_by_author_lou)
-    sequential_pages = 0
-    zero_hit_pages = 0
+    targeted_pages = 0
+    range_pages = 0
     pid_requests = 0
     pid_hits = 0
-    skipped_pages = 0
     recovered_author_lous = 0
     peak_page_recovery = 0
     fallback_reason = "none"
-    expected_pid: int | None = None
-    next_index = 0
-    scan_complete = False
+    batch_size = get_api_concurrency()
 
     report_progress(
-        f"准备顺序扫描原帖{len(pages_to_scan)}页，"
+        f"准备构建原帖楼层映射，候选{len(pages_to_scan)}页，"
         f"匹配{len(target_author_lous)}个未映射楼层",
         completed=0,
         total=len(pages_to_scan),
     )
 
     try:
-        with time_section("原帖页面PID跳页扫描"):
-            while next_index < len(pages_to_scan) and not scan_complete:
-                restart_from_redirect = False
-                page_iterator = client.iter_pages(
-                    tid,
-                    None,
-                    pages_to_scan[next_index:],
+        with time_section("原帖页面PID定点扫描"):
+            if len(target_author_lous) >= len(pages_to_scan):
+                fallback_reason = "request_bound"
+            else:
+                probe_target_pages = min(
+                    128,
+                    max(batch_size * 2, len(pages_to_scan) // 20),
                 )
-                try:
-                    for page_number, page_data in page_iterator:
-                        current_index = page_index[page_number]
-                        next_index = current_index + 1
-                        next_scanned_pages.add(page_number)
-                        sequential_pages += 1
-                        application = _apply_original_page(
-                            page_data,
-                            page_number,
-                            next_seen_original_lous,
-                            next_original_posts_by_lou,
-                            pid_to_author_lous,
-                            next_original_lou_by_author_lou,
-                        )
-                        newly_matched = application.newly_matched_author_lous
-                        recovered_author_lous += newly_matched
-                        peak_page_recovery = max(peak_page_recovery, newly_matched)
+                direct_request_bound = 2 * len(target_author_lous) <= len(
+                    pages_to_scan
+                )
+                direct_recovered_author_lous = 0
 
-                        if expected_pid is not None:
-                            if expected_pid not in application.post_pids:
-                                fallback_reason = "target_pid_missing"
-                                break
-                            pid_hits += 1
-                            expected_pid = None
+                while True:
+                    unresolved_author_lous = sorted(
+                        author_lou
+                        for author_lou in target_author_lous
+                        if author_lou not in next_original_lou_by_author_lou
+                    )
+                    if not unresolved_author_lous:
+                        break
 
-                        newly_resolved_target_count = sum(
-                            author_lou in next_original_lou_by_author_lou
-                            for author_lou in target_author_lous
-                        )
-                        matched_count = (
-                            author_post_count
-                            - len(target_author_lous)
-                            + newly_resolved_target_count
-                        )
-                        report_progress(
-                            f"已处理原帖第{page_number}页，"
-                            f"已匹配{matched_count}/{author_post_count}楼",
-                            completed=current_index + 1,
-                            total=len(pages_to_scan),
-                        )
-                        unresolved_author_lous = sorted(
-                            author_lou
-                            for author_lou in target_author_lous
-                            if author_lou not in next_original_lou_by_author_lou
-                        )
-                        if not unresolved_author_lous:
-                            scan_complete = True
-                            break
-                        if newly_matched > 0:
-                            continue
+                    selected_author_lous = _spaced_author_lous(
+                        unresolved_author_lous,
+                        batch_size,
+                    )
+                    selected_pid_by_author_lou = {
+                        author_lou: author_lou_to_pid[author_lou]
+                        for author_lou in selected_author_lous
+                    }
+                    selected_pids = list(selected_pid_by_author_lou.values())
+                    pid_requests += len(selected_pids)
+                    try:
+                        targets = client.get_pid_redirect_targets(selected_pids)
+                    except requests.RequestException as error:
+                        fallback_reason = f"request_error:{type(error).__name__}"
+                        break
 
-                        zero_hit_pages += 1
-                        next_author_lou = unresolved_author_lous[0]
-                        next_pid = author_lou_to_pid[next_author_lou]
-                        pid_requests += 1
-                        try:
-                            target = client.get_pid_redirect_target(next_pid)
-                        except requests.RequestException as error:
-                            fallback_reason = f"request_error:{type(error).__name__}"
-                            break
+                    expected_pids_by_page: dict[int, set[int]] = {}
+                    for pid in selected_pids:
+                        target = targets.get(pid)
                         if target is None:
                             fallback_reason = "no_redirect"
                             break
@@ -790,49 +771,123 @@ def _scan_pending_author_pages(
                         if target.page_number < 1 or target.page_number > page_count:
                             fallback_reason = "invalid_page"
                             break
-                        target_index = page_index.get(target.page_number)
-                        if target_index is None:
+                        if target.page_number not in pages_in_scan:
                             fallback_reason = "target_outside_scan"
                             break
-                        if target_index <= current_index:
-                            fallback_reason = "non_forward_target"
+                        if target.page_number in next_scanned_pages:
+                            fallback_reason = "target_page_already_scanned"
                             break
-
-                        jump_distance = target_index - current_index - 1
-                        if jump_distance <= get_api_concurrency() * 2:
-                            fallback_reason = "jump_not_profitable"
-                            break
-                        skipped_pages += jump_distance
-                        expected_pid = next_pid
-                        next_index = target_index
-                        restart_from_redirect = True
+                        expected_pids_by_page.setdefault(
+                            target.page_number,
+                            set(),
+                        ).add(pid)
+                    if fallback_reason != "none":
                         break
-                finally:
-                    page_iterator.close()
 
-                if scan_complete:
-                    break
-                if fallback_reason != "none":
+                    target_pages = sorted(expected_pids_by_page)
+                    page_iterator = client.iter_pages(tid, None, target_pages)
+                    try:
+                        for page_number, page_data in page_iterator:
+                            next_scanned_pages.add(page_number)
+                            targeted_pages += 1
+                            application = _apply_original_page(
+                                page_data,
+                                page_number,
+                                next_seen_original_lous,
+                                next_original_posts_by_lou,
+                                pid_to_author_lous,
+                                next_original_lou_by_author_lou,
+                            )
+                            expected_pids = expected_pids_by_page[page_number]
+                            matched_expected_pids = (
+                                expected_pids & application.post_pids
+                            )
+                            pid_hits += len(matched_expected_pids)
+                            if matched_expected_pids != expected_pids:
+                                fallback_reason = "target_pid_missing"
+                            newly_matched = application.newly_matched_author_lous
+                            direct_recovered_author_lous += newly_matched
+                            recovered_author_lous += newly_matched
+                            peak_page_recovery = max(
+                                peak_page_recovery,
+                                newly_matched,
+                            )
+                            matched_count = (
+                                author_post_count
+                                - len(target_author_lous)
+                                + sum(
+                                    author_lou in next_original_lou_by_author_lou
+                                    for author_lou in target_author_lous
+                                )
+                            )
+                            report_progress(
+                                f"PID定点处理原帖第{page_number}页，"
+                                f"已匹配{matched_count}/{author_post_count}楼",
+                                completed=len(next_scanned_pages),
+                                total=len(pages_to_scan),
+                            )
+                    finally:
+                        page_iterator.close()
+                    if fallback_reason != "none":
+                        break
+
+                    unresolved_count = sum(
+                        author_lou not in next_original_lou_by_author_lou
+                        for author_lou in target_author_lous
+                    )
+                    if unresolved_count == 0:
+                        break
+                    if direct_request_bound or targeted_pages < probe_target_pages:
+                        continue
+
+                    recovery_per_page = (
+                        direct_recovered_author_lous / targeted_pages
+                    )
+                    locator_requests_per_page = pid_requests / targeted_pages
+                    estimated_target_pages = (
+                        unresolved_count / recovery_per_page
+                    )
+                    estimated_direct_requests = estimated_target_pages * (
+                        1.0 + locator_requests_per_page
+                    )
+                    remaining_range_pages = sum(
+                        page_number not in next_scanned_pages
+                        for page_number in pages_to_scan
+                    )
+                    if estimated_direct_requests >= remaining_range_pages * 1.05:
+                        fallback_reason = "probe_cost"
+                        break
+
+            if fallback_reason != "none":
+                normal_cost_fallback = fallback_reason in {
+                    "request_bound",
+                    "probe_cost",
+                }
+                message = (
+                    "PID定点取页成本不低于顺扫，回退原帖范围扫描："
+                    if normal_cost_fallback
+                    else "PID定位不可用，回退原帖范围扫描："
+                )
+                if normal_cost_fallback:
+                    report_info(f"{message}tid={tid}，原因={fallback_reason}。")
+                else:
                     report_warning(
                         WarningCategory.FLOOR_MAP,
-                        "PID定位不可用，回退原帖范围扫描："
-                        f"tid={tid}，原因={fallback_reason}。",
+                        f"{message}tid={tid}，原因={fallback_reason}。",
                     )
-                    _scan_original_pages(
-                        client,
-                        tid,
-                        pages_to_scan,
-                        next_scanned_pages,
-                        next_seen_original_lous,
-                        next_original_posts_by_lou,
-                        pid_to_author_lous,
-                        next_original_lou_by_author_lou,
-                        author_post_count,
-                    )
-                    scan_complete = True
-                    break
-                if not restart_from_redirect:
-                    break
+                scanned_before_range = len(next_scanned_pages)
+                _scan_original_pages(
+                    client,
+                    tid,
+                    pages_to_scan,
+                    next_scanned_pages,
+                    next_seen_original_lous,
+                    next_original_posts_by_lou,
+                    pid_to_author_lous,
+                    next_original_lou_by_author_lou,
+                    author_post_count,
+                )
+                range_pages = len(next_scanned_pages) - scanned_before_range
     finally:
         recovered_author_lous = max(
             recovered_author_lous,
@@ -843,11 +898,10 @@ def _scan_pending_author_pages(
             - initially_matched_target_count,
         )
         _record_pending_scan_metrics(
-            sequential_pages=sequential_pages,
-            zero_hit_pages=zero_hit_pages,
+            targeted_pages=targeted_pages,
+            range_pages=range_pages,
             pid_requests=pid_requests,
             pid_hits=pid_hits,
-            skipped_pages=skipped_pages,
             recovered_author_lous=recovered_author_lous,
             peak_page_recovery=peak_page_recovery,
             fallback_reason=fallback_reason,
@@ -863,7 +917,7 @@ def _scan_pending_author_pages(
     original_lou_by_author_lou.update(next_original_lou_by_author_lou)
     report_progress(
         "原帖作者楼层扫描完成",
-        completed=min(next_index, len(pages_to_scan)),
+        completed=len(next_scanned_pages),
         total=len(pages_to_scan),
     )
 
