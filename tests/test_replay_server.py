@@ -248,6 +248,14 @@ class ReplayCorpusTest:
         assert corpus.image(MISSING_IMAGE_URL) is None
         assert corpus.manifest.exact_page_count == 2
         assert corpus.manifest.synthetic_thread_count == 1
+        assert corpus.manifest.locatable_pid_count == 2
+        first_pid_target = corpus.pid_target(100)
+        assert first_pid_target is not None
+        assert first_pid_target.tid == 123
+        assert first_pid_target.page_number == 1
+        second_pid_target = corpus.pid_target(101)
+        assert second_pid_target is not None
+        assert second_pid_target.page_number == 2
         assert corpus.manifest.image_mapping_count == 2
         assert corpus.manifest.available_image_mapping_count == 1
         assert corpus.manifest.unavailable_image_mapping_count == 1
@@ -325,6 +333,23 @@ class ReplayServerTest:
         assert synthetic_response.status_code == 200
         assert synthetic_response.json()["result"][-1]["pid"] == 101
 
+        redirect_response = client.get(
+            "/read.php",
+            params={"pid": "101", "opt": "128"},
+            follow_redirects=False,
+        )
+        assert redirect_response.status_code == 302
+        assert redirect_response.headers["location"] == (
+            "/read.php?tid=123&page=2#pid101Anchor"
+        )
+        missing_redirect_response = client.get(
+            "/read.php",
+            params={"pid": "999", "opt": "128"},
+            follow_redirects=False,
+        )
+        assert missing_redirect_response.status_code == 200
+        assert "location" not in missing_redirect_response.headers
+
         missing_page_response = client.post(
             "/app_api.php?__lib=post&__act=list",
             data={"tid": "123", "authorid": "456", "page": "3"},
@@ -349,9 +374,14 @@ class ReplayServerTest:
         assert manifest["profile_id"] == _unlimited_profile().profile_id
 
         metrics = client.get("/__replay__/metrics").json()
-        assert metrics["api"]["requests"] == 3
+        assert metrics["api"]["requests"] == 5
         assert metrics["api"]["synthetic_original_requests"] == 1
-        assert metrics["api"]["statuses"] == {"200": 3}
+        assert metrics["api"]["statuses"] == {"200": 4, "302": 1}
+        assert metrics["api"]["operations"] == {
+            "author_post_list": 1,
+            "original_post_list": 1,
+            "pid_redirect": 2,
+        }
         assert metrics["image"]["requests"] == 2
         assert metrics["image"]["statuses"] == {"200": 1, "404": 1}
 

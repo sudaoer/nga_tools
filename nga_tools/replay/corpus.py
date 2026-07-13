@@ -12,7 +12,7 @@ from typing import Optional, Protocol, TypeAlias, cast
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.core.sqlite import configure_readonly_connection
 
-_CORPUS_FORMAT_VERSION = 4
+_CORPUS_FORMAT_VERSION = 5
 
 PageKey: TypeAlias = tuple[int, Optional[int], int]
 ProgressCallback: TypeAlias = Callable[[int, int, str], None]
@@ -32,6 +32,12 @@ class ReplayCorpusError(RuntimeError):
 class ReplayPage:
     payload: bytes
     synthetic_original: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayPidTarget:
+    tid: int
+    page_number: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +139,7 @@ class ReplayManifest:
     exact_page_count: int
     exact_page_payload_bytes: int
     synthetic_thread_count: int
+    locatable_pid_count: int
     image_mapping_count: int
     available_image_mapping_count: int
     unavailable_image_mapping_count: int
@@ -149,6 +156,7 @@ class ReplayManifest:
             "exact_page_count": self.exact_page_count,
             "exact_page_payload_bytes": self.exact_page_payload_bytes,
             "synthetic_thread_count": self.synthetic_thread_count,
+            "locatable_pid_count": self.locatable_pid_count,
             "image_mapping_count": self.image_mapping_count,
             "available_image_mapping_count": self.available_image_mapping_count,
             "unavailable_image_mapping_count": self.unavailable_image_mapping_count,
@@ -161,6 +169,7 @@ class ReplayManifest:
 class ReplayCorpus:
     exact_pages: dict[PageKey, bytes]
     synthetic_threads: dict[int, _SyntheticThread]
+    pid_targets: dict[int, ReplayPidTarget]
     images_by_url: dict[str, ImageReplayEntry]
     manifest: ReplayManifest
 
@@ -180,6 +189,9 @@ class ReplayCorpus:
         if entry is None or not entry.is_current():
             return None
         return entry
+
+    def pid_target(self, pid: int) -> ReplayPidTarget | None:
+        return self.pid_targets.get(pid)
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,6 +429,84 @@ def _optional_int(value: object, *, source: str) -> Optional[int]:
     if type(value) is int:
         return value
     raise ReplayCorpusError(f"{source}不是整数或null：{value!r}")
+
+
+def _read_pid_targets(
+    path: Path,
+    config: _ThreadReplayConfig,
+    hasher: _Hasher,
+    *,
+    expected_database_state: _DatabaseState,
+) -> dict[int, ReplayPidTarget]:
+    if config.aid is None:
+        return {}
+    try:
+        connection, database_state = _connect_frozen(
+            path,
+            expected_state=expected_database_state,
+        )
+        with closing(connection):
+            state_row = connection.execute(
+                "SELECT tid, aid FROM floor_map_state WHERE singleton = 1"
+            ).fetchone()
+            if state_row is None:
+                _hash_fields(hasher, "pid_targets_missing", config.tid, config.aid)
+                rows: list[tuple[object, object, object]] = []
+            elif state_row != (config.tid, config.aid):
+                raise ReplayCorpusError(f"重放源归档楼层映射与配置不匹配：{path}")
+            else:
+                rows = cast(
+                    list[tuple[object, object, object]],
+                    connection.execute(
+                        """
+                        SELECT pid, original_pid, original_lou
+                        FROM floor_map_entries
+                        WHERE original_lou IS NOT NULL
+                        ORDER BY author_lou
+                        """
+                    ).fetchall(),
+                )
+        _verify_frozen(path, database_state)
+    except sqlite3.Error as error:
+        raise ReplayCorpusError(f"无法读取重放PID索引：{path}: {error}") from error
+
+    targets: dict[int, ReplayPidTarget] = {}
+    for raw_pid, raw_original_pid, raw_original_lou in rows:
+        original_lou = _optional_int(
+            raw_original_lou,
+            source=f"{path} original_lou",
+        )
+        if original_lou is None or original_lou < 0:
+            raise ReplayCorpusError(f"重放源PID索引original_lou无效：{path}")
+        target = ReplayPidTarget(
+            tid=config.tid,
+            page_number=original_lou // ORIGINAL_POSTS_PER_PAGE + 1,
+        )
+        for raw_value, field_name in (
+            (raw_pid, "pid"),
+            (raw_original_pid, "original_pid"),
+        ):
+            pid = _optional_int(raw_value, source=f"{path} {field_name}")
+            if pid is None:
+                continue
+            if pid <= 0:
+                raise ReplayCorpusError(f"重放源PID索引{field_name}无效：{path}")
+            existing = targets.get(pid)
+            if existing is not None and existing != target:
+                raise ReplayCorpusError(
+                    f"重放源PID {pid} 映射到多个目标：{existing}、{target}"
+                )
+            targets[pid] = target
+
+    for pid, target in sorted(targets.items()):
+        _hash_fields(
+            hasher,
+            "pid_target",
+            pid,
+            target.tid,
+            target.page_number,
+        )
+    return targets
 
 
 def _build_synthetic_thread(
@@ -691,6 +781,7 @@ def load_replay_corpus(
     configs = _read_thread_configs(resolved_thread_config, hasher)
     exact_pages: dict[PageKey, bytes] = {}
     synthetic_threads: dict[int, _SyntheticThread] = {}
+    pid_targets: dict[int, ReplayPidTarget] = {}
     exact_payload_bytes = 0
     total_configs = len(configs)
     total_work_items = total_configs + 1
@@ -704,6 +795,19 @@ def load_replay_corpus(
             config.aid,
         )
         latest_pages = _read_latest_archive_pages(configured_archive)
+        archive_pid_targets = _read_pid_targets(
+            configured_archive,
+            config,
+            hasher,
+            expected_database_state=latest_pages.database_state,
+        )
+        for pid, target in archive_pid_targets.items():
+            existing = pid_targets.get(pid)
+            if existing is not None and existing != target:
+                raise ReplayCorpusError(
+                    f"重放语料PID {pid} 映射到多个目标：{existing}、{target}"
+                )
+            pid_targets[pid] = target
         for page_number, (response_hash, payload) in latest_pages.pages.items():
             key = (config.tid, config.aid, page_number)
             exact_pages[key] = payload
@@ -755,6 +859,7 @@ def load_replay_corpus(
         exact_page_count=len(exact_pages),
         exact_page_payload_bytes=exact_payload_bytes,
         synthetic_thread_count=len(synthetic_threads),
+        locatable_pid_count=len(pid_targets),
         image_mapping_count=image_result.mapping_count,
         available_image_mapping_count=len(image_result.images_by_url),
         unavailable_image_mapping_count=image_result.unavailable_mapping_count,
@@ -764,6 +869,7 @@ def load_replay_corpus(
     return ReplayCorpus(
         exact_pages=exact_pages,
         synthetic_threads=synthetic_threads,
+        pid_targets=pid_targets,
         images_by_url=image_result.images_by_url,
         manifest=manifest,
     )

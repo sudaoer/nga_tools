@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from nga_tools.console import report_info, report_progress
 from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.replay.corpus import ImageReplayEntry, ReplayCorpus, load_replay_corpus
-from nga_tools.replay.metrics import ReplayMetrics, TrafficKind
+from nga_tools.replay.metrics import ReplayMetrics, ReplayOperation, TrafficKind
 from nga_tools.replay.profile import ReplayProfile
 from nga_tools.replay.rate_limit import TrafficShaper
 
@@ -75,6 +75,7 @@ class ReplayService:
         *,
         status: int,
         synthetic_original: bool = False,
+        operation: ReplayOperation | None = None,
     ) -> ByteSource:
         shaper = self._shaper(kind)
         response_bytes = 0
@@ -85,6 +86,7 @@ class ReplayService:
             self.metrics.begin(
                 kind,
                 synthetic_original=synthetic_original,
+                operation=operation,
             )
             try:
                 latency_wait_seconds = await shaper.wait_latency()
@@ -126,17 +128,23 @@ def _streaming_response(
     content_type: str,
     content_length: int,
     synthetic_original: bool = False,
+    operation: ReplayOperation | None = None,
+    headers: dict[str, str] | None = None,
 ) -> StreamingResponse:
+    response_headers = {"Content-Length": str(content_length)}
+    if headers is not None:
+        response_headers.update(headers)
     return StreamingResponse(
         service.shaped_stream(
             kind,
             source,
             status=status,
             synthetic_original=synthetic_original,
+            operation=operation,
         ),
         status_code=status,
         media_type=content_type,
-        headers={"Content-Length": str(content_length)},
+        headers=response_headers,
     )
 
 
@@ -145,6 +153,7 @@ def _api_response(
     payload: bytes,
     *,
     synthetic_original: bool,
+    operation: ReplayOperation | None = None,
 ) -> StreamingResponse:
     return _streaming_response(
         service,
@@ -154,6 +163,7 @@ def _api_response(
         content_type="application/json",
         content_length=len(payload),
         synthetic_original=synthetic_original,
+        operation=operation,
     )
 
 
@@ -162,6 +172,26 @@ def _api_error_response(service: ReplayService, message: str) -> StreamingRespon
         service,
         _json_bytes({"code": -1, "msg": message, "result": []}),
         synthetic_original=False,
+    )
+
+
+def _pid_response(
+    service: ReplayService,
+    payload: bytes,
+    *,
+    status: int,
+    location: str | None = None,
+) -> StreamingResponse:
+    headers = None if location is None else {"Location": location}
+    return _streaming_response(
+        service,
+        "api",
+        _bytes_source(payload, service.profile.chunk_bytes),
+        status=status,
+        content_type="text/html",
+        content_length=len(payload),
+        operation="pid_redirect",
+        headers=headers,
     )
 
 
@@ -281,7 +311,35 @@ def create_replay_app(corpus: ReplayCorpus, profile: ReplayProfile) -> FastAPI:
             service,
             replay_page.payload,
             synthetic_original=replay_page.synthetic_original,
+            operation=(
+                "original_post_list" if aid is None else "author_post_list"
+            ),
         )
+
+    async def nga_pid_redirect(request: Request) -> StreamingResponse:
+        raw_pid = request.query_params.get("pid")
+        if request.query_params.get("opt") != "128" or raw_pid is None:
+            return _pid_response(
+                service,
+                b"<html><body>invalid pid request</body></html>",
+                status=200,
+            )
+        try:
+            pid = int(raw_pid)
+        except ValueError:
+            pid = 0
+        target = corpus.pid_target(pid) if pid > 0 else None
+        if target is None:
+            return _pid_response(
+                service,
+                b"<html><body>post not found</body></html>",
+                status=200,
+            )
+        location = (
+            f"/read.php?tid={target.tid}&page={target.page_number}"
+            f"#pid{pid}Anchor"
+        )
+        return _pid_response(service, b"", status=302, location=location)
 
     async def replay_image(request: Request) -> StreamingResponse:
         url = request.query_params.get("url")
@@ -300,6 +358,7 @@ def create_replay_app(corpus: ReplayCorpus, profile: ReplayProfile) -> FastAPI:
     app.add_api_route("/__replay__/metrics", metrics, methods=["GET"])
     app.add_api_route("/__replay__/reset", reset, methods=["POST"])
     app.add_api_route("/app_api.php", nga_post_list, methods=["POST"])
+    app.add_api_route("/read.php", nga_pid_redirect, methods=["GET"])
     app.add_api_route("/__replay__/image", replay_image, methods=["GET"])
     return app
 

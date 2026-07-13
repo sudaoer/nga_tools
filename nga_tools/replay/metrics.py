@@ -7,6 +7,11 @@ from datetime import datetime
 from typing import Literal, TypeAlias
 
 TrafficKind: TypeAlias = Literal["api", "image"]
+ReplayOperation: TypeAlias = Literal[
+    "author_post_list",
+    "original_post_list",
+    "pid_redirect",
+]
 
 
 @dataclass(slots=True)
@@ -20,6 +25,7 @@ class _TrafficState:
     active: int = 0
     max_active: int = 0
     statuses: Counter[int] = field(default_factory=Counter[int])
+    operations: Counter[str] = field(default_factory=Counter[str])
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -34,6 +40,7 @@ class _TrafficState:
             "statuses": {
                 str(status): count for status, count in sorted(self.statuses.items())
             },
+            "operations": dict(sorted(self.operations.items())),
         }
 
 
@@ -52,7 +59,13 @@ class ReplayMetrics:
         with self._lock:
             return self._api.active + self._image.active
 
-    def begin(self, kind: TrafficKind, *, synthetic_original: bool) -> None:
+    def begin(
+        self,
+        kind: TrafficKind,
+        *,
+        synthetic_original: bool,
+        operation: ReplayOperation | None,
+    ) -> None:
         with self._lock:
             state = self._state(kind)
             state.requests += 1
@@ -60,6 +73,8 @@ class ReplayMetrics:
             state.max_active = max(state.max_active, state.active)
             if synthetic_original:
                 state.synthetic_original_requests += 1
+            if operation is not None:
+                state.operations[operation] += 1
 
     def finish(
         self,
