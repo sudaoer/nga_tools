@@ -30,6 +30,7 @@ from nga_tools.commands.backup import (
 from nga_tools.commands.thread_batch import run_thread_config_batch
 from nga_tools.forum.thread_configs import ThreadConfig
 from nga_tools.ngaclient.client import NGAPageError
+from nga_tools.ngaclient.api_runtime import current_api_runtime
 from nga_tools.ngaclient.session import current_api_session
 from nga_tools.timing import (
     record_timing,
@@ -363,6 +364,50 @@ class BackupWarningLogTest:
                 None,
                 write_json=True,
             )
+
+    @pytest.mark.parametrize(
+        ("handler", "implementation_path"),
+        [
+            (backup_all, "nga_tools.commands.backup.backup_thread"),
+            (backup_sub, "nga_tools.commands.backup.backup_thread_sub"),
+        ],
+    )
+    def test_single_thread_backup_uses_shared_api_runtime(
+        self,
+        handler: Callable[[dict[str, object]], None],
+        implementation_path: str,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            base_dir = Path(temp_dir_name)
+
+            def implementation(
+                tid: int,
+                aid: int | None,
+                **kwargs: object,
+            ) -> None:
+                assert (tid, aid) == (101, None)
+                assert kwargs == {"write_json": False}
+                runtime = current_api_runtime()
+                assert runtime is not None
+                assert runtime.capacity == 4
+
+            with (
+                patch(
+                    "nga_tools.commands.backup.configure_network_limits_from_args",
+                    return_value=_backup_config_app_config(),
+                ),
+                patch(
+                    "nga_tools.commands.backup.resolve_command_thread_target",
+                    return_value=(101, None),
+                ),
+                patch(
+                    "nga_tools.core.paths.get_folder",
+                    side_effect=_fake_get_folder(base_dir),
+                ),
+                patch(implementation_path, side_effect=implementation),
+                _captured_reporter(),
+            ):
+                handler({})
 
     @pytest.mark.parametrize(
         ("handler", "implementation_path"),

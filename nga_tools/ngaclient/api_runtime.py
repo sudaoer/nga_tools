@@ -233,11 +233,9 @@ class FairAPIRuntime:
                     raise outcome.error
                 yield batch.items[index], cast(_ResultT, outcome.value)
         finally:
+            if yielded < len(batch.items):
+                self._cancel_batch(erased_batch)
             with self._condition:
-                if yielded < len(batch.items):
-                    self._cancel_batch(erased_batch)
-                    while batch.running:
-                        self._condition.wait()
                 self._remove_batch_locked(batch.batch_id)
                 self._condition.notify_all()
 
@@ -273,11 +271,9 @@ class FairAPIRuntime:
                     raise outcome.error
                 yield batch.items[index], cast(_ResultT, outcome.value)
         finally:
+            if yielded < len(batch.items):
+                self._cancel_batch(erased_batch)
             with self._condition:
-                if yielded < len(batch.items):
-                    self._cancel_batch(erased_batch)
-                    while batch.running:
-                        self._condition.wait()
                 self._remove_batch_locked(batch.batch_id)
                 self._condition.notify_all()
 

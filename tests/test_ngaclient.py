@@ -103,6 +103,41 @@ class _ConcurrentPageSession:
         self.closed = True
 
 
+class _EarlyStopPageSession:
+    def __init__(
+        self,
+        started_pages: list[int],
+        started_lock: Lock,
+        blocked_request_started: Event,
+        release: Event,
+    ) -> None:
+        self.started_pages = started_pages
+        self.started_lock = started_lock
+        self.blocked_request_started = blocked_request_started
+        self.release = release
+        self.closed = False
+
+    def post(
+        self,
+        url: str,
+        *,
+        data: dict[str, str],
+        timeout: int,
+    ) -> _SuccessfulPageResponse:
+        del url, timeout
+        page = int(data["page"])
+        with self.started_lock:
+            self.started_pages.append(page)
+        if page != 1:
+            self.blocked_request_started.set()
+            if not self.release.wait(timeout=2):
+                raise RuntimeError("early-stop request was not released")
+        return _SuccessfulPageResponse(page)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _ForumThreadPageResponse:
     def raise_for_status(self) -> None:
         return
@@ -490,6 +525,46 @@ class NGAClientPageBatchTest:
             pages = list(client.iter_pages(123, None, [3, 1, 2]))
 
         assert [page for page, _data in pages] == [3, 1, 2]
+        assert client.page_cache == {}
+
+    def test_iter_pages_close_cancels_queued_pages_without_waiting_for_inflight(
+        self,
+    ) -> None:
+        configure_network_limits(api_concurrency=2, image_concurrency=1)
+        started_pages: list[int] = []
+        started_lock = Lock()
+        blocked_request_started = Event()
+        release = Event()
+        sessions = [
+            _EarlyStopPageSession(
+                started_pages,
+                started_lock,
+                blocked_request_started,
+                release,
+            )
+            for _ in range(2)
+        ]
+
+        client = NGAClient()
+        with (
+            patch(
+                "nga_tools.ngaclient.api_runtime.create_api_session",
+                side_effect=sessions,
+            ),
+            use_api_runtime(2),
+        ):
+            pages = client.iter_pages(123, None, list(range(1, 11)))
+            first_page, _first_data = next(pages)
+            assert first_page == 1
+            assert blocked_request_started.wait(timeout=1)
+            pages.close()
+            with started_lock:
+                started_before_release = list(started_pages)
+            release.set()
+
+        assert set(started_before_release).issubset({1, 2, 3})
+        assert len(started_before_release) < 10
+        assert all(session.closed for session in sessions)
         assert client.page_cache == {}
 
 

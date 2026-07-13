@@ -381,20 +381,24 @@ class NGAClient:
         ) -> PageData:
             return self._request_page_with_session(session, tid, aid, page)
 
-        fetched_iterator = iter(runtime.map_ordered(missing_pages, fetch_runtime_page))
-        next_fetched = next(fetched_iterator, None)
-        for page in ordered_pages:
-            if page in cached_pages:
-                page_data = cached_pages[page]
-            else:
-                if next_fetched is None or next_fetched[0] != page:
-                    raise RuntimeError("NGA API流式页面顺序不一致。")
-                page_data = next_fetched[1]
-                next_fetched = next(fetched_iterator, None)
-            completed += 1
-            if on_page_complete is not None:
-                on_page_complete(page, completed, total)
-            yield page, page_data
+        fetched_iterator = runtime.map_ordered(missing_pages, fetch_runtime_page)
+        try:
+            for page in ordered_pages:
+                if page in cached_pages:
+                    page_data = cached_pages[page]
+                else:
+                    try:
+                        fetched_page, page_data = next(fetched_iterator)
+                    except StopIteration as error:
+                        raise RuntimeError("NGA API流式页面提前结束。") from error
+                    if fetched_page != page:
+                        raise RuntimeError("NGA API流式页面顺序不一致。")
+                completed += 1
+                if on_page_complete is not None:
+                    on_page_complete(page, completed, total)
+                yield page, page_data
+        finally:
+            fetched_iterator.close()
 
     def get_forum_thread_page(
         self,
