@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event, Lock
 
 import pytest
 import requests
@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import NGAPageError
+from nga_tools.network_limits import configure_network_limits
 from nga_tools.ngaclient.session import (
     ThreadLocalAPISessionPool,
     use_api_session,
@@ -25,6 +26,70 @@ class _PageErrorResponse:
             "code": 35,
             "msg": "找不到内容 或 没有更多页了",
         }
+
+
+class _SuccessfulPageResponse:
+    def __init__(self, page: int) -> None:
+        self.page = page
+
+    def raise_for_status(self) -> None:
+        return
+
+    def json(self) -> dict[str, object]:
+        return {
+            "code": 0,
+            "currentPage": self.page,
+            "totalPage": 3,
+            "result": [],
+        }
+
+
+class _ConcurrentRequestTracker:
+    def __init__(self, expected_overlap: int) -> None:
+        self.expected_overlap = expected_overlap
+        self.release = Event()
+        self.lock = Lock()
+        self.active = 0
+        self.max_active = 0
+        self.pages: list[int] = []
+
+    def enter(self, page: int) -> None:
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.pages.append(page)
+            if self.active >= self.expected_overlap:
+                self.release.set()
+        if not self.release.wait(timeout=2):
+            raise RuntimeError("concurrent requests did not overlap")
+
+    def exit(self) -> None:
+        with self.lock:
+            self.active -= 1
+
+
+class _ConcurrentPageSession:
+    def __init__(self, tracker: _ConcurrentRequestTracker) -> None:
+        self.tracker = tracker
+        self.closed = False
+
+    def post(
+        self,
+        url: str,
+        *,
+        data: dict[str, str],
+        timeout: int,
+    ) -> _SuccessfulPageResponse:
+        del url, timeout
+        page = int(data["page"])
+        self.tracker.enter(page)
+        try:
+            return _SuccessfulPageResponse(page)
+        finally:
+            self.tracker.exit()
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _ForumThreadPageResponse:
@@ -103,6 +168,99 @@ class NGAClientPageErrorTest:
         assert context.value.code == 35
         assert context.value.message == '找不到内容 或 没有更多页了'
         assert str(context.value) == 'Error fetching page: 找不到内容 或 没有更多页了'
+
+
+class NGAClientPageBatchTest:
+    def test_fetches_pages_concurrently_with_thread_local_sessions(self) -> None:
+        configure_network_limits(api_concurrency=2, image_concurrency=1)
+        tracker = _ConcurrentRequestTracker(expected_overlap=2)
+        worker_sessions: list[_ConcurrentPageSession] = []
+
+        def create_worker_session() -> _ConcurrentPageSession:
+            session = _ConcurrentPageSession(tracker)
+            worker_sessions.append(session)
+            return session
+
+        completed_pages: list[int] = []
+        parent_session = MagicMock(spec=requests.Session)
+        with (
+            patch(
+                "nga_tools.ngaclient.client.create_api_session",
+                return_value=parent_session,
+            ),
+            patch(
+                "nga_tools.ngaclient.session.create_api_session",
+                side_effect=create_worker_session,
+            ),
+        ):
+            client = NGAClient()
+            pages = client.get_pages(
+                123,
+                None,
+                [1, 2, 3],
+                on_page_complete=lambda page, _completed, _total: (
+                    completed_pages.append(page)
+                ),
+            )
+
+        assert list(pages) == [1, 2, 3]
+        assert {page: data["currentPage"] for page, data in pages.items()} == {
+            1: 1,
+            2: 2,
+            3: 3,
+        }
+        assert tracker.max_active == 2
+        assert sorted(tracker.pages) == [1, 2, 3]
+        assert sorted(completed_pages) == [1, 2, 3]
+        assert len(worker_sessions) == 2
+        assert all(session.closed for session in worker_sessions)
+        parent_session.post.assert_not_called()
+
+    def test_batch_deduplicates_pages_and_reuses_parent_cache(self) -> None:
+        configure_network_limits(api_concurrency=1, image_concurrency=1)
+        session = MagicMock(spec=requests.Session)
+        session.post.side_effect = [
+            _SuccessfulPageResponse(3),
+            _SuccessfulPageResponse(1),
+        ]
+        client = NGAClient(session=session)
+
+        first = client.get_pages(123, None, [3, 1, 3])
+        cached = client.get_pages(123, None, [1, 3])
+
+        assert list(first) == [3, 1]
+        assert list(cached) == [1, 3]
+        assert session.post.call_count == 2
+
+    def test_failed_batch_does_not_commit_partial_parent_cache(self) -> None:
+        configure_network_limits(api_concurrency=1, image_concurrency=1)
+        session = MagicMock(spec=requests.Session)
+        session.post.side_effect = [
+            _SuccessfulPageResponse(1),
+            RuntimeError("page two failed"),
+        ]
+        client = NGAClient(session=session)
+
+        with pytest.raises(RuntimeError, match="page two failed"):
+            client.get_pages(123, None, [1, 2])
+
+        assert client.page_cache == {}
+
+    def test_explicit_session_keeps_batch_on_calling_thread(self) -> None:
+        configure_network_limits(api_concurrency=4, image_concurrency=1)
+        session = MagicMock(spec=requests.Session)
+        session.post.side_effect = [
+            _SuccessfulPageResponse(1),
+            _SuccessfulPageResponse(2),
+        ]
+        client = NGAClient(session=session)
+
+        with patch("nga_tools.ngaclient.client.ThreadPoolExecutor") as executor:
+            pages = client.get_pages(123, None, [1, 2])
+
+        assert list(pages) == [1, 2]
+        assert session.post.call_count == 2
+        executor.assert_not_called()
 
 
 class NGAClientSessionTest:

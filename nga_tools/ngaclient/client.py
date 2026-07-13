@@ -1,14 +1,21 @@
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Optional, TypeAlias, TypedDict, cast
 
 import requests
 
 from nga_tools.config import get_config
-from nga_tools.network_limits import api_request_slot
-from nga_tools.ngaclient.session import create_api_session, current_api_session
+from nga_tools.network_limits import api_request_slot, get_api_concurrency
+from nga_tools.ngaclient.session import (
+    ThreadLocalAPISessionPool,
+    create_api_session,
+    current_api_session,
+)
 
 Tid: TypeAlias = int | str
 Aid: TypeAlias = Optional[int | str]
 PageData: TypeAlias = dict[str, Any]
+PageProgressCallback: TypeAlias = Callable[[int, int, int], None]
 
 
 class ForumThread(TypedDict):
@@ -114,6 +121,7 @@ class NGAClient:
         )
         self.base_url = app_config.base_url
         self.page_cache: dict[str, PageData] = {}
+        self._parallel_page_fetch_enabled = session is None
 
     def page_cache_key(self, tid: Tid, aid: Aid, page: int) -> str:
         return f"{tid}_{aid if aid else 'all'}_page_{page}"
@@ -125,15 +133,11 @@ class NGAClient:
             raise ValueError(f"Invalid totalPage value: {total_pages!r}")
         return total_pages
 
-    def get_page(self, tid: Tid, aid: Aid, page: int) -> PageData:
+    def _request_page(self, tid: Tid, aid: Aid, page: int) -> PageData:
         if not tid and not page:
             raise ValueError("Either tid or page must be provided.")
         if page < 1:
             raise ValueError("Page number must be greater than 0.")
-
-        cache_key = self.page_cache_key(tid, aid, page)
-        if cache_key in self.page_cache:
-            return self.page_cache[cache_key]
 
         url = f"{self.base_url}/app_api.php?__lib=post&__act=list"
         data = {
@@ -158,8 +162,101 @@ class NGAClient:
                 message = "Unknown error"
             raise NGAPageError(page_data.get("code"), message)
 
+        return page_data
+
+    def get_page(self, tid: Tid, aid: Aid, page: int) -> PageData:
+        if not tid and not page:
+            raise ValueError("Either tid or page must be provided.")
+        if page < 1:
+            raise ValueError("Page number must be greater than 0.")
+
+        cache_key = self.page_cache_key(tid, aid, page)
+        if cache_key in self.page_cache:
+            return self.page_cache[cache_key]
+
+        page_data = self._request_page(tid, aid, page)
         self.page_cache[cache_key] = page_data
         return page_data
+
+    def get_pages(
+        self,
+        tid: Tid,
+        aid: Aid,
+        pages: Sequence[int],
+        *,
+        on_page_complete: PageProgressCallback | None = None,
+    ) -> dict[int, PageData]:
+        ordered_pages = list(dict.fromkeys(pages))
+        for page in ordered_pages:
+            if page < 1:
+                raise ValueError("Page number must be greater than 0.")
+
+        total = len(ordered_pages)
+        if total == 0:
+            return {}
+
+        cached_pages: dict[int, PageData] = {}
+        missing_pages: list[int] = []
+        for page in ordered_pages:
+            cached = self.page_cache.get(self.page_cache_key(tid, aid, page))
+            if cached is None:
+                missing_pages.append(page)
+            else:
+                cached_pages[page] = cached
+
+        completed = 0
+        if on_page_complete is not None:
+            for page in ordered_pages:
+                if page not in cached_pages:
+                    continue
+                completed += 1
+                on_page_complete(page, completed, total)
+
+        fetched_pages: dict[int, PageData] = {}
+        worker_count = min(get_api_concurrency(), len(missing_pages))
+        if worker_count <= 1 or not self._parallel_page_fetch_enabled:
+            for page in missing_pages:
+                fetched_pages[page] = self._request_page(tid, aid, page)
+                completed += 1
+                if on_page_complete is not None:
+                    on_page_complete(page, completed, total)
+        else:
+            session_pool = ThreadLocalAPISessionPool()
+
+            def fetch_page(page: int) -> PageData:
+                worker_client = NGAClient(session=session_pool.session())
+                worker_client.base_url = self.base_url
+                return worker_client._request_page(tid, aid, page)
+
+            with session_pool:
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    future_pages: dict[Future[PageData], int] = {
+                        executor.submit(fetch_page, page): page
+                        for page in missing_pages
+                    }
+                    try:
+                        for future in as_completed(future_pages):
+                            page = future_pages[future]
+                            fetched_pages[page] = future.result()
+                            completed += 1
+                            if on_page_complete is not None:
+                                on_page_complete(page, completed, total)
+                    except BaseException:
+                        for future in future_pages:
+                            future.cancel()
+                        raise
+
+        for page, page_data in fetched_pages.items():
+            self.page_cache[self.page_cache_key(tid, aid, page)] = page_data
+
+        return {
+            page: (
+                cached_pages[page]
+                if page in cached_pages
+                else fetched_pages[page]
+            )
+            for page in ordered_pages
+        }
 
     def get_forum_thread_page(
         self,

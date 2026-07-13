@@ -14,8 +14,10 @@ from nga_tools.console import (
     report_progress,
     report_warning,
 )
+from nga_tools.network_limits import get_api_concurrency
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
+from nga_tools.timing import record_timing_metric, time_section
 from nga_tools.backup.floor_models import (
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,
@@ -592,14 +594,63 @@ def _scan_original_pages(
     original_lou_by_author_lou: dict[int, int],
     author_post_count: int,
 ) -> None:
+    pages_to_scan = list(
+        dict.fromkeys(
+            page_number
+            for page_number in page_numbers
+            if page_number not in scanned_pages
+        )
+    )
     target_author_lous = {
         author_lou
         for author_lous in pid_to_author_lous.values()
         for author_lou in author_lous
     }
-    for index, page_number in enumerate(page_numbers, start=1):
-        if page_number in scanned_pages:
-            continue
+
+    if target_author_lous:
+        matched_count = sum(
+            1
+            for author_lou in target_author_lous
+            if author_lou in original_lou_by_author_lou
+        )
+        progress_text = f"已匹配{matched_count}/{author_post_count}楼"
+    else:
+        progress_text = "正在收集原帖楼层信息"
+
+    total = len(pages_to_scan)
+    report_progress(
+        f"准备扫描原帖{total}页，{progress_text}",
+        completed=0,
+        total=total,
+    )
+
+    def report_page_complete(
+        page_number: int,
+        completed: int,
+        page_total: int,
+    ) -> None:
+        report_progress(
+            f"已获取原帖第{page_number}页，{progress_text}",
+            completed=completed,
+            total=page_total,
+        )
+
+    record_timing_metric("原帖页面抓取页数", total)
+    record_timing_metric(
+        "原帖页面抓取并发上限",
+        min(total, get_api_concurrency()),
+    )
+    with time_section("原帖页面并发抓取"):
+        page_data_by_page = client.get_pages(
+            tid,
+            None,
+            pages_to_scan,
+            on_page_complete=report_page_complete,
+        )
+
+    for page_number in pages_to_scan:
+        page_data = page_data_by_page[page_number]
+        scanned_pages.add(page_number)
         if target_author_lous:
             matched_count = sum(
                 1
@@ -609,14 +660,6 @@ def _scan_original_pages(
             progress_text = f"已匹配{matched_count}/{author_post_count}楼"
         else:
             progress_text = "正在收集原帖楼层信息"
-        report_progress(
-            f"正在扫描原帖第{page_number}页，{progress_text}",
-            completed=index - 1,
-            total=len(page_numbers),
-        )
-
-        page_data = client.get_page(tid, None, page_number)
-        scanned_pages.add(page_number)
         for post in _page_post_dicts(
             page_data,
             f"原帖第{page_number}页",
@@ -637,8 +680,8 @@ def _scan_original_pages(
                 original_lou_by_author_lou[author_lou] = original_lou
     report_progress(
         "原帖扫描完成",
-        completed=len(page_numbers),
-        total=len(page_numbers),
+        completed=total,
+        total=total,
     )
 
 

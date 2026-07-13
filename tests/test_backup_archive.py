@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sqlite3
+from collections.abc import Sequence
 from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from typing import Callable
@@ -70,6 +71,22 @@ class MutableFakeClient:
         if aid is not None and self.vrows is not None:
             data["vrows"] = self.vrows
         return data
+
+    def get_pages(
+        self,
+        tid: int,
+        aid: int | None,
+        pages: Sequence[int],
+        *,
+        on_page_complete: Callable[[int, int, int], None] | None = None,
+    ) -> dict[int, dict[str, object]]:
+        result: dict[int, dict[str, object]] = {}
+        total = len(pages)
+        for completed, page in enumerate(pages, start=1):
+            result[page] = self.get_page(tid, aid, page)
+            if on_page_complete is not None:
+                on_page_complete(page, completed, total)
+        return result
 
 
 class FailingTailFakeClient(MutableFakeClient):

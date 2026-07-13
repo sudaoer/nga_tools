@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 import io
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -23,10 +24,12 @@ from nga_tools.backup.floor_models import (
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,
     FLOOR_MAP_VERSION,
+    OriginalPostSnapshot,
     StoredFloorMap,
 )
 from nga_tools.config import get_config
 from nga_tools.ngaclient.client import PageData
+from nga_tools.timing import use_timing_log
 
 
 class FakeClient:
@@ -43,6 +46,22 @@ class FakeClient:
     def get_page(self, tid: int, aid: None, page: int) -> PageData:
         self.page_calls.append(page)
         return self.pages[page]
+
+    def get_pages(
+        self,
+        tid: int,
+        aid: None,
+        pages: Sequence[int],
+        *,
+        on_page_complete: Callable[[int, int, int], None] | None = None,
+    ) -> dict[int, PageData]:
+        result: dict[int, PageData] = {}
+        total = len(pages)
+        for completed, page in enumerate(pages, start=1):
+            result[page] = self.get_page(tid, aid, page)
+            if on_page_complete is not None:
+                on_page_complete(page, completed, total)
+        return result
 
 
 class FloorMapPagePostRefsTest:
@@ -120,6 +139,129 @@ class FloorMapOriginalScanTest:
         assert scanned_pages == {1, 2, 3}
         assert seen_original_lous == {1, 3}
         assert original_lou_by_author_lou == {1: 1, 2: 3}
+
+    def test_scan_original_pages_records_batch_fetch_timing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client = FakeClient({1: {"result": []}})
+        timing_path = tmp_path / "floor-map.timing.log"
+
+        with use_timing_log(timing_path, task_name="floor map") as timing_log:
+            assert timing_log is not None
+            with patch("builtins.print"):
+                _scan_original_pages(
+                    client,
+                    123,
+                    [1],
+                    set(),
+                    set(),
+                    None,
+                    {},
+                    {},
+                    0,
+                )
+
+        timing_text = timing_log.path.read_text(encoding="utf-8")
+        assert "阶段：原帖页面并发抓取，开始时间：" in timing_text
+        assert "阶段：原帖页面并发抓取，结束时间：" in timing_text
+        assert "指标：原帖页面抓取页数，值：1\n" in timing_text
+        assert "指标：原帖页面抓取并发上限，值：1\n" in timing_text
+
+    def test_scan_original_pages_applies_out_of_order_responses_in_page_order(
+        self,
+    ) -> None:
+        class ReverseCompletionClient(FakeClient):
+            def get_pages(
+                self,
+                tid: int,
+                aid: None,
+                pages: Sequence[int],
+                *,
+                on_page_complete: Callable[[int, int, int], None] | None = None,
+            ) -> dict[int, PageData]:
+                result: dict[int, PageData] = {}
+                reversed_pages = list(reversed(pages))
+                for completed, page in enumerate(reversed_pages, start=1):
+                    self.page_calls.append(page)
+                    result[page] = self.pages[page]
+                    if on_page_complete is not None:
+                        on_page_complete(page, completed, len(reversed_pages))
+                return result
+
+        client = ReverseCompletionClient(
+            {
+                1: {"result": [{"pid": 1001, "lou": 10}]},
+                2: {"result": [{"pid": 1001, "lou": 20}]},
+            }
+        )
+        scanned_pages: set[int] = set()
+        seen_original_lous: set[int] = set()
+        original_lou_by_author_lou: dict[int, int] = {}
+
+        with patch("builtins.print"):
+            _scan_original_pages(
+                client,
+                123,
+                [1, 2],
+                scanned_pages,
+                seen_original_lous,
+                None,
+                {1001: [1]},
+                original_lou_by_author_lou,
+                1,
+            )
+
+        assert client.page_calls == [2, 1]
+        assert scanned_pages == {1, 2}
+        assert seen_original_lous == {10, 20}
+        assert original_lou_by_author_lou == {1: 20}
+
+    def test_scan_original_pages_does_not_apply_partial_failed_batch(self) -> None:
+        class FailingBatchClient(FakeClient):
+            def get_pages(
+                self,
+                tid: int,
+                aid: None,
+                pages: Sequence[int],
+                *,
+                on_page_complete: Callable[[int, int, int], None] | None = None,
+            ) -> dict[int, PageData]:
+                del tid, aid, pages, on_page_complete
+                raise RuntimeError("page fetch failed")
+
+        client = FailingBatchClient({1: {"result": []}})
+        scanned_pages = {9}
+        seen_original_lous = {90}
+        original_posts_by_lou: dict[int, OriginalPostSnapshot] = {
+            90: {
+                "pid": 9000,
+                "lou": 90,
+                "author_uid": 9,
+                "content": "existing",
+                "raw_post": {"pid": 9000, "lou": 90},
+            }
+        }
+        original_lou_by_author_lou = {9: 90}
+
+        with patch("builtins.print"):
+            with pytest.raises(RuntimeError, match="page fetch failed"):
+                _scan_original_pages(
+                    client,
+                    123,
+                    [1, 2],
+                    scanned_pages,
+                    seen_original_lous,
+                    original_posts_by_lou,
+                    {},
+                    original_lou_by_author_lou,
+                    0,
+                )
+
+        assert scanned_pages == {9}
+        assert seen_original_lous == {90}
+        assert set(original_posts_by_lou) == {90}
+        assert original_lou_by_author_lou == {9: 90}
 
 
 class FloorMapMissingInferenceTest:
