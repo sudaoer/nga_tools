@@ -78,8 +78,10 @@ def test_unchanged_records_reuse_cached_references_without_parsing(
     )
     assert first.manifest_posts[0].references[0].url == image_url
     assert first.cache_hit_count == 0
+    assert first.cache_miss_lous == frozenset({1})
     assert second.tasks == [{"url": image_url}]
     assert second.cache_hit_count == 1
+    assert second.cache_miss_lous == frozenset()
     assert parser_mock.call_count == 1
 
 

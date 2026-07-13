@@ -382,6 +382,7 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
   只看作者备份的楼层映射、候选原楼层及可重建的图片引用解析缓存也保存在此数据库；
   网页保存的单楼 BBCode overlay 存在 `post_overlays` 表，Web 和 PDF 按需渲染；
   `archive_change_state`、`backup_floor_processing_state`、`backup_image_reference_state` 和 `backup_pending_images` 分别保存归档修订、楼层派生状态、图片引用集合版本状态和未完成图片 URL；`backup_image_reference_manifest_*` 四张伴生表保存逐楼引用清单及 URL 引用计数，普通处理状态命中不扫描它们；旧版本创建的 `backup_image_references` 表仅作为历史数据保留，备份热路径不再读取或改写它
+  - 当归档变更可精确归因到本轮楼层写入且 overlay、版本选择和提取器版本未变时，备份只更新变更楼层的图片引用；旧归档缺少伴生清单时仅在首次真实变更时懒初始化，无变更命中不会为此扫描完整归档
 - `post_version_overrides.json`：管理界面保存的正文历史版本选择；没有选择时可为空
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 

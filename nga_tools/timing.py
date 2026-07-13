@@ -386,6 +386,7 @@ def write_batch_timing_summary(
     snapshot_list = list(snapshots)
     image_failure_categories: Counter[str] = Counter()
     processing_reuse_results: Counter[str] = Counter()
+    image_reference_modes: Counter[str] = Counter()
     for snapshot in snapshot_list:
         for metric_name, value in snapshot.metrics:
             prefix = "图片下载失败/"
@@ -394,6 +395,8 @@ def write_batch_timing_summary(
         for label_name, value in snapshot.labels:
             if label_name in {"处理状态复用结果", "增量快路径结果"}:
                 processing_reuse_results[value] += 1
+            if label_name == "图片引用处理模式":
+                image_reference_modes[value] += 1
 
     expected_failure_categories: Counter[str] = (
         Counter[str]()
@@ -451,6 +454,17 @@ def write_batch_timing_summary(
                 lines.append(f"- {reason}: {count}")
     else:
         lines.append("不适用（本批次未执行处理状态复用）")
+
+    lines.extend(["", "图片引用处理模式："])
+    if image_reference_modes:
+        lines.append(
+            "，".join(
+                f"{mode}={count}"
+                for mode, count in sorted(image_reference_modes.items())
+            )
+        )
+    else:
+        lines.append("不适用（本批次无图片引用处理样本）")
 
     has_command_phases = (
         forum_sync_seconds is not None

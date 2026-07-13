@@ -210,7 +210,7 @@ class TimingLogTest:
                     TimingSectionRecord("共享阶段", elapsed / 2, "完成"),
                 ),
                 metrics=(),
-                labels=(),
+                labels=(("图片引用处理模式", "delta"),),
             )
             for index, elapsed in enumerate((1.0, 2.0, 3.0, 4.0, 100.0), start=1)
         )
@@ -239,6 +239,7 @@ class TimingLogTest:
         assert "- 峰值未启动主题数：3" in summary
         assert "- 累计启动等待：6.500s" in summary
         assert "- 最大启动等待：4.500s" in summary
+        assert "图片引用处理模式：\ndelta=5\n" in summary
         assert summary.index("- target-5: 100.000s") < summary.index(
             "- target-4: 4.000s"
         )

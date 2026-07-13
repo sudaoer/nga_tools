@@ -39,6 +39,7 @@ class ImageReferenceCollectionResult:
     record_count: int
     cache_hit_count: int
     cache_miss_count: int
+    cache_miss_lous: frozenset[int]
 
 
 @dataclass(frozen=True)
@@ -225,6 +226,9 @@ def collect_image_download_tasks_for_records(
     archive_store: ThreadArchiveStore,
     records: list[PostRecord],
     floor_labels: FloorLabels,
+    *,
+    task_lous: set[int] | None = None,
+    include_cache_misses_in_tasks: bool = False,
 ) -> ImageReferenceCollectionResult:
     with time_section("图片引用缓存读取"):
         with time_section("图片引用缓存键构造"):
@@ -285,7 +289,26 @@ def collect_image_download_tasks_for_records(
                 )
                 for target in targets
             ]
-            tasks = collect_image_download_tasks_from_scans(scans, floor_labels)
+            cache_miss_lous = frozenset(
+                target.record["lou"]
+                for target in targets
+                if target.cache_key in missing_targets_by_key
+            )
+            effective_task_lous = None if task_lous is None else set(task_lous)
+            if (
+                effective_task_lous is not None
+                and include_cache_misses_in_tasks
+            ):
+                effective_task_lous.update(cache_miss_lous)
+            task_scans = (
+                scans
+                if effective_task_lous is None
+                else [scan for scan in scans if scan.lou in effective_task_lous]
+            )
+            tasks = collect_image_download_tasks_from_scans(
+                task_scans,
+                floor_labels,
+            )
 
     with time_section("图片引用缓存写入"):
         if cache_read_succeeded and new_entries:
@@ -320,4 +343,5 @@ def collect_image_download_tasks_for_records(
         record_count=len(records),
         cache_hit_count=cache_hit_count,
         cache_miss_count=cache_miss_count,
+        cache_miss_lous=cache_miss_lous,
     )

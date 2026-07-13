@@ -251,10 +251,12 @@ class ThreadArchiveStoreTest:
         assert first.post_observations == 2
         assert first.effective_changed_pages == 2
         assert first.effective_changed_lous == frozenset({1, 2})
+        assert first.effective_added_lous == frozenset({1, 2})
         assert repeated.page_snapshots_inserted == 0
         assert repeated.post_versions_inserted == 0
         assert repeated.effective_changed_pages == 0
         assert repeated.effective_changed_lous == frozenset()
+        assert repeated.effective_added_lous == frozenset()
         assert after_first.archive_revision == 1
         assert after_repeated.archive_revision == 1
         assert [record["lou"] for record in records] == [1, 2]
@@ -1221,6 +1223,158 @@ class ThreadArchiveStoreTest:
 
         assert snapshot.image_state == image_state
 
+    def test_incremental_manifest_commit_updates_changed_lous_and_counts(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            initial = store.read_backup_processing_snapshot()
+            old_state = ImageReferenceState(
+                format_version=1,
+                processed_archive_revision=initial.change_state.archive_revision,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
+                image_reference_extractor_version=1,
+                completed_at="2026-07-11T00:00:00+00:00",
+            )
+            old_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202607/11/incremental-old.png"
+            )
+            new_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202607/11/incremental-new.png"
+            )
+            shared_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202607/11/incremental-shared.png"
+            )
+            old_posts = (
+                ImageReferenceManifestPost(
+                    1,
+                    "cache-old-1",
+                    (ImageReferenceManifestEntry(1, old_url, True),),
+                ),
+                ImageReferenceManifestPost(
+                    2,
+                    "cache-old-2",
+                    (ImageReferenceManifestEntry(1, shared_url, True),),
+                ),
+            )
+            assert store.commit_image_reference_state(
+                old_state,
+                {old_url},
+                manifest_posts=old_posts,
+            )
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [{"lou": 1, "pid": 1001, "content": "changed"}],
+                },
+            )
+            current = store.read_backup_processing_snapshot()
+            new_state = ImageReferenceState(
+                format_version=1,
+                processed_archive_revision=current.change_state.archive_revision,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
+                image_reference_extractor_version=1,
+                completed_at="2026-07-11T01:00:00+00:00",
+            )
+            changed_posts = (
+                ImageReferenceManifestPost(
+                    1,
+                    "cache-new-1",
+                    (
+                        ImageReferenceManifestEntry(1, new_url, True),
+                        ImageReferenceManifestEntry(2, shared_url, True),
+                    ),
+                ),
+            )
+
+            assert store.read_image_reference_manifest_posts({1}) == {
+                1: old_posts[0]
+            }
+            assert store.read_image_reference_manifest_url_counts(
+                {old_url, shared_url, new_url}
+            ) == {
+                old_url: (1, True),
+                shared_url: (1, True),
+            }
+            assert store.commit_incremental_image_reference_state(
+                old_state,
+                new_state,
+                {new_url},
+                changed_posts,
+            )
+            manifest = store.read_image_reference_manifest()
+            assert not store.commit_incremental_image_reference_state(
+                old_state,
+                new_state,
+                set(),
+                changed_posts,
+            )
+
+        assert manifest is not None
+        assert manifest.posts == (changed_posts[0], old_posts[1])
+        assert manifest.url_reference_counts == (
+            (new_url, 1, True),
+            (shared_url, 2, True),
+        )
+
+    def test_bootstrap_manifest_commit_requires_absent_manifest(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            initial = store.read_backup_processing_snapshot()
+            old_state = ImageReferenceState(
+                format_version=1,
+                processed_archive_revision=initial.change_state.archive_revision,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
+                image_reference_extractor_version=1,
+                completed_at="2026-07-11T00:00:00+00:00",
+            )
+            assert store.commit_image_reference_state(old_state, set())
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [{"lou": 1, "pid": 1001, "content": "new"}],
+                },
+            )
+            current = store.read_backup_processing_snapshot()
+            new_state = ImageReferenceState(
+                format_version=1,
+                processed_archive_revision=current.change_state.archive_revision,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
+                image_reference_extractor_version=1,
+                completed_at="2026-07-11T01:00:00+00:00",
+            )
+            posts = (
+                ImageReferenceManifestPost(1, "cache-new", ()),
+            )
+
+            assert store.commit_bootstrapped_image_reference_state(
+                old_state,
+                new_state,
+                set(),
+                posts,
+            )
+            assert not store.commit_bootstrapped_image_reference_state(
+                old_state,
+                new_state,
+                set(),
+                posts,
+            )
+            manifest = store.read_image_reference_manifest()
+
+        assert manifest is not None
+        assert manifest.posts == posts
+
     def test_legacy_processing_state_migrates_floor_state_and_drops_table(
         self,
     ) -> None:
@@ -1378,12 +1532,16 @@ class ThreadArchiveStoreTest:
 
         assert first.effective_processing_inputs_changed
         assert first.effective_changed_lous == frozenset({1})
+        assert first.effective_added_lous == frozenset({1})
         assert not repeated.effective_processing_inputs_changed
         assert repeated.effective_changed_lous == frozenset()
+        assert repeated.effective_added_lous == frozenset()
         assert changed_attachments.effective_processing_inputs_changed
         assert changed_attachments.effective_changed_lous == frozenset({1})
+        assert changed_attachments.effective_added_lous == frozenset()
         assert changed_author.effective_processing_inputs_changed
         assert changed_author.effective_changed_lous == frozenset({1})
+        assert changed_author.effective_added_lous == frozenset()
         assert after_first.archive_revision == 1
         assert after_repeated.archive_revision == 1
         assert after_attachments.archive_revision == 2
@@ -1446,9 +1604,11 @@ class ThreadArchiveStoreTest:
         assert after_floor_map.archive_revision == 0
         assert first_recovery.inserted_count == 1
         assert first_recovery.effective_changed_lous == frozenset({2})
+        assert first_recovery.effective_added_lous == frozenset({2})
         assert after_recovery.archive_revision == 1
         assert repeated_recovery.inserted_count == 0
         assert repeated_recovery.effective_changed_lous == frozenset()
+        assert repeated_recovery.effective_added_lous == frozenset()
         assert after_repeat.archive_revision == 1
 
     def test_processing_state_commit_rejects_stale_archive_revision(self) -> None:

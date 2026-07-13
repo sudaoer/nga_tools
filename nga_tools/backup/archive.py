@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
@@ -56,6 +57,7 @@ from nga_tools.backup.post_version_selection import selections_fingerprint
 from nga_tools.backup.processing_state import (
     FLOOR_PROCESSING_STATE_VERSION,
     IMAGE_REFERENCE_STATE_VERSION,
+    IMAGE_REFERENCE_MANIFEST_VERSION,
     BackupProcessingSnapshot,
     FloorProcessingState,
     ImageReferenceManifestPost,
@@ -88,6 +90,22 @@ class _RecordProcessingResult:
 class _ImageRecordProcessingResult:
     download_summary: ImageDownloadOutcome
     manifest_posts: tuple[ImageReferenceManifestPost, ...]
+
+
+@dataclass(frozen=True)
+class _ArchiveIncrementalChanges:
+    previous_snapshot: BackupProcessingSnapshot | None
+    changed_lous: frozenset[int]
+    added_lous: frozenset[int]
+    archive_revision_increments: int
+
+
+@dataclass(frozen=True)
+class _FloorStateRefreshResult:
+    succeeded: bool
+    snapshot: BackupProcessingSnapshot
+    changed_lous: frozenset[int]
+    added_lous: frozenset[int]
 
 
 ProcessingStateReuseReason = Literal[
@@ -380,7 +398,7 @@ def _refresh_author_floor_state(
     author_total_lou_count: int | None,
     expected_snapshot: BackupProcessingSnapshot,
     commit_even_if_unchanged: bool = True,
-) -> tuple[bool, BackupProcessingSnapshot]:
+) -> _FloorStateRefreshResult:
     post_refs, missing_lous = _author_post_refs_and_missing_lous(
         archive_store,
         author_total_lou_count,
@@ -388,7 +406,12 @@ def _refresh_author_floor_state(
     record_timing_metric("待恢复缺失楼数", len(missing_lous))
     if not missing_lous and not commit_even_if_unchanged:
         record_timing_metric("本次恢复缺失楼数", 0)
-        return True, expected_snapshot
+        return _FloorStateRefreshResult(
+            True,
+            expected_snapshot,
+            frozenset(),
+            frozenset(),
+        )
 
     floor_processing = _build_floor_map_for_post_refs(
         client,
@@ -406,13 +429,23 @@ def _refresh_author_floor_state(
         recovered_result.inserted_count,
     )
     if not floor_processing.cacheable:
-        return False, expected_snapshot
+        return _FloorStateRefreshResult(
+            False,
+            expected_snapshot,
+            recovered_result.effective_changed_lous,
+            recovered_result.effective_added_lous,
+        )
     snapshot = archive_store.read_backup_processing_snapshot()
     if (
         not commit_even_if_unchanged
         and snapshot.change_state == expected_snapshot.change_state
     ):
-        return True, snapshot
+        return _FloorStateRefreshResult(
+            True,
+            snapshot,
+            recovered_result.effective_changed_lous,
+            recovered_result.effective_added_lous,
+        )
     committed = archive_store.commit_floor_processing_state(
         _new_floor_state(
             snapshot,
@@ -420,7 +453,12 @@ def _refresh_author_floor_state(
             author_total_lou_count=author_total_lou_count,
         )
     )
-    return committed, snapshot
+    return _FloorStateRefreshResult(
+        committed,
+        snapshot,
+        recovered_result.effective_changed_lous,
+        recovered_result.effective_added_lous,
+    )
 
 
 def _rebuild_image_reference_state(
@@ -477,6 +515,347 @@ def _rebuild_image_reference_state(
     )
 
 
+def _new_image_reference_state(
+    snapshot: BackupProcessingSnapshot,
+    *,
+    post_overlays_hash: str,
+    post_version_selections_hash: str,
+) -> ImageReferenceState:
+    return ImageReferenceState(
+        format_version=IMAGE_REFERENCE_STATE_VERSION,
+        processed_archive_revision=snapshot.change_state.archive_revision,
+        post_overlays_fingerprint=post_overlays_hash,
+        post_version_selections_fingerprint=post_version_selections_hash,
+        image_reference_extractor_version=IMAGE_REFERENCE_EXTRACTOR_VERSION,
+        completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+
+
+def _manifest_reference_summary(
+    posts: tuple[ImageReferenceManifestPost, ...],
+) -> tuple[Counter[str], dict[str, bool]]:
+    counts: Counter[str] = Counter()
+    validity_by_url: dict[str, bool] = {}
+    for post in posts:
+        for reference in post.references:
+            previous_validity = validity_by_url.setdefault(
+                reference.url,
+                reference.valid,
+            )
+            if previous_validity != reference.valid:
+                raise ValueError(
+                    f"图片引用URL合法性冲突：{reference.url}"
+                )
+            counts[reference.url] += 1
+    return counts, validity_by_url
+
+
+def _image_floor_labels(
+    archive_store: ThreadArchiveStore,
+    aid: Optional[int],
+) -> FloorLabels:
+    if aid is None:
+        return FloorLabels.plain()
+    try:
+        return load_floor_labels_from_archive(archive_store, aid)
+    except Exception as error:
+        report_warning(
+            WarningCategory.FLOOR_MAP,
+            f"无法加载楼层映射，使用普通楼层标签：{error}",
+        )
+        return FloorLabels.plain()
+
+
+def _image_tasks_for_urls(urls: set[str]) -> list[ImageDownloadTask]:
+    return [{"url": url} for url in sorted(urls)]
+
+
+def _incremental_image_reference_prerequisites_hold(
+    changes: _ArchiveIncrementalChanges,
+    snapshot: BackupProcessingSnapshot,
+    *,
+    post_overlays_hash: str,
+    post_version_selections_hash: str,
+) -> bool:
+    previous_snapshot = changes.previous_snapshot
+    if (
+        previous_snapshot is None
+        or previous_snapshot.image_state is None
+        or not changes.changed_lous
+        or not changes.added_lous <= changes.changed_lous
+    ):
+        return False
+    if not _image_state_is_current(
+        previous_snapshot,
+        post_overlays_hash=post_overlays_hash,
+        post_version_selections_hash=post_version_selections_hash,
+    ):
+        return False
+    expected_revision = (
+        previous_snapshot.change_state.archive_revision
+        + changes.archive_revision_increments
+    )
+    return snapshot.change_state.archive_revision == expected_revision
+
+
+def _try_incremental_image_reference_update(
+    tid: int,
+    aid: Optional[int],
+    thread_folder: Path,
+    archive_store: ThreadArchiveStore,
+    *,
+    snapshot: BackupProcessingSnapshot,
+    changes: _ArchiveIncrementalChanges,
+    post_overlays_hash: str,
+    post_version_selections_hash: str,
+) -> Literal["delta", "bootstrap"] | None:
+    if not _incremental_image_reference_prerequisites_hold(
+        changes,
+        snapshot,
+        post_overlays_hash=post_overlays_hash,
+        post_version_selections_hash=post_version_selections_hash,
+    ):
+        return None
+    previous_snapshot = changes.previous_snapshot
+    assert previous_snapshot is not None
+    expected_image_state = previous_snapshot.image_state
+    assert expected_image_state is not None
+
+    try:
+        manifest_state = archive_store.read_image_reference_manifest_state()
+        floor_labels = _image_floor_labels(archive_store, aid)
+        if manifest_state is None:
+            with time_section("图片引用清单懒初始化"):
+                with time_section("清单初始化归档读取"):
+                    records = archive_store.read_effective_post_records()
+                with time_section("清单初始化Overlay应用"):
+                    effective_records = _apply_post_overlays_to_records(
+                        archive_store.read_post_overlays(),
+                        records,
+                        output_dir=archive_store.thread_folder.parent,
+                    )
+                collection = _collect_image_download_tasks_for_records(
+                    archive_store,
+                    effective_records,
+                    floor_labels,
+                    task_lous=set(changes.changed_lous),
+                    include_cache_misses_in_tasks=True,
+                )
+                manifest_counts, manifest_validity = _manifest_reference_summary(
+                    collection.manifest_posts
+                )
+                retained_pending = {
+                    url
+                    for url in snapshot.pending_image_urls
+                    if manifest_counts[url] > 0 and manifest_validity.get(url, False)
+                }
+                candidate_urls = {
+                    task["url"] for task in collection.tasks
+                } | retained_pending
+                record_timing_metric(
+                    "图片引用增量楼层数",
+                    len(changes.changed_lous),
+                )
+                record_timing_metric(
+                    "图片引用清单楼层数",
+                    len(collection.manifest_posts),
+                )
+                record_timing_metric(
+                    "图片引用清单记录数",
+                    sum(
+                        len(post.references)
+                        for post in collection.manifest_posts
+                    ),
+                )
+                record_timing_metric(
+                    "图片增量候选URL数",
+                    len(candidate_urls),
+                )
+                download_summary = _download_images(
+                    tid,
+                    aid,
+                    _image_tasks_for_urls(candidate_urls),
+                )
+            fingerprints_after = (
+                archive_store.post_overlays_fingerprint(),
+                selections_fingerprint(thread_folder),
+            )
+            latest_snapshot = archive_store.read_backup_processing_snapshot()
+            if (
+                fingerprints_after
+                != (post_overlays_hash, post_version_selections_hash)
+                or latest_snapshot.change_state != snapshot.change_state
+            ):
+                return None
+            new_state = _new_image_reference_state(
+                latest_snapshot,
+                post_overlays_hash=post_overlays_hash,
+                post_version_selections_hash=post_version_selections_hash,
+            )
+            if not archive_store.commit_bootstrapped_image_reference_state(
+                expected_image_state,
+                new_state,
+                _failed_image_urls(download_summary),
+                collection.manifest_posts,
+            ):
+                return None
+            return "bootstrap"
+
+        if (
+            manifest_state.format_version != IMAGE_REFERENCE_MANIFEST_VERSION
+            or manifest_state.processed_archive_revision
+            != expected_image_state.processed_archive_revision
+        ):
+            return None
+
+        with time_section("图片引用清单增量更新"):
+            old_posts_by_lou = (
+                archive_store.read_image_reference_manifest_posts(
+                    set(changes.changed_lous)
+                )
+            )
+            missing_old_lous = (
+                changes.changed_lous
+                - changes.added_lous
+                - old_posts_by_lou.keys()
+            )
+            unexpected_old_lous = changes.added_lous & old_posts_by_lou.keys()
+            if missing_old_lous or unexpected_old_lous:
+                raise ValueError(
+                    "图片引用清单楼层集与归档变更不一致："
+                    f"missing={sorted(missing_old_lous)}, "
+                    f"unexpected={sorted(unexpected_old_lous)}"
+                )
+            with time_section("增量图片引用归档读取"):
+                records = archive_store.read_effective_post_records(
+                    set(changes.changed_lous)
+                )
+            with time_section("增量图片引用Overlay应用"):
+                effective_records = _apply_post_overlays_to_records(
+                    archive_store.read_post_overlays(),
+                    records,
+                    output_dir=archive_store.thread_folder.parent,
+                )
+            collection = _collect_image_download_tasks_for_records(
+                archive_store,
+                effective_records,
+                floor_labels,
+            )
+            new_posts_by_lou = {
+                post.lou: post for post in collection.manifest_posts
+            }
+            if new_posts_by_lou.keys() != changes.changed_lous:
+                raise ValueError(
+                    "增量图片引用读取的楼层集与归档变更不一致。"
+                )
+
+            old_posts = tuple(old_posts_by_lou.values())
+            new_posts = tuple(
+                new_posts_by_lou[lou] for lou in sorted(new_posts_by_lou)
+            )
+            old_counts, old_validity = _manifest_reference_summary(old_posts)
+            new_counts, new_validity = _manifest_reference_summary(new_posts)
+            queried_urls = (
+                set(old_counts)
+                | set(new_counts)
+                | set(snapshot.pending_image_urls)
+            )
+            stored_counts = (
+                archive_store.read_image_reference_manifest_url_counts(
+                    queried_urls
+                )
+            )
+            validity_by_url = {
+                url: valid for url, (_count, valid) in stored_counts.items()
+            }
+            for source in (old_validity, new_validity):
+                for url, valid in source.items():
+                    previous_validity = validity_by_url.setdefault(url, valid)
+                    if previous_validity != valid:
+                        raise ValueError(
+                            f"图片引用URL合法性冲突：{url}"
+                        )
+            for url, removed_count in old_counts.items():
+                stored = stored_counts.get(url)
+                if stored is None or stored[0] < removed_count:
+                    raise ValueError(
+                        f"图片引用清单URL计数无效：{url}"
+                    )
+            for url in snapshot.pending_image_urls:
+                if url not in stored_counts and url not in new_counts:
+                    raise ValueError(
+                        f"待重试图片URL不在引用清单中：{url}"
+                    )
+
+            def updated_reference_count(url: str) -> int:
+                return (
+                    stored_counts.get(url, (0, False))[0]
+                    - old_counts[url]
+                    + new_counts[url]
+                )
+
+            newly_referenced_urls = {
+                url
+                for url in new_counts
+                if url not in stored_counts and new_validity[url]
+            }
+            retained_pending = {
+                url
+                for url in snapshot.pending_image_urls
+                if updated_reference_count(url) > 0
+                and validity_by_url.get(url, False)
+            }
+            candidate_urls = newly_referenced_urls | retained_pending
+            record_timing_metric(
+                "图片引用增量楼层数",
+                len(changes.changed_lous),
+            )
+            record_timing_metric(
+                "图片引用清单记录数",
+                sum(len(post.references) for post in new_posts),
+            )
+            record_timing_metric(
+                "图片增量候选URL数",
+                len(candidate_urls),
+            )
+            download_summary = _download_images(
+                tid,
+                aid,
+                _image_tasks_for_urls(candidate_urls),
+            )
+
+        fingerprints_after = (
+            archive_store.post_overlays_fingerprint(),
+            selections_fingerprint(thread_folder),
+        )
+        latest_snapshot = archive_store.read_backup_processing_snapshot()
+        if (
+            fingerprints_after
+            != (post_overlays_hash, post_version_selections_hash)
+            or latest_snapshot.change_state != snapshot.change_state
+        ):
+            return None
+        new_state = _new_image_reference_state(
+            latest_snapshot,
+            post_overlays_hash=post_overlays_hash,
+            post_version_selections_hash=post_version_selections_hash,
+        )
+        if not archive_store.commit_incremental_image_reference_state(
+            expected_image_state,
+            new_state,
+            _failed_image_urls(download_summary),
+            new_posts,
+        ):
+            return None
+        return "delta"
+    except ValueError as error:
+        report_warning(
+            WarningCategory.PROCESSING_STATE,
+            f"图片引用清单无法增量更新，改为完整重建：{error}",
+        )
+        return None
+
+
 def _try_processing_state_reuse(
     client: NGAClient,
     tid: int,
@@ -488,6 +867,7 @@ def _try_processing_state_reuse(
     author_total_lou_count: int | None,
     local_pages_cover_remote: bool,
     processing_snapshot: BackupProcessingSnapshot | None = None,
+    incremental_changes: _ArchiveIncrementalChanges | None = None,
 ) -> ProcessingStateReuseResult:
     if not local_pages_cover_remote:
         return ProcessingStateReuseResult(False, "local_pages_incomplete")
@@ -507,6 +887,11 @@ def _try_processing_state_reuse(
         return ProcessingStateReuseResult(False, "state_invalid")
     post_overlays_hash = archive_store.post_overlays_fingerprint()
     post_version_selections_hash = selections_fingerprint(thread_folder)
+    changes = (
+        _ArchiveIncrementalChanges(None, frozenset(), frozenset(), 0)
+        if incremental_changes is None
+        else incremental_changes
+    )
     floor_hit = _floor_state_is_current(
         snapshot,
         page_count=page_count,
@@ -518,7 +903,7 @@ def _try_processing_state_reuse(
             record_timing_label("楼层状态复用结果", "rebuild_required")
             return ProcessingStateReuseResult(False, "state_missing")
         with time_section("楼层派生状态刷新"):
-            floor_refresh_succeeded, snapshot = _refresh_author_floor_state(
+            floor_refresh = _refresh_author_floor_state(
                 client,
                 archive_store,
                 tid,
@@ -527,15 +912,23 @@ def _try_processing_state_reuse(
                 author_total_lou_count=author_total_lou_count,
                 expected_snapshot=snapshot,
             )
-            if not floor_refresh_succeeded:
+            snapshot = floor_refresh.snapshot
+            if not floor_refresh.succeeded:
                 return ProcessingStateReuseResult(False, "floor_map_changed")
+            changes = _ArchiveIncrementalChanges(
+                changes.previous_snapshot,
+                changes.changed_lous | floor_refresh.changed_lous,
+                changes.added_lous | floor_refresh.added_lous,
+                changes.archive_revision_increments
+                + int(bool(floor_refresh.changed_lous)),
+            )
         record_timing_label("楼层状态复用结果", "floor_only_refresh")
     else:
         record_timing_label("楼层状态复用结果", "hit")
         if aid is not None:
             with time_section("未完成缺失楼重试"):
                 before_archive_revision = snapshot.change_state.archive_revision
-                floor_refresh_succeeded, snapshot = _refresh_author_floor_state(
+                floor_refresh = _refresh_author_floor_state(
                     client,
                     archive_store,
                     tid,
@@ -545,8 +938,16 @@ def _try_processing_state_reuse(
                     expected_snapshot=snapshot,
                     commit_even_if_unchanged=False,
                 )
-                if not floor_refresh_succeeded:
+                snapshot = floor_refresh.snapshot
+                if not floor_refresh.succeeded:
                     return ProcessingStateReuseResult(False, "floor_map_changed")
+                changes = _ArchiveIncrementalChanges(
+                    changes.previous_snapshot,
+                    changes.changed_lous | floor_refresh.changed_lous,
+                    changes.added_lous | floor_refresh.added_lous,
+                    changes.archive_revision_increments
+                    + int(bool(floor_refresh.changed_lous)),
+                )
                 record_timing_metric(
                     "缺失楼重试引发完整处理",
                     int(snapshot.change_state.archive_revision != before_archive_revision),
@@ -558,11 +959,29 @@ def _try_processing_state_reuse(
         post_version_selections_hash=post_version_selections_hash,
     )
     record_timing_metric("图片引用状态复用命中", int(image_hit))
-    record_timing_label(
-        "图片引用状态复用结果",
-        "image_collection_hit" if image_hit else "image_collection_rebuilt",
-    )
     if not image_hit or snapshot.image_state is None:
+        incremental_mode = _try_incremental_image_reference_update(
+            tid,
+            aid,
+            thread_folder,
+            archive_store,
+            snapshot=snapshot,
+            changes=changes,
+            post_overlays_hash=post_overlays_hash,
+            post_version_selections_hash=post_version_selections_hash,
+        )
+        if incremental_mode is not None:
+            record_timing_label(
+                "图片引用状态复用结果",
+                f"image_collection_{incremental_mode}",
+            )
+            record_timing_label("图片引用处理模式", incremental_mode)
+            return ProcessingStateReuseResult(True, "hit")
+        record_timing_label(
+            "图片引用状态复用结果",
+            "image_collection_rebuilt",
+        )
+        record_timing_label("图片引用处理模式", "full")
         if not _rebuild_image_reference_state(
             tid,
             aid,
@@ -574,6 +993,11 @@ def _try_processing_state_reuse(
             return ProcessingStateReuseResult(False, "archive_changed")
         return ProcessingStateReuseResult(True, "hit")
 
+    record_timing_label(
+        "图片引用状态复用结果",
+        "image_collection_hit",
+    )
+    record_timing_label("图片引用处理模式", "hit")
     report_info("归档与派生输入未变化，跳过完整处理。")
     record_timing_metric("待重试图片URL数", len(snapshot.pending_image_urls))
     pending_tasks: list[ImageDownloadTask] = [
@@ -665,6 +1089,7 @@ def _run_full_processing(
     page_count: int,
     author_total_lou_count: int | None,
 ) -> None:
+    record_timing_label("图片引用处理模式", "full")
     fingerprints_before = (
         archive_store.post_overlays_fingerprint(),
         selections_fingerprint(thread_folder),
@@ -747,6 +1172,7 @@ def _reuse_processing_state_after_page_refresh(
     local_pages_cover_remote: bool,
     force_processing: bool,
     processing_snapshot: BackupProcessingSnapshot | None = None,
+    incremental_changes: _ArchiveIncrementalChanges | None = None,
 ) -> ProcessingStateReuseResult:
     with time_section("处理状态复用判定"):
         if force_processing:
@@ -763,6 +1189,7 @@ def _reuse_processing_state_after_page_refresh(
                 author_total_lou_count=author_total_lou_count,
                 local_pages_cover_remote=local_pages_cover_remote,
                 processing_snapshot=processing_snapshot,
+                incremental_changes=incremental_changes,
             )
     record_timing_metric("处理状态复用命中", int(result.hit))
     record_timing_label("处理状态复用结果", result.reason)
@@ -814,6 +1241,15 @@ def backup_local_work_kind(
     return None
 
 
+def _read_incremental_base_snapshot(
+    archive_store: ThreadArchiveStore,
+) -> BackupProcessingSnapshot | None:
+    try:
+        return archive_store.read_backup_processing_snapshot()
+    except ValueError:
+        return None
+
+
 def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
     thread_folder = Path(utils.get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
@@ -845,6 +1281,12 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
         local_pages_cover_remote=local_pages_cover_remote,
         force_processing=False,
         processing_snapshot=snapshot,
+        incremental_changes=_ArchiveIncrementalChanges(
+            snapshot,
+            frozenset(),
+            frozenset(),
+            0,
+        ),
     )
     if reuse_result.hit:
         return
@@ -901,6 +1343,9 @@ def backup_thread(
 
     with time_section("归档Schema初始化"):
         archive_store.ensure_schema()
+    previous_processing_snapshot = _read_incremental_base_snapshot(
+        archive_store
+    )
     with time_section("归档页面准备与事务写入"):
         upsert_result = _upsert_archive_pages(archive_store, page_data_by_page)
     _record_archive_upsert_metrics(upsert_result)
@@ -930,6 +1375,12 @@ def backup_thread(
         author_total_lou_count=author_total_lou_count,
         local_pages_cover_remote=local_pages_cover_remote,
         force_processing=force_processing,
+        incremental_changes=_ArchiveIncrementalChanges(
+            previous_processing_snapshot,
+            upsert_result.effective_changed_lous,
+            upsert_result.effective_added_lous,
+            int(bool(upsert_result.effective_changed_lous)),
+        ),
     )
     if reuse_result.hit:
         return
@@ -974,14 +1425,14 @@ def backup_thread_sub(
         if aid is not None and existing_page_numbers
         else None
     )
-    try:
-        previous_floor_state = (
-            archive_store.read_backup_processing_snapshot().floor_state
-            if existing_page_numbers
-            else None
-        )
-    except ValueError:
-        previous_floor_state = None
+    previous_processing_snapshot = _read_incremental_base_snapshot(
+        archive_store
+    )
+    previous_floor_state = (
+        previous_processing_snapshot.floor_state
+        if previous_processing_snapshot is not None and existing_page_numbers
+        else None
+    )
 
     with time_section("远端页面抓取"):
         first_page_data = client.get_page(tid, aid, 1)
@@ -1116,6 +1567,12 @@ def backup_thread_sub(
             set(range(1, page_count + 1)) <= available_page_numbers
         ),
         force_processing=force_processing,
+        incremental_changes=_ArchiveIncrementalChanges(
+            previous_processing_snapshot,
+            upsert_result.effective_changed_lous,
+            upsert_result.effective_added_lous,
+            int(bool(upsert_result.effective_changed_lous)),
+        ),
     )
     if reuse_result.hit:
         return

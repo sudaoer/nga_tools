@@ -4,7 +4,7 @@ import io
 import json
 import sqlite3
 from collections.abc import Sequence
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, closing, redirect_stdout
 from pathlib import Path
 from typing import Callable
 from unittest.mock import patch
@@ -524,12 +524,177 @@ class BackupRawArchiveTest:
         thread_dir = tmp_path / "123_456"
         client = MutableFakeClient()
         parsed_lous: list[list[int]] = []
-        _run_backup(thread_dir, client, parsed_lous=parsed_lous)
+        full_processing_calls: list[str] = []
+        labels: list[tuple[str, str]] = []
+        _run_backup(
+            thread_dir,
+            client,
+            parsed_lous=parsed_lous,
+            full_processing_calls=full_processing_calls,
+        )
         client.posts[1]["content"] = "second changed"
 
-        _run_backup(thread_dir, client, parsed_lous=parsed_lous)
+        with patch(
+            "nga_tools.backup.archive.record_timing_label",
+            side_effect=lambda name, value: labels.append((name, value)),
+        ):
+            _run_backup(
+                thread_dir,
+                client,
+                parsed_lous=parsed_lous,
+                full_processing_calls=full_processing_calls,
+            )
 
         assert parsed_lous == [[1, 2], [2]]
+        assert full_processing_calls == ["full"]
+        assert ("图片引用处理模式", "delta") in labels
+
+    def test_incremental_image_manifest_prepares_only_new_urls(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        old_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/11/delta-old.png"
+        )
+        new_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/11/delta-new.png"
+        )
+        shared_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/11/delta-shared.png"
+        )
+        client = MutableFakeClient()
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": f"[img]{old_url}[/img]"},
+            {"lou": 2, "pid": 1002, "content": f"[img]{shared_url}[/img]"},
+        ]
+        downloaded_urls: list[list[str]] = []
+        full_processing_calls: list[str] = []
+        thread_dir = tmp_path / "123_456"
+
+        _run_backup(
+            thread_dir,
+            client,
+            downloaded_urls=downloaded_urls,
+            full_processing_calls=full_processing_calls,
+        )
+        client.posts[0]["content"] = f"[img]{new_url}[/img]"
+        _run_backup(
+            thread_dir,
+            client,
+            downloaded_urls=downloaded_urls,
+            full_processing_calls=full_processing_calls,
+        )
+
+        manifest = ThreadArchiveStore(
+            thread_dir
+        ).read_image_reference_manifest()
+        assert downloaded_urls == [[old_url, shared_url], [new_url]]
+        assert full_processing_calls == ["full"]
+        assert manifest is not None
+        assert manifest.url_reference_counts == (
+            (new_url, 1, True),
+            (shared_url, 1, True),
+        )
+
+    def test_legacy_image_state_lazily_bootstraps_manifest_on_change(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        parsed_lous: list[list[int]] = []
+        full_processing_calls: list[str] = []
+        labels: list[tuple[str, str]] = []
+        _run_backup(
+            thread_dir,
+            client,
+            parsed_lous=parsed_lous,
+            full_processing_calls=full_processing_calls,
+        )
+        store = ThreadArchiveStore(thread_dir)
+        with closing(sqlite3.connect(store.db_path)) as connection:
+            connection.execute(
+                "DELETE FROM backup_image_reference_manifest_entries"
+            )
+            connection.execute("DELETE FROM backup_image_reference_manifest_posts")
+            connection.execute("DELETE FROM backup_image_reference_manifest_urls")
+            connection.execute("DELETE FROM backup_image_reference_manifest_state")
+            connection.commit()
+        client.posts[1]["content"] = "second changed for bootstrap"
+
+        with patch(
+            "nga_tools.backup.archive.record_timing_label",
+            side_effect=lambda name, value: labels.append((name, value)),
+        ):
+            _run_backup(
+                thread_dir,
+                client,
+                parsed_lous=parsed_lous,
+                full_processing_calls=full_processing_calls,
+            )
+
+        manifest = store.read_image_reference_manifest()
+        assert parsed_lous == [[1, 2], [2]]
+        assert full_processing_calls == ["full"]
+        assert ("图片引用处理模式", "bootstrap") in labels
+        assert manifest is not None
+        assert [post.lou for post in manifest.posts] == [1, 2]
+
+    def test_legacy_image_state_does_not_bootstrap_on_unchanged_hit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        parsed_lous: list[list[int]] = []
+        _run_backup(thread_dir, client, parsed_lous=parsed_lous)
+        store = ThreadArchiveStore(thread_dir)
+        with closing(sqlite3.connect(store.db_path)) as connection:
+            connection.execute(
+                "DELETE FROM backup_image_reference_manifest_entries"
+            )
+            connection.execute("DELETE FROM backup_image_reference_manifest_posts")
+            connection.execute("DELETE FROM backup_image_reference_manifest_urls")
+            connection.execute("DELETE FROM backup_image_reference_manifest_state")
+            connection.commit()
+
+        _run_backup(thread_dir, client, parsed_lous=parsed_lous)
+
+        assert parsed_lous == [[1, 2]]
+        assert store.read_image_reference_manifest() is None
+
+    def test_partial_image_manifest_falls_back_to_full_rebuild(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        labels: list[tuple[str, str]] = []
+        _run_backup(thread_dir, client)
+        store = ThreadArchiveStore(thread_dir)
+        with closing(sqlite3.connect(store.db_path)) as connection:
+            connection.execute(
+                "DELETE FROM backup_image_reference_manifest_entries WHERE lou = 2"
+            )
+            connection.execute(
+                "DELETE FROM backup_image_reference_manifest_posts WHERE lou = 2"
+            )
+            connection.commit()
+        client.posts[1]["content"] = "changed after manifest corruption"
+
+        with patch(
+            "nga_tools.backup.archive.record_timing_label",
+            side_effect=lambda name, value: labels.append((name, value)),
+        ):
+            _run_backup(thread_dir, client)
+
+        manifest = store.read_image_reference_manifest()
+        assert ("图片引用处理模式", "full") in labels
+        assert manifest is not None
+        assert [post.lou for post in manifest.posts] == [1, 2]
 
     def test_failed_image_is_reconsidered_on_every_sub_run(self, tmp_path: Path) -> None:
         image_url = (
@@ -1494,8 +1659,10 @@ def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(
 
     assert first_recovery.inserted_count == 1
     assert first_recovery.effective_changed_lous == frozenset({2})
+    assert first_recovery.effective_added_lous == frozenset({2})
     assert repeated_recovery.inserted_count == 0
     assert repeated_recovery.effective_changed_lous == frozenset()
+    assert repeated_recovery.effective_added_lous == frozenset()
     assert len(rows) == 1
     assert rows[0].lou == 2
     assert rows[0].pid == 2002
