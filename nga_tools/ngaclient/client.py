@@ -375,7 +375,7 @@ class NGAClient:
             cache_key = self.page_cache_key(tid, aid, page)
             cached = self.page_cache.get(cache_key)
             if cached is None:
-                cached = self._stream_prefetch_cache.pop(cache_key, None)
+                cached = self._stream_prefetch_cache.get(cache_key)
             if cached is None:
                 missing_pages.append(page)
             else:
@@ -398,6 +398,10 @@ class NGAClient:
             for page in ordered_pages:
                 if page in cached_pages:
                     page_data = cached_pages[page]
+                    self._stream_prefetch_cache.pop(
+                        self.page_cache_key(tid, aid, page),
+                        None,
+                    )
                 else:
                     try:
                         fetched_page, page_data = next(fetched_iterator)

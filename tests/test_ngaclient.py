@@ -578,6 +578,46 @@ class NGAClientPageBatchTest:
         assert all(session.closed for session in sessions)
         assert client.page_cache == {}
 
+    def test_iter_pages_close_preserves_unconsumed_prefetch_for_later_stream(
+        self,
+    ) -> None:
+        sessions = [
+            MagicMock(spec=requests.Session),
+            MagicMock(spec=requests.Session),
+        ]
+        client = NGAClient()
+        client._stream_prefetch_cache.update(
+            {
+                client.page_cache_key(123, None, 2): {
+                    "code": 0,
+                    "currentPage": 2,
+                    "result": [],
+                },
+                client.page_cache_key(123, None, 3): {
+                    "code": 0,
+                    "currentPage": 3,
+                    "result": [],
+                },
+            }
+        )
+
+        with (
+            patch(
+                "nga_tools.ngaclient.api_runtime.create_api_session",
+                side_effect=sessions,
+            ),
+            use_api_runtime(2),
+        ):
+            first_stream = client.iter_pages(123, None, [2, 3])
+            first_page, _first_data = next(first_stream)
+            assert first_page == 2
+            first_stream.close()
+            later_pages = list(client.iter_pages(123, None, [3]))
+
+        assert [page for page, _data in later_pages] == [3]
+        for session in sessions:
+            session.post.assert_not_called()
+
 
 class NGAClientSessionTest:
     def test_uses_bound_session_without_sharing_it_outside_context(self) -> None:
