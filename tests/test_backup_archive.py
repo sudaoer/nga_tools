@@ -51,6 +51,12 @@ class MutableFakeClient:
         self.vrows: int | None = 3
         self.total_page = 1
         self.get_page_calls: list[int] = []
+        self.page_cache: dict[str, dict[str, object]] = {}
+
+    def clear_page_cache(self) -> int:
+        cleared_count = len(self.page_cache)
+        self.page_cache.clear()
+        return cleared_count
 
     def get_page_count(self, tid: int, aid: int | None) -> int:
         del tid, aid

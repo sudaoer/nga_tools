@@ -127,6 +127,11 @@ class NGAClient:
     def page_cache_key(self, tid: Tid, aid: Aid, page: int) -> str:
         return f"{tid}_{aid if aid else 'all'}_page_{page}"
 
+    def clear_page_cache(self) -> int:
+        cleared_count = len(self.page_cache)
+        self.page_cache.clear()
+        return cleared_count
+
     def get_page_count(self, tid: Tid, aid: Aid) -> int:
         first_page_data = self.get_page(tid, aid, 1)
         total_pages = first_page_data.get("totalPage", 1)

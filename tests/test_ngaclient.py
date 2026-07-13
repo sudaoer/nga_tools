@@ -233,6 +233,9 @@ class NGAClientPageBatchTest:
         assert list(first) == [3, 1]
         assert list(cached) == [1, 3]
         assert session.post.call_count == 2
+        assert client.clear_page_cache() == 2
+        assert client.page_cache == {}
+        assert client.clear_page_cache() == 0
 
     def test_failed_batch_does_not_commit_partial_parent_cache(self) -> None:
         configure_network_limits(api_concurrency=1, image_concurrency=1)

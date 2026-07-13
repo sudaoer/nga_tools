@@ -884,6 +884,18 @@ def backup_thread(
         refreshed_word_counts = archive_store.refresh_stored_word_counts()
     record_timing_metric("归档字数回填版本数", refreshed_word_counts)
 
+    local_pages_cover_remote = set(range(1, page_count + 1)) <= set(
+        page_data_by_page
+    )
+    archived_page_data_count = len(page_data_by_page)
+    page_data_by_page.clear()
+    del page_data_by_page, first_page_data
+    cleared_client_page_count = client.clear_page_cache()
+    record_timing_metric(
+        "归档页面内存释放页数",
+        max(archived_page_data_count, cleared_client_page_count),
+    )
+
     reuse_result = _reuse_processing_state_after_page_refresh(
         client,
         tid,
@@ -892,9 +904,7 @@ def backup_thread(
         archive_store,
         page_count=page_count,
         author_total_lou_count=author_total_lou_count,
-        local_pages_cover_remote=(
-            set(range(1, page_count + 1)) <= set(page_data_by_page)
-        ),
+        local_pages_cover_remote=local_pages_cover_remote,
         force_processing=force_processing,
     )
     if reuse_result.hit:
@@ -1062,6 +1072,14 @@ def backup_thread_sub(
     record_timing_metric("归档字数回填版本数", refreshed_word_counts)
 
     available_page_numbers = existing_page_numbers | set(page_data_by_page)
+    archived_page_data_count = len(page_data_by_page)
+    page_data_by_page.clear()
+    del page_data_by_page, first_page_data
+    cleared_client_page_count = client.clear_page_cache()
+    record_timing_metric(
+        "归档页面内存释放页数",
+        max(archived_page_data_count, cleared_client_page_count),
+    )
     reuse_result = _reuse_processing_state_after_page_refresh(
         client,
         tid,
