@@ -33,6 +33,7 @@ from nga_tools.forum.thread_configs import (
 )
 from nga_tools.ngaclient.client import ForumThread
 from nga_tools.ngaclient.session import ThreadLocalAPISessionPool, use_api_session
+from nga_tools.ngaclient.api_runtime import use_api_runtime
 
 
 AnkebakMode = Literal["full", "sub", "maintenance"]
@@ -208,7 +209,7 @@ def backup_auto(args: CommandArgs) -> None:
             full_backup=job.mode == "full",
         )
 
-    with session_pool:
+    with session_pool, use_api_runtime(app_config.api_concurrency):
         run_thread_config_batch(
             action=action,
             progress_text="正在执行智能备份",

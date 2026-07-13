@@ -12,6 +12,7 @@ from nga_tools.network_limits import (
     get_image_concurrency,
 )
 from nga_tools.ngaclient import NGAClient
+from nga_tools.ngaclient.api_runtime import use_api_runtime
 
 
 class _ApiResponse:
@@ -94,6 +95,17 @@ class NetworkLimitsTest:
 
         assert get_api_concurrency() == 2
         assert get_image_concurrency() == 7
+
+    def test_cannot_reconfigure_api_limit_while_runtime_is_active(self) -> None:
+        configure_network_limits(api_concurrency=2, image_concurrency=7)
+
+        with use_api_runtime(2):
+            try:
+                configure_network_limits(api_concurrency=3, image_concurrency=7)
+            except RuntimeError as error:
+                assert "活动期间不能修改API并发数" in str(error)
+            else:
+                raise AssertionError("expected active runtime reconfiguration failure")
 
     def test_nga_client_uses_api_request_slot(self) -> None:
         config = SimpleNamespace(

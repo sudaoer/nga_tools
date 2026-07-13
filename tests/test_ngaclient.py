@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event, Lock
 
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import NGAPageError
+from nga_tools.ngaclient.api_runtime import FairAPIRuntime, use_api_runtime
 from nga_tools.network_limits import configure_network_limits
 from nga_tools.ngaclient.session import (
     ThreadLocalAPISessionPool,
@@ -261,6 +263,153 @@ class NGAClientPageBatchTest:
         assert list(pages) == [1, 2]
         assert session.post.call_count == 2
         executor.assert_not_called()
+
+    def test_command_runtime_schedules_batches_fairly(self) -> None:
+        configure_network_limits(api_concurrency=4, image_concurrency=1)
+        initial_large_started = Event()
+        release_large = Event()
+        starts: list[tuple[str, int]] = []
+        start_lock = Lock()
+
+        def fetch(
+            _session: requests.Session,
+            item: tuple[str, int],
+        ) -> tuple[str, int]:
+            with start_lock:
+                starts.append(item)
+                if len(starts) >= 4:
+                    initial_large_started.set()
+            if item[0] == "large" and item[1] <= 4:
+                assert release_large.wait(timeout=2)
+            return item
+
+        sessions = [MagicMock(spec=requests.Session) for _ in range(4)]
+        with patch(
+            "nga_tools.ngaclient.api_runtime.create_api_session",
+            side_effect=sessions,
+        ):
+            runtime = FairAPIRuntime(4)
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    large_future = executor.submit(
+                        lambda: list(
+                            runtime.map_unordered(
+                                [("large", index) for index in range(1, 21)],
+                                fetch,
+                            )
+                        )
+                    )
+                    assert initial_large_started.wait(timeout=2)
+                    small_future = executor.submit(
+                        lambda: list(
+                            runtime.map_unordered([("small", 1)], fetch)
+                        )
+                    )
+                    release_large.set()
+                    assert len(large_future.result(timeout=3)) == 20
+                    assert small_future.result(timeout=3) == [
+                        (("small", 1), ("small", 1))
+                    ]
+            finally:
+                runtime.close()
+
+        small_index = starts.index(("small", 1))
+        large_after_initial = [
+            item for item in starts[4:small_index] if item[0] == "large"
+        ]
+        assert len(large_after_initial) < 4
+        for session in sessions:
+            session.close.assert_called_once_with()
+
+    def test_runtime_callbacks_run_on_the_calling_thread(self) -> None:
+        configure_network_limits(api_concurrency=2, image_concurrency=1)
+        caller_thread = threading.get_ident()
+        callback_threads: list[int] = []
+        sessions = [
+            MagicMock(spec=requests.Session),
+            MagicMock(spec=requests.Session),
+        ]
+        for session in sessions:
+            session.post.side_effect = lambda _url, *, data, timeout: (
+                _SuccessfulPageResponse(int(data["page"]))
+            )
+
+        with (
+            patch(
+                "nga_tools.ngaclient.api_runtime.create_api_session",
+                side_effect=sessions,
+            ),
+            use_api_runtime(2),
+        ):
+            client = NGAClient()
+            pages = client.get_pages(
+                123,
+                None,
+                [1, 2, 3],
+                on_page_complete=lambda _page, _completed, _total: (
+                    callback_threads.append(threading.get_ident())
+                ),
+            )
+
+        assert list(pages) == [1, 2, 3]
+        assert callback_threads == [caller_thread, caller_thread, caller_thread]
+
+    def test_failed_runtime_batch_does_not_cancel_other_batch(self) -> None:
+        sessions = [
+            MagicMock(spec=requests.Session),
+            MagicMock(spec=requests.Session),
+        ]
+
+        def fetch(_session: requests.Session, item: int) -> int:
+            if item == 2:
+                raise RuntimeError("page two failed")
+            return item
+
+        with patch(
+            "nga_tools.ngaclient.api_runtime.create_api_session",
+            side_effect=sessions,
+        ):
+            runtime = FairAPIRuntime(2)
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    failed_future = executor.submit(
+                        lambda: list(runtime.map_unordered([1, 2, 3], fetch))
+                    )
+                    healthy_future = executor.submit(
+                        lambda: list(runtime.map_unordered([10, 11], fetch))
+                    )
+                    with pytest.raises(RuntimeError, match="page two failed"):
+                        failed_future.result(timeout=3)
+                    assert sorted(healthy_future.result(timeout=3)) == [
+                        (10, 10),
+                        (11, 11),
+                    ]
+            finally:
+                runtime.close()
+
+    def test_iter_pages_streams_without_populating_parent_cache(self) -> None:
+        configure_network_limits(api_concurrency=2, image_concurrency=1)
+        sessions = [
+            MagicMock(spec=requests.Session),
+            MagicMock(spec=requests.Session),
+        ]
+        for session in sessions:
+            session.post.side_effect = lambda _url, *, data, timeout: (
+                _SuccessfulPageResponse(int(data["page"]))
+            )
+
+        client = NGAClient()
+        with (
+            patch(
+                "nga_tools.ngaclient.api_runtime.create_api_session",
+                side_effect=sessions,
+            ),
+            use_api_runtime(2),
+        ):
+            pages = list(client.iter_pages(123, None, [3, 1, 2]))
+
+        assert [page for page, _data in pages] == [3, 1, 2]
+        assert client.page_cache == {}
 
 
 class NGAClientSessionTest:

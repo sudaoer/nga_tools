@@ -37,6 +37,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_tid,
 )
 from nga_tools.ngaclient.session import ThreadLocalAPISessionPool, use_api_session
+from nga_tools.ngaclient.api_runtime import use_api_runtime
 from nga_tools.timing import time_section, use_timing_log
 
 
@@ -120,7 +121,7 @@ def run_backup_fetch_batch(
             else:
                 backup_func(tid, aid, write_json=write_json)
 
-    with session_pool:
+    with session_pool, use_api_runtime(app_config.api_concurrency):
         return run_thread_config_batch(
             action=action,
             progress_text=progress_text,

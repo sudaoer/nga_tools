@@ -640,44 +640,61 @@ def _scan_original_pages(
         "原帖页面抓取并发上限",
         min(total, get_api_concurrency()),
     )
+    next_scanned_pages = set(scanned_pages)
+    next_seen_original_lous = set(seen_original_lous)
+    next_original_posts_by_lou = (
+        None
+        if original_posts_by_lou is None
+        else dict(original_posts_by_lou)
+    )
+    next_original_lou_by_author_lou = dict(original_lou_by_author_lou)
+
     with time_section("原帖页面并发抓取"):
-        page_data_by_page = client.get_pages(
+        page_iterator = client.iter_pages(
             tid,
             None,
             pages_to_scan,
             on_page_complete=report_page_complete,
         )
+        for page_number, page_data in page_iterator:
+            next_scanned_pages.add(page_number)
+            if target_author_lous:
+                matched_count = sum(
+                    1
+                    for author_lou in target_author_lous
+                    if author_lou in next_original_lou_by_author_lou
+                )
+                progress_text = f"已匹配{matched_count}/{author_post_count}楼"
+            else:
+                progress_text = "正在收集原帖楼层信息"
+            for post in _page_post_dicts(
+                page_data,
+                f"原帖第{page_number}页",
+                allow_missing_posts=True,
+            ):
+                pid = cast(int, post["pid"])
+                original_lou = cast(int, post["lou"])
+                next_seen_original_lous.add(original_lou)
+                if next_original_posts_by_lou is not None:
+                    next_original_posts_by_lou[original_lou] = {
+                        "pid": pid,
+                        "lou": original_lou,
+                        "author_uid": _post_author_uid(post),
+                        "content": _post_content(post),
+                        "raw_post": dict(post),
+                    }
+                for author_lou in pid_to_author_lous.get(pid, []):
+                    next_original_lou_by_author_lou[author_lou] = original_lou
 
-    for page_number in pages_to_scan:
-        page_data = page_data_by_page[page_number]
-        scanned_pages.add(page_number)
-        if target_author_lous:
-            matched_count = sum(
-                1
-                for author_lou in target_author_lous
-                if author_lou in original_lou_by_author_lou
-            )
-            progress_text = f"已匹配{matched_count}/{author_post_count}楼"
-        else:
-            progress_text = "正在收集原帖楼层信息"
-        for post in _page_post_dicts(
-            page_data,
-            f"原帖第{page_number}页",
-            allow_missing_posts=True,
-        ):
-            pid = cast(int, post["pid"])
-            original_lou = cast(int, post["lou"])
-            seen_original_lous.add(original_lou)
-            if original_posts_by_lou is not None:
-                original_posts_by_lou[original_lou] = {
-                    "pid": pid,
-                    "lou": original_lou,
-                    "author_uid": _post_author_uid(post),
-                    "content": _post_content(post),
-                    "raw_post": dict(post),
-                }
-            for author_lou in pid_to_author_lous.get(pid, []):
-                original_lou_by_author_lou[author_lou] = original_lou
+    scanned_pages.clear()
+    scanned_pages.update(next_scanned_pages)
+    seen_original_lous.clear()
+    seen_original_lous.update(next_seen_original_lous)
+    if original_posts_by_lou is not None and next_original_posts_by_lou is not None:
+        original_posts_by_lou.clear()
+        original_posts_by_lou.update(next_original_posts_by_lou)
+    original_lou_by_author_lou.clear()
+    original_lou_by_author_lou.update(next_original_lou_by_author_lou)
     report_progress(
         "原帖扫描完成",
         completed=total,

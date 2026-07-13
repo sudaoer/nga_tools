@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 import io
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -62,6 +62,22 @@ class FakeClient:
             if on_page_complete is not None:
                 on_page_complete(page, completed, total)
         return result
+
+    def iter_pages(
+        self,
+        tid: int,
+        aid: None,
+        pages: Sequence[int],
+        *,
+        on_page_complete: Callable[[int, int, int], None] | None = None,
+    ) -> Generator[tuple[int, PageData]]:
+        page_data_by_page = self.get_pages(tid, aid, pages)
+        ordered_pages = list(dict.fromkeys(pages))
+        total = len(ordered_pages)
+        for completed, page in enumerate(ordered_pages, start=1):
+            if on_page_complete is not None:
+                on_page_complete(page, completed, total)
+            yield page, page_data_by_page[page]
 
 
 class FloorMapPagePostRefsTest:

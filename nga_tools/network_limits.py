@@ -27,6 +27,15 @@ def configure_network_limits(
     _validate_positive("api_concurrency", api_concurrency)
     _validate_positive("image_concurrency", image_concurrency)
 
+    from nga_tools.ngaclient.api_runtime import active_api_runtime_capacity
+
+    active_capacity = active_api_runtime_capacity()
+    if active_capacity is not None and active_capacity != api_concurrency:
+        raise RuntimeError(
+            "NGA API运行时活动期间不能修改API并发数："
+            f"active={active_capacity}, requested={api_concurrency}"
+        )
+
     global _api_concurrency, _image_concurrency, _api_semaphore, _image_semaphore
     with _STATE_LOCK:
         _api_concurrency = api_concurrency

@@ -1,4 +1,4 @@
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Optional, TypeAlias, TypedDict, cast
 
@@ -11,6 +11,7 @@ from nga_tools.ngaclient.session import (
     create_api_session,
     current_api_session,
 )
+from nga_tools.ngaclient.api_runtime import current_api_runtime
 
 Tid: TypeAlias = int | str
 Aid: TypeAlias = Optional[int | str]
@@ -134,6 +135,15 @@ class NGAClient:
         return total_pages
 
     def _request_page(self, tid: Tid, aid: Aid, page: int) -> PageData:
+        return self._request_page_with_session(self.session, tid, aid, page)
+
+    def _request_page_with_session(
+        self,
+        session: requests.Session,
+        tid: Tid,
+        aid: Aid,
+        page: int,
+    ) -> PageData:
         if not tid and not page:
             raise ValueError("Either tid or page must be provided.")
         if page < 1:
@@ -148,7 +158,7 @@ class NGAClient:
             data["authorid"] = str(aid)
 
         with api_request_slot():
-            response = self.session.post(url, data=data, timeout=30)
+            response = session.post(url, data=data, timeout=30)
         response.raise_for_status()
 
         json_data = response.json()
@@ -220,6 +230,21 @@ class NGAClient:
                 completed += 1
                 if on_page_complete is not None:
                     on_page_complete(page, completed, total)
+        elif (runtime := current_api_runtime()) is not None:
+            def fetch_runtime_page(
+                session: requests.Session,
+                page: int,
+            ) -> PageData:
+                return self._request_page_with_session(session, tid, aid, page)
+
+            for page, page_data in runtime.map_unordered(
+                missing_pages,
+                fetch_runtime_page,
+            ):
+                fetched_pages[page] = page_data
+                completed += 1
+                if on_page_complete is not None:
+                    on_page_complete(page, completed, total)
         else:
             session_pool = ThreadLocalAPISessionPool()
 
@@ -257,6 +282,64 @@ class NGAClient:
             )
             for page in ordered_pages
         }
+
+    def iter_pages(
+        self,
+        tid: Tid,
+        aid: Aid,
+        pages: Sequence[int],
+        *,
+        on_page_complete: PageProgressCallback | None = None,
+    ) -> Generator[tuple[int, PageData]]:
+        """Yield pages in request order without retaining newly fetched pages."""
+        ordered_pages = list(dict.fromkeys(pages))
+        for page in ordered_pages:
+            if page < 1:
+                raise ValueError("Page number must be greater than 0.")
+        total = len(ordered_pages)
+        if total == 0:
+            return
+
+        completed = 0
+        runtime = current_api_runtime()
+        if runtime is None or not self._parallel_page_fetch_enabled:
+            page_data_by_page = self.get_pages(tid, aid, ordered_pages)
+            for page in ordered_pages:
+                completed += 1
+                if on_page_complete is not None:
+                    on_page_complete(page, completed, total)
+                yield page, page_data_by_page[page]
+            return
+
+        cached_pages: dict[int, PageData] = {}
+        missing_pages: list[int] = []
+        for page in ordered_pages:
+            cached = self.page_cache.get(self.page_cache_key(tid, aid, page))
+            if cached is None:
+                missing_pages.append(page)
+            else:
+                cached_pages[page] = cached
+
+        def fetch_runtime_page(
+            session: requests.Session,
+            page: int,
+        ) -> PageData:
+            return self._request_page_with_session(session, tid, aid, page)
+
+        fetched_iterator = iter(runtime.map_ordered(missing_pages, fetch_runtime_page))
+        next_fetched = next(fetched_iterator, None)
+        for page in ordered_pages:
+            if page in cached_pages:
+                page_data = cached_pages[page]
+            else:
+                if next_fetched is None or next_fetched[0] != page:
+                    raise RuntimeError("NGA API流式页面顺序不一致。")
+                page_data = next_fetched[1]
+                next_fetched = next(fetched_iterator, None)
+            completed += 1
+            if on_page_complete is not None:
+                on_page_complete(page, completed, total)
+            yield page, page_data
 
     def get_forum_thread_page(
         self,
