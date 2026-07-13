@@ -527,7 +527,7 @@ class NGAClientPageBatchTest:
         assert [page for page, _data in pages] == [3, 1, 2]
         assert client.page_cache == {}
 
-    def test_iter_pages_close_cancels_queued_pages_without_waiting_for_inflight(
+    def test_iter_pages_close_retains_completed_inflight_pages_for_next_stream(
         self,
     ) -> None:
         configure_network_limits(api_concurrency=2, image_concurrency=1)
@@ -557,13 +557,24 @@ class NGAClientPageBatchTest:
             first_page, _first_data = next(pages)
             assert first_page == 1
             assert blocked_request_started.wait(timeout=1)
-            pages.close()
+            close_completed = Event()
+            close_thread = threading.Thread(
+                target=lambda: (pages.close(), close_completed.set()),
+            )
+            close_thread.start()
+            assert not close_completed.wait(timeout=0.05)
             with started_lock:
                 started_before_release = list(started_pages)
             release.set()
+            close_thread.join(timeout=1)
+            assert close_completed.is_set()
+            prefetched_pages = sorted(set(started_before_release) - {1})
+            replayed_pages = list(client.iter_pages(123, None, prefetched_pages))
 
         assert set(started_before_release).issubset({1, 2, 3})
         assert len(started_before_release) < 10
+        assert [page for page, _data in replayed_pages] == prefetched_pages
+        assert started_pages == started_before_release
         assert all(session.closed for session in sessions)
         assert client.page_cache == {}
 

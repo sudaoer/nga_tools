@@ -1,6 +1,7 @@
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Optional, TypeAlias, TypedDict, cast
 from urllib.parse import parse_qs, urlparse
 
@@ -153,14 +154,16 @@ class NGAClient:
         )
         self.base_url = app_config.base_url
         self.page_cache: dict[str, PageData] = {}
+        self._stream_prefetch_cache: dict[str, PageData] = {}
         self._parallel_page_fetch_enabled = session is None
 
     def page_cache_key(self, tid: Tid, aid: Aid, page: int) -> str:
         return f"{tid}_{aid if aid else 'all'}_page_{page}"
 
     def clear_page_cache(self) -> int:
-        cleared_count = len(self.page_cache)
+        cleared_count = len(self.page_cache) + len(self._stream_prefetch_cache)
         self.page_cache.clear()
+        self._stream_prefetch_cache.clear()
         return cleared_count
 
     def get_page_count(self, tid: Tid, aid: Aid) -> int:
@@ -346,7 +349,7 @@ class NGAClient:
         *,
         on_page_complete: PageProgressCallback | None = None,
     ) -> Generator[tuple[int, PageData]]:
-        """Yield pages in request order without retaining newly fetched pages."""
+        """Yield pages in order and retain only unconsumed in-flight results."""
         ordered_pages = list(dict.fromkeys(pages))
         for page in ordered_pages:
             if page < 1:
@@ -369,17 +372,26 @@ class NGAClient:
         cached_pages: dict[int, PageData] = {}
         missing_pages: list[int] = []
         for page in ordered_pages:
-            cached = self.page_cache.get(self.page_cache_key(tid, aid, page))
+            cache_key = self.page_cache_key(tid, aid, page)
+            cached = self.page_cache.get(cache_key)
+            if cached is None:
+                cached = self._stream_prefetch_cache.pop(cache_key, None)
             if cached is None:
                 missing_pages.append(page)
             else:
                 cached_pages[page] = cached
 
+        completed_stream_pages: dict[int, PageData] = {}
+        completed_stream_pages_lock = Lock()
+
         def fetch_runtime_page(
             session: requests.Session,
             page: int,
         ) -> PageData:
-            return self._request_page_with_session(session, tid, aid, page)
+            page_data = self._request_page_with_session(session, tid, aid, page)
+            with completed_stream_pages_lock:
+                completed_stream_pages[page] = page_data
+            return page_data
 
         fetched_iterator = runtime.map_ordered(missing_pages, fetch_runtime_page)
         try:
@@ -393,12 +405,20 @@ class NGAClient:
                         raise RuntimeError("NGA API流式页面提前结束。") from error
                     if fetched_page != page:
                         raise RuntimeError("NGA API流式页面顺序不一致。")
+                    with completed_stream_pages_lock:
+                        completed_stream_pages.pop(fetched_page, None)
                 completed += 1
                 if on_page_complete is not None:
                     on_page_complete(page, completed, total)
                 yield page, page_data
         finally:
             fetched_iterator.close()
+            with completed_stream_pages_lock:
+                prefetched_pages = dict(completed_stream_pages)
+            for page, page_data in prefetched_pages.items():
+                self._stream_prefetch_cache[
+                    self.page_cache_key(tid, aid, page)
+                ] = page_data
 
     def get_forum_thread_page(
         self,
