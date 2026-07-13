@@ -29,8 +29,14 @@ class APIRuntimeMetrics:
     peak_queued_items: int
     queue_wait_seconds: float
     service_seconds: float
+    runtime_seconds: float
 
     def as_dict(self) -> dict[str, int | float]:
+        utilization = (
+            0.0
+            if self.runtime_seconds <= 0
+            else self.service_seconds / (self.runtime_seconds * self.capacity)
+        )
         return {
             "capacity": self.capacity,
             "batches_submitted": self.batches_submitted,
@@ -42,6 +48,8 @@ class APIRuntimeMetrics:
             "peak_queued_items": self.peak_queued_items,
             "queue_wait_seconds": self.queue_wait_seconds,
             "service_seconds": self.service_seconds,
+            "runtime_seconds": self.runtime_seconds,
+            "capacity_utilization": min(1.0, utilization),
         }
 
 
@@ -111,6 +119,7 @@ class FairAPIRuntime:
             for index in range(capacity)
         )
         self._batches_submitted = 0
+        self._started_at = perf_counter()
         self._items_submitted = 0
         self._items_completed = 0
         self._active_requests = 0
@@ -345,6 +354,7 @@ class FairAPIRuntime:
                 peak_queued_items=self._peak_queued_items,
                 queue_wait_seconds=self._queue_wait_seconds,
                 service_seconds=self._service_seconds,
+                runtime_seconds=max(0.0, perf_counter() - self._started_at),
             )
 
     def close(self) -> None:

@@ -299,8 +299,16 @@ class ImageSingleFlightTest:
         url = _image_url("single-flight")
         owner_started = threading.Event()
         release_owner = threading.Event()
+        waiter_claimed = threading.Event()
         calls = 0
         call_lock = threading.Lock()
+        real_claim = image_store._claim_image_url
+
+        def observed_claim(image_url):
+            result = real_claim(image_url)
+            if not result[2]:
+                waiter_claimed.set()
+            return result
 
         def fake_download(tasks, on_progress=None, **_kwargs):
             nonlocal calls
@@ -328,12 +336,17 @@ class ImageSingleFlightTest:
                 "nga_tools.backup.image_store.utils.download_files",
                 side_effect=fake_download,
             ),
+            patch(
+                "nga_tools.backup.image_store._claim_image_url",
+                side_effect=observed_claim,
+            ),
             use_image_index_writer(),
         ):
             with ThreadPoolExecutor(max_workers=2) as executor:
                 owner = executor.submit(image_store.download_image_tasks, [{"url": url}])
                 assert owner_started.wait(timeout=2)
                 waiter = executor.submit(image_store.download_image_tasks, [{"url": url}])
+                assert waiter_claimed.wait(timeout=2)
                 release_owner.set()
                 owner_result = owner.result(timeout=3)
                 waiter_result = waiter.result(timeout=3)
@@ -401,7 +414,15 @@ class ImageSingleFlightTest:
         url = _image_url("single-flight-shared-failure")
         owner_started = threading.Event()
         release_owner = threading.Event()
+        waiter_claimed = threading.Event()
         calls = 0
+        real_claim = image_store._claim_image_url
+
+        def observed_claim(image_url):
+            result = real_claim(image_url)
+            if not result[2]:
+                waiter_claimed.set()
+            return result
 
         def fake_download(tasks, on_progress=None, **_kwargs):
             nonlocal calls
@@ -426,11 +447,16 @@ class ImageSingleFlightTest:
                 "nga_tools.backup.image_store.utils.download_files",
                 side_effect=fake_download,
             ),
+            patch(
+                "nga_tools.backup.image_store._claim_image_url",
+                side_effect=observed_claim,
+            ),
         ):
             with ThreadPoolExecutor(max_workers=2) as executor:
                 owner = executor.submit(image_store.download_image_tasks, [{"url": url}])
                 assert owner_started.wait(timeout=2)
                 waiter = executor.submit(image_store.download_image_tasks, [{"url": url}])
+                assert waiter_claimed.wait(timeout=2)
                 release_owner.set()
                 owner_result = owner.result(timeout=3)
                 waiter_result = waiter.result(timeout=3)
@@ -448,7 +474,15 @@ class ImageSingleFlightTest:
         url = _image_url("single-flight-cancel")
         owner_started = threading.Event()
         release_owner = threading.Event()
+        waiter_claimed = threading.Event()
         calls = 0
+        real_claim = image_store._claim_image_url
+
+        def observed_claim(image_url):
+            result = real_claim(image_url)
+            if not result[2]:
+                waiter_claimed.set()
+            return result
 
         def fake_download(tasks, on_progress=None, **_kwargs):
             nonlocal calls
@@ -477,12 +511,17 @@ class ImageSingleFlightTest:
                 "nga_tools.backup.image_store.utils.download_files",
                 side_effect=fake_download,
             ),
+            patch(
+                "nga_tools.backup.image_store._claim_image_url",
+                side_effect=observed_claim,
+            ),
             use_image_index_writer(),
         ):
             with ThreadPoolExecutor(max_workers=2) as executor:
                 owner = executor.submit(image_store.download_image_tasks, [{"url": url}])
                 assert owner_started.wait(timeout=2)
                 waiter = executor.submit(image_store.download_image_tasks, [{"url": url}])
+                assert waiter_claimed.wait(timeout=2)
                 release_owner.set()
                 with pytest.raises(RuntimeError, match="owner cancelled"):
                     owner.result(timeout=3)

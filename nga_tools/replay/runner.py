@@ -42,6 +42,7 @@ from nga_tools.replay.state import (
 )
 from nga_tools.replay.validation import ValidationStats, validate_replay_output
 from nga_tools.timing import TimingSnapshot, git_commit_id
+from nga_tools.client_runtime_metrics import client_runtime_metrics
 
 JsonObject: TypeAlias = dict[str, object]
 _INITIAL_STATES: set[str] = {"empty", "warm", "existing"}
@@ -258,6 +259,8 @@ def _write_run_report(
         },
         "server_metrics_baseline": metrics_baseline,
         "server_metrics": metrics_final,
+        "client_runtime_metrics": client_runtime_metrics(),
+        "thread_batch_metrics": result.queue_metrics.as_dict(),
         "processing_state_reuse": _processing_reuse_counts(
             result.timing_snapshots
         ),

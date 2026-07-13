@@ -787,6 +787,14 @@ class ReplayRunnerTest:
                 "nga_tools.replay.runner.validate_replay_output",
                 return_value=ValidationStats(0.02, 1, 1, 1, 0, 0, 0),
             ),
+            patch(
+                "nga_tools.replay.runner.client_runtime_metrics",
+                return_value={
+                    "api": {"capacity": 4},
+                    "image": {"capacity": 16},
+                    "image_index_writer": {"transactions": 2},
+                },
+            ),
         ):
             run_replay_backup(args)
 
@@ -799,6 +807,16 @@ class ReplayRunnerTest:
         assert report["initial_state"] == "empty"
         assert report["concurrency"]["workers"] == 2
         assert report["server_metrics"] == metrics
+        assert report["client_runtime_metrics"] == {
+            "api": {"capacity": 4},
+            "image": {"capacity": 16},
+            "image_index_writer": {"transactions": 2},
+        }
+        assert report["thread_batch_metrics"] == {
+            "peak_unstarted_configs": 0,
+            "unstarted_config_seconds": 0.0,
+            "max_config_start_wait_seconds": 0.0,
+        }
 
     def test_empty_existing_and_warm_run_end_to_end(self, tmp_path: Path) -> None:
         source, thread_config = _build_warm_source(tmp_path)

@@ -5,8 +5,9 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 from time import perf_counter
 
 from nga_tools.console import (
@@ -51,12 +52,29 @@ ThreadBatchSuccess = tuple[int, str]
 
 
 @dataclass(frozen=True)
+class ThreadBatchQueueMetrics:
+    peak_unstarted_configs: int = 0
+    unstarted_config_seconds: float = 0.0
+    max_config_start_wait_seconds: float = 0.0
+
+    def as_dict(self) -> dict[str, int | float]:
+        return {
+            "peak_unstarted_configs": self.peak_unstarted_configs,
+            "unstarted_config_seconds": self.unstarted_config_seconds,
+            "max_config_start_wait_seconds": self.max_config_start_wait_seconds,
+        }
+
+
+@dataclass(frozen=True)
 class ThreadBatchResult:
     successes: tuple[ThreadBatchSuccess, ...]
     failures: tuple[ThreadBatchFailure, ...]
     hidden_threads: tuple[ThreadBatchFailure, ...]
     timing_snapshots: tuple[TimingSnapshot, ...] = ()
     batch_timing_path: Path | None = None
+    queue_metrics: ThreadBatchQueueMetrics = field(
+        default_factory=ThreadBatchQueueMetrics
+    )
 
 
 def thread_config_label(thread_config: ThreadConfig) -> str:
@@ -85,7 +103,10 @@ def _run_thread_config_with_progress(
     timing_snapshot_callback: Callable[[TimingSnapshot], None] | None,
     thread_summary_reporter: Reporter,
     command_warning_collector: WarningSummaryCollector | None,
+    on_start: Callable[[], None] | None = None,
 ) -> str | None:
+    if on_start is not None:
+        on_start()
     tid = thread_config_tid(thread_config)
     aid = thread_config_aid(thread_config)
     label = thread_config_label(thread_config)
@@ -195,13 +216,26 @@ def _run_thread_configs_parallel(
     timing_snapshot_callback: Callable[[TimingSnapshot], None] | None,
     thread_summary_reporter: Reporter,
     command_warning_collector: WarningSummaryCollector | None,
-) -> tuple[list[ThreadBatchSuccess], list[ThreadBatchFailure]]:
+) -> tuple[
+    list[ThreadBatchSuccess],
+    list[ThreadBatchFailure],
+    ThreadBatchQueueMetrics,
+]:
     successes: list[ThreadBatchSuccess] = []
     failures: list[tuple[int, ThreadConfig, Exception]] = []
     total = len(thread_configs)
+    start_waits: list[float] = []
+    start_waits_lock = Lock()
+
+    def record_start(queued_at: float) -> None:
+        wait_seconds = max(0.0, perf_counter() - queued_at)
+        with start_waits_lock:
+            start_waits.append(wait_seconds)
+
     with ThreadPoolExecutor(max_workers=min(worker_count, total)) as executor:
         future_context: dict[Future[str | None], tuple[int, ThreadConfig]] = {}
         for index, thread_config in enumerate(thread_configs, start=1):
+            queued_at = perf_counter()
             future = executor.submit(
                 _run_thread_config_with_progress,
                 index=index,
@@ -219,6 +253,7 @@ def _run_thread_configs_parallel(
                 timing_snapshot_callback=timing_snapshot_callback,
                 thread_summary_reporter=thread_summary_reporter,
                 command_warning_collector=command_warning_collector,
+                on_start=lambda queued_at=queued_at: record_start(queued_at),
             )
             future_context[future] = (index, thread_config)
 
@@ -236,7 +271,12 @@ def _run_thread_configs_parallel(
         (thread_config, error)
         for _, thread_config, error in sorted(failures, key=lambda item: item[0])
     ]
-    return successes, ordered_failures
+    queue_metrics = ThreadBatchQueueMetrics(
+        peak_unstarted_configs=max(0, total - min(worker_count, total)),
+        unstarted_config_seconds=sum(start_waits),
+        max_config_start_wait_seconds=max(start_waits, default=0.0),
+    )
+    return successes, ordered_failures, queue_metrics
 
 
 def _print_thread_batch_summary(
@@ -335,8 +375,9 @@ def run_thread_config_batch(
                 thread_summary_reporter=thread_summary_reporter,
                 command_warning_collector=command_warning_collector,
             )
+            queue_metrics = ThreadBatchQueueMetrics()
         else:
-            successes, failures = _run_thread_configs_parallel(
+            successes, failures, queue_metrics = _run_thread_configs_parallel(
                 selected_thread_configs,
                 worker_count,
                 progress,
@@ -408,6 +449,7 @@ def run_thread_config_batch(
         tuple(hidden_threads),
         () if batch_collector is None else batch_collector.snapshots(),
         batch_timing_path,
+        queue_metrics,
     )
     if unexpected_failures and raise_on_failure:
         raise SystemExit(1)
