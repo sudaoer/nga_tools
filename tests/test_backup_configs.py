@@ -843,7 +843,15 @@ class BackupBatchHandlerTest:
         assert "处理状态复用：" in summary
         assert "命中1，未命中1，不适用0" in summary
         assert "- archive_changed: 1" in summary
-        assert "- 共享阶段: 样本2，P50=3.000s，P95=4.000s" in summary
+        assert (
+            "- 共享阶段: 样本2，线程秒总和=7.000s，"
+            "P50=3.000s，P95=4.000s，P99=4.000s，max=4.000s"
+            in summary
+        )
+        assert "主题总耗时（可用线程快照）：" in summary
+        assert "最慢主题（Top 5）：" in summary
+        assert "批次队列：" in summary
+        assert "- 峰值未启动主题数：0" in summary
         assert "预期图片下载失败：2" in summary
         assert "- http_4xx: 2" in summary
 

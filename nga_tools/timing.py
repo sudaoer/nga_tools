@@ -354,6 +354,17 @@ def _summed_stage_durations_by_thread(
     return dict(durations_by_stage)
 
 
+def _duration_distribution_text(values: list[float]) -> str:
+    return (
+        f"样本{len(values)}，"
+        f"线程秒总和={_format_duration(sum(values))}，"
+        f"P50={_format_duration(_nearest_rank(values, 0.50))}，"
+        f"P95={_format_duration(_nearest_rank(values, 0.95))}，"
+        f"P99={_format_duration(_nearest_rank(values, 0.99))}，"
+        f"max={_format_duration(max(values))}"
+    )
+
+
 def write_batch_timing_summary(
     path: Path,
     *,
@@ -368,6 +379,9 @@ def write_batch_timing_summary(
     planning_seconds: float | None = None,
     water_level_seconds: float | None = None,
     batch_execution_seconds: float | None = None,
+    peak_unstarted_configs: int | None = None,
+    unstarted_config_seconds: float | None = None,
+    max_config_start_wait_seconds: float | None = None,
 ) -> Path:
     snapshot_list = list(snapshots)
     image_failure_categories: Counter[str] = Counter()
@@ -462,18 +476,61 @@ def write_batch_timing_summary(
         )
         lines.append(f"- 批次执行：{_format_duration(batch_execution_value)}")
 
+    has_queue_metrics = (
+        peak_unstarted_configs is not None
+        or unstarted_config_seconds is not None
+        or max_config_start_wait_seconds is not None
+    )
+    if has_queue_metrics:
+        lines.extend(
+            [
+                "",
+                "批次队列：",
+                f"- 峰值未启动主题数：{peak_unstarted_configs or 0}",
+                "- 累计启动等待："
+                f"{_format_duration(unstarted_config_seconds or 0.0)}",
+                "- 最大启动等待："
+                f"{_format_duration(max_config_start_wait_seconds or 0.0)}",
+            ]
+        )
+
+    lines.extend(["", "主题总耗时（可用线程快照）："])
+    thread_elapsed_values = [
+        snapshot.elapsed_seconds for snapshot in snapshot_list
+    ]
+    if thread_elapsed_values:
+        lines.append(_duration_distribution_text(thread_elapsed_values))
+    else:
+        lines.append("无线程快照")
+
     lines.extend(["", "阶段耗时（每帖同名阶段累计）："])
     durations_by_stage = _summed_stage_durations_by_thread(snapshot_list)
     if durations_by_stage:
         for stage_name in sorted(durations_by_stage):
             values = durations_by_stage[stage_name]
-            lines.append(
-                f"- {stage_name}: 样本{len(values)}，"
-                f"P50={_format_duration(_nearest_rank(values, 0.50))}，"
-                f"P95={_format_duration(_nearest_rank(values, 0.95))}"
-            )
+            lines.append(f"- {stage_name}: {_duration_distribution_text(values)}")
     else:
         lines.append("无阶段样本")
+
+    lines.extend(["", "最慢主题（Top 5）："])
+    slowest_snapshots = sorted(
+        snapshot_list,
+        key=lambda snapshot: (
+            -snapshot.elapsed_seconds,
+            snapshot.target or "",
+            snapshot.task_name,
+            snapshot.started_at,
+        ),
+    )[:5]
+    if slowest_snapshots:
+        for snapshot in slowest_snapshots:
+            target = snapshot.target or "未知目标"
+            lines.append(
+                f"- {target}: {_format_duration(snapshot.elapsed_seconds)}"
+                f"（状态：{snapshot.status}）"
+            )
+    else:
+        lines.append("无线程快照")
 
     lines.extend(["", "失败分类："])
     if image_failure_categories:

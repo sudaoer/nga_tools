@@ -434,6 +434,11 @@ def run_thread_config_batch(
                 if command_wall_start is not None
                 else None
             ),
+            peak_unstarted_configs=queue_metrics.peak_unstarted_configs,
+            unstarted_config_seconds=queue_metrics.unstarted_config_seconds,
+            max_config_start_wait_seconds=(
+                queue_metrics.max_config_start_wait_seconds
+            ),
         )
 
     for _, message in sorted(successes, key=lambda item: item[0]):

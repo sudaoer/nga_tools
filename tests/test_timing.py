@@ -10,6 +10,8 @@ from unittest.mock import patch
 import pytest
 
 from nga_tools.timing import (
+    TimingSectionRecord,
+    TimingSnapshot,
     record_timing,
     record_timing_metric,
     time_section,
@@ -193,3 +195,50 @@ class TimingLogTest:
                 f"Commit ID：{commit_id}\n" in text
                 for text in retained_texts
             )
+
+    def test_batch_timing_summary_reports_tail_and_slowest_targets(self) -> None:
+        started_at = datetime.now().astimezone()
+        snapshots = tuple(
+            TimingSnapshot(
+                task_name="backup auto",
+                target=f"target-{index}",
+                started_at=started_at,
+                elapsed_seconds=elapsed,
+                status="完成",
+                sections=(
+                    TimingSectionRecord("共享阶段", elapsed / 2, "完成"),
+                    TimingSectionRecord("共享阶段", elapsed / 2, "完成"),
+                ),
+                metrics=(),
+                labels=(),
+            )
+            for index, elapsed in enumerate((1.0, 2.0, 3.0, 4.0, 100.0), start=1)
+        )
+
+        with TemporaryDirectory() as temp_dir_name:
+            batch_path = Path(temp_dir_name) / "batch_timing.log"
+            output_path = write_batch_timing_summary(
+                batch_path,
+                task_name="backup auto",
+                started_at=started_at,
+                wall_seconds=100.0,
+                total_threads=5,
+                snapshots=snapshots,
+                thread_failure_categories=Counter(),
+                peak_unstarted_configs=3,
+                unstarted_config_seconds=6.5,
+                max_config_start_wait_seconds=4.5,
+            )
+            summary = output_path.read_text(encoding="utf-8")
+
+        assert (
+            "样本5，线程秒总和=110.000s，P50=3.000s，"
+            "P95=100.000s，P99=100.000s，max=100.000s"
+            in summary
+        )
+        assert "- 峰值未启动主题数：3" in summary
+        assert "- 累计启动等待：6.500s" in summary
+        assert "- 最大启动等待：4.500s" in summary
+        assert summary.index("- target-5: 100.000s") < summary.index(
+            "- target-4: 4.000s"
+        )
