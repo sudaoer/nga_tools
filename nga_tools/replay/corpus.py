@@ -490,7 +490,7 @@ def _read_pid_targets(
             if pid is None:
                 continue
             if pid <= 0:
-                raise ReplayCorpusError(f"重放源PID索引{field_name}无效：{path}")
+                continue
             existing = targets.get(pid)
             if existing is not None and existing != target:
                 raise ReplayCorpusError(

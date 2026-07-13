@@ -147,6 +147,7 @@ def _build_source(tmp_path: Path) -> tuple[Path, Path, Path]:
                     "original_lou": None,
                     "candidate_original_lous": [11, 12],
                 },
+                {"pid": 0, "author_lou": 4, "original_lou": 2},
             ],
         )
     )
