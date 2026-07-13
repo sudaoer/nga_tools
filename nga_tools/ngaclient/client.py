@@ -1,6 +1,8 @@
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Any, Optional, TypeAlias, TypedDict, cast
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -17,6 +19,35 @@ Tid: TypeAlias = int | str
 Aid: TypeAlias = Optional[int | str]
 PageData: TypeAlias = dict[str, Any]
 PageProgressCallback: TypeAlias = Callable[[int, int, int], None]
+
+
+@dataclass(frozen=True, slots=True)
+class PidRedirectTarget:
+    tid: int
+    page_number: int
+
+
+def _single_positive_query_int(query: dict[str, list[str]], key: str) -> int | None:
+    values = query.get(key)
+    if values is None or len(values) != 1:
+        return None
+    try:
+        value = int(values[0])
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def parse_pid_redirect_location(location: str) -> PidRedirectTarget | None:
+    parsed = urlparse(location)
+    if not parsed.path.endswith("/read.php"):
+        return None
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    tid = _single_positive_query_int(query, "tid")
+    page_number = _single_positive_query_int(query, "page")
+    if tid is None or page_number is None:
+        return None
+    return PidRedirectTarget(tid=tid, page_number=page_number)
 
 
 class ForumThread(TypedDict):
@@ -138,6 +169,25 @@ class NGAClient:
         if not isinstance(total_pages, int):
             raise ValueError(f"Invalid totalPage value: {total_pages!r}")
         return total_pages
+
+    def get_pid_redirect_target(self, pid: int) -> PidRedirectTarget | None:
+        if pid <= 0:
+            raise ValueError("PID must be greater than 0.")
+        url = f"{self.base_url.rstrip('/')}/read.php"
+        with api_request_slot():
+            response = self.session.get(
+                url,
+                params={"pid": str(pid), "opt": "128"},
+                allow_redirects=False,
+                timeout=30,
+            )
+        response.raise_for_status()
+        if response.status_code < 300 or response.status_code >= 400:
+            return None
+        location = response.headers.get("Location")
+        if location is None:
+            return None
+        return parse_pid_redirect_location(location)
 
     def _request_page(self, tid: Tid, aid: Aid, page: int) -> PageData:
         return self._request_page_with_session(self.session, tid, aid, page)

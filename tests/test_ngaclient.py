@@ -9,7 +9,7 @@ import requests
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from nga_tools.ngaclient import NGAClient
+from nga_tools.ngaclient import NGAClient, PidRedirectTarget, parse_pid_redirect_location
 from nga_tools.ngaclient.client import NGAPageError
 from nga_tools.ngaclient.api_runtime import FairAPIRuntime, use_api_runtime
 from nga_tools.network_limits import configure_network_limits
@@ -44,6 +44,15 @@ class _SuccessfulPageResponse:
             "totalPage": 3,
             "result": [],
         }
+
+
+class _PidRedirectResponse:
+    def __init__(self, status_code: int, location: str | None = None) -> None:
+        self.status_code = status_code
+        self.headers = {} if location is None else {"Location": location}
+
+    def raise_for_status(self) -> None:
+        return
 
 
 class _ConcurrentRequestTracker:
@@ -170,6 +179,75 @@ class NGAClientPageErrorTest:
         assert context.value.code == 35
         assert context.value.message == '找不到内容 或 没有更多页了'
         assert str(context.value) == 'Error fetching page: 找不到内容 或 没有更多页了'
+
+
+class NGAClientPidRedirectTest:
+    @pytest.mark.parametrize(
+        ("location", "expected"),
+        [
+            (
+                "/read.php?tid=43877379&page=1249#pid874888389Anchor",
+                PidRedirectTarget(tid=43877379, page_number=1249),
+            ),
+            (
+                "https://bbs.nga.cn/read.php?tid=43877379&page=1249"
+                "#pid874888389Anchor",
+                PidRedirectTarget(tid=43877379, page_number=1249),
+            ),
+            ("/read.php?tid=43877379&page=0", None),
+            ("/read.php?tid=43877379", None),
+            ("/thread.php?tid=43877379&page=1249", None),
+        ],
+    )
+    def test_parses_relative_and_absolute_locations(
+        self,
+        location: str,
+        expected: PidRedirectTarget | None,
+    ) -> None:
+        assert parse_pid_redirect_location(location) == expected
+
+    def test_uses_configured_base_url_session_and_disables_following(self) -> None:
+        config = SimpleNamespace(
+            base_url="https://ngabbs.com/",
+            user_agent="test-agent",
+            nga_passport_uid="uid",
+            nga_passport_cid="cid",
+        )
+        session = MagicMock(spec=requests.Session)
+        session.get.return_value = _PidRedirectResponse(
+            302,
+            "/read.php?tid=43877379&page=1249#pid874888389Anchor",
+        )
+
+        with patch("nga_tools.ngaclient.client.get_config", return_value=config):
+            target = NGAClient(session=session).get_pid_redirect_target(874888389)
+
+        assert target == PidRedirectTarget(tid=43877379, page_number=1249)
+        session.get.assert_called_once_with(
+            "https://ngabbs.com/read.php",
+            params={"pid": "874888389", "opt": "128"},
+            allow_redirects=False,
+            timeout=30,
+        )
+
+    def test_non_redirect_or_invalid_redirect_returns_none(self) -> None:
+        session = MagicMock(spec=requests.Session)
+        session.get.side_effect = [
+            _PidRedirectResponse(200),
+            _PidRedirectResponse(302, "/read.php?tid=123&page=invalid"),
+        ]
+        client = NGAClient(session=session)
+
+        assert client.get_pid_redirect_target(100) is None
+        assert client.get_pid_redirect_target(101) is None
+
+    def test_rejects_non_positive_pid_without_request(self) -> None:
+        session = MagicMock(spec=requests.Session)
+        client = NGAClient(session=session)
+
+        with pytest.raises(ValueError, match="PID"):
+            client.get_pid_redirect_target(0)
+        session.get.assert_not_called()
 
 
 class NGAClientPageBatchTest:
