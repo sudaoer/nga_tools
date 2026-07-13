@@ -587,6 +587,322 @@ class ImageStoreMetricsTest:
         assert metrics.fallback_hashes == 1
 
 
+class ImageMappingBatchTest:
+    @pytest.mark.parametrize(
+        ("task_count", "expected_batch_sizes"),
+        [
+            (65, [64, 1]),
+            (129, [64, 64, 1]),
+        ],
+    )
+    def test_successful_mappings_are_persisted_in_fixed_batches(
+        self,
+        tmp_path: Path,
+        task_count: int,
+        expected_batch_sizes: list[int],
+    ) -> None:
+        output_dir = tmp_path / "output"
+        config = SimpleNamespace(output_dir=str(output_dir))
+        payload_path = tmp_path / "payload.png"
+        Image.new("RGB", (2, 2), color="white").save(payload_path)
+        payload = payload_path.read_bytes()
+        digest = sha256(payload).hexdigest()
+        tasks = [
+            {"url": _image_url(f"batch-{task_count}-{index}")}
+            for index in range(task_count)
+        ]
+        progress: list[tuple[int, str]] = []
+
+        def fake_download(download_tasks, on_progress=None, **_kwargs):
+            results: list[image_store.utils.DownloadFileResult] = []
+            for current, download_task in enumerate(download_tasks, start=1):
+                Path(download_task["save_path"]).write_bytes(payload)
+                result: image_store.utils.DownloadFileResult = {
+                    "url": download_task["url"],
+                    "save_path": download_task["save_path"],
+                    "success": True,
+                    "content_sha256": digest,
+                    "content_bytes": len(payload),
+                }
+                results.append(result)
+                if on_progress is not None:
+                    on_progress(current, len(download_tasks), result)
+            return {"succeeded": results, "failed": []}
+
+        real_enqueue = image_store.enqueue_image_mappings
+        with (
+            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch(
+                "nga_tools.backup.image_store.utils.download_files_streaming",
+                side_effect=fake_download,
+            ),
+            patch(
+                "nga_tools.backup.image_store.enqueue_image_mappings",
+                wraps=real_enqueue,
+            ) as enqueue_mock,
+            use_image_index_writer(),
+            use_image_store_metrics(),
+            image_store.use_image_download_coordination(),
+        ):
+            summary = image_store.download_image_tasks(
+                tasks,
+                on_progress=lambda current, _total, result: progress.append(
+                    (current, result["url"])
+                ),
+            )
+            metrics = image_store_metrics()
+            writer_metrics = image_index_writer_metrics()
+            mappings = image_store.image_mappings_for_urls(
+                task["url"] for task in tasks
+            )
+
+        batch_sizes = [
+            len(call.args[0])
+            for call in enqueue_mock.call_args_list
+        ]
+        assert batch_sizes == expected_batch_sizes
+        assert len(summary["succeeded"]) == task_count
+        assert summary["failed"] == []
+        assert progress == [
+            (index, task["url"])
+            for index, task in enumerate(tasks, start=1)
+        ]
+        assert len(mappings) == task_count
+        assert metrics is not None
+        assert metrics.mapping_submissions == len(expected_batch_sizes)
+        assert metrics.mapping_rows == task_count
+        assert writer_metrics is not None
+        assert writer_metrics.rows_written == task_count
+        assert writer_metrics.transactions <= len(expected_batch_sizes)
+
+    def test_download_failure_flushes_earlier_successes_in_completion_order(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        config = SimpleNamespace(output_dir=str(output_dir))
+        payload_path = tmp_path / "payload.png"
+        Image.new("RGB", (2, 2), color="white").save(payload_path)
+        payload = payload_path.read_bytes()
+        digest = sha256(payload).hexdigest()
+        tasks = [
+            {"url": _image_url(f"ordered-result-{index}")}
+            for index in range(3)
+        ]
+        progress_urls: list[str] = []
+
+        def fake_download(download_tasks, on_progress=None, **_kwargs):
+            results: list[image_store.utils.DownloadFileResult] = []
+            for current, download_task in enumerate(download_tasks, start=1):
+                if current == 2:
+                    result: image_store.utils.DownloadFileResult = {
+                        "url": download_task["url"],
+                        "save_path": download_task["save_path"],
+                        "success": False,
+                        "error": "forced download failure",
+                        "failure_kind": "connection",
+                    }
+                else:
+                    Path(download_task["save_path"]).write_bytes(payload)
+                    result = {
+                        "url": download_task["url"],
+                        "save_path": download_task["save_path"],
+                        "success": True,
+                        "content_sha256": digest,
+                        "content_bytes": len(payload),
+                    }
+                results.append(result)
+                if on_progress is not None:
+                    on_progress(current, len(download_tasks), result)
+            return {
+                "succeeded": [result for result in results if result["success"]],
+                "failed": [result for result in results if not result["success"]],
+            }
+
+        real_enqueue = image_store.enqueue_image_mappings
+        with (
+            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch(
+                "nga_tools.backup.image_store.utils.download_files_streaming",
+                side_effect=fake_download,
+            ),
+            patch(
+                "nga_tools.backup.image_store.enqueue_image_mappings",
+                wraps=real_enqueue,
+            ) as enqueue_mock,
+            use_image_index_writer(),
+            image_store.use_image_download_coordination(),
+        ):
+            summary = image_store.download_image_tasks(
+                tasks,
+                on_progress=lambda _current, _total, result: (
+                    progress_urls.append(result["url"])
+                ),
+            )
+
+        assert progress_urls == [task["url"] for task in tasks]
+        assert len(summary["succeeded"]) == 2
+        assert len(summary["failed"]) == 1
+        assert [
+            len(call.args[0])
+            for call in enqueue_mock.call_args_list
+        ] == [1, 1]
+
+    def test_transaction_failure_marks_the_whole_batch_and_allows_retry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        config = SimpleNamespace(output_dir=str(output_dir))
+        payload_path = tmp_path / "payload.png"
+        Image.new("RGB", (2, 2), color="white").save(payload_path)
+        payload = payload_path.read_bytes()
+        digest = sha256(payload).hexdigest()
+        tasks = [
+            {"url": _image_url(f"mapping-failure-{index}")}
+            for index in range(3)
+        ]
+
+        def fake_download(download_tasks, on_progress=None, **_kwargs):
+            results: list[image_store.utils.DownloadFileResult] = []
+            for current, download_task in enumerate(download_tasks, start=1):
+                Path(download_task["save_path"]).write_bytes(payload)
+                result: image_store.utils.DownloadFileResult = {
+                    "url": download_task["url"],
+                    "save_path": download_task["save_path"],
+                    "success": True,
+                    "content_sha256": digest,
+                    "content_bytes": len(payload),
+                }
+                results.append(result)
+                if on_progress is not None:
+                    on_progress(current, len(download_tasks), result)
+            return {"succeeded": results, "failed": []}
+
+        with patch("nga_tools.backup.image_store.get_config", return_value=config):
+            image_store.upsert_image_mapping(
+                _image_url("mapping-failure-seed"),
+                output_dir / "images_unique" / "seed.png",
+            )
+            with sqlite3.connect(output_dir / "image_index.sqlite3") as connection:
+                connection.execute(
+                    """
+                    CREATE TRIGGER reject_mapping_batch
+                    BEFORE INSERT ON image_mappings
+                    BEGIN
+                        SELECT RAISE(FAIL, 'forced batch failure');
+                    END
+                    """
+                )
+                connection.commit()
+
+            with (
+                patch(
+                    "nga_tools.backup.image_store.utils.download_files_streaming",
+                    side_effect=fake_download,
+                ),
+                use_image_index_writer(),
+                use_image_store_metrics(),
+                image_store.use_image_download_coordination(),
+            ):
+                failed_summary = image_store.download_image_tasks(tasks)
+                failed_metrics = image_store_metrics()
+                failed_mappings = image_store.image_mappings_for_urls(
+                    task["url"] for task in tasks
+                )
+
+            with sqlite3.connect(output_dir / "image_index.sqlite3") as connection:
+                connection.execute("DROP TRIGGER reject_mapping_batch")
+                connection.commit()
+
+            with (
+                patch(
+                    "nga_tools.backup.image_store.utils.download_files_streaming",
+                    side_effect=fake_download,
+                ),
+                use_image_index_writer(),
+                use_image_store_metrics(),
+                image_store.use_image_download_coordination(),
+            ):
+                retry_summary = image_store.download_image_tasks(tasks)
+                retry_mappings = image_store.image_mappings_for_urls(
+                    task["url"] for task in tasks
+                )
+
+        assert failed_summary["succeeded"] == []
+        assert len(failed_summary["failed"]) == len(tasks)
+        assert all(
+            result["failure_kind"] == "image_store"
+            for result in failed_summary["failed"]
+        )
+        assert failed_metrics is not None
+        assert failed_metrics.mapping_submissions == 1
+        assert failed_metrics.mapping_rows == len(tasks)
+        assert failed_metrics.mapping_failures == 1
+        assert failed_mappings == {}
+        assert len(retry_summary["succeeded"]) == len(tasks)
+        assert retry_summary["failed"] == []
+        assert len(retry_mappings) == len(tasks)
+
+    def test_cancelled_download_flushes_tail_without_reporting_success(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        config = SimpleNamespace(output_dir=str(output_dir))
+        payload_path = tmp_path / "payload.png"
+        Image.new("RGB", (2, 2), color="white").save(payload_path)
+        payload = payload_path.read_bytes()
+        digest = sha256(payload).hexdigest()
+        tasks = [
+            {"url": _image_url(f"cancelled-tail-{index}")}
+            for index in range(4)
+        ]
+        progress: list[image_store.utils.DownloadFileResult] = []
+
+        def cancelled_download(download_tasks, on_progress=None, **_kwargs):
+            for current, download_task in enumerate(download_tasks[:3], start=1):
+                Path(download_task["save_path"]).write_bytes(payload)
+                result: image_store.utils.DownloadFileResult = {
+                    "url": download_task["url"],
+                    "save_path": download_task["save_path"],
+                    "success": True,
+                    "content_sha256": digest,
+                    "content_bytes": len(payload),
+                }
+                if on_progress is not None:
+                    on_progress(current, len(download_tasks), result)
+            raise asyncio.CancelledError
+
+        with (
+            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch(
+                "nga_tools.backup.image_store.utils.download_files_streaming",
+                side_effect=cancelled_download,
+            ),
+            use_image_index_writer(),
+            use_image_store_metrics(),
+            image_store.use_image_download_coordination(),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                image_store.download_image_tasks(
+                    tasks,
+                    on_progress=lambda _current, _total, result: progress.append(
+                        result
+                    ),
+                )
+            metrics = image_store_metrics()
+            persisted = image_store.image_mappings_for_urls(
+                task["url"] for task in tasks
+            )
+
+        assert progress == []
+        assert set(persisted) == {task["url"] for task in tasks[:3]}
+        assert metrics is not None
+        assert metrics.mapping_submissions == 1
+        assert metrics.mapping_rows == 3
+
+
 class ImageSingleFlightTest:
     def test_shared_condition_does_not_complete_another_claim(
         self,

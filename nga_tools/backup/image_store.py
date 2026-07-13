@@ -6,7 +6,6 @@ import os
 import sqlite3
 import tempfile
 import threading
-from collections import deque
 from concurrent.futures import Future
 from contextlib import closing, contextmanager
 from collections.abc import Generator
@@ -179,6 +178,15 @@ class _ImageURLClaim:
 
 
 type _ImageClaimKey = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class _PendingImageMapping:
+    result: utils.DownloadFileResult
+    mapping: tuple[str, Path]
+    claim_key: _ImageClaimKey
+    claim: _ImageURLClaim
+
 
 _IMAGE_URL_CLAIMS_LOCK = threading.RLock()
 _IMAGE_URL_CLAIMS_CONDITION = threading.Condition(_IMAGE_URL_CLAIMS_LOCK)
@@ -873,6 +881,25 @@ def _store_image_file_deferred_mapping(
     move_source: bool,
     download_result: utils.DownloadFileResult | None = None,
 ) -> tuple[StoredImageResult, Future[None]]:
+    result = _store_image_file_without_mapping(
+        source_path,
+        task,
+        move_source=move_source,
+        download_result=download_result,
+    )
+    _mappings, mapping_future = enqueue_image_mappings(
+        [(task["url"], Path(result["unique_path"]))]
+    )
+    return result, mapping_future
+
+
+def _store_image_file_without_mapping(
+    source_path: Path,
+    task: ImageDownloadTask,
+    *,
+    move_source: bool,
+    download_result: utils.DownloadFileResult | None = None,
+) -> StoredImageResult:
     record_image_store_attempt()
     try:
         with time_image_store_phase("source_validation"):
@@ -916,14 +943,11 @@ def _store_image_file_deferred_mapping(
         }
         if collision:
             result["collision"] = True
-        _mappings, mapping_future = enqueue_image_mappings(
-            [(task["url"], target_path)]
-        )
     except BaseException:
         record_image_store_failed()
         raise
     record_image_store_completed(reused=reused, collision=collision)
-    return result, mapping_future
+    return result
 
 
 def store_downloaded_image(temp_path: Path, task: ImageDownloadTask) -> StoredImageResult:
@@ -1043,14 +1067,7 @@ def _run_download_image_tasks(
         if on_progress is not None:
             on_progress(completed, len(image_tasks), result)
 
-    pending_store_results: deque[
-        tuple[
-            utils.DownloadFileResult,
-            Future[None],
-            _ImageClaimKey,
-            _ImageURLClaim,
-        ]
-    ] = deque()
+    pending_mapping_results: list[_PendingImageMapping] = []
 
     def release_owner(
         claim_key: _ImageClaimKey,
@@ -1060,28 +1077,100 @@ def _run_download_image_tasks(
         _release_image_url_claim(claim_key, claim, result=result)
         emit_result(result)
 
-    def resolve_pending_store_result(
-        pending: tuple[
-            utils.DownloadFileResult,
-            Future[None],
-            _ImageClaimKey,
-            _ImageURLClaim,
-        ],
+    def mapping_failure_result(
+        pending: _PendingImageMapping,
+        error: BaseException,
+    ) -> utils.DownloadFileResult:
+        return {
+            "url": pending.result["url"],
+            "save_path": str(unique_images_dir()),
+            "success": False,
+            "error": str(error),
+            "failure_kind": "image_store",
+        }
+
+    def release_remaining_without_progress(
+        pending_batch: tuple[_PendingImageMapping, ...],
+        *,
+        results: tuple[utils.DownloadFileResult, ...] | None = None,
+        error: BaseException | None = None,
     ) -> None:
-        result, mapping_future, claim_key, claim = pending
+        for index, pending in enumerate(pending_batch):
+            _release_image_url_claim(
+                pending.claim_key,
+                pending.claim,
+                result=None if results is None else results[index],
+                error=error,
+            )
+
+    def flush_pending_mapping_results(
+        *,
+        emit_progress: bool,
+        suppress_mapping_error: bool = False,
+    ) -> None:
+        if not pending_mapping_results:
+            return
+        pending_batch = tuple(pending_mapping_results)
+        pending_mapping_results.clear()
         try:
+            _mappings, mapping_future = enqueue_image_mappings(
+                [pending.mapping for pending in pending_batch]
+            )
             _wait_image_mapping(mapping_future)
-        except Exception as error:
-            failed_result: utils.DownloadFileResult = {
-                "url": result["url"],
-                "save_path": str(unique_images_dir()),
-                "success": False,
-                "error": str(error),
-                "failure_kind": "image_store",
-            }
-            release_owner(claim_key, claim, failed_result)
-        else:
-            release_owner(claim_key, claim, result)
+        except BaseException as mapping_error:
+            if emit_progress and isinstance(mapping_error, Exception):
+                failed_results = tuple(
+                    mapping_failure_result(pending, mapping_error)
+                    for pending in pending_batch
+                )
+                for index, (pending, failed_result) in enumerate(
+                    zip(pending_batch, failed_results, strict=True)
+                ):
+                    _release_image_url_claim(
+                        pending.claim_key,
+                        pending.claim,
+                        result=failed_result,
+                    )
+                    try:
+                        emit_result(failed_result)
+                    except BaseException:
+                        release_remaining_without_progress(
+                            pending_batch[index + 1 :],
+                            results=failed_results[index + 1 :],
+                        )
+                        raise
+                return
+            release_remaining_without_progress(
+                pending_batch,
+                error=mapping_error,
+            )
+            if not suppress_mapping_error:
+                raise
+            return
+
+        if not emit_progress:
+            release_remaining_without_progress(
+                pending_batch,
+                results=tuple(pending.result for pending in pending_batch),
+            )
+            return
+        for index, pending in enumerate(pending_batch):
+            _release_image_url_claim(
+                pending.claim_key,
+                pending.claim,
+                result=pending.result,
+            )
+            try:
+                emit_result(pending.result)
+            except BaseException:
+                release_remaining_without_progress(
+                    pending_batch[index + 1 :],
+                    results=tuple(
+                        remaining.result
+                        for remaining in pending_batch[index + 1 :]
+                    ),
+                )
+                raise
 
     with tempfile.TemporaryDirectory(prefix="nga_image_download_") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
@@ -1108,34 +1197,41 @@ def _run_download_image_tasks(
             _total: int,
             download_result: utils.DownloadFileResult,
         ) -> None:
-            image_task, claim_key, claim = owner_by_temp_path.pop(
+            image_task, claim_key, claim = owner_by_temp_path[
                 download_result["save_path"]
-            )
+            ]
             result: utils.DownloadFileResult
             if download_result["success"]:
                 try:
-                    stored_image, mapping_future = (
-                        _store_image_file_deferred_mapping(
-                            Path(download_result["save_path"]),
-                            image_task,
-                            move_source=True,
-                            download_result=download_result,
-                        )
+                    stored_image = _store_image_file_without_mapping(
+                        Path(download_result["save_path"]),
+                        image_task,
+                        move_source=True,
+                        download_result=download_result,
                     )
                     result = {
                         "url": image_task["url"],
                         "save_path": stored_image["unique_path"],
                         "success": True,
                     }
-                    pending_store_results.append(
-                        (result, mapping_future, claim_key, claim)
+                    owner_by_temp_path.pop(download_result["save_path"])
+                    pending_mapping_results.append(
+                        _PendingImageMapping(
+                            result=result,
+                            mapping=(
+                                image_task["url"],
+                                Path(stored_image["unique_path"]),
+                            ),
+                            claim_key=claim_key,
+                            claim=claim,
+                        )
                     )
                     if (
-                        len(pending_store_results)
+                        len(pending_mapping_results)
                         >= _MAX_PENDING_IMAGE_MAPPING_RESULTS
                     ):
-                        resolve_pending_store_result(
-                            pending_store_results.popleft()
+                        flush_pending_mapping_results(
+                            emit_progress=True,
                         )
                     return
                 except Exception as error:
@@ -1159,6 +1255,8 @@ def _run_download_image_tasks(
                 }
                 if "http_status" in download_result:
                     result["http_status"] = download_result["http_status"]
+            flush_pending_mapping_results(emit_progress=True)
+            owner_by_temp_path.pop(download_result["save_path"])
             release_owner(claim_key, claim, result)
 
         try:
@@ -1167,27 +1265,12 @@ def _run_download_image_tasks(
                     download_tasks,
                     on_progress=handle_progress,
                 )
-            while pending_store_results:
-                resolve_pending_store_result(pending_store_results.popleft())
+            flush_pending_mapping_results(emit_progress=True)
         except BaseException as error:
-            while pending_store_results:
-                result, mapping_future, claim_key, claim = (
-                    pending_store_results.popleft()
-                )
-                try:
-                    _wait_image_mapping(mapping_future)
-                except BaseException as mapping_error:
-                    _release_image_url_claim(
-                        claim_key,
-                        claim,
-                        error=mapping_error,
-                    )
-                else:
-                    _release_image_url_claim(
-                        claim_key,
-                        claim,
-                        result=result,
-                    )
+            flush_pending_mapping_results(
+                emit_progress=False,
+                suppress_mapping_error=True,
+            )
             for _task, claim_key, claim in owner_by_temp_path.values():
                 _release_image_url_claim(claim_key, claim, error=error)
             raise
