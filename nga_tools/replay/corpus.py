@@ -12,7 +12,7 @@ from typing import Optional, Protocol, TypeAlias, cast
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.core.sqlite import configure_readonly_connection
 
-_CORPUS_FORMAT_VERSION = 3
+_CORPUS_FORMAT_VERSION = 4
 
 PageKey: TypeAlias = tuple[int, Optional[int], int]
 ProgressCallback: TypeAlias = Callable[[int, int, str], None]
@@ -370,13 +370,14 @@ def _read_latest_archive_pages(path: Path) -> _LatestArchivePages:
     if page_one is None:
         raise ReplayCorpusError(f"重放源归档缺少第一页：{path}")
     page_one_object = _page_object(page_one[1], source=f"{path}第1页")
-    raw_page_count = page_one_object.get("totalPage", 1)
-    if type(raw_page_count) is not int or raw_page_count < 1:
+    reported_page_count = page_one_object.get("totalPage", 1)
+    if type(reported_page_count) is not int or reported_page_count < 1:
         raise ReplayCorpusError(f"重放源归档第一页totalPage无效：{path}")
+    page_count = max(reported_page_count, max(latest_by_page))
 
     missing_pages = [
         page_number
-        for page_number in range(1, raw_page_count + 1)
+        for page_number in range(1, page_count + 1)
         if page_number not in latest_by_page
     ]
     if missing_pages:
@@ -384,17 +385,27 @@ def _read_latest_archive_pages(path: Path) -> _LatestArchivePages:
         raise ReplayCorpusError(f"重放源归档缺少分页{preview}：{path}")
 
     selected_pages: dict[int, tuple[str, bytes]] = {}
-    for page_number in range(1, raw_page_count + 1):
-        response_hash, page_json = latest_by_page[page_number]
+    for page_number in range(1, page_count + 1):
+        _response_hash, page_json = latest_by_page[page_number]
         page = _page_object(page_json, source=f"{path}第{page_number}页")
         current_page = page.get("currentPage")
         if current_page is not None and current_page != page_number:
             raise ReplayCorpusError(
                 f"重放源归档currentPage与页号不一致：{path}第{page_number}页"
             )
-        selected_pages[page_number] = (response_hash, page_json.encode("utf-8"))
+        page["totalPage"] = page_count
+        payload = json.dumps(
+            page,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        selected_pages[page_number] = (
+            hashlib.sha256(payload).hexdigest(),
+            payload,
+        )
     return _LatestArchivePages(
-        page_count=raw_page_count,
+        page_count=page_count,
         pages=selected_pages,
         database_state=database_state,
     )

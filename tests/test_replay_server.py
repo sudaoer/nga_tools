@@ -255,6 +255,27 @@ class ReplayCorpusTest:
         reloaded = load_replay_corpus(output_dir, thread_config)
         assert reloaded.manifest.corpus_id == corpus.manifest.corpus_id
 
+    def test_uses_newer_last_page_when_first_page_count_is_stale(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir, thread_config, _image_path = _build_source(tmp_path)
+        store = ThreadArchiveStore(output_dir / "123_456")
+        store.upsert_page(
+            3,
+            _page(3, 3, [_author_post(2, 102, "third")]),
+            observed_at="2026-07-13T00:00:00+00:00",
+        )
+
+        corpus = load_replay_corpus(output_dir, thread_config)
+
+        assert corpus.manifest.exact_page_count == 3
+        for page_number in range(1, 4):
+            replay_page = corpus.page(123, 456, page_number)
+            assert replay_page is not None
+            assert json.loads(replay_page.payload)["totalPage"] == 3
+        assert corpus.page(123, 456, 4) is None
+
     def test_rejects_database_with_uncheckpointed_wal(
         self,
         tmp_path: Path,
