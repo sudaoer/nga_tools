@@ -798,7 +798,11 @@ def _scan_pending_author_pages(
                             fallback_reason = "non_forward_target"
                             break
 
-                        skipped_pages += target_index - current_index - 1
+                        jump_distance = target_index - current_index - 1
+                        if jump_distance <= get_api_concurrency() * 2:
+                            fallback_reason = "jump_not_profitable"
+                            break
+                        skipped_pages += jump_distance
                         expected_pid = next_pid
                         next_index = target_index
                         restart_from_redirect = True

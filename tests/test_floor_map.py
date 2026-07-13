@@ -386,15 +386,22 @@ class FloorMapPidJumpScanTest:
         self,
         tmp_path: Path,
     ) -> None:
-        client = StreamingFakeClient(
-            {
+        pages: dict[int, PageData] = {
                 1: {"result": [{"pid": 1001, "lou": 10}]},
                 2: {"result": [{"pid": 9002, "lou": 20}]},
-                3: {"result": [{"pid": 9003, "lou": 30}]},
-                4: {"result": [{"pid": 1002, "lou": 60}, {"pid": 1003, "lou": 61}]},
-                5: {"result": []},
-            },
-            pid_targets={1002: PidRedirectTarget(tid=123, page_number=4)},
+                15: {
+                    "result": [
+                        {"pid": 1002, "lou": 280},
+                        {"pid": 1003, "lou": 281},
+                    ]
+                },
+            }
+        pages.update(
+            {page: {"result": []} for page in range(3, 15)}
+        )
+        client = StreamingFakeClient(
+            pages,
+            pid_targets={1002: PidRedirectTarget(tid=123, page_number=15)},
         )
         timing_path = tmp_path / "pid-jump.timing.log"
 
@@ -404,11 +411,11 @@ class FloorMapPidJumpScanTest:
             timing_path=timing_path,
         )
 
-        assert client.page_calls == [1, 2, 4]
+        assert client.page_calls == [1, 2, 15]
         assert client.pid_calls == [1002]
-        assert scanned_pages == {1, 2, 4}
-        assert seen_lous == {10, 20, 60, 61}
-        assert mapped == {1: 10, 2: 60, 3: 61}
+        assert scanned_pages == {1, 2, 15}
+        assert seen_lous == {10, 20, 280, 281}
+        assert mapped == {1: 10, 2: 280, 3: 281}
         timing_logs = list(tmp_path.glob("pid-jump.timing-*.log"))
         assert len(timing_logs) == 1
         timing_text = timing_logs[0].read_text(encoding="utf-8")
@@ -416,7 +423,7 @@ class FloorMapPidJumpScanTest:
         assert "指标：楼层映射零命中原帖页数，值：1\n" in timing_text
         assert "指标：楼层映射PID定位请求数，值：1\n" in timing_text
         assert "指标：楼层映射PID定位命中数，值：1\n" in timing_text
-        assert "指标：楼层映射PID跳过页数，值：1\n" in timing_text
+        assert "指标：楼层映射PID跳过页数，值：12\n" in timing_text
         assert "指标：楼层映射本次恢复作者楼数，值：3\n" in timing_text
         assert "标签：楼层映射PID定位结果，值：none\n" in timing_text
 
@@ -440,18 +447,42 @@ class FloorMapPidJumpScanTest:
         assert scanned_pages == {1, 2, 3, 4}
         assert mapped == {1: 10, 2: 60}
 
-    def test_target_without_requested_pid_falls_back_and_preserves_other_hits(
-        self,
-    ) -> None:
+    def test_short_jump_falls_back_instead_of_repeating_pid_requests(self) -> None:
         client = StreamingFakeClient(
             {
                 1: {"result": [{"pid": 1001, "lou": 10}]},
                 2: {"result": [{"pid": 9002, "lou": 20}]},
                 3: {"result": [{"pid": 9003, "lou": 30}]},
-                4: {"result": [{"pid": 1003, "lou": 60}]},
-                5: {"result": [{"pid": 1002, "lou": 80}]},
+                4: {"result": [{"pid": 1002, "lou": 60}]},
             },
             pid_targets={1002: PidRedirectTarget(tid=123, page_number=4)},
+        )
+
+        scanned_pages, _seen_lous, mapped = self._scan(
+            client,
+            {1001: [1], 1002: [2]},
+        )
+
+        assert client.page_calls == [1, 2, 3, 4]
+        assert client.pid_calls == [1002]
+        assert scanned_pages == {1, 2, 3, 4}
+        assert mapped == {1: 10, 2: 60}
+
+    def test_target_without_requested_pid_falls_back_and_preserves_other_hits(
+        self,
+    ) -> None:
+        pages: dict[int, PageData] = {
+                1: {"result": [{"pid": 1001, "lou": 10}]},
+                2: {"result": [{"pid": 9002, "lou": 20}]},
+                15: {"result": [{"pid": 1003, "lou": 280}]},
+                16: {"result": [{"pid": 1002, "lou": 300}]},
+            }
+        pages.update(
+            {page: {"result": []} for page in range(3, 15)}
+        )
+        client = StreamingFakeClient(
+            pages,
+            pid_targets={1002: PidRedirectTarget(tid=123, page_number=15)},
         )
 
         scanned_pages, _seen_lous, mapped = self._scan(
@@ -459,10 +490,16 @@ class FloorMapPidJumpScanTest:
             {1001: [1], 1002: [2], 1003: [3]},
         )
 
-        assert client.page_calls == [1, 2, 4, 3, 5]
+        assert client.page_calls == [
+            1,
+            2,
+            15,
+            *range(3, 15),
+            16,
+        ]
         assert client.pid_calls == [1002]
-        assert scanned_pages == {1, 2, 3, 4, 5}
-        assert mapped == {1: 10, 2: 80, 3: 60}
+        assert scanned_pages == set(range(1, 17))
+        assert mapped == {1: 10, 2: 300, 3: 280}
 
 
 class FloorMapMissingInferenceTest:
