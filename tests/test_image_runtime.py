@@ -17,6 +17,13 @@ from nga_tools.backup.image_index_writer import (
     image_index_writer_metrics,
     use_image_index_writer,
 )
+from nga_tools.backup.image_store_metrics import (
+    image_store_metrics,
+    record_image_store_attempt,
+    record_image_store_completed,
+    time_image_store_phase,
+    use_image_store_metrics,
+)
 from nga_tools.core.image_download_runtime import (
     ImageDownloadRuntime,
     _AttemptFailure,
@@ -349,7 +356,11 @@ class ImageIndexWriterTest:
             assert metrics is not None
             assert metrics.rows_written == 1000
             assert metrics.transactions <= 4
+            assert metrics.requests_submitted == 1
             assert metrics.max_transaction_rows <= 256
+            assert metrics.queue_put_seconds >= 0
+            assert metrics.coalesce_wait_seconds >= 0
+            assert metrics.transaction_seconds >= 0
 
         with sqlite3.connect(output_dir / "image_index.sqlite3") as connection:
             count = connection.execute(
@@ -397,6 +408,83 @@ class ImageIndexWriterTest:
         assert rejected is None
 
 
+class ImageStoreMetricsTest:
+    def test_metrics_aggregate_across_worker_threads(self) -> None:
+        def record_one(index: int) -> None:
+            record_image_store_attempt()
+            with time_image_store_phase("source_validation"):
+                time.sleep(0.0001)
+            record_image_store_completed(
+                reused=index % 2 == 0,
+                collision=index % 5 == 0,
+            )
+
+        with use_image_store_metrics():
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(record_one, range(100)))
+            metrics = image_store_metrics()
+
+        assert metrics is not None
+        assert metrics.store_attempts == 100
+        assert metrics.stores_completed == 100
+        assert metrics.reused_files == 50
+        assert metrics.collision_files == 20
+        assert metrics.source_validation_seconds > 0
+
+    def test_store_phases_and_mapping_wait_are_command_scoped(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        config = SimpleNamespace(output_dir=str(output_dir))
+        source = tmp_path / "source.png"
+        Image.new("RGB", (2, 2), color="white").save(source)
+
+        with (
+            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            use_image_index_writer(),
+            use_image_store_metrics(),
+        ):
+            first = image_store.store_existing_image(
+                source,
+                _image_url("metrics-first"),
+            )
+            second = image_store.store_existing_image(
+                source,
+                _image_url("metrics-second"),
+            )
+            metrics = image_store_metrics()
+
+        assert first["reused"] is False
+        assert second["reused"] is True
+        assert metrics is not None
+        assert metrics.store_attempts == 2
+        assert metrics.stores_completed == 2
+        assert metrics.stores_failed == 0
+        assert metrics.reused_files == 1
+        assert metrics.mapping_submissions == 2
+        assert metrics.mapping_rows == 2
+        assert metrics.mapping_failures == 0
+        assert metrics.source_validation_seconds > 0
+        assert metrics.fallback_hash_seconds > 0
+        assert metrics.format_detection_seconds > 0
+        assert metrics.target_selection_seconds > 0
+        assert metrics.content_compare_seconds > 0
+        assert metrics.file_placement_seconds > 0
+        assert metrics.final_validation_seconds > 0
+        assert metrics.mapping_submit_seconds > 0
+        assert metrics.mapping_wait_seconds > 0
+
+    def test_empty_scope_reports_zero_metrics(self) -> None:
+        with use_image_store_metrics():
+            metrics = image_store_metrics()
+
+        assert metrics is not None
+        assert metrics.store_attempts == 0
+        assert metrics.mapping_rows == 0
+        assert metrics.single_flight_waits == 0
+
+
 class ImageSingleFlightTest:
     def test_shared_condition_does_not_complete_another_claim(
         self,
@@ -414,7 +502,10 @@ class ImageSingleFlightTest:
             image_store._wait_image_url_claim(claim)
             done.set()
 
-        with patch("nga_tools.backup.image_store.get_config", return_value=config):
+        with (
+            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            use_image_store_metrics(),
+        ):
             first_key, first_claim, first_owner = image_store._claim_image_url(
                 _image_url("shared-condition-first")
             )
@@ -451,6 +542,11 @@ class ImageSingleFlightTest:
                 assert second_done.wait(timeout=2)
                 first_waiter.result(timeout=2)
                 second_waiter.result(timeout=2)
+            metrics = image_store_metrics()
+
+        assert metrics is not None
+        assert metrics.single_flight_waits >= 1
+        assert metrics.single_flight_wait_seconds > 0
 
     def test_duplicate_url_downloads_once_and_waits_for_durable_mapping(
         self,

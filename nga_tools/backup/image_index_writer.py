@@ -25,8 +25,12 @@ class ImageIndexWriterMetrics:
     rows_written: int
     transactions: int
     write_batches: int
+    requests_submitted: int
     max_transaction_rows: int
     peak_queue_depth: int
+    queue_put_seconds: float
+    coalesce_wait_seconds: float
+    transaction_seconds: float
 
     def as_dict(self) -> dict[str, int | float]:
         mean_rows = (
@@ -38,8 +42,12 @@ class ImageIndexWriterMetrics:
             "rows_written": self.rows_written,
             "transactions": self.transactions,
             "write_batches": self.write_batches,
+            "requests_submitted": self.requests_submitted,
             "max_transaction_rows": self.max_transaction_rows,
             "peak_queue_depth": self.peak_queue_depth,
+            "queue_put_seconds": self.queue_put_seconds,
+            "coalesce_wait_seconds": self.coalesce_wait_seconds,
+            "transaction_seconds": self.transaction_seconds,
             "mean_rows_per_transaction": mean_rows,
         }
 
@@ -71,8 +79,12 @@ class ImageIndexWriter:
         self._rows_written = 0
         self._transactions = 0
         self._write_batches = 0
+        self._requests_submitted = 0
         self._max_transaction_rows = 0
         self._peak_queue_depth = 0
+        self._queue_put_seconds = 0.0
+        self._coalesce_wait_seconds = 0.0
+        self._transaction_seconds = 0.0
 
     def _ensure_started(self) -> None:
         with self._state_lock:
@@ -95,8 +107,12 @@ class ImageIndexWriter:
             future.set_result(None)
             return future
         self._ensure_started()
+        put_started_at = monotonic()
         self._queue.put(_WriteRequest(tuple(rows), future))
+        put_seconds = monotonic() - put_started_at
         with self._state_lock:
+            self._requests_submitted += 1
+            self._queue_put_seconds += put_seconds
             self._peak_queue_depth = max(
                 self._peak_queue_depth,
                 self._queue.qsize(),
@@ -129,10 +145,19 @@ class ImageIndexWriter:
                     remaining = deadline - monotonic()
                     if remaining <= 0:
                         break
+                    coalesce_started_at = monotonic()
                     try:
                         item = self._queue.get(timeout=remaining)
                     except queue.Empty:
+                        with self._state_lock:
+                            self._coalesce_wait_seconds += (
+                                monotonic() - coalesce_started_at
+                            )
                         break
+                    with self._state_lock:
+                        self._coalesce_wait_seconds += (
+                            monotonic() - coalesce_started_at
+                        )
                     if isinstance(item, _StopRequest):
                         stop_after_batch = True
                         break
@@ -151,22 +176,29 @@ class ImageIndexWriter:
         try:
             for start in range(0, len(rows), _MAX_TRANSACTION_ROWS):
                 chunk = rows[start : start + _MAX_TRANSACTION_ROWS]
-                with connection:
-                    connection.executemany(
-                        """
-                        INSERT INTO image_mappings (
-                            url,
-                            unique_rel_path,
-                            created_at,
-                            updated_at
+                transaction_started_at = monotonic()
+                try:
+                    with connection:
+                        connection.executemany(
+                            """
+                            INSERT INTO image_mappings (
+                                url,
+                                unique_rel_path,
+                                created_at,
+                                updated_at
+                            )
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(url) DO UPDATE SET
+                                unique_rel_path = excluded.unique_rel_path,
+                                updated_at = excluded.updated_at
+                            """,
+                            chunk,
                         )
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(url) DO UPDATE SET
-                            unique_rel_path = excluded.unique_rel_path,
-                            updated_at = excluded.updated_at
-                        """,
-                        chunk,
-                    )
+                finally:
+                    with self._state_lock:
+                        self._transaction_seconds += (
+                            monotonic() - transaction_started_at
+                        )
                 with self._state_lock:
                     self._rows_written += len(chunk)
                     self._transactions += 1
@@ -196,8 +228,12 @@ class ImageIndexWriter:
                 rows_written=self._rows_written,
                 transactions=self._transactions,
                 write_batches=self._write_batches,
+                requests_submitted=self._requests_submitted,
                 max_transaction_rows=self._max_transaction_rows,
                 peak_queue_depth=self._peak_queue_depth,
+                queue_put_seconds=self._queue_put_seconds,
+                coalesce_wait_seconds=self._coalesce_wait_seconds,
+                transaction_seconds=self._transaction_seconds,
             )
 
     def close(self) -> None:

@@ -792,6 +792,7 @@ class ReplayRunnerTest:
                 return_value={
                     "api": {"capacity": 4},
                     "image": {"capacity": 16},
+                    "image_store": {"store_attempts": 3},
                     "image_index_writer": {"transactions": 2},
                 },
             ),
@@ -810,6 +811,7 @@ class ReplayRunnerTest:
         assert report["client_runtime_metrics"] == {
             "api": {"capacity": 4},
             "image": {"capacity": 16},
+            "image_store": {"store_attempts": 3},
             "image_index_writer": {"transactions": 2},
         }
         assert report["thread_batch_metrics"] == {

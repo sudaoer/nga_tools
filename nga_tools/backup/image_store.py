@@ -12,6 +12,7 @@ from contextlib import closing, contextmanager
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Iterable, NotRequired, TypedDict
 from urllib.parse import urlsplit
 
@@ -47,6 +48,15 @@ from nga_tools.timing import time_section
 from nga_tools.backup.image_index_writer import (
     ImageMappingRow,
     active_image_index_writer,
+)
+from nga_tools.backup.image_store_metrics import (
+    record_image_mapping_failure,
+    record_image_mapping_submission,
+    record_image_single_flight_wait,
+    record_image_store_attempt,
+    record_image_store_completed,
+    record_image_store_failed,
+    time_image_store_phase,
 )
 
 
@@ -401,7 +411,7 @@ def upsert_image_mappings(
     mappings: list[tuple[str, Path]],
 ) -> list[ImageMapping]:
     image_mappings, future = enqueue_image_mappings(mappings)
-    future.result()
+    _wait_image_mapping(future)
     return image_mappings
 
 
@@ -413,45 +423,56 @@ def enqueue_image_mappings(
         future.set_result(None)
         return [], future
 
-    now = _now_utc_iso()
-    image_mappings = [
-        ImageMapping(url=url, unique_rel_path=_unique_rel_path(unique_path))
-        for url, unique_path in mappings
-    ]
-    rows: list[ImageMappingRow] = [
-        (mapping.url, mapping.unique_rel_path, now, now)
-        for mapping in image_mappings
-    ]
-    db_path = _initialize_image_index()
-    writer = active_image_index_writer(db_path)
-    if writer is not None:
-        return image_mappings, writer.submit(rows)
+    record_image_mapping_submission(len(mappings))
+    with time_image_store_phase("mapping_submit"):
+        now = _now_utc_iso()
+        image_mappings = [
+            ImageMapping(url=url, unique_rel_path=_unique_rel_path(unique_path))
+            for url, unique_path in mappings
+        ]
+        rows: list[ImageMappingRow] = [
+            (mapping.url, mapping.unique_rel_path, now, now)
+            for mapping in image_mappings
+        ]
+        db_path = _initialize_image_index()
+        writer = active_image_index_writer(db_path)
+        if writer is not None:
+            return image_mappings, writer.submit(rows)
 
-    future = Future[None]()
-    with _IMAGE_STORE_LOCK:
-        try:
-            with closing(_connect_image_index_writable()) as connection:
-                with connection:
-                    connection.executemany(
-                        """
-                        INSERT INTO image_mappings (
-                            url,
-                            unique_rel_path,
-                            created_at,
-                            updated_at
+        future = Future[None]()
+        with _IMAGE_STORE_LOCK:
+            try:
+                with closing(_connect_image_index_writable()) as connection:
+                    with connection:
+                        connection.executemany(
+                            """
+                            INSERT INTO image_mappings (
+                                url,
+                                unique_rel_path,
+                                created_at,
+                                updated_at
+                            )
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(url) DO UPDATE SET
+                                unique_rel_path = excluded.unique_rel_path,
+                                updated_at = excluded.updated_at
+                            """,
+                            rows,
                         )
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(url) DO UPDATE SET
-                            unique_rel_path = excluded.unique_rel_path,
-                            updated_at = excluded.updated_at
-                        """,
-                        rows,
-                    )
-        except BaseException as error:
-            future.set_exception(error)
-        else:
-            future.set_result(None)
-    return image_mappings, future
+            except BaseException as error:
+                future.set_exception(error)
+            else:
+                future.set_result(None)
+        return image_mappings, future
+
+
+def _wait_image_mapping(future: Future[None]) -> None:
+    with time_image_store_phase("mapping_wait"):
+        try:
+            future.result()
+        except BaseException:
+            record_image_mapping_failure()
+            raise
 
 
 def load_persistent_validation_cache(
@@ -725,9 +746,10 @@ def _image_extension_from_file(path: Path, url: str) -> str:
 
 
 def _same_file_content(first: Path, second: Path) -> bool:
-    if not first.exists() or not second.exists():
-        return False
-    return filecmp.cmp(first, second, shallow=False)
+    with time_image_store_phase("content_compare"):
+        if not first.exists() or not second.exists():
+            return False
+        return filecmp.cmp(first, second, shallow=False)
 
 
 def _image_file_is_valid(path: Path) -> bool:
@@ -784,7 +806,7 @@ def _store_image_file(
         task,
         move_source=move_source,
     )
-    mapping_future.result()
+    _wait_image_mapping(mapping_future)
     return stored_image
 
 
@@ -802,35 +824,57 @@ def _store_image_file_deferred_mapping(
     *,
     move_source: bool,
 ) -> tuple[StoredImageResult, Future[None]]:
-    if not image_file_is_valid(source_path):
-        raise ValueError(f"图片文件无效：{source_path}")
-    image_hash = utils.sha256(str(source_path))
-    extension = _image_extension_from_file(source_path, task["url"])
-    with _hash_lock(image_hash):
-        target_path, reused, collision = _target_path_for_download(
-            source_path,
-            image_hash,
-            extension,
+    record_image_store_attempt()
+    try:
+        with time_image_store_phase("source_validation"):
+            source_is_valid = image_file_is_valid(source_path)
+        if not source_is_valid:
+            raise ValueError(f"图片文件无效：{source_path}")
+        with time_image_store_phase("fallback_hash"):
+            image_hash = utils.sha256(str(source_path))
+        with time_image_store_phase("format_detection"):
+            extension = _image_extension_from_file(source_path, task["url"])
+        with _hash_lock(image_hash):
+            with time_image_store_phase("target_selection"):
+                target_path, reused, collision = _target_path_for_download(
+                    source_path,
+                    image_hash,
+                    extension,
+                )
+            if not reused:
+                if target_path.exists():
+                    invalidate_current_image_validation(target_path)
+                with time_image_store_phase("file_placement"):
+                    if move_source:
+                        replace_file_atomically(
+                            source_path,
+                            target_path,
+                            move_source=True,
+                        )
+                    elif source_path.resolve() != target_path.resolve():
+                        replace_file_atomically(
+                            source_path,
+                            target_path,
+                            move_source=False,
+                        )
+                with time_image_store_phase("final_validation"):
+                    target_is_valid = _image_file_is_valid(target_path)
+                if not target_is_valid:
+                    raise ValueError(f"图片保存后无法校验：{target_path}")
+        result: StoredImageResult = {
+            "url": task["url"],
+            "unique_path": str(target_path),
+            "reused": reused,
+        }
+        if collision:
+            result["collision"] = True
+        _mappings, mapping_future = enqueue_image_mappings(
+            [(task["url"], target_path)]
         )
-        if not reused:
-            if target_path.exists():
-                invalidate_current_image_validation(target_path)
-            if move_source:
-                replace_file_atomically(source_path, target_path, move_source=True)
-            elif source_path.resolve() != target_path.resolve():
-                replace_file_atomically(source_path, target_path, move_source=False)
-            if not _image_file_is_valid(target_path):
-                raise ValueError(f"图片保存后无法校验：{target_path}")
-    result: StoredImageResult = {
-        "url": task["url"],
-        "unique_path": str(target_path),
-        "reused": reused,
-    }
-    if collision:
-        result["collision"] = True
-    _mappings, mapping_future = enqueue_image_mappings(
-        [(task["url"], target_path)]
-    )
+    except BaseException:
+        record_image_store_failed()
+        raise
+    record_image_store_completed(reused=reused, collision=collision)
     return result, mapping_future
 
 
@@ -893,9 +937,14 @@ def _release_image_url_claim(
 
 
 def _wait_image_url_claim(claim: _ImageURLClaim) -> None:
+    wait_started_at: float | None = None
     with _IMAGE_URL_CLAIMS_CONDITION:
         while not claim.completed:
+            if wait_started_at is None:
+                wait_started_at = perf_counter()
             _IMAGE_URL_CLAIMS_CONDITION.wait()
+    if wait_started_at is not None:
+        record_image_single_flight_wait(perf_counter() - wait_started_at)
 
 
 def _copy_claim_result(
@@ -973,7 +1022,7 @@ def _run_download_image_tasks(
     ) -> None:
         result, mapping_future, claim_key, claim = pending
         try:
-            mapping_future.result()
+            _wait_image_mapping(mapping_future)
         except Exception as error:
             failed_result: utils.DownloadFileResult = {
                 "url": result["url"],
@@ -1077,7 +1126,7 @@ def _run_download_image_tasks(
                     pending_store_results.popleft()
                 )
                 try:
-                    mapping_future.result()
+                    _wait_image_mapping(mapping_future)
                 except BaseException as mapping_error:
                     _release_image_url_claim(
                         claim_key,
