@@ -17,6 +17,7 @@ from nga_tools.backup.floor_map import (
     read_author_posts_from_archive,
     read_unresolved_missing_author_lous_from_archive,
     _page_post_dicts,
+    _scan_pending_author_pages,
     _scan_original_pages,
 )
 from nga_tools.backup.archive_store import ThreadArchiveStore
@@ -28,16 +29,23 @@ from nga_tools.backup.floor_models import (
     StoredFloorMap,
 )
 from nga_tools.config import get_config
-from nga_tools.ngaclient.client import PageData
+from nga_tools.ngaclient.client import PageData, PidRedirectTarget
 from nga_tools.timing import use_timing_log
 
 
 class FakeClient:
-    def __init__(self, pages: dict[int, PageData], page_count: int | None = None) -> None:
+    def __init__(
+        self,
+        pages: dict[int, PageData],
+        page_count: int | None = None,
+        pid_targets: dict[int, PidRedirectTarget | None] | None = None,
+    ) -> None:
         self.pages = pages
         self.page_count = page_count if page_count is not None else max(pages)
+        self.pid_targets = {} if pid_targets is None else pid_targets
         self.page_calls: list[int] = []
         self.page_count_calls = 0
+        self.pid_calls: list[int] = []
 
     def get_page_count(self, tid: int, aid: None) -> int:
         self.page_count_calls += 1
@@ -46,6 +54,10 @@ class FakeClient:
     def get_page(self, tid: int, aid: None, page: int) -> PageData:
         self.page_calls.append(page)
         return self.pages[page]
+
+    def get_pid_redirect_target(self, pid: int) -> PidRedirectTarget | None:
+        self.pid_calls.append(pid)
+        return self.pid_targets.get(pid)
 
     def get_pages(
         self,
@@ -78,6 +90,24 @@ class FakeClient:
             if on_page_complete is not None:
                 on_page_complete(page, completed, total)
             yield page, page_data_by_page[page]
+
+
+class StreamingFakeClient(FakeClient):
+    def iter_pages(
+        self,
+        tid: int,
+        aid: None,
+        pages: Sequence[int],
+        *,
+        on_page_complete: Callable[[int, int, int], None] | None = None,
+    ) -> Generator[tuple[int, PageData]]:
+        ordered_pages = list(dict.fromkeys(pages))
+        total = len(ordered_pages)
+        for completed, page in enumerate(ordered_pages, start=1):
+            page_data = self.get_page(tid, aid, page)
+            if on_page_complete is not None:
+                on_page_complete(page, completed, total)
+            yield page, page_data
 
 
 class FloorMapPagePostRefsTest:
@@ -278,6 +308,161 @@ class FloorMapOriginalScanTest:
         assert seen_original_lous == {90}
         assert set(original_posts_by_lou) == {90}
         assert original_lou_by_author_lou == {9: 90}
+
+
+class FloorMapPidJumpScanTest:
+    @staticmethod
+    def _scan(
+        client: StreamingFakeClient,
+        pid_to_author_lous: dict[int, list[int]],
+        *,
+        timing_path: Path | None = None,
+    ) -> tuple[set[int], set[int], dict[int, int]]:
+        scanned_pages: set[int] = set()
+        seen_original_lous: set[int] = set()
+        original_lou_by_author_lou: dict[int, int] = {}
+
+        def run_scan() -> None:
+            _scan_pending_author_pages(
+                client,
+                123,
+                list(range(1, client.page_count + 1)),
+                client.page_count,
+                scanned_pages,
+                seen_original_lous,
+                {},
+                pid_to_author_lous,
+                original_lou_by_author_lou,
+                sum(len(lous) for lous in pid_to_author_lous.values()),
+            )
+
+        with patch("builtins.print"), patch("sys.stdout", new_callable=io.StringIO):
+            if timing_path is None:
+                run_scan()
+            else:
+                with use_timing_log(timing_path, task_name="pid jump"):
+                    run_scan()
+        return scanned_pages, seen_original_lous, original_lou_by_author_lou
+
+    def test_one_page_recovers_every_pending_pid_and_stops_before_tail(self) -> None:
+        client = StreamingFakeClient(
+            {
+                1: {"result": [{"pid": 1001, "lou": 10}, {"pid": 1002, "lou": 11}]},
+                2: {"result": []},
+                3: {"result": []},
+            }
+        )
+
+        scanned_pages, _seen_lous, mapped = self._scan(
+            client,
+            {1001: [1], 1002: [2]},
+        )
+
+        assert client.page_calls == [1]
+        assert client.pid_calls == []
+        assert scanned_pages == {1}
+        assert mapped == {1: 10, 2: 11}
+
+    def test_hit_pages_continue_sequentially_without_pid_requests(self) -> None:
+        client = StreamingFakeClient(
+            {
+                1: {"result": [{"pid": 1001, "lou": 10}]},
+                2: {"result": [{"pid": 1002, "lou": 30}]},
+                3: {"result": []},
+            }
+        )
+
+        scanned_pages, _seen_lous, mapped = self._scan(
+            client,
+            {1001: [1], 1002: [2]},
+        )
+
+        assert client.page_calls == [1, 2]
+        assert client.pid_calls == []
+        assert scanned_pages == {1, 2}
+        assert mapped == {1: 10, 2: 30}
+
+    def test_zero_hit_locates_next_author_pid_and_recovers_whole_target_page(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client = StreamingFakeClient(
+            {
+                1: {"result": [{"pid": 1001, "lou": 10}]},
+                2: {"result": [{"pid": 9002, "lou": 20}]},
+                3: {"result": [{"pid": 9003, "lou": 30}]},
+                4: {"result": [{"pid": 1002, "lou": 60}, {"pid": 1003, "lou": 61}]},
+                5: {"result": []},
+            },
+            pid_targets={1002: PidRedirectTarget(tid=123, page_number=4)},
+        )
+        timing_path = tmp_path / "pid-jump.timing.log"
+
+        scanned_pages, seen_lous, mapped = self._scan(
+            client,
+            {1001: [1], 1002: [2], 1003: [3]},
+            timing_path=timing_path,
+        )
+
+        assert client.page_calls == [1, 2, 4]
+        assert client.pid_calls == [1002]
+        assert scanned_pages == {1, 2, 4}
+        assert seen_lous == {10, 20, 60, 61}
+        assert mapped == {1: 10, 2: 60, 3: 61}
+        timing_logs = list(tmp_path.glob("pid-jump.timing-*.log"))
+        assert len(timing_logs) == 1
+        timing_text = timing_logs[0].read_text(encoding="utf-8")
+        assert "指标：楼层映射顺序原帖页数，值：3\n" in timing_text
+        assert "指标：楼层映射零命中原帖页数，值：1\n" in timing_text
+        assert "指标：楼层映射PID定位请求数，值：1\n" in timing_text
+        assert "指标：楼层映射PID定位命中数，值：1\n" in timing_text
+        assert "指标：楼层映射PID跳过页数，值：1\n" in timing_text
+        assert "指标：楼层映射本次恢复作者楼数，值：3\n" in timing_text
+        assert "标签：楼层映射PID定位结果，值：none\n" in timing_text
+
+    def test_missing_redirect_falls_back_to_remaining_range(self) -> None:
+        client = StreamingFakeClient(
+            {
+                1: {"result": [{"pid": 1001, "lou": 10}]},
+                2: {"result": [{"pid": 9002, "lou": 20}]},
+                3: {"result": [{"pid": 9003, "lou": 30}]},
+                4: {"result": [{"pid": 1002, "lou": 60}]},
+            },
+        )
+
+        scanned_pages, _seen_lous, mapped = self._scan(
+            client,
+            {1001: [1], 1002: [2]},
+        )
+
+        assert client.page_calls == [1, 2, 3, 4]
+        assert client.pid_calls == [1002]
+        assert scanned_pages == {1, 2, 3, 4}
+        assert mapped == {1: 10, 2: 60}
+
+    def test_target_without_requested_pid_falls_back_and_preserves_other_hits(
+        self,
+    ) -> None:
+        client = StreamingFakeClient(
+            {
+                1: {"result": [{"pid": 1001, "lou": 10}]},
+                2: {"result": [{"pid": 9002, "lou": 20}]},
+                3: {"result": [{"pid": 9003, "lou": 30}]},
+                4: {"result": [{"pid": 1003, "lou": 60}]},
+                5: {"result": [{"pid": 1002, "lou": 80}]},
+            },
+            pid_targets={1002: PidRedirectTarget(tid=123, page_number=4)},
+        )
+
+        scanned_pages, _seen_lous, mapped = self._scan(
+            client,
+            {1001: [1], 1002: [2], 1003: [3]},
+        )
+
+        assert client.page_calls == [1, 2, 4, 3, 5]
+        assert client.pid_calls == [1002]
+        assert scanned_pages == {1, 2, 3, 4, 5}
+        assert mapped == {1: 10, 2: 80, 3: 60}
 
 
 class FloorMapMissingInferenceTest:
