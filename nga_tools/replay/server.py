@@ -304,14 +304,13 @@ def create_replay_app(corpus: ReplayCorpus, profile: ReplayProfile) -> FastAPI:
     return app
 
 
-def serve_replay(
+def load_replay_app(
     *,
     source_output: Path,
     thread_config_path: Path,
     profile: ReplayProfile,
-    host: str = DEFAULT_REPLAY_HOST,
-    port: int = DEFAULT_REPLAY_PORT,
-) -> None:
+) -> FastAPI:
+    """Load a frozen replay corpus and build its ASGI application."""
     report_info(f"正在加载重放语料：{source_output}")
 
     def update_progress(completed: int, total: int, message: str) -> None:
@@ -330,9 +329,25 @@ def serve_replay(
         f"可用图片映射{manifest.available_image_mapping_count}条。"
     )
     report_info(f"Corpus ID：{manifest.corpus_id}")
+    return create_replay_app(corpus, profile)
+
+
+def serve_replay(
+    *,
+    source_output: Path,
+    thread_config_path: Path,
+    profile: ReplayProfile,
+    host: str = DEFAULT_REPLAY_HOST,
+    port: int = DEFAULT_REPLAY_PORT,
+) -> None:
+    app = load_replay_app(
+        source_output=source_output,
+        thread_config_path=thread_config_path,
+        profile=profile,
+    )
     report_info(f"重放服务：http://{host}:{port}/")
     uvicorn.run(
-        create_replay_app(corpus, profile),
+        app,
         host=host,
         port=port,
         log_level="warning",

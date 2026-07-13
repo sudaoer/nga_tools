@@ -223,6 +223,23 @@ pixi run python main.py replay run `
   --api-concurrency 4 --image-concurrency 50
 ```
 
+也可以使用一次性测试入口自动启动重放服务进程，等待服务就绪后再启动独立的
+模拟运行进程：
+
+```powershell
+pixi run python main.py replay test `
+  --source-output output --profile replay_profile.json `
+  --target-output replay-output/run-a `
+  --initial-state warm --all-threads --workers 8 `
+  --api-concurrency 4 --image-concurrency 50
+```
+
+`replay test` 默认仅在 `127.0.0.1` 上自动选择空闲端口，也可以通过
+`--port` 指定端口。语料加载与服务就绪检查合计最多等待 300 秒，健康检查通过
+后才会启动模拟运行；模拟运行成功、失败或被 Ctrl+C 中断时都会停止服务并回收
+两个子进程。该入口不接收 `--server-url`，目标准备、网络隔离、验收和
+`replay_run-*.json` 报告均复用 `replay run` 的实现。
+
 `empty` 要求目标不存在或为空，从零创建归档；`warm` 通过 SQLite Online Backup
 复制数据库，并复制或 reflink 图片及版本选择文件。两者都会写入 replay 目标归属
 标记；`existing` 只接受带有同一 `source-output` 归属标记的目标，可继续一次中断的

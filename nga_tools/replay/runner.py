@@ -48,8 +48,9 @@ _INITIAL_STATES: set[str] = {"empty", "warm", "existing"}
 
 
 class ReplayServerClient:
-    def __init__(self, server_url: str) -> None:
+    def __init__(self, server_url: str, *, timeout_seconds: float = 30.0) -> None:
         self.server_url = normalized_server_url(server_url)
+        self.timeout_seconds = timeout_seconds
         self.session = requests.Session()
         self.session.trust_env = False
 
@@ -66,7 +67,7 @@ class ReplayServerClient:
         response = self.session.request(
             method,
             f"{self.server_url}{path}",
-            timeout=30,
+            timeout=self.timeout_seconds,
         )
         response.raise_for_status()
         value: object = response.json()

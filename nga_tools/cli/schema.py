@@ -11,7 +11,7 @@ from nga_tools.commands.backup import (
 from nga_tools.commands.ankebak import backup_auto
 from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
 from nga_tools.commands.image import image_verify
-from nga_tools.commands.replay import replay_run, replay_serve
+from nga_tools.commands.replay import replay_run, replay_serve, replay_test
 from nga_tools.commands.types import CommandHandler
 from nga_tools.commands.web import web_serve
 from nga_tools.replay.server import DEFAULT_REPLAY_HOST, DEFAULT_REPLAY_PORT
@@ -40,6 +40,7 @@ class ActionConfig(TypedDict):
     required_any: NotRequired[list[str]]
     defaults: NotRequired[dict[str, object]]
     positive: NotRequired[list[str]]
+    child_warning_summary: NotRequired[bool]
 
 
 ARG_DEFS: dict[str, ArgDef] = {
@@ -167,7 +168,7 @@ ARG_DEFS: dict[str, ArgDef] = {
         "flags": ("--port",),
         "type": int,
         "metavar": "PORT",
-        "help": "Web服务监听端口",
+        "help": "本地服务监听端口",
     },
     "static_dir": {
         "flags": ("--static-dir", "--static_dir"),
@@ -569,6 +570,69 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "required_any": ["name", "tid", "all_threads"],
             "positive": ["workers", "api_concurrency", "image_concurrency"],
+        },
+        "test": {
+            "handler": replay_test,
+            "child_warning_summary": True,
+            "summary": "自动启动重放服务和模拟运行进程进行测试",
+            "usage": (
+                f"{PROGRAM_USAGE} replay test --source-output PATH "
+                "--profile PATH --target-output PATH "
+                "--initial-state (empty|warm|existing) "
+                "((--name NAME | --tid TID [--aid AID]) | --all-threads) "
+                "[--thread-config PATH] [--port PORT] [--workers N] "
+                "[--api-concurrency N] [--image-concurrency N]"
+            ),
+            "examples": [
+                (
+                    f"{PROGRAM_USAGE} replay test "
+                    "--source-output output --profile replay_profile.json "
+                    "--target-output replay-output/run-a "
+                    "--initial-state warm --all-threads --workers 8 "
+                    "--api-concurrency 4 --image-concurrency 50"
+                ),
+                (
+                    f"{PROGRAM_USAGE} replay test "
+                    "--source-output output --profile replay_profile.json "
+                    "--target-output replay-output/sample "
+                    "--initial-state empty --name 帖子名 --port 8765"
+                ),
+            ],
+            "notes": [
+                "默认仅在127.0.0.1上自动选择空闲端口，也可通过--port覆盖。",
+                "语料加载和服务就绪检查合计最多等待300秒。",
+                "服务就绪后才启动模拟运行；两个子进程直接继承当前终端输出。",
+                "模拟运行结束、失败或被中断时会自动停止重放服务并回收子进程。",
+                "目标准备、离线网络保护、验收和报告格式与replay run相同。",
+            ],
+            "args": [
+                "source_output",
+                "profile",
+                "target_output",
+                "initial_state",
+                "thread_config",
+                "port",
+                "name",
+                "tid",
+                "aid",
+                "all_threads",
+                "workers",
+                "api_concurrency",
+                "image_concurrency",
+            ],
+            "required": [
+                "source_output",
+                "profile",
+                "target_output",
+                "initial_state",
+            ],
+            "required_any": ["name", "tid", "all_threads"],
+            "positive": [
+                "port",
+                "workers",
+                "api_concurrency",
+                "image_concurrency",
+            ],
         },
     },
 }

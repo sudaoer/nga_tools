@@ -13,6 +13,9 @@ def dispatch_command(args: CommandArgs) -> None:
     action = cast(str, args["action"])
     action_config = COMMANDS[command][action]
     handler = action_config["handler"]
+    if action_config.get("child_warning_summary", False):
+        handler(args)
+        return
     with use_command_warning_summary():
         handler(args)
 

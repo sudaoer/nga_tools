@@ -12,6 +12,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 from unittest.mock import patch
 
 import pytest
@@ -26,7 +27,7 @@ from nga_tools.backup.floor_models import (
     StoredFloorMap,
 )
 from nga_tools.backup.post_version_selection import make_selection, write_selections
-from nga_tools.cli import args_parse
+from nga_tools.cli import args_parse, dispatch_command
 from nga_tools.commands.thread_batch import ThreadBatchResult
 from nga_tools.core.downloads import download_files
 from nga_tools.ngaclient.session import create_api_session
@@ -36,6 +37,7 @@ from nga_tools.replay.offline import (
     image_request_url,
     use_replay_network_policy,
 )
+from nga_tools.replay.orchestrator import run_replay_test
 from nga_tools.replay.runner import run_replay_backup
 from nga_tools.replay.corpus import load_replay_corpus
 from nga_tools.replay.profile import ReplayProfile, TrafficProfile
@@ -168,6 +170,29 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return source, thread_config
+
+
+def _write_replay_profile(tmp_path: Path) -> Path:
+    profile_path = tmp_path / "replay_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "api": {
+                    "latency_ms": 0,
+                    "bandwidth_bytes_per_second": 0,
+                    "max_inflight": 4,
+                },
+                "image": {
+                    "latency_ms": 0,
+                    "bandwidth_bytes_per_second": 0,
+                    "max_inflight": 4,
+                },
+                "chunk_bytes": 4096,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return profile_path
 
 
 @contextmanager
@@ -486,6 +511,179 @@ class ReplayOfflineTest:
 
 
 class ReplayRunnerTest:
+    def test_replay_test_cli_uses_an_automatic_port(self, tmp_path: Path) -> None:
+        source, thread_config = _build_warm_source(tmp_path)
+        profile_path = _write_replay_profile(tmp_path)
+        target = tmp_path / "test-output"
+        args = args_parse(
+            [
+                "replay",
+                "test",
+                "--source-output",
+                str(source),
+                "--profile",
+                str(profile_path),
+                "--target-output",
+                str(target),
+                "--thread-config",
+                str(thread_config),
+                "--initial-state",
+                "empty",
+                "--all-threads",
+            ]
+        )
+
+        assert args["command"] == "replay"
+        assert args["action"] == "test"
+        assert args["port"] is None
+
+        with pytest.raises(SystemExit) as exc_info:
+            args_parse(
+                [
+                    "replay",
+                    "test",
+                    "--server-url",
+                    "http://127.0.0.1:8765",
+                    "--source-output",
+                    str(source),
+                    "--profile",
+                    str(profile_path),
+                    "--target-output",
+                    str(target),
+                    "--thread-config",
+                    str(thread_config),
+                    "--initial-state",
+                    "empty",
+                    "--all-threads",
+                ]
+            )
+        assert exc_info.value.code == 2
+
+    def test_replay_test_rejects_an_out_of_range_port(self, tmp_path: Path) -> None:
+        source, thread_config = _build_warm_source(tmp_path)
+        profile_path = _write_replay_profile(tmp_path)
+        with pytest.raises(ValueError, match="1到65535"):
+            run_replay_test(
+                {
+                    "source_output": str(source),
+                    "profile": str(profile_path),
+                    "target_output": str(tmp_path / "test-output"),
+                    "thread_config": str(thread_config),
+                    "initial_state": "empty",
+                    "all_threads": True,
+                    "port": 65536,
+                }
+            )
+
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows的SO_REUSEADDR端口占用语义不同",
+    )
+    def test_replay_test_does_not_start_runner_when_port_is_busy(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source, thread_config = _build_warm_source(tmp_path)
+        profile_path = _write_replay_profile(tmp_path)
+        target = tmp_path / "test-output"
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            busy_port = listener.getsockname()[1]
+            with pytest.raises(RuntimeError, match="重放服务启动失败"):
+                run_replay_test(
+                    {
+                        "source_output": str(source),
+                        "profile": str(profile_path),
+                        "target_output": str(target),
+                        "thread_config": str(thread_config),
+                        "initial_state": "empty",
+                        "all_threads": True,
+                        "port": busy_port,
+                    }
+                )
+
+        assert not target.exists()
+
+    def test_replay_test_starts_and_stops_both_processes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source, thread_config = _build_warm_source(tmp_path)
+        profile_path = _write_replay_profile(tmp_path)
+        target = tmp_path / "test-output"
+        fingerprint_before = source_state_fingerprint(source)
+
+        dispatch_command(
+            args_parse(
+                [
+                    "replay",
+                    "test",
+                    "--source-output",
+                    str(source),
+                    "--profile",
+                    str(profile_path),
+                    "--target-output",
+                    str(target),
+                    "--thread-config",
+                    str(thread_config),
+                    "--initial-state",
+                    "empty",
+                    "--all-threads",
+                    "--workers",
+                    "1",
+                    "--api-concurrency",
+                    "1",
+                    "--image-concurrency",
+                    "1",
+                ]
+            )
+        )
+
+        reports = list(target.glob("replay_run-*.json"))
+        assert len(reports) == 1
+        report = json.loads(reports[0].read_text(encoding="utf-8"))
+        assert report["status"] == "completed"
+        assert report["initial_state"] == "empty"
+        assert source_state_fingerprint(source) == fingerprint_before
+
+        parsed_url = urlparse(report["server_url"])
+        assert parsed_url.hostname == "127.0.0.1"
+        assert parsed_url.port is not None
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", parsed_url.port))
+
+    def test_replay_test_propagates_runner_failure_and_stops_service(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source, thread_config = _build_warm_source(tmp_path)
+        profile_path = _write_replay_profile(tmp_path)
+        target = tmp_path / "test-output"
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_replay_test(
+                {
+                    "source_output": str(source),
+                    "profile": str(profile_path),
+                    "target_output": str(target),
+                    "thread_config": str(thread_config),
+                    "initial_state": "empty",
+                    "name": "missing-thread",
+                    "port": port,
+                }
+            )
+
+        assert exc_info.value.code == 1
+        assert not target.exists()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", port))
+
     @pytest.mark.skipif(
         os.name == "nt",
         reason="Windows replay暂时跳过链接隔离检查",
