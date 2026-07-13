@@ -41,12 +41,23 @@ class ImageDownloadRuntimeMetrics:
     peak_active_downloads: int
     queued_items: int
     peak_queued_items: int
+    in_flight_requests: int
+    peak_in_flight_requests: int
+    pending_results: int
+    peak_pending_results: int
     retry_count: int
     queue_wait_seconds: float
     service_seconds: float
+    request_to_headers_seconds: float
+    response_body_read_seconds: float
+    temp_file_write_seconds: float
+    atomic_replace_seconds: float
+    result_delivery_wait_seconds: float
+    progress_callback_seconds: float
+    downloaded_bytes: int
     runtime_seconds: float
 
-    def as_dict(self) -> dict[str, int | float]:
+    def as_dict(self) -> dict[str, int | float | str]:
         utilization = (
             0.0
             if self.runtime_seconds <= 0
@@ -61,9 +72,21 @@ class ImageDownloadRuntimeMetrics:
             "peak_active_downloads": self.peak_active_downloads,
             "queued_items": self.queued_items,
             "peak_queued_items": self.peak_queued_items,
+            "queued_items_kind": "logical_unstarted_or_retry",
+            "in_flight_requests": self.in_flight_requests,
+            "peak_in_flight_requests": self.peak_in_flight_requests,
+            "pending_results": self.pending_results,
+            "peak_pending_results": self.peak_pending_results,
             "retry_count": self.retry_count,
             "queue_wait_seconds": self.queue_wait_seconds,
             "service_seconds": self.service_seconds,
+            "request_to_headers_seconds": self.request_to_headers_seconds,
+            "response_body_read_seconds": self.response_body_read_seconds,
+            "temp_file_write_seconds": self.temp_file_write_seconds,
+            "atomic_replace_seconds": self.atomic_replace_seconds,
+            "result_delivery_wait_seconds": self.result_delivery_wait_seconds,
+            "progress_callback_seconds": self.progress_callback_seconds,
+            "downloaded_bytes": self.downloaded_bytes,
             "runtime_seconds": self.runtime_seconds,
             "capacity_utilization": min(1.0, utilization),
         }
@@ -82,6 +105,7 @@ class _RetryEvent:
 class _ResultEvent:
     index: int
     result: DownloadFileResult
+    completed_at: float
 
 
 @dataclass(frozen=True)
@@ -115,6 +139,7 @@ class _DownloadBatch:
     running: int = 0
     delayed: int = 0
     consumed: int = 0
+    pending_results: int = 0
     cancelled: bool = False
     fatal_error: BaseException | None = None
 
@@ -165,9 +190,20 @@ class ImageDownloadRuntime:
         self._active_downloads = 0
         self._peak_active_downloads = 0
         self._peak_queued_items = 0
+        self._in_flight_requests = 0
+        self._peak_in_flight_requests = 0
+        self._pending_results = 0
+        self._peak_pending_results = 0
         self._retry_count = 0
         self._queue_wait_seconds = 0.0
         self._service_seconds = 0.0
+        self._request_to_headers_seconds = 0.0
+        self._response_body_read_seconds = 0.0
+        self._temp_file_write_seconds = 0.0
+        self._atomic_replace_seconds = 0.0
+        self._result_delivery_wait_seconds = 0.0
+        self._progress_callback_seconds = 0.0
+        self._downloaded_bytes = 0
         self._thread.start()
         if not self._ready.wait(timeout=30):
             raise RuntimeError("图片下载运行时启动超时。")
@@ -261,16 +297,24 @@ class ImageDownloadRuntime:
         )
         self._next_batch_id += 1
         self._batches[batch.batch_id] = batch
-        self._batches_submitted += 1
-        self._items_submitted += len(items)
+        with self._state_lock:
+            self._batches_submitted += 1
+            self._items_submitted += len(items)
         self._record_queue_peak()
         self._make_ready(batch)
         return batch
 
-    async def _consume_result(self, batch_id: int) -> None:
+    async def _consume_result(self, batch_id: int, completed_at: float) -> None:
         batch = self._batches.get(batch_id)
         if batch is None:
             return
+        batch.pending_results -= 1
+        with self._state_lock:
+            self._pending_results -= 1
+            self._result_delivery_wait_seconds += max(
+                0.0,
+                perf_counter() - completed_at,
+            )
         batch.outstanding -= 1
         batch.consumed += 1
         self._make_ready(batch)
@@ -283,6 +327,7 @@ class ImageDownloadRuntime:
             return
         batch.cancelled = True
         batch.retry_items.clear()
+        self._discard_pending_results(batch)
         self._ready_batch_ids.discard(batch_id)
         if batch.running == 0:
             self._remove_batch(batch_id)
@@ -291,11 +336,19 @@ class ImageDownloadRuntime:
         for batch in tuple(self._batches.values()):
             batch.cancelled = True
             batch.retry_items.clear()
+            self._discard_pending_results(batch)
             self._ready_batch_ids.discard(batch.batch_id)
             if batch.running == 0:
                 self._remove_batch(batch.batch_id)
         while self._batches:
             await asyncio.sleep(0.001)
+
+    def _discard_pending_results(self, batch: _DownloadBatch) -> None:
+        if batch.pending_results <= 0:
+            return
+        with self._state_lock:
+            self._pending_results -= batch.pending_results
+        batch.pending_results = 0
 
     def _remove_batch(self, batch_id: int) -> None:
         self._batches.pop(batch_id, None)
@@ -389,7 +442,9 @@ class ImageDownloadRuntime:
                 if isinstance(event, _FatalEvent):
                     raise event.error
                 result = event.result
-                self._run_in_loop(self._consume_result(batch.batch_id))
+                self._run_in_loop(
+                    self._consume_result(batch.batch_id, event.completed_at)
+                )
                 completed += 1
                 if collect_results:
                     if result["success"]:
@@ -397,7 +452,14 @@ class ImageDownloadRuntime:
                     else:
                         failed.append(result)
                 if on_progress is not None:
-                    on_progress(completed, len(items), result)
+                    callback_started_at = perf_counter()
+                    try:
+                        on_progress(completed, len(items), result)
+                    finally:
+                        with self._state_lock:
+                            self._progress_callback_seconds += (
+                                perf_counter() - callback_started_at
+                            )
         except BaseException:
             self._run_in_loop(self._cancel_batch(batch.batch_id))
             raise
@@ -417,11 +479,12 @@ class ImageDownloadRuntime:
                 batch.next_item += 1
                 batch.outstanding += 1
             batch.running += 1
-            self._active_downloads += 1
-            self._peak_active_downloads = max(
-                self._peak_active_downloads,
-                self._active_downloads,
-            )
+            with self._state_lock:
+                self._active_downloads += 1
+                self._peak_active_downloads = max(
+                    self._peak_active_downloads,
+                    self._active_downloads,
+                )
             self._make_ready(batch)
             return batch, index
         if self._work_available is not None:
@@ -440,10 +503,11 @@ class ImageDownloadRuntime:
                 work = self._take_work()
             batch, index = work
             started_at = perf_counter()
-            self._queue_wait_seconds += max(
-                0.0,
-                started_at - batch.ready_at[index],
-            )
+            with self._state_lock:
+                self._queue_wait_seconds += max(
+                    0.0,
+                    started_at - batch.ready_at[index],
+                )
             fatal_error: BaseException | None = None
             attempt_result: DownloadFileResult | _AttemptFailure | None = None
             try:
@@ -464,8 +528,9 @@ class ImageDownloadRuntime:
                 }
             ended_at = perf_counter()
             batch.running -= 1
-            self._active_downloads -= 1
-            self._service_seconds += ended_at - started_at
+            with self._state_lock:
+                self._active_downloads -= 1
+                self._service_seconds += ended_at - started_at
 
             if batch.cancelled:
                 if batch.running == 0:
@@ -485,7 +550,8 @@ class ImageDownloadRuntime:
                     wait_seconds = batch.backoff_factor * (2**attempt)
                     batch.attempts[index] += 1
                     batch.delayed += 1
-                    self._retry_count += 1
+                    with self._state_lock:
+                        self._retry_count += 1
                     batch.events.put(
                         _RetryEvent(
                             logical_url=batch.items[index]["url"],
@@ -507,8 +573,23 @@ class ImageDownloadRuntime:
                     batch.items[index],
                     attempt_result,
                 )
-            self._items_completed += 1
-            batch.events.put(_ResultEvent(index=index, result=attempt_result))
+            with self._state_lock:
+                self._items_completed += 1
+            completed_at = perf_counter()
+            batch.pending_results += 1
+            with self._state_lock:
+                self._pending_results += 1
+                self._peak_pending_results = max(
+                    self._peak_pending_results,
+                    self._pending_results,
+                )
+            batch.events.put(
+                _ResultEvent(
+                    index=index,
+                    result=attempt_result,
+                    completed_at=completed_at,
+                )
+            )
 
     def _retry_ready(self, batch_id: int, index: int) -> None:
         batch = self._batches.get(batch_id)
@@ -537,6 +618,14 @@ class ImageDownloadRuntime:
             )
         target_path = Path(item["save_path"])
         temp_path: Path | None = None
+        request_to_headers_seconds = 0.0
+        response_body_read_seconds = 0.0
+        temp_file_write_seconds = 0.0
+        atomic_replace_seconds = 0.0
+        downloaded_bytes = 0
+        request_started_at = 0.0
+        headers_received = False
+        request_started = False
         try:
             assert_replay_request_allowed(request_url)
             replay_mode = current_replay_network_policy() is not None
@@ -545,7 +634,17 @@ class ImageDownloadRuntime:
                 if replay_mode
                 else session.get(request_url)
             )
+            request_started_at = perf_counter()
+            request_started = True
+            with self._state_lock:
+                self._in_flight_requests += 1
+                self._peak_in_flight_requests = max(
+                    self._peak_in_flight_requests,
+                    self._in_flight_requests,
+                )
             async with response_context as response:
+                request_to_headers_seconds += perf_counter() - request_started_at
+                headers_received = True
                 if response.status >= 300:
                     raise aiohttp.ClientResponseError(
                         request_info=response.request_info,
@@ -556,10 +655,38 @@ class ImageDownloadRuntime:
                     )
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 temp_path = temporary_sibling_path(target_path)
-                with temp_path.open("wb") as output_file:
-                    async for chunk in response.content.iter_chunked(64 * 1024):
+                file_opened_at = perf_counter()
+                output_file = temp_path.open("wb")
+                temp_file_write_seconds += perf_counter() - file_opened_at
+                try:
+                    chunks = response.content.iter_chunked(64 * 1024).__aiter__()
+                    while True:
+                        read_started_at = perf_counter()
+                        try:
+                            chunk = await anext(chunks)
+                        except StopAsyncIteration:
+                            response_body_read_seconds += (
+                                perf_counter() - read_started_at
+                            )
+                            break
+                        response_body_read_seconds += (
+                            perf_counter() - read_started_at
+                        )
+                        downloaded_bytes += len(chunk)
+                        write_started_at = perf_counter()
                         output_file.write(chunk)
+                        temp_file_write_seconds += (
+                            perf_counter() - write_started_at
+                        )
+                finally:
+                    file_close_started_at = perf_counter()
+                    output_file.close()
+                    temp_file_write_seconds += (
+                        perf_counter() - file_close_started_at
+                    )
+                replace_started_at = perf_counter()
                 replace_temp_file(temp_path, target_path)
+                atomic_replace_seconds += perf_counter() - replace_started_at
                 temp_path = None
             return {
                 "url": logical_url,
@@ -598,6 +725,20 @@ class ImageDownloadRuntime:
                 retryable=(status in retry_statuses if status is not None else True),
             )
         finally:
+            if request_started:
+                if not headers_received:
+                    request_to_headers_seconds += (
+                        perf_counter() - request_started_at
+                    )
+                with self._state_lock:
+                    self._in_flight_requests -= 1
+                    self._request_to_headers_seconds += (
+                        request_to_headers_seconds
+                    )
+                    self._response_body_read_seconds += response_body_read_seconds
+                    self._temp_file_write_seconds += temp_file_write_seconds
+                    self._atomic_replace_seconds += atomic_replace_seconds
+                    self._downloaded_bytes += downloaded_bytes
             if temp_path is not None:
                 try:
                     temp_path.unlink()
@@ -631,9 +772,20 @@ class ImageDownloadRuntime:
                 peak_active_downloads=self._peak_active_downloads,
                 queued_items=self._queued_items(),
                 peak_queued_items=self._peak_queued_items,
+                in_flight_requests=self._in_flight_requests,
+                peak_in_flight_requests=self._peak_in_flight_requests,
+                pending_results=self._pending_results,
+                peak_pending_results=self._peak_pending_results,
                 retry_count=self._retry_count,
                 queue_wait_seconds=self._queue_wait_seconds,
                 service_seconds=self._service_seconds,
+                request_to_headers_seconds=self._request_to_headers_seconds,
+                response_body_read_seconds=self._response_body_read_seconds,
+                temp_file_write_seconds=self._temp_file_write_seconds,
+                atomic_replace_seconds=self._atomic_replace_seconds,
+                result_delivery_wait_seconds=self._result_delivery_wait_seconds,
+                progress_callback_seconds=self._progress_callback_seconds,
+                downloaded_bytes=self._downloaded_bytes,
                 runtime_seconds=max(0.0, perf_counter() - self._started_at),
             )
 
@@ -641,12 +793,12 @@ class ImageDownloadRuntime:
         with self._state_lock:
             if self._closed:
                 return
-            self._run_in_loop(self._cancel_all_and_wait())
-            loop = self._loop_or_raise()
-            shutdown = self._shutdown_requested
-            if shutdown is None:
-                raise RuntimeError("图片下载关闭事件未初始化。")
-            loop.call_soon_threadsafe(shutdown.set)
+        self._run_in_loop(self._cancel_all_and_wait())
+        loop = self._loop_or_raise()
+        shutdown = self._shutdown_requested
+        if shutdown is None:
+            raise RuntimeError("图片下载关闭事件未初始化。")
+        loop.call_soon_threadsafe(shutdown.set)
         self._thread.join()
 
 

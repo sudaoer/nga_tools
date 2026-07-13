@@ -14,6 +14,7 @@ from nga_tools.network_limits import (
 )
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.api_runtime import use_api_runtime
+from nga_tools.core.image_download_runtime import image_download_runtime_metrics
 
 
 class _ApiResponse:
@@ -153,6 +154,15 @@ class NetworkLimitsTest:
 
         assert len(result['succeeded']) == 1
         assert _ClientSession.instance_count == 1
+        metrics = image_download_runtime_metrics()
+        assert metrics is not None
+        assert metrics.downloaded_bytes == len(b"image")
+        assert metrics.in_flight_requests == 0
+        assert metrics.peak_in_flight_requests == 1
+        assert metrics.request_to_headers_seconds >= 0
+        assert metrics.response_body_read_seconds >= 0
+        assert metrics.temp_file_write_seconds >= 0
+        assert metrics.atomic_replace_seconds >= 0
 
     def test_default_download_concurrency_uses_configured_image_limit(self) -> None:
         configure_network_limits(api_concurrency=4, image_concurrency=100)

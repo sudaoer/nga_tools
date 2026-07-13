@@ -48,6 +48,74 @@ def _image_url(name: str) -> str:
 
 
 class ImageDownloadRuntimeTest:
+    def test_result_delivery_and_callback_metrics_return_to_zero(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        async def fake_attempt(
+            _runtime: ImageDownloadRuntime,
+            _session: object,
+            item: image_store.utils.DownloadTask,
+            _retry_statuses: tuple[int, ...],
+        ) -> image_store.utils.DownloadFileResult:
+            return _success_result(item)
+
+        runtime = ImageDownloadRuntime(2)
+        runtime._download_attempt = MethodType(fake_attempt, runtime)
+        try:
+            runtime.download_streaming(
+                [_download_task(str(index), tmp_path) for index in range(8)],
+                retries=0,
+                backoff_factor=0,
+                retry_statuses=(),
+                batch_limit=2,
+                on_progress=lambda _current, _total, _result: time.sleep(0.002),
+            )
+            metrics = runtime.snapshot()
+        finally:
+            runtime.close()
+
+        assert metrics.pending_results == 0
+        assert metrics.peak_pending_results >= 1
+        assert metrics.result_delivery_wait_seconds > 0
+        assert metrics.progress_callback_seconds >= 0.008
+
+    def test_cancelled_callback_discards_pending_result_metrics(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        async def fake_attempt(
+            _runtime: ImageDownloadRuntime,
+            _session: object,
+            item: image_store.utils.DownloadTask,
+            _retry_statuses: tuple[int, ...],
+        ) -> image_store.utils.DownloadFileResult:
+            return _success_result(item)
+
+        def fail_callback(
+            _current: int,
+            _total: int,
+            _result: image_store.utils.DownloadFileResult,
+        ) -> None:
+            raise RuntimeError("stop consuming")
+
+        runtime = ImageDownloadRuntime(4)
+        runtime._download_attempt = MethodType(fake_attempt, runtime)
+        with pytest.raises(RuntimeError, match="stop consuming"):
+            runtime.download_streaming(
+                [_download_task(str(index), tmp_path) for index in range(100)],
+                retries=0,
+                backoff_factor=0,
+                retry_statuses=(),
+                batch_limit=4,
+                on_progress=fail_callback,
+            )
+        runtime.close()
+
+        metrics = runtime.snapshot()
+        assert metrics.active_downloads == 0
+        assert metrics.pending_results == 0
+
     def test_large_batch_uses_only_fixed_worker_tasks(self, tmp_path: Path) -> None:
         original_create_task = asyncio.create_task
         created_tasks = 0
