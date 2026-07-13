@@ -6,10 +6,12 @@ import os
 import sqlite3
 import tempfile
 import threading
-from contextlib import closing
+from contextlib import closing, contextmanager
+from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, NotRequired, TypedDict
+from concurrent.futures import Future
 from urllib.parse import urlsplit
 
 from PIL import Image, ImageDraw
@@ -42,6 +44,10 @@ from nga_tools.backup.image_validation import (
 )
 from nga_tools.replay.offline import image_request_url
 from nga_tools.timing import time_section
+from nga_tools.backup.image_index_writer import (
+    ImageMappingRow,
+    active_image_index_writer,
+)
 
 
 class ImageDownloadTask(TypedDict):
@@ -145,7 +151,40 @@ class ImageDownloadPreparation:
 IMAGE_INDEX_FILENAME = "image_index.sqlite3"
 PLACEHOLDER_IMAGE_FILENAME = "download_failed_placeholder.png"
 _IMAGE_STORE_LOCK = threading.RLock()
+_IMAGE_HASH_LOCKS = tuple(threading.Lock() for _index in range(256))
 _INITIALIZED_IMAGE_INDEX_PATHS: set[Path] = set()
+
+
+@dataclass
+class _ImageURLClaim:
+    event: threading.Event = field(default_factory=threading.Event)
+    result: utils.DownloadFileResult | None = None
+    error: BaseException | None = None
+
+
+type _ImageClaimKey = tuple[str, str]
+
+_IMAGE_URL_CLAIMS_LOCK = threading.RLock()
+_IMAGE_URL_CLAIMS: dict[_ImageClaimKey, _ImageURLClaim] = {}
+_COMPLETED_IMAGE_URL_CLAIMS: dict[
+    _ImageClaimKey,
+    utils.DownloadFileResult,
+] = {}
+_image_coordination_scope_depth = 0
+
+
+@contextmanager
+def use_image_download_coordination() -> Generator[None]:
+    global _image_coordination_scope_depth
+    with _IMAGE_URL_CLAIMS_LOCK:
+        _image_coordination_scope_depth += 1
+    try:
+        yield
+    finally:
+        with _IMAGE_URL_CLAIMS_LOCK:
+            _image_coordination_scope_depth -= 1
+            if _image_coordination_scope_depth == 0:
+                _COMPLETED_IMAGE_URL_CLAIMS.clear()
 
 
 def normalize_nga_image_url(url: str) -> str:
@@ -357,37 +396,58 @@ def upsert_image_mapping(url: str, unique_path: Path) -> ImageMapping:
 def upsert_image_mappings(
     mappings: list[tuple[str, Path]],
 ) -> list[ImageMapping]:
+    image_mappings, future = enqueue_image_mappings(mappings)
+    future.result()
+    return image_mappings
+
+
+def enqueue_image_mappings(
+    mappings: list[tuple[str, Path]],
+) -> tuple[list[ImageMapping], Future[None]]:
     if not mappings:
-        return []
+        future = Future[None]()
+        future.set_result(None)
+        return [], future
 
     now = _now_utc_iso()
     image_mappings = [
         ImageMapping(url=url, unique_rel_path=_unique_rel_path(unique_path))
         for url, unique_path in mappings
     ]
-    rows = [
+    rows: list[ImageMappingRow] = [
         (mapping.url, mapping.unique_rel_path, now, now)
         for mapping in image_mappings
     ]
+    db_path = _initialize_image_index()
+    writer = active_image_index_writer(db_path)
+    if writer is not None:
+        return image_mappings, writer.submit(rows)
+
+    future = Future[None]()
     with _IMAGE_STORE_LOCK:
-        with closing(_connect_image_index_writable()) as connection:
-            with connection:
-                connection.executemany(
-                    """
-                    INSERT INTO image_mappings (
-                        url,
-                        unique_rel_path,
-                        created_at,
-                        updated_at
+        try:
+            with closing(_connect_image_index_writable()) as connection:
+                with connection:
+                    connection.executemany(
+                        """
+                        INSERT INTO image_mappings (
+                            url,
+                            unique_rel_path,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(url) DO UPDATE SET
+                            unique_rel_path = excluded.unique_rel_path,
+                            updated_at = excluded.updated_at
+                        """,
+                        rows,
                     )
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(url) DO UPDATE SET
-                        unique_rel_path = excluded.unique_rel_path,
-                        updated_at = excluded.updated_at
-                    """,
-                    rows,
-                )
-    return image_mappings
+        except BaseException as error:
+            future.set_exception(error)
+        else:
+            future.set_result(None)
+    return image_mappings, future
 
 
 def load_persistent_validation_cache(
@@ -715,27 +775,48 @@ def _store_image_file(
     *,
     move_source: bool,
 ) -> StoredImageResult:
-    if not _image_file_is_valid(source_path):
+    stored_image, mapping_future = _store_image_file_deferred_mapping(
+        source_path,
+        task,
+        move_source=move_source,
+    )
+    mapping_future.result()
+    return stored_image
+
+
+def _hash_lock(image_hash: str) -> threading.Lock:
+    try:
+        stripe = int(image_hash[:2], 16)
+    except ValueError:
+        stripe = hash(image_hash) % len(_IMAGE_HASH_LOCKS)
+    return _IMAGE_HASH_LOCKS[stripe]
+
+
+def _store_image_file_deferred_mapping(
+    source_path: Path,
+    task: ImageDownloadTask,
+    *,
+    move_source: bool,
+) -> tuple[StoredImageResult, Future[None]]:
+    if not image_file_is_valid(source_path):
         raise ValueError(f"图片文件无效：{source_path}")
     image_hash = utils.sha256(str(source_path))
     extension = _image_extension_from_file(source_path, task["url"])
-    with _IMAGE_STORE_LOCK:
+    with _hash_lock(image_hash):
         target_path, reused, collision = _target_path_for_download(
             source_path,
             image_hash,
             extension,
         )
         if not reused:
+            if target_path.exists():
+                invalidate_current_image_validation(target_path)
             if move_source:
                 replace_file_atomically(source_path, target_path, move_source=True)
             elif source_path.resolve() != target_path.resolve():
                 replace_file_atomically(source_path, target_path, move_source=False)
-            invalidate_current_image_validation(source_path)
-            invalidate_current_image_validation(target_path)
             if not _image_file_is_valid(target_path):
                 raise ValueError(f"图片保存后无法校验：{target_path}")
-
-        upsert_image_mapping(task["url"], target_path)
     result: StoredImageResult = {
         "url": task["url"],
         "unique_path": str(target_path),
@@ -743,7 +824,10 @@ def _store_image_file(
     }
     if collision:
         result["collision"] = True
-    return result
+    _mappings, mapping_future = enqueue_image_mappings(
+        [(task["url"], target_path)]
+    )
+    return result, mapping_future
 
 
 def store_downloaded_image(temp_path: Path, task: ImageDownloadTask) -> StoredImageResult:
@@ -752,6 +836,58 @@ def store_downloaded_image(temp_path: Path, task: ImageDownloadTask) -> StoredIm
 
 def store_existing_image(image_path: Path, url: str) -> StoredImageResult:
     return _store_image_file(image_path, {"url": url}, move_source=False)
+
+
+def _claim_image_url(
+    url: str,
+) -> tuple[_ImageClaimKey, _ImageURLClaim, bool]:
+    claim_key = (
+        str(output_dir().resolve()),
+        normalize_nga_image_url(url),
+    )
+    with _IMAGE_URL_CLAIMS_LOCK:
+        existing = _IMAGE_URL_CLAIMS.get(claim_key)
+        if existing is not None:
+            return claim_key, existing, False
+        completed_result = _COMPLETED_IMAGE_URL_CLAIMS.get(claim_key)
+        if completed_result is not None:
+            completed_path = Path(completed_result["save_path"])
+            if image_file_is_valid(completed_path):
+                completed_claim = _ImageURLClaim(result=completed_result)
+                completed_claim.event.set()
+                return claim_key, completed_claim, False
+            _COMPLETED_IMAGE_URL_CLAIMS.pop(claim_key, None)
+        claim = _ImageURLClaim()
+        _IMAGE_URL_CLAIMS[claim_key] = claim
+        return claim_key, claim, True
+
+
+def _release_image_url_claim(
+    claim_key: _ImageClaimKey,
+    claim: _ImageURLClaim,
+    *,
+    result: utils.DownloadFileResult | None = None,
+    error: BaseException | None = None,
+) -> None:
+    claim.result = result
+    claim.error = error
+    claim.event.set()
+    with _IMAGE_URL_CLAIMS_LOCK:
+        if result is not None and result["success"]:
+            _COMPLETED_IMAGE_URL_CLAIMS[claim_key] = result
+        else:
+            _COMPLETED_IMAGE_URL_CLAIMS.pop(claim_key, None)
+        if _IMAGE_URL_CLAIMS.get(claim_key) is claim:
+            _IMAGE_URL_CLAIMS.pop(claim_key, None)
+
+
+def _copy_claim_result(
+    url: str,
+    result: utils.DownloadFileResult,
+) -> utils.DownloadFileResult:
+    copied = result.copy()
+    copied["url"] = url
+    return copied
 
 
 def download_image_tasks(
@@ -763,14 +899,58 @@ def download_image_tasks(
 
     succeeded: list[utils.DownloadFileResult] = []
     failed: list[utils.DownloadFileResult] = []
+    owners: list[tuple[ImageDownloadTask, _ImageClaimKey, _ImageURLClaim]] = []
+    waiters: list[tuple[ImageDownloadTask, _ImageURLClaim]] = []
+    for image_task in image_tasks:
+        claim_key, claim, is_owner = _claim_image_url(image_task["url"])
+        if is_owner:
+            owners.append((image_task, claim_key, claim))
+        else:
+            waiters.append((image_task, claim))
+
+    completed = 0
+
+    def emit_result(result: utils.DownloadFileResult) -> None:
+        nonlocal completed
+        completed += 1
+        if result["success"]:
+            succeeded.append(result)
+        else:
+            failed.append(result)
+        if on_progress is not None:
+            on_progress(completed, len(image_tasks), result)
+
+    pending_store_results: list[
+        tuple[
+            utils.DownloadFileResult,
+            Future[None],
+            _ImageClaimKey,
+            _ImageURLClaim,
+        ]
+    ] = []
+    released_owner_claim_ids: set[int] = set()
+
+    def release_owner(
+        claim_key: _ImageClaimKey,
+        claim: _ImageURLClaim,
+        result: utils.DownloadFileResult,
+    ) -> None:
+        _release_image_url_claim(claim_key, claim, result=result)
+        released_owner_claim_ids.add(id(claim))
+        emit_result(result)
+
     with tempfile.TemporaryDirectory(prefix="nga_image_download_") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
         download_tasks: list[utils.DownloadTask] = []
-        task_by_temp_path: dict[str, ImageDownloadTask] = {}
-        for index, image_task in enumerate(image_tasks):
+        owner_by_temp_path: dict[
+            str,
+            tuple[ImageDownloadTask, _ImageClaimKey, _ImageURLClaim],
+        ] = {}
+        for index, owner in enumerate(owners):
+            image_task, claim_key, claim = owner
             temp_path = temp_dir / f"image_{index}"
             temp_path_str = str(temp_path)
-            task_by_temp_path[temp_path_str] = image_task
+            owner_by_temp_path[temp_path_str] = owner
             download_tasks.append(
                 {
                     "url": image_task["url"],
@@ -780,24 +960,32 @@ def download_image_tasks(
             )
 
         def handle_progress(
-            completed: int,
-            total: int,
+            _completed: int,
+            _total: int,
             download_result: utils.DownloadFileResult,
         ) -> None:
-            image_task = task_by_temp_path[download_result["save_path"]]
+            image_task, claim_key, claim = owner_by_temp_path[
+                download_result["save_path"]
+            ]
             result: utils.DownloadFileResult
             if download_result["success"]:
                 try:
-                    stored_image = store_downloaded_image(
-                        Path(download_result["save_path"]),
-                        image_task,
+                    stored_image, mapping_future = (
+                        _store_image_file_deferred_mapping(
+                            Path(download_result["save_path"]),
+                            image_task,
+                            move_source=True,
+                        )
                     )
                     result = {
                         "url": image_task["url"],
                         "save_path": stored_image["unique_path"],
                         "success": True,
                     }
-                    succeeded.append(result)
+                    pending_store_results.append(
+                        (result, mapping_future, claim_key, claim)
+                    )
+                    return
                 except Exception as error:
                     result = {
                         "url": image_task["url"],
@@ -806,7 +994,6 @@ def download_image_tasks(
                         "error": str(error),
                         "failure_kind": "image_store",
                     }
-                    failed.append(result)
             else:
                 result = {
                     "url": image_task["url"],
@@ -820,11 +1007,57 @@ def download_image_tasks(
                 }
                 if "http_status" in download_result:
                     result["http_status"] = download_result["http_status"]
-                failed.append(result)
+            release_owner(claim_key, claim, result)
 
-            if on_progress is not None:
-                on_progress(completed, total, result)
+        try:
+            if download_tasks:
+                utils.download_files(download_tasks, on_progress=handle_progress)
+            for result, mapping_future, claim_key, claim in pending_store_results:
+                try:
+                    mapping_future.result()
+                except Exception as error:
+                    failed_result: utils.DownloadFileResult = {
+                        "url": result["url"],
+                        "save_path": str(unique_images_dir()),
+                        "success": False,
+                        "error": str(error),
+                        "failure_kind": "image_store",
+                    }
+                    release_owner(claim_key, claim, failed_result)
+                else:
+                    release_owner(claim_key, claim, result)
+        except BaseException as error:
+            for result, mapping_future, claim_key, claim in pending_store_results:
+                if id(claim) in released_owner_claim_ids:
+                    continue
+                try:
+                    mapping_future.result()
+                except BaseException as mapping_error:
+                    _release_image_url_claim(
+                        claim_key,
+                        claim,
+                        error=mapping_error,
+                    )
+                else:
+                    _release_image_url_claim(
+                        claim_key,
+                        claim,
+                        result=result,
+                    )
+                released_owner_claim_ids.add(id(claim))
+            for _task, claim_key, claim in owners:
+                if id(claim) not in released_owner_claim_ids:
+                    _release_image_url_claim(claim_key, claim, error=error)
+            raise
 
-        utils.download_files(download_tasks, on_progress=handle_progress)
+    for image_task, claim in waiters:
+        claim.event.wait()
+        if claim.error is not None:
+            raise RuntimeError(
+                f"共享图片下载失败：{image_task['url']}"
+            ) from claim.error
+        if claim.result is None:
+            raise RuntimeError(f"共享图片下载没有结果：{image_task['url']}")
+        emit_result(_copy_claim_result(image_task["url"], claim.result))
 
     return {"succeeded": succeeded, "failed": failed}

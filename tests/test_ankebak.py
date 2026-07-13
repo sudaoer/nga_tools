@@ -269,6 +269,7 @@ def test_backup_auto_isolates_planning_failure_and_omits_success_detail(
 
     app_config = SimpleNamespace(
         api_concurrency=4,
+        image_concurrency=16,
         backup_configs_workers=1,
         timing_log_enabled=False,
         ankebak_full_backup_interval_hours=168,

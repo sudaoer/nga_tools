@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,23 +24,14 @@ class _ApiResponse:
         return {"code": 0, "totalPage": 1, "result": []}
 
 
-class _AsyncSlot:
-    entered_count = 0
-
-    async def __aenter__(self) -> None:
-        type(self).entered_count += 1
-
-    async def __aexit__(
-        self,
-        exc_type: object,
-        exc: object,
-        traceback: object,
-    ) -> None:
-        return
+class _ChunkedContent:
+    async def iter_chunked(self, _chunk_size: int):
+        yield b"image"
 
 
 class _DownloadResponse:
     status = 200
+    content = _ChunkedContent()
 
     async def __aenter__(self) -> "_DownloadResponse":
         return self
@@ -64,8 +56,11 @@ class _FailedDownloadResponse(_DownloadResponse):
 
 
 class _ClientSession:
+    instance_count = 0
+
     def __init__(self, **kwargs: object) -> None:
-        del kwargs
+        type(self).instance_count += 1
+        self.connector = kwargs.get("connector")
 
     async def __aenter__(self) -> "_ClientSession":
         return self
@@ -76,6 +71,11 @@ class _ClientSession:
         exc: object,
         traceback: object,
     ) -> None:
+        close = getattr(self.connector, "close", None)
+        if close is not None:
+            close_result = close()
+            if inspect.isawaitable(close_result):
+                await close_result
         return
 
     def get(self, url: str) -> _DownloadResponse:
@@ -132,18 +132,15 @@ class NetworkLimitsTest:
         api_slot.__enter__.assert_called_once_with()
         api_slot.__exit__.assert_called_once()
 
-    def test_download_files_uses_image_download_slot(self) -> None:
-        _AsyncSlot.entered_count = 0
+    def test_download_files_reuses_one_command_runtime_session(self) -> None:
+        _ClientSession.instance_count = 0
         configure_network_limits(api_concurrency=4, image_concurrency=1)
 
         with tempfile.TemporaryDirectory() as temp_dir_name:
             target_path = Path(temp_dir_name) / "image"
-            with (
-                patch("nga_tools.core.downloads.aiohttp.ClientSession", _ClientSession),
-                patch(
-                    "nga_tools.core.downloads.network_limits.image_download_slot",
-                    side_effect=_AsyncSlot,
-                ),
+            with patch(
+                "nga_tools.core.image_download_runtime.aiohttp.ClientSession",
+                _ClientSession,
             ):
                 result = utils.download_files(
                     [
@@ -155,7 +152,7 @@ class NetworkLimitsTest:
                 )
 
         assert len(result['succeeded']) == 1
-        assert _AsyncSlot.entered_count == 1
+        assert _ClientSession.instance_count == 1
 
     def test_default_download_concurrency_uses_configured_image_limit(self) -> None:
         configure_network_limits(api_concurrency=4, image_concurrency=100)
@@ -169,10 +166,12 @@ class NetworkLimitsTest:
     ) -> None:
         with (
             patch(
-                "nga_tools.core.downloads.aiohttp.ClientSession",
+                "nga_tools.core.image_download_runtime.aiohttp.ClientSession",
                 _FailedClientSession,
             ),
-            patch("nga_tools.core.downloads.report_warning") as warning_mock,
+            patch(
+                "nga_tools.core.image_download_runtime.report_warning"
+            ) as warning_mock,
         ):
             result = utils.download_files(
                 [
