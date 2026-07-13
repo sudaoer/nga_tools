@@ -167,6 +167,7 @@ IMAGE_INDEX_FILENAME = "image_index.sqlite3"
 PLACEHOLDER_IMAGE_FILENAME = "download_failed_placeholder.png"
 _IMAGE_STORE_LOCK = threading.RLock()
 _IMAGE_HASH_LOCKS = tuple(threading.Lock() for _index in range(256))
+_IMAGE_PREPARATION_SEMAPHORE = threading.BoundedSemaphore(1)
 _INITIALIZED_IMAGE_INDEX_PATHS: set[Path] = set()
 
 
@@ -647,6 +648,18 @@ def pending_image_download_tasks(
 
 
 def prepare_image_download_tasks(
+    image_tasks: list[ImageDownloadTask],
+) -> ImageDownloadPreparation:
+    with time_section("图片下载准备排队"):
+        _IMAGE_PREPARATION_SEMAPHORE.acquire()
+    try:
+        with time_section("图片下载准备执行"):
+            return _prepare_image_download_tasks_uncoordinated(image_tasks)
+    finally:
+        _IMAGE_PREPARATION_SEMAPHORE.release()
+
+
+def _prepare_image_download_tasks_uncoordinated(
     image_tasks: list[ImageDownloadTask],
 ) -> ImageDownloadPreparation:
     with time_section("图片索引批量查询"):

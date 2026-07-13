@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 import io
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event, Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -365,6 +367,134 @@ def _image_url_for_store(name: str) -> str:
         "https://img.nga.178.com/attachments/"
         f"mon_202506/06/{name}.png"
     )
+
+
+def _image_preparation(
+    pending_tasks: list[image_store.ImageDownloadTask] | None = None,
+) -> image_store.ImageDownloadPreparation:
+    tasks = [] if pending_tasks is None else pending_tasks
+    return image_store.ImageDownloadPreparation(
+        pending_tasks=tasks,
+        stats=image_store.ImagePreparationStats(
+            task_url_count=len(tasks),
+            mapping_hit_url_count=0,
+            unique_physical_path_count=0,
+            intra_thread_path_dedup_count=0,
+            memory_cache_hit_path_count=0,
+            deep_validation_path_count=0,
+            persistent_cache_hit_path_count=0,
+            missing_validation_path_count=0,
+            persistent_cache_query_path_count=0,
+            invalid_mapping_count=0,
+            pending_download_url_count=len(tasks),
+        ),
+    )
+
+
+def test_image_download_preparation_runs_one_caller_at_a_time() -> None:
+    first_entered = Event()
+    second_entered = Event()
+    release_first = Event()
+    active_count = 0
+    max_active_count = 0
+    call_count = 0
+    state_lock = Lock()
+
+    def prepare_side_effect(
+        _tasks: list[image_store.ImageDownloadTask],
+    ) -> image_store.ImageDownloadPreparation:
+        nonlocal active_count, call_count, max_active_count
+        with state_lock:
+            call_count += 1
+            active_count += 1
+            max_active_count = max(max_active_count, active_count)
+            current_call = call_count
+        if current_call == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=2)
+        else:
+            second_entered.set()
+        with state_lock:
+            active_count -= 1
+        return _image_preparation()
+
+    with (
+        patch(
+            "nga_tools.backup.image_store."
+            "_prepare_image_download_tasks_uncoordinated",
+            side_effect=prepare_side_effect,
+        ),
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        first = executor.submit(image_store.prepare_image_download_tasks, [])
+        assert first_entered.wait(timeout=2)
+        second = executor.submit(image_store.prepare_image_download_tasks, [])
+        assert not second_entered.wait(timeout=0.1)
+        release_first.set()
+        first.result(timeout=2)
+        second.result(timeout=2)
+
+    assert max_active_count == 1
+    assert second_entered.is_set()
+
+
+def test_image_download_preparation_releases_slot_after_failure() -> None:
+    with patch(
+        "nga_tools.backup.image_store._prepare_image_download_tasks_uncoordinated",
+        side_effect=(RuntimeError("boom"), _image_preparation()),
+    ):
+        with pytest.raises(RuntimeError, match="boom"):
+            image_store.prepare_image_download_tasks([])
+        assert image_store.prepare_image_download_tasks([]) == _image_preparation()
+
+
+def test_image_download_execution_is_outside_preparation_slot() -> None:
+    from nga_tools.backup import image_pipeline
+
+    download_barrier = Barrier(2, timeout=2)
+
+    def download_side_effect(
+        _tasks: list[image_store.ImageDownloadTask],
+        **_kwargs: object,
+    ) -> image_store.CompactImageDownloadSummary:
+        download_barrier.wait()
+        return {"succeeded_count": 1, "failed": []}
+
+    first_task: image_store.ImageDownloadTask = {
+        "url": _image_url_for_store("preparation-slot-first")
+    }
+    second_task: image_store.ImageDownloadTask = {
+        "url": _image_url_for_store("preparation-slot-second")
+    }
+    with (
+        patch(
+            "nga_tools.backup.image_store."
+            "_prepare_image_download_tasks_uncoordinated",
+            side_effect=lambda tasks: _image_preparation(tasks),
+        ),
+        patch(
+            "nga_tools.backup.image_store.download_image_tasks_compact",
+            side_effect=download_side_effect,
+        ),
+        patch("nga_tools.backup.image_pipeline.report_progress"),
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        first = executor.submit(
+            image_pipeline._run_download_images,
+            1,
+            None,
+            [first_task],
+            collect_successes=False,
+        )
+        second = executor.submit(
+            image_pipeline._run_download_images,
+            2,
+            None,
+            [second_task],
+            collect_successes=False,
+        )
+        first.result(timeout=3)
+        second.result(timeout=3)
 
 
 def test_prepare_image_download_tasks_uses_persistent_cache(tmp_path: Path) -> None:
