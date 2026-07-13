@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import socket
 import sqlite3
 import threading
@@ -40,6 +41,7 @@ from nga_tools.replay.corpus import load_replay_corpus
 from nga_tools.replay.profile import ReplayProfile, TrafficProfile
 from nga_tools.replay.server import create_replay_app
 from nga_tools.replay.state import (
+    REPLAY_TARGET_MARKER_FILENAME,
     PreparationStats,
     prepare_target_state,
     source_state_fingerprint,
@@ -239,6 +241,7 @@ class ReplayStateTest:
         assert stats.selection_file_count == 1
         assert stats.image_file_count == 1
         assert stats.validation_cache_path_updates == 1
+        assert (target / REPLAY_TARGET_MARKER_FILENAME).is_file()
         assert source_state_fingerprint(source) == fingerprint_before
         assert {
             path: path.stat().st_mtime_ns for path in source_mtimes
@@ -301,6 +304,130 @@ class ReplayStateTest:
         with pytest.raises(ValueError, match="互相嵌套"):
             prepare_target_state("empty", source, source / "nested")
 
+        historical = tmp_path / "historical-output"
+        historical.mkdir()
+        with pytest.raises(ValueError, match="归属标记"):
+            prepare_target_state("existing", source, historical)
+
+    def test_existing_accepts_replay_owned_target(self, tmp_path: Path) -> None:
+        source, _thread_config = _build_warm_source(tmp_path)
+        target = tmp_path / "existing-output"
+        prepare_target_state("empty", source, target)
+
+        stats = prepare_target_state("existing", source, target)
+
+        assert stats.initial_state == "existing"
+        marker = json.loads(
+            (target / REPLAY_TARGET_MARKER_FILENAME).read_text(encoding="utf-8")
+        )
+        assert marker["source_output"] == str(source.resolve())
+        assert marker["created_initial_state"] == "empty"
+
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows replay暂时跳过链接隔离检查",
+    )
+    def test_existing_rejects_root_and_internal_symlinks(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source, _thread_config = _build_warm_source(tmp_path)
+        target = tmp_path / "symlink-output"
+        prepare_target_state("empty", source, target)
+        alias = tmp_path / "symlink-output-alias"
+        try:
+            alias.symlink_to(target, target_is_directory=True)
+        except OSError as error:
+            pytest.skip(f"当前平台不能创建符号链接：{error}")
+
+        with pytest.raises(ValueError, match="target-output不能是符号链接"):
+            prepare_target_state("existing", source, alias)
+
+        (target / "linked-thread").symlink_to(
+            source / "123_456",
+            target_is_directory=True,
+        )
+        with pytest.raises(ValueError, match="不能包含符号链接"):
+            prepare_target_state("existing", source, target)
+
+    @pytest.mark.parametrize(
+        "relative_path",
+        [
+            Path("123_456/archive.sqlite3"),
+            Path("image_index.sqlite3"),
+            Path("images_unique") / "linked-image.png",
+        ],
+    )
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows replay暂时跳过链接隔离检查",
+    )
+    def test_existing_rejects_source_hardlinks(
+        self,
+        tmp_path: Path,
+        relative_path: Path,
+    ) -> None:
+        source, _thread_config = _build_warm_source(tmp_path)
+        target = tmp_path / f"hardlink-{relative_path.name}"
+        prepare_target_state("empty", source, target)
+        if relative_path.parts[0] == "images_unique":
+            source_path = next((source / "images_unique").iterdir())
+        else:
+            source_path = source / relative_path
+        target_path = target / relative_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(source_path, target_path)
+        except OSError as error:
+            pytest.skip(f"当前平台不能创建硬链接：{error}")
+
+        with pytest.raises(ValueError, match="共享同一inode"):
+            prepare_target_state("existing", source, target)
+
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="此测试在POSIX上模拟Windows链接策略",
+    )
+    def test_windows_policy_checks_directory_and_marker_only(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source, _thread_config = _build_warm_source(tmp_path)
+        target = tmp_path / "windows-existing-output"
+        prepare_target_state("empty", source, target)
+        marker_path = target / REPLAY_TARGET_MARKER_FILENAME
+        marker_target = target / "owned-marker.json"
+        marker_path.replace(marker_target)
+        marker_path.symlink_to(marker_target.name)
+        hardlink_path = target / "linked-archive.sqlite3"
+        os.link(source / "123_456" / "archive.sqlite3", hardlink_path)
+        (target / "linked-thread").symlink_to(
+            source / "123_456",
+            target_is_directory=True,
+        )
+        alias = tmp_path / "windows-existing-alias"
+        alias.symlink_to(target, target_is_directory=True)
+
+        with patch(
+            "nga_tools.replay.state._is_windows",
+            return_value=True,
+        ):
+            direct_stats = prepare_target_state("existing", source, target)
+            alias_stats = prepare_target_state("existing", source, alias)
+
+            historical = tmp_path / "windows-historical-output"
+            historical.mkdir()
+            with pytest.raises(ValueError, match="归属标记"):
+                prepare_target_state("existing", source, historical)
+
+            file_target = tmp_path / "windows-file-target"
+            file_target.write_text("not a directory", encoding="utf-8")
+            with pytest.raises(ValueError, match="已存在"):
+                prepare_target_state("existing", source, file_target)
+
+        assert direct_stats.initial_state == "existing"
+        assert alias_stats.initial_state == "existing"
+
 
 class ReplayOfflineTest:
     def test_maps_images_and_rejects_non_server_origins(self) -> None:
@@ -359,6 +486,32 @@ class ReplayOfflineTest:
 
 
 class ReplayRunnerTest:
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows replay暂时跳过链接隔离检查",
+    )
+    def test_runner_preserves_target_symlink_for_guard(self, tmp_path: Path) -> None:
+        source, thread_config = _build_warm_source(tmp_path)
+        target = tmp_path / "owned-target"
+        prepare_target_state("empty", source, target)
+        alias = tmp_path / "owned-target-alias"
+        try:
+            alias.symlink_to(target, target_is_directory=True)
+        except OSError as error:
+            pytest.skip(f"当前平台不能创建符号链接：{error}")
+
+        with pytest.raises(ValueError, match="target-output不能是符号链接"):
+            run_replay_backup(
+                {
+                    "server_url": "http://127.0.0.1:1",
+                    "source_output": str(source),
+                    "target_output": str(alias),
+                    "thread_config": str(thread_config),
+                    "initial_state": "existing",
+                    "all_threads": True,
+                }
+            )
+
     def test_cli_and_runner_write_reproducible_report(self, tmp_path: Path) -> None:
         source, thread_config = _build_warm_source(tmp_path)
         target = tmp_path / "run-output"

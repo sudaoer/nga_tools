@@ -282,7 +282,7 @@ def _initial_state(args: CommandArgs) -> InitialState:
 
 def run_replay_backup(args: CommandArgs) -> None:
     source_output = Path(required_str(args, "source_output")).resolve()
-    target_output = Path(required_str(args, "target_output")).resolve()
+    target_output = Path(required_str(args, "target_output")).absolute()
     server_url = normalized_server_url(required_str(args, "server_url"))
     thread_config_arg = optional_str(args, "thread_config")
     default_config = get_config()

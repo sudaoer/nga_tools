@@ -224,9 +224,12 @@ pixi run python main.py replay run `
 ```
 
 `empty` 要求目标不存在或为空，从零创建归档；`warm` 通过 SQLite Online Backup
-复制数据库，并复制或 reflink 图片及版本选择文件；`existing` 要求目标已存在，
-可继续一次中断的重放运行。源与目标相同或互相嵌套时会拒绝运行，`empty` 和
-`warm` 不会覆盖非空目标。
+复制数据库，并复制或 reflink 图片及版本选择文件。两者都会写入 replay 目标归属
+标记；`existing` 只接受带有同一 `source-output` 归属标记的目标，可继续一次中断的
+重放运行。源与目标相同或互相嵌套、目标使用符号链接，或目标文件与源文件共享
+inode 时会拒绝运行；`empty` 和 `warm` 不会覆盖非空目标。Windows 当前只检查
+`target-output` 是目录并校验归属标记，暂不检查符号链接、directory junction 或
+共享文件 ID；在 Windows 上使用 `existing` 时必须由用户保证目标是独立的物理目录。
 
 重放运行不会读取环境代理或发送 NGA Cookie，API 与图片的实际请求 origin 必须
 等于 `server-url`。准备耗时不计入备份墙钟；结束后会在目标根目录原子写入

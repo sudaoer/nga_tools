@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
+import stat
+from collections.abc import Iterator
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -15,11 +18,18 @@ from nga_tools.backup.post_version_selection import (
     POST_VERSION_SELECTIONS_FILENAME,
 )
 from nga_tools.console import report_progress
-from nga_tools.core.atomic import replace_temp_file, temporary_sibling_path
+from nga_tools.core.atomic import (
+    replace_temp_file,
+    temporary_sibling_path,
+    write_json_atomically,
+)
 from nga_tools.core.sqlite import SQLITE_BUSY_TIMEOUT_SECONDS
 
 InitialState = Literal["empty", "warm", "existing"]
+REPLAY_TARGET_MARKER_FILENAME = ".nga-replay-target.json"
 _SQLITE_BACKUP_FILENAME = "archive.sqlite3"
+_REPLAY_TARGET_MARKER_KIND = "nga-tools-replay-target"
+_REPLAY_TARGET_MARKER_VERSION = 1
 _FICLONE = 0x40049409
 
 
@@ -54,8 +64,14 @@ class _DatabaseState:
     wal: _FileState
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def validate_source_target_paths(source_output: Path, target_output: Path) -> None:
     source = source_output.resolve()
+    if not _is_windows() and target_output.is_symlink():
+        raise ValueError(f"target-output不能是符号链接：{target_output}")
     target = target_output.resolve()
     if source == target or source in target.parents or target in source.parents:
         raise ValueError("source-output与target-output不能相同或互相嵌套。")
@@ -69,6 +85,122 @@ def _ensure_empty_target(target_output: Path) -> None:
             raise ValueError(f"target-output已存在且不是目录：{target_output}")
         if any(target_output.iterdir()):
             raise ValueError(f"target-output必须不存在或为空：{target_output}")
+
+
+def _write_replay_target_marker(
+    target_output: Path,
+    source_output: Path,
+    initial_state: Literal["empty", "warm"],
+) -> None:
+    write_json_atomically(
+        target_output / REPLAY_TARGET_MARKER_FILENAME,
+        {
+            "format_version": _REPLAY_TARGET_MARKER_VERSION,
+            "kind": _REPLAY_TARGET_MARKER_KIND,
+            "source_output": str(source_output.resolve()),
+            "created_initial_state": initial_state,
+        },
+        indent=2,
+        trailing_newline=True,
+    )
+
+
+def _validate_replay_target_marker(
+    target_output: Path,
+    source_output: Path,
+) -> None:
+    marker_path = target_output / REPLAY_TARGET_MARKER_FILENAME
+    windows = _is_windows()
+    try:
+        marker_state = marker_path.stat() if windows else marker_path.lstat()
+    except FileNotFoundError as error:
+        raise ValueError(
+            "existing要求target-output带有replay创建的归属标记："
+            f"{marker_path}"
+        ) from error
+    if not windows and stat.S_ISLNK(marker_state.st_mode):
+        raise ValueError(f"replay目标归属标记不能是符号链接：{marker_path}")
+    if not stat.S_ISREG(marker_state.st_mode):
+        raise ValueError(f"replay目标归属标记不是普通文件：{marker_path}")
+    try:
+        raw_marker: object = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"replay目标归属标记无效：{marker_path}") from error
+    if not isinstance(raw_marker, dict):
+        raise ValueError(f"replay目标归属标记无效：{marker_path}")
+    marker = cast(dict[object, object], raw_marker)
+    marker_source = marker.get("source_output")
+    if (
+        marker.get("format_version") != _REPLAY_TARGET_MARKER_VERSION
+        or marker.get("kind") != _REPLAY_TARGET_MARKER_KIND
+        or not isinstance(marker_source, str)
+        or not marker_source
+    ):
+        raise ValueError(f"replay目标归属标记无效：{marker_path}")
+    if Path(marker_source).resolve() != source_output.resolve():
+        raise ValueError(
+            "existing目标归属标记对应的source-output不一致："
+            f"marker={Path(marker_source).resolve()}，"
+            f"runner={source_output.resolve()}"
+        )
+
+
+def _iter_regular_file_identities(
+    root: Path,
+    *,
+    reject_symlinks: bool,
+) -> Iterator[tuple[Path, tuple[int, int]]]:
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = list(iterator)
+        except FileNotFoundError as error:
+            raise ValueError(f"状态目录扫描期间发生变化：{directory}") from error
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                entry_state = entry.stat(follow_symlinks=False)
+            except FileNotFoundError as error:
+                raise ValueError(f"状态目录扫描期间发生变化：{path}") from error
+            mode = entry_state.st_mode
+            if stat.S_ISLNK(mode):
+                if reject_symlinks:
+                    raise ValueError(f"existing目标不能包含符号链接：{path}")
+                continue
+            if stat.S_ISDIR(mode):
+                pending.append(path)
+                continue
+            if stat.S_ISREG(mode):
+                yield path, (entry_state.st_dev, entry_state.st_ino)
+                continue
+            if reject_symlinks:
+                raise ValueError(f"existing目标包含不支持的文件类型：{path}")
+
+
+def _validate_existing_target_isolated(
+    source_output: Path,
+    target_output: Path,
+) -> None:
+    if _is_windows():
+        return
+    source_identities = {
+        identity
+        for _path, identity in _iter_regular_file_identities(
+            source_output,
+            reject_symlinks=False,
+        )
+    }
+    for target_path, identity in _iter_regular_file_identities(
+        target_output,
+        reject_symlinks=True,
+    ):
+        if identity in source_identities:
+            raise ValueError(
+                "existing目标文件与source-output共享同一inode，"
+                f"可能是硬链接：{target_path}"
+            )
 
 
 def _iter_archive_directories(source_output: Path) -> list[Path]:
@@ -288,6 +420,7 @@ def _prepare_warm(source_output: Path, target_output: Path) -> PreparationStats:
     fingerprint_before = source_state_fingerprint(source)
     database_states_before = _source_database_states(source)
     target.mkdir(parents=True, exist_ok=True)
+    _write_replay_target_marker(target, source, "warm")
 
     database_count = 0
     selection_count = 0
@@ -381,11 +514,18 @@ def prepare_target_state(
     if initial_state == "existing":
         if not target.is_dir():
             raise ValueError(f"existing要求target-output已存在：{target}")
-        return PreparationStats(initial_state="existing", elapsed_seconds=0.0)
+        started = perf_counter()
+        _validate_replay_target_marker(target, source_output)
+        _validate_existing_target_isolated(source_output.resolve(), target)
+        return PreparationStats(
+            initial_state="existing",
+            elapsed_seconds=perf_counter() - started,
+        )
     _ensure_empty_target(target)
     if initial_state == "empty":
         started = perf_counter()
         target.mkdir(parents=True, exist_ok=True)
+        _write_replay_target_marker(target, source_output, "empty")
         return PreparationStats(
             initial_state="empty",
             elapsed_seconds=perf_counter() - started,
