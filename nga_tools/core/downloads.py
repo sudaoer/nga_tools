@@ -32,6 +32,8 @@ class DownloadFileResult(TypedDict):
     error: NotRequired[str]
     failure_kind: NotRequired[DownloadFailureKind]
     http_status: NotRequired[int]
+    content_sha256: NotRequired[str]
+    content_bytes: NotRequired[int]
 
 
 class DownloadSummary(TypedDict):

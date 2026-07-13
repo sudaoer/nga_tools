@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
@@ -462,6 +463,9 @@ class ImageStoreMetricsTest:
         assert metrics.stores_completed == 2
         assert metrics.stores_failed == 0
         assert metrics.reused_files == 1
+        assert metrics.precomputed_hash_hits == 0
+        assert metrics.precomputed_hash_rejections == 0
+        assert metrics.fallback_hashes == 2
         assert metrics.mapping_submissions == 2
         assert metrics.mapping_rows == 2
         assert metrics.mapping_failures == 0
@@ -483,6 +487,104 @@ class ImageStoreMetricsTest:
         assert metrics.store_attempts == 0
         assert metrics.mapping_rows == 0
         assert metrics.single_flight_waits == 0
+
+    def test_download_identity_skips_second_full_file_hash(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        config = SimpleNamespace(output_dir=str(output_dir))
+        url = _image_url("precomputed-hash")
+
+        def fake_download(tasks, on_progress=None, **_kwargs):
+            task = tasks[0]
+            Image.new("RGB", (2, 2), color="white").save(
+                task["save_path"],
+                format="PNG",
+            )
+            payload = Path(task["save_path"]).read_bytes()
+            result: image_store.utils.DownloadFileResult = {
+                "url": task["url"],
+                "save_path": task["save_path"],
+                "success": True,
+                "content_sha256": sha256(payload).hexdigest(),
+                "content_bytes": len(payload),
+            }
+            if on_progress is not None:
+                on_progress(1, 1, result)
+            return {"succeeded": [result], "failed": []}
+
+        with (
+            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch(
+                "nga_tools.backup.image_store.utils.download_files_streaming",
+                side_effect=fake_download,
+            ),
+            patch(
+                "nga_tools.backup.image_store.utils.sha256",
+                side_effect=AssertionError("unexpected fallback hash"),
+            ),
+            use_image_index_writer(),
+            use_image_store_metrics(),
+        ):
+            summary = image_store.download_image_tasks([{"url": url}])
+            metrics = image_store_metrics()
+
+        assert len(summary["succeeded"]) == 1
+        assert metrics is not None
+        assert metrics.precomputed_hash_hits == 1
+        assert metrics.precomputed_hash_rejections == 0
+        assert metrics.fallback_hashes == 0
+
+    def test_size_mismatch_falls_back_to_file_hash(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        config = SimpleNamespace(output_dir=str(output_dir))
+        url = _image_url("fallback-hash")
+        real_sha256 = image_store.utils.sha256
+
+        def fake_download(tasks, on_progress=None, **_kwargs):
+            task = tasks[0]
+            Image.new("RGB", (2, 2), color="white").save(
+                task["save_path"],
+                format="PNG",
+            )
+            payload = Path(task["save_path"]).read_bytes()
+            result: image_store.utils.DownloadFileResult = {
+                "url": task["url"],
+                "save_path": task["save_path"],
+                "success": True,
+                "content_sha256": sha256(payload).hexdigest(),
+                "content_bytes": len(payload) + 1,
+            }
+            if on_progress is not None:
+                on_progress(1, 1, result)
+            return {"succeeded": [result], "failed": []}
+
+        with (
+            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch(
+                "nga_tools.backup.image_store.utils.download_files_streaming",
+                side_effect=fake_download,
+            ),
+            patch(
+                "nga_tools.backup.image_store.utils.sha256",
+                wraps=real_sha256,
+            ) as fallback_hash,
+            use_image_index_writer(),
+            use_image_store_metrics(),
+        ):
+            summary = image_store.download_image_tasks([{"url": url}])
+            metrics = image_store_metrics()
+
+        assert len(summary["succeeded"]) == 1
+        fallback_hash.assert_called_once()
+        assert metrics is not None
+        assert metrics.precomputed_hash_hits == 0
+        assert metrics.precomputed_hash_rejections == 1
+        assert metrics.fallback_hashes == 1
 
 
 class ImageSingleFlightTest:

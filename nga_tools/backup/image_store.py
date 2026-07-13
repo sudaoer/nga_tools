@@ -50,6 +50,7 @@ from nga_tools.backup.image_index_writer import (
     active_image_index_writer,
 )
 from nga_tools.backup.image_store_metrics import (
+    record_image_hash_source,
     record_image_mapping_failure,
     record_image_mapping_submission,
     record_image_single_flight_wait,
@@ -818,11 +819,59 @@ def _hash_lock(image_hash: str) -> threading.Lock:
     return _IMAGE_HASH_LOCKS[stripe]
 
 
+def _precomputed_content_hash(
+    source_path: Path,
+    download_result: utils.DownloadFileResult | None,
+) -> tuple[str | None, bool]:
+    if download_result is None:
+        return None, False
+    has_identity = (
+        "content_sha256" in download_result
+        or "content_bytes" in download_result
+    )
+    content_sha256 = download_result.get("content_sha256")
+    content_bytes = download_result.get("content_bytes")
+    if (
+        not isinstance(content_sha256, str)
+        or not isinstance(content_bytes, int)
+        or isinstance(content_bytes, bool)
+        or content_bytes < 0
+    ):
+        return None, has_identity
+    normalized_hash = content_sha256.lower()
+    if len(normalized_hash) != 64:
+        return None, True
+    try:
+        int(normalized_hash, 16)
+    except ValueError:
+        return None, True
+    if source_path.stat().st_size != content_bytes:
+        return None, True
+    return normalized_hash, False
+
+
+def _content_hash_for_store(
+    source_path: Path,
+    download_result: utils.DownloadFileResult | None,
+) -> str:
+    precomputed_hash, rejected = _precomputed_content_hash(
+        source_path,
+        download_result,
+    )
+    if precomputed_hash is not None:
+        record_image_hash_source(precomputed=True)
+        return precomputed_hash
+    record_image_hash_source(precomputed=False, rejected=rejected)
+    with time_image_store_phase("fallback_hash"):
+        return utils.sha256(str(source_path))
+
+
 def _store_image_file_deferred_mapping(
     source_path: Path,
     task: ImageDownloadTask,
     *,
     move_source: bool,
+    download_result: utils.DownloadFileResult | None = None,
 ) -> tuple[StoredImageResult, Future[None]]:
     record_image_store_attempt()
     try:
@@ -830,8 +879,7 @@ def _store_image_file_deferred_mapping(
             source_is_valid = image_file_is_valid(source_path)
         if not source_is_valid:
             raise ValueError(f"图片文件无效：{source_path}")
-        with time_image_store_phase("fallback_hash"):
-            image_hash = utils.sha256(str(source_path))
+        image_hash = _content_hash_for_store(source_path, download_result)
         with time_image_store_phase("format_detection"):
             extension = _image_extension_from_file(source_path, task["url"])
         with _hash_lock(image_hash):
@@ -1071,6 +1119,7 @@ def _run_download_image_tasks(
                             Path(download_result["save_path"]),
                             image_task,
                             move_source=True,
+                            download_result=download_result,
                         )
                     )
                     result = {

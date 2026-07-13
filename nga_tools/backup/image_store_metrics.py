@@ -28,6 +28,9 @@ class ImageStoreMetrics:
     stores_failed: int
     reused_files: int
     collision_files: int
+    precomputed_hash_hits: int
+    precomputed_hash_rejections: int
+    fallback_hashes: int
     mapping_submissions: int
     mapping_rows: int
     mapping_failures: int
@@ -50,6 +53,9 @@ class ImageStoreMetrics:
             "stores_failed": self.stores_failed,
             "reused_files": self.reused_files,
             "collision_files": self.collision_files,
+            "precomputed_hash_hits": self.precomputed_hash_hits,
+            "precomputed_hash_rejections": self.precomputed_hash_rejections,
+            "fallback_hashes": self.fallback_hashes,
             "mapping_submissions": self.mapping_submissions,
             "mapping_rows": self.mapping_rows,
             "mapping_failures": self.mapping_failures,
@@ -77,6 +83,9 @@ class ImageStoreMetricsCollector:
         self._stores_failed = 0
         self._reused_files = 0
         self._collision_files = 0
+        self._precomputed_hash_hits = 0
+        self._precomputed_hash_rejections = 0
+        self._fallback_hashes = 0
         self._mapping_submissions = 0
         self._mapping_rows = 0
         self._mapping_failures = 0
@@ -118,6 +127,20 @@ class ImageStoreMetricsCollector:
         with self._lock:
             self._stores_failed += 1
 
+    def record_hash_source(
+        self,
+        *,
+        precomputed: bool,
+        rejected: bool,
+    ) -> None:
+        with self._lock:
+            if precomputed:
+                self._precomputed_hash_hits += 1
+            else:
+                self._fallback_hashes += 1
+            if rejected:
+                self._precomputed_hash_rejections += 1
+
     def record_mapping_submission(self, row_count: int) -> None:
         with self._lock:
             self._mapping_submissions += 1
@@ -140,6 +163,9 @@ class ImageStoreMetricsCollector:
                 stores_failed=self._stores_failed,
                 reused_files=self._reused_files,
                 collision_files=self._collision_files,
+                precomputed_hash_hits=self._precomputed_hash_hits,
+                precomputed_hash_rejections=self._precomputed_hash_rejections,
+                fallback_hashes=self._fallback_hashes,
                 mapping_submissions=self._mapping_submissions,
                 mapping_rows=self._mapping_rows,
                 mapping_failures=self._mapping_failures,
@@ -203,6 +229,15 @@ def record_image_store_failed() -> None:
     collector = _current_collector()
     if collector is not None:
         collector.record_store_failed()
+
+
+def record_image_hash_source(*, precomputed: bool, rejected: bool = False) -> None:
+    collector = _current_collector()
+    if collector is not None:
+        collector.record_hash_source(
+            precomputed=precomputed,
+            rejected=rejected,
+        )
 
 
 def record_image_mapping_submission(row_count: int) -> None:

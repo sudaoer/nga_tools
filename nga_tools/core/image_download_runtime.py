@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import Coroutine, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from time import perf_counter
 from typing import TypeVar
@@ -51,6 +52,7 @@ class ImageDownloadRuntimeMetrics:
     request_to_headers_seconds: float
     response_body_read_seconds: float
     temp_file_write_seconds: float
+    content_hash_seconds: float
     atomic_replace_seconds: float
     result_delivery_wait_seconds: float
     progress_callback_seconds: float
@@ -83,6 +85,7 @@ class ImageDownloadRuntimeMetrics:
             "request_to_headers_seconds": self.request_to_headers_seconds,
             "response_body_read_seconds": self.response_body_read_seconds,
             "temp_file_write_seconds": self.temp_file_write_seconds,
+            "content_hash_seconds": self.content_hash_seconds,
             "atomic_replace_seconds": self.atomic_replace_seconds,
             "result_delivery_wait_seconds": self.result_delivery_wait_seconds,
             "progress_callback_seconds": self.progress_callback_seconds,
@@ -200,6 +203,7 @@ class ImageDownloadRuntime:
         self._request_to_headers_seconds = 0.0
         self._response_body_read_seconds = 0.0
         self._temp_file_write_seconds = 0.0
+        self._content_hash_seconds = 0.0
         self._atomic_replace_seconds = 0.0
         self._result_delivery_wait_seconds = 0.0
         self._progress_callback_seconds = 0.0
@@ -621,8 +625,10 @@ class ImageDownloadRuntime:
         request_to_headers_seconds = 0.0
         response_body_read_seconds = 0.0
         temp_file_write_seconds = 0.0
+        content_hash_seconds = 0.0
         atomic_replace_seconds = 0.0
         downloaded_bytes = 0
+        content_hasher = sha256()
         request_started_at = 0.0
         headers_received = False
         request_started = False
@@ -673,6 +679,9 @@ class ImageDownloadRuntime:
                             perf_counter() - read_started_at
                         )
                         downloaded_bytes += len(chunk)
+                        hash_started_at = perf_counter()
+                        content_hasher.update(chunk)
+                        content_hash_seconds += perf_counter() - hash_started_at
                         write_started_at = perf_counter()
                         output_file.write(chunk)
                         temp_file_write_seconds += (
@@ -692,6 +701,8 @@ class ImageDownloadRuntime:
                 "url": logical_url,
                 "save_path": str(target_path),
                 "success": True,
+                "content_sha256": content_hasher.hexdigest(),
+                "content_bytes": downloaded_bytes,
             }
         except (
             aiohttp.ClientConnectorError,
@@ -737,6 +748,7 @@ class ImageDownloadRuntime:
                     )
                     self._response_body_read_seconds += response_body_read_seconds
                     self._temp_file_write_seconds += temp_file_write_seconds
+                    self._content_hash_seconds += content_hash_seconds
                     self._atomic_replace_seconds += atomic_replace_seconds
                     self._downloaded_bytes += downloaded_bytes
             if temp_path is not None:
@@ -782,6 +794,7 @@ class ImageDownloadRuntime:
                 request_to_headers_seconds=self._request_to_headers_seconds,
                 response_body_read_seconds=self._response_body_read_seconds,
                 temp_file_write_seconds=self._temp_file_write_seconds,
+                content_hash_seconds=self._content_hash_seconds,
                 atomic_replace_seconds=self._atomic_replace_seconds,
                 result_delivery_wait_seconds=self._result_delivery_wait_seconds,
                 progress_callback_seconds=self._progress_callback_seconds,

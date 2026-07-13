@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import tempfile
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -153,6 +154,10 @@ class NetworkLimitsTest:
                 )
 
         assert len(result['succeeded']) == 1
+        assert result["succeeded"][0]["content_sha256"] == sha256(
+            b"image"
+        ).hexdigest()
+        assert result["succeeded"][0]["content_bytes"] == len(b"image")
         assert _ClientSession.instance_count == 1
         metrics = image_download_runtime_metrics()
         assert metrics is not None
@@ -197,3 +202,5 @@ class NetworkLimitsTest:
         assert result["succeeded"] == []
         assert result["failed"][0]["failure_kind"] == "http_4xx"
         assert result["failed"][0]["http_status"] == 404
+        assert "content_sha256" not in result["failed"][0]
+        assert "content_bytes" not in result["failed"][0]
