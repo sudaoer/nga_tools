@@ -727,7 +727,7 @@ def _scan_pending_author_pages(
             else:
                 probe_target_pages = min(
                     128,
-                    max(batch_size * 2, len(pages_to_scan) // 20),
+                    max(batch_size * 2, len(pages_to_scan) // 40),
                 )
                 direct_request_bound = 2 * len(target_author_lous) <= len(
                     pages_to_scan
