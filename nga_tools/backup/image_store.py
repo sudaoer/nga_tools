@@ -160,16 +160,17 @@ _IMAGE_HASH_LOCKS = tuple(threading.Lock() for _index in range(256))
 _INITIALIZED_IMAGE_INDEX_PATHS: set[Path] = set()
 
 
-@dataclass
+@dataclass(slots=True)
 class _ImageURLClaim:
-    event: threading.Event = field(default_factory=threading.Event)
     result: utils.DownloadFileResult | None = None
     error: BaseException | None = None
+    completed: bool = False
 
 
 type _ImageClaimKey = tuple[str, str]
 
 _IMAGE_URL_CLAIMS_LOCK = threading.RLock()
+_IMAGE_URL_CLAIMS_CONDITION = threading.Condition(_IMAGE_URL_CLAIMS_LOCK)
 _IMAGE_URL_CLAIMS: dict[_ImageClaimKey, _ImageURLClaim] = {}
 _COMPLETED_IMAGE_URL_CLAIMS: dict[_ImageClaimKey, str] = {}
 _image_coordination_scope_depth = 0
@@ -861,9 +862,9 @@ def _claim_image_url(
                         "url": url,
                         "save_path": completed_path_text,
                         "success": True,
-                    }
+                    },
+                    completed=True,
                 )
-                completed_claim.event.set()
                 return claim_key, completed_claim, False
             _COMPLETED_IMAGE_URL_CLAIMS.pop(claim_key, None)
         claim = _ImageURLClaim()
@@ -878,16 +879,23 @@ def _release_image_url_claim(
     result: utils.DownloadFileResult | None = None,
     error: BaseException | None = None,
 ) -> None:
-    claim.result = result
-    claim.error = error
-    claim.event.set()
-    with _IMAGE_URL_CLAIMS_LOCK:
+    with _IMAGE_URL_CLAIMS_CONDITION:
+        claim.result = result
+        claim.error = error
+        claim.completed = True
         if result is not None and result["success"]:
             _COMPLETED_IMAGE_URL_CLAIMS[claim_key] = result["save_path"]
         else:
             _COMPLETED_IMAGE_URL_CLAIMS.pop(claim_key, None)
         if _IMAGE_URL_CLAIMS.get(claim_key) is claim:
             _IMAGE_URL_CLAIMS.pop(claim_key, None)
+        _IMAGE_URL_CLAIMS_CONDITION.notify_all()
+
+
+def _wait_image_url_claim(claim: _ImageURLClaim) -> None:
+    with _IMAGE_URL_CLAIMS_CONDITION:
+        while not claim.completed:
+            _IMAGE_URL_CLAIMS_CONDITION.wait()
 
 
 def _copy_claim_result(
@@ -1087,7 +1095,7 @@ def _run_download_image_tasks(
             raise
 
     for image_task, claim in waiters:
-        claim.event.wait()
+        _wait_image_url_claim(claim)
         if claim.error is not None:
             raise RuntimeError(
                 f"共享图片下载失败：{image_task['url']}"

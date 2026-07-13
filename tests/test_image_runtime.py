@@ -330,6 +330,60 @@ class ImageIndexWriterTest:
 
 
 class ImageSingleFlightTest:
+    def test_shared_condition_does_not_complete_another_claim(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        config = SimpleNamespace(output_dir=str(output_dir))
+        first_done = threading.Event()
+        second_done = threading.Event()
+
+        def wait_for_claim(
+            claim: image_store._ImageURLClaim,
+            done: threading.Event,
+        ) -> None:
+            image_store._wait_image_url_claim(claim)
+            done.set()
+
+        with patch("nga_tools.backup.image_store.get_config", return_value=config):
+            first_key, first_claim, first_owner = image_store._claim_image_url(
+                _image_url("shared-condition-first")
+            )
+            second_key, second_claim, second_owner = image_store._claim_image_url(
+                _image_url("shared-condition-second")
+            )
+            assert first_owner is True
+            assert second_owner is True
+            assert not hasattr(first_claim, "event")
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first_waiter = executor.submit(
+                    wait_for_claim,
+                    first_claim,
+                    first_done,
+                )
+                second_waiter = executor.submit(
+                    wait_for_claim,
+                    second_claim,
+                    second_done,
+                )
+                image_store._release_image_url_claim(
+                    first_key,
+                    first_claim,
+                    error=RuntimeError("first failed"),
+                )
+                assert first_done.wait(timeout=2)
+                assert not second_done.wait(timeout=0.05)
+                image_store._release_image_url_claim(
+                    second_key,
+                    second_claim,
+                    error=RuntimeError("second failed"),
+                )
+                assert second_done.wait(timeout=2)
+                first_waiter.result(timeout=2)
+                second_waiter.result(timeout=2)
+
     def test_duplicate_url_downloads_once_and_waits_for_durable_mapping(
         self,
         tmp_path: Path,
