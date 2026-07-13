@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -340,6 +343,33 @@ def load_timing_log_enabled(config_path: Optional[PathValue] = None) -> bool:
     )
 
 
+_CONFIG_OVERRIDE_LOCK = threading.RLock()
+_config_override: AppConfig | None = None
+
+
 @lru_cache(maxsize=1)
-def get_config() -> AppConfig:
+def _get_default_config() -> AppConfig:
     return load_config()
+
+
+def get_config() -> AppConfig:
+    with _CONFIG_OVERRIDE_LOCK:
+        override = _config_override
+    return _get_default_config() if override is None else override
+
+
+@contextmanager
+def use_config_override(config: AppConfig) -> Generator[None]:
+    """Install a process-wide temporary config before worker threads are created."""
+
+    global _config_override
+    with _CONFIG_OVERRIDE_LOCK:
+        previous = _config_override
+        if previous is not None:
+            raise RuntimeError("运行时配置覆盖已经启用。")
+        _config_override = config
+    try:
+        yield
+    finally:
+        with _CONFIG_OVERRIDE_LOCK:
+            _config_override = previous

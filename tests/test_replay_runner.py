@@ -1,0 +1,508 @@
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import socket
+import sqlite3
+import threading
+import time
+from collections.abc import Generator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+import uvicorn
+from PIL import Image
+
+from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.floor_models import (
+    FLOOR_MAP_GENERATION_VERSION,
+    FLOOR_MAP_HASH_ALGORITHM,
+    FLOOR_MAP_VERSION,
+    StoredFloorMap,
+)
+from nga_tools.backup.post_version_selection import make_selection, write_selections
+from nga_tools.cli import args_parse
+from nga_tools.commands.thread_batch import ThreadBatchResult
+from nga_tools.core.downloads import download_files
+from nga_tools.ngaclient.session import create_api_session
+from nga_tools.replay.offline import (
+    ReplayOfflineError,
+    assert_replay_request_allowed,
+    image_request_url,
+    use_replay_network_policy,
+)
+from nga_tools.replay.runner import run_replay_backup
+from nga_tools.replay.corpus import load_replay_corpus
+from nga_tools.replay.profile import ReplayProfile, TrafficProfile
+from nga_tools.replay.server import create_replay_app
+from nga_tools.replay.state import (
+    PreparationStats,
+    prepare_target_state,
+    source_state_fingerprint,
+)
+from nga_tools.replay.validation import ValidationStats, validate_replay_output
+
+IMAGE_URL = (
+    "https://img.nga.178.com/attachments/mon_202607/13/"
+    "runner-test.png"
+)
+
+
+def _page() -> dict[str, object]:
+    return {
+        "code": 0,
+        "currentPage": 1,
+        "totalPage": 1,
+        "vrows": 3,
+        "result": [
+            {
+                "lou": 0,
+                "pid": 100,
+                "content": f"runner body [img]{IMAGE_URL}[/img]",
+                "author": {"uid": 456, "username": "author"},
+            },
+            {
+                "lou": 2,
+                "pid": 102,
+                "content": "runner tail",
+                "author": {"uid": 456, "username": "author"},
+            },
+        ],
+    }
+
+
+def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
+    source = tmp_path / "source-output"
+    thread_dir = source / "123_456"
+    store = ThreadArchiveStore(thread_dir)
+    store.upsert_page(1, _page(), observed_at="2026-07-13T00:00:00+00:00")
+    store.replace_floor_map(
+        StoredFloorMap(
+            version=FLOOR_MAP_VERSION,
+            generation_version=FLOOR_MAP_GENERATION_VERSION,
+            algorithm=FLOOR_MAP_HASH_ALGORITHM,
+            tid=123,
+            aid=456,
+            input_signature="runner-floor-map",
+            entries=[
+                {"pid": 100, "author_lou": 0, "original_lou": 0},
+                {
+                    "pid": None,
+                    "author_lou": 1,
+                    "original_lou": None,
+                    "candidate_original_lous": [1, 2],
+                },
+                {"pid": 102, "author_lou": 2, "original_lou": 3},
+            ],
+        )
+    )
+    with sqlite3.connect(thread_dir / "archive.sqlite3") as connection:
+        version_id, source_hash = connection.execute(
+            "SELECT id, source_hash FROM post_versions"
+        ).fetchone()
+    write_selections(thread_dir, {0: make_selection(version_id, source_hash)})
+    (thread_dir / "warnings.log").write_text("do not copy", encoding="utf-8")
+    (thread_dir / "pdf").mkdir()
+    (thread_dir / "pdf" / "old.pdf").write_bytes(b"pdf")
+    (thread_dir / "debug_json").mkdir()
+    (thread_dir / "debug_json" / "page_1.json").write_text(
+        "{}", encoding="utf-8"
+    )
+
+    images_dir = source / "images_unique"
+    images_dir.mkdir(parents=True)
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (1, 1), color=(255, 0, 0)).save(image_buffer, format="PNG")
+    image_bytes = image_buffer.getvalue()
+    image_path = images_dir / f"{hashlib.sha256(image_bytes).hexdigest()}.png"
+    image_path.write_bytes(image_bytes)
+    with sqlite3.connect(source / "image_index.sqlite3") as connection:
+        connection.executescript(
+            """
+            CREATE TABLE image_mappings (
+                url TEXT PRIMARY KEY,
+                unique_rel_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE image_validation_cache (
+                canonical_path TEXT PRIMARY KEY,
+                size INTEGER NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                valid INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        stat_result = image_path.stat()
+        connection.execute(
+            "INSERT INTO image_mappings VALUES (?, ?, '', '')",
+            (IMAGE_URL, f"images_unique/{image_path.name}"),
+        )
+        connection.execute(
+            "INSERT INTO image_validation_cache VALUES (?, ?, ?, 1, '')",
+            (str(image_path.resolve()), stat_result.st_size, stat_result.st_mtime_ns),
+        )
+        connection.commit()
+
+    thread_config = tmp_path / "thread_configs.json"
+    thread_config.write_text(
+        json.dumps(
+            {
+                "ThreadList": [
+                    {
+                        "thread_name": "sample",
+                        "tid": 123,
+                        "aid": 456,
+                        "replies": 3,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return source, thread_config
+
+
+@contextmanager
+def _live_replay_server(source: Path, thread_config: Path) -> Generator[str]:
+    profile = ReplayProfile(
+        api=TrafficProfile(0, 0, 4),
+        image=TrafficProfile(0, 0, 4),
+        chunk_bytes=4096,
+    )
+    app = create_replay_app(
+        load_replay_corpus(source, thread_config),
+        profile,
+    )
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(128)
+    port = sock.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(app, log_level="error", lifespan="off")
+    )
+    thread = threading.Thread(
+        target=server.run,
+        kwargs={"sockets": [sock]},
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not server.started and thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not server.started:
+        server.should_exit = True
+        thread.join(timeout=5)
+        sock.close()
+        raise RuntimeError("测试重放服务启动失败。")
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        sock.close()
+
+
+class ReplayStateTest:
+    def test_zero_length_wal_does_not_change_source_fingerprint(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source, _thread_config = _build_warm_source(tmp_path)
+        fingerprint = source_state_fingerprint(source)
+        Path(f"{source / '123_456' / 'archive.sqlite3'}-wal").write_bytes(b"")
+        assert source_state_fingerprint(source) == fingerprint
+
+    def test_warm_uses_database_backups_and_copies_only_semantic_state(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source, _thread_config = _build_warm_source(tmp_path)
+        target = tmp_path / "target-output"
+        fingerprint_before = source_state_fingerprint(source)
+        source_mtimes = {
+            path: path.stat().st_mtime_ns
+            for path in source.rglob("*")
+            if path.is_file()
+            and not path.name.endswith(("-wal", "-shm"))
+        }
+
+        stats = prepare_target_state("warm", source, target)
+
+        assert stats.sqlite_database_count == 2
+        assert stats.selection_file_count == 1
+        assert stats.image_file_count == 1
+        assert stats.validation_cache_path_updates == 1
+        assert source_state_fingerprint(source) == fingerprint_before
+        assert {
+            path: path.stat().st_mtime_ns for path in source_mtimes
+        } == source_mtimes
+        assert (target / "123_456" / "archive.sqlite3").is_file()
+        assert (target / "123_456" / "post_version_overrides.json").is_file()
+        assert not (target / "123_456" / "warnings.log").exists()
+        assert not (target / "123_456" / "pdf").exists()
+        assert not (target / "123_456" / "debug_json").exists()
+        source_image = next((source / "images_unique").iterdir())
+        target_image = target / "images_unique" / source_image.name
+        assert target_image.read_bytes() == source_image.read_bytes()
+        with sqlite3.connect(target / "image_index.sqlite3") as connection:
+            cached_path = connection.execute(
+                "SELECT canonical_path FROM image_validation_cache"
+            ).fetchone()[0]
+        assert cached_path == str(target_image.resolve())
+
+        validation = validate_replay_output(
+            source,
+            target,
+            [{"thread_name": "sample", "tid": 123, "aid": 456}],
+            "warm",
+        )
+        assert validation.checked_archive_count == 1
+        assert validation.compared_archive_count == 1
+        assert validation.image_mapping_mismatch_count == 0
+
+    def test_validation_checks_all_floor_map_fields(self, tmp_path: Path) -> None:
+        source, _thread_config = _build_warm_source(tmp_path)
+        target = tmp_path / "target-output"
+        prepare_target_state("warm", source, target)
+        with sqlite3.connect(target / "123_456" / "archive.sqlite3") as connection:
+            connection.execute(
+                "UPDATE floor_map_entries SET original_pid = 999 WHERE author_lou = 0"
+            )
+            connection.commit()
+
+        with pytest.raises(RuntimeError, match="楼层映射"):
+            validate_replay_output(
+                source,
+                target,
+                [{"thread_name": "sample", "tid": 123, "aid": 456}],
+                "warm",
+            )
+
+    def test_initial_state_guards_nonempty_and_nested_targets(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source, _thread_config = _build_warm_source(tmp_path)
+        nonempty = tmp_path / "nonempty"
+        nonempty.mkdir()
+        (nonempty / "keep.txt").write_text("keep", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="必须不存在或为空"):
+            prepare_target_state("empty", source, nonempty)
+        with pytest.raises(ValueError, match="已存在"):
+            prepare_target_state("existing", source, tmp_path / "missing")
+        with pytest.raises(ValueError, match="互相嵌套"):
+            prepare_target_state("empty", source, source / "nested")
+
+
+class ReplayOfflineTest:
+    def test_maps_images_and_rejects_non_server_origins(self) -> None:
+        with use_replay_network_policy("http://127.0.0.1:8765"):
+            mapped = image_request_url(IMAGE_URL)
+            assert mapped.startswith("http://127.0.0.1:8765/__replay__/image?")
+            assert_replay_request_allowed(mapped)
+            with pytest.raises(ReplayOfflineError, match="离线保护拒绝"):
+                assert_replay_request_allowed("https://bbs.nga.cn/app_api.php")
+            session = create_api_session()
+            try:
+                assert session.trust_env is False
+                assert "Cookie" not in session.headers
+            finally:
+                session.close()
+
+    def test_image_redirect_cannot_escape_replay_origin(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", "https://example.com/escaped.png")
+                self.end_headers()
+
+            def log_message(self, _format: str, *args: object) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        server_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with use_replay_network_policy(server_url):
+                summary = download_files(
+                    [
+                        {
+                            "url": IMAGE_URL,
+                            "request_url": f"{server_url}/redirect",
+                            "save_path": str(tmp_path / "redirected.png"),
+                        }
+                    ],
+                    retries=0,
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        assert not summary["succeeded"]
+        assert summary["failed"][0]["url"] == IMAGE_URL
+        assert summary["failed"][0]["failure_kind"] == "http_3xx"
+        assert summary["failed"][0]["http_status"] == 302
+        assert not (tmp_path / "redirected.png").exists()
+
+
+class ReplayRunnerTest:
+    def test_cli_and_runner_write_reproducible_report(self, tmp_path: Path) -> None:
+        source, thread_config = _build_warm_source(tmp_path)
+        target = tmp_path / "run-output"
+        server_url = "http://127.0.0.1:8765"
+        args = args_parse(
+            [
+                "replay",
+                "run",
+                "--server-url",
+                server_url,
+                "--source-output",
+                str(source),
+                "--target-output",
+                str(target),
+                "--thread-config",
+                str(thread_config),
+                "--initial-state",
+                "empty",
+                "--all-threads",
+                "--workers",
+                "2",
+            ]
+        )
+        manifest = {
+            "corpus_id": "corpus-1",
+            "profile_id": "profile-1",
+            "profile": {"chunk_bytes": 4096},
+            "source_output": str(source.resolve()),
+            "thread_config": str(thread_config.resolve()),
+        }
+        metrics = {
+            "reset_at": "2026-07-13T00:00:00+08:00",
+            "api": {"requests": 1, "response_bytes": 100},
+            "image": {"requests": 0, "response_bytes": 0},
+        }
+
+        def prepare(*_args: object, **_kwargs: object) -> PreparationStats:
+            target.mkdir()
+            return PreparationStats("empty", 0.01)
+
+        with (
+            patch(
+                "nga_tools.replay.runner.ReplayServerClient.health",
+                return_value={
+                    "status": "ok",
+                    "corpus_id": "corpus-1",
+                    "profile_id": "profile-1",
+                },
+            ),
+            patch(
+                "nga_tools.replay.runner.ReplayServerClient.manifest",
+                return_value=manifest,
+            ),
+            patch(
+                "nga_tools.replay.runner.ReplayServerClient.reset",
+                return_value={"status": "ok"},
+            ),
+            patch(
+                "nga_tools.replay.runner.ReplayServerClient.metrics",
+                side_effect=[
+                    {
+                        "reset_at": "2026-07-13T00:00:00+08:00",
+                        "api": {"requests": 0},
+                        "image": {"requests": 0},
+                    },
+                    metrics,
+                ],
+            ),
+            patch("nga_tools.replay.runner.prepare_target_state", side_effect=prepare),
+            patch(
+                "nga_tools.replay.runner.run_backup_fetch_batch",
+                return_value=ThreadBatchResult((), (), ()),
+            ) as batch_mock,
+            patch(
+                "nga_tools.replay.runner.validate_replay_output",
+                return_value=ValidationStats(0.02, 1, 1, 1, 0, 0, 0),
+            ),
+        ):
+            run_replay_backup(args)
+
+        batch_mock.assert_called_once()
+        reports = list(target.glob("replay_run-*.json"))
+        assert len(reports) == 1
+        report = json.loads(reports[0].read_text(encoding="utf-8"))
+        assert report["corpus_id"] == "corpus-1"
+        assert report["profile_hash"] == "profile-1"
+        assert report["initial_state"] == "empty"
+        assert report["concurrency"]["workers"] == 2
+        assert report["server_metrics"] == metrics
+
+    def test_empty_existing_and_warm_run_end_to_end(self, tmp_path: Path) -> None:
+        source, thread_config = _build_warm_source(tmp_path)
+        tracked_source_paths = [
+            source / "123_456" / "archive.sqlite3",
+            source / "123_456" / "post_version_overrides.json",
+            source / "image_index.sqlite3",
+            next((source / "images_unique").iterdir()),
+        ]
+        source_states = {
+            path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in tracked_source_paths
+        }
+
+        def run(target: Path, initial_state: str, server_url: str) -> None:
+            run_replay_backup(
+                {
+                    "server_url": server_url,
+                    "source_output": str(source),
+                    "target_output": str(target),
+                    "thread_config": str(thread_config),
+                    "initial_state": initial_state,
+                    "all_threads": True,
+                    "workers": 1,
+                    "api_concurrency": 1,
+                    "image_concurrency": 1,
+                }
+            )
+
+        empty_target = tmp_path / "empty-run"
+        warm_target = tmp_path / "warm-run"
+        with _live_replay_server(source, thread_config) as server_url:
+            run(empty_target, "empty", server_url)
+            run(empty_target, "existing", server_url)
+            run(empty_target, "existing", server_url)
+            run(warm_target, "warm", server_url)
+
+        empty_reports = sorted(empty_target.glob("replay_run-*.json"))
+        assert len(empty_reports) == 3
+        assert len(list(warm_target.glob("replay_run-*.json"))) == 1
+        first_existing = json.loads(empty_reports[-2].read_text(encoding="utf-8"))
+        second_existing = json.loads(empty_reports[-1].read_text(encoding="utf-8"))
+        for traffic_kind in ("api", "image"):
+            first_traffic = first_existing["server_metrics"][traffic_kind]
+            second_traffic = second_existing["server_metrics"][traffic_kind]
+            for metric in (
+                "requests",
+                "response_bytes",
+                "synthetic_original_requests",
+                "statuses",
+            ):
+                assert first_traffic[metric] == second_traffic[metric]
+        assert {
+            path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in tracked_source_paths
+        } == source_states
+        with sqlite3.connect(warm_target / "123_456" / "archive.sqlite3") as connection:
+            assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)

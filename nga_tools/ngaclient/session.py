@@ -8,20 +8,28 @@ from threading import Lock, local
 import requests
 
 from nga_tools.config import get_config
+from nga_tools.replay.offline import (
+    ReplayGuardHTTPAdapter,
+    current_replay_network_policy,
+)
 
 
 def create_api_session() -> requests.Session:
     app_config = get_config()
     session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": app_config.user_agent,
-            "Cookie": (
+    headers = {"User-Agent": app_config.user_agent}
+    replay_policy = current_replay_network_policy()
+    if replay_policy is None:
+        headers["Cookie"] = (
                 f"ngaPassportUid={app_config.nga_passport_uid}; "
                 f"ngaPassportCid={app_config.nga_passport_cid};"
-            ),
-        }
-    )
+        )
+    else:
+        session.trust_env = False
+        adapter = ReplayGuardHTTPAdapter()
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+    session.headers.update(headers)
     return session
 
 

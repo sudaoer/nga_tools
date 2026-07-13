@@ -12,7 +12,7 @@ from typing import Optional, Protocol, TypeAlias, cast
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.core.sqlite import configure_readonly_connection
 
-_CORPUS_FORMAT_VERSION = 1
+_CORPUS_FORMAT_VERSION = 3
 
 PageKey: TypeAlias = tuple[int, Optional[int], int]
 ProgressCallback: TypeAlias = Callable[[int, int, str], None]
@@ -65,6 +65,7 @@ class _SyntheticThread:
     source_aid: int
     row_count: int
     posts_by_original_lou: dict[int, _SyntheticPost]
+    omitted_original_lous: frozenset[int]
 
     @property
     def page_count(self) -> int:
@@ -82,6 +83,8 @@ class _SyntheticThread:
         end_lou = min(start_lou + ORIGINAL_POSTS_PER_PAGE, self.row_count)
         posts: list[dict[str, object]] = []
         for original_lou in range(start_lou, end_lou):
+            if original_lou in self.omitted_original_lous:
+                continue
             known_post = self.posts_by_original_lou.get(original_lou)
             if known_post is None:
                 posts.append(
@@ -447,6 +450,7 @@ def _build_synthetic_thread(
             )
 
             posts_by_original_lou: dict[int, _SyntheticPost] = {}
+            omitted_original_lous: set[int] = set()
             max_original_lou = -1
             for raw_author_lou, raw_pid, raw_original_lou, raw_original_pid in entry_rows:
                 if type(raw_author_lou) is not int or raw_author_lou < 0:
@@ -485,7 +489,10 @@ def _build_synthetic_thread(
                         )
                     posts_by_original_lou[original_lou] = synthetic_post
                     continue
-                if original_lou is None or original_pid is None:
+                if original_lou is None:
+                    continue
+                if original_pid is None:
+                    omitted_original_lous.add(original_lou)
                     continue
 
                 content_row = connection.execute(
@@ -531,6 +538,13 @@ def _build_synthetic_thread(
                     raw_candidate_index,
                     raw_original_lou,
                 )
+                if raw_original_lou in posts_by_original_lou:
+                    raise ReplayCorpusError(
+                        "缺失楼候选原楼层与已恢复帖子冲突："
+                        f"{path}: original_lou={raw_original_lou}"
+                    )
+                omitted_original_lous.add(raw_original_lou)
+                max_original_lou = max(max_original_lou, raw_original_lou)
         _verify_frozen(path, database_state)
     except sqlite3.Error as error:
         raise ReplayCorpusError(f"无法读取重放楼层映射：{path}: {error}") from error
@@ -542,6 +556,7 @@ def _build_synthetic_thread(
         source_aid=config.aid,
         row_count=row_count,
         posts_by_original_lou=posts_by_original_lou,
+        omitted_original_lous=frozenset(omitted_original_lous),
     )
 
 

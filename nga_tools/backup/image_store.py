@@ -40,6 +40,7 @@ from nga_tools.backup.image_validation import (
     current_image_validation_cache,
     invalidate_current_image_validation,
 )
+from nga_tools.replay.offline import image_request_url
 from nga_tools.timing import time_section
 
 
@@ -773,6 +774,7 @@ def download_image_tasks(
             download_tasks.append(
                 {
                     "url": image_task["url"],
+                    "request_url": image_request_url(image_task["url"]),
                     "save_path": temp_path_str,
                 }
             )

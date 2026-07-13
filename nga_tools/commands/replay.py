@@ -5,6 +5,7 @@ from pathlib import Path
 from nga_tools.commands.types import CommandArgs, optional_int, optional_str, required_str
 from nga_tools.config import get_config
 from nga_tools.replay.profile import load_replay_profile
+from nga_tools.replay.runner import run_replay_backup
 from nga_tools.replay.server import (
     DEFAULT_REPLAY_HOST,
     DEFAULT_REPLAY_PORT,
@@ -30,3 +31,7 @@ def replay_serve(args: CommandArgs) -> None:
         host=host,
         port=port,
     )
+
+
+def replay_run(args: CommandArgs) -> None:
+    run_replay_backup(args)

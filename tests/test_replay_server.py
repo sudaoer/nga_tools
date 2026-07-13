@@ -140,6 +140,13 @@ def _build_source(tmp_path: Path) -> tuple[Path, Path, Path]:
             entries=[
                 {"pid": 100, "author_lou": 0, "original_lou": 0},
                 {"pid": 101, "author_lou": 1, "original_lou": 25},
+                {"pid": None, "author_lou": 2, "original_lou": 10},
+                {
+                    "pid": None,
+                    "author_lou": 3,
+                    "original_lou": None,
+                    "candidate_original_lous": [11, 12],
+                },
             ],
         )
     )
@@ -224,7 +231,10 @@ class ReplayCorpusTest:
         assert synthetic_first.synthetic_original is True
         first_data = json.loads(synthetic_first.payload)
         assert first_data["totalPage"] == 2
-        assert len(first_data["result"]) == 20
+        assert len(first_data["result"]) == 17
+        assert {10, 11, 12}.isdisjoint(
+            {post["lou"] for post in first_data["result"]}
+        )
         assert first_data["result"][0]["pid"] == 100
 
         synthetic_second = corpus.page(123, None, 2)

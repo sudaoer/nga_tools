@@ -22,7 +22,7 @@ from nga_tools.console import (
 from nga_tools.backup.pdf import PdfRenderPool, generate_pdf
 from nga_tools.commands.network import configure_network_limits_from_args
 from nga_tools.commands.resolve import resolve_command_thread_target
-from nga_tools.commands.thread_batch import run_thread_config_batch
+from nga_tools.commands.thread_batch import ThreadBatchResult, run_thread_config_batch
 from nga_tools.commands.types import (
     CommandArgs,
     optional_bool,
@@ -87,13 +87,15 @@ def _use_thread_output_logs(
         yield
 
 
-def _run_backup_fetch_batch(
+def run_backup_fetch_batch(
     args: CommandArgs,
     *,
     backup_func: BackupFetchFunc,
     progress_text: str,
     task_name: str,
-) -> None:
+    thread_configs: list[ThreadConfig] | None = None,
+    raise_on_failure: bool = True,
+) -> ThreadBatchResult:
     app_config = configure_network_limits_from_args(args)
     write_json = optional_bool(args, "write_json")
     force_processing = optional_bool(args, "force_processing")
@@ -119,7 +121,7 @@ def _run_backup_fetch_batch(
                 backup_func(tid, aid, write_json=write_json)
 
     with session_pool:
-        run_thread_config_batch(
+        return run_thread_config_batch(
             action=action,
             progress_text=progress_text,
             failure_text="备份失败",
@@ -129,12 +131,14 @@ def _run_backup_fetch_batch(
             timing_log_enabled=app_config.timing_log_enabled,
             task_name=task_name,
             write_batch_timing_log=True,
+            thread_configs=thread_configs,
+            raise_on_failure=raise_on_failure,
         )
 
 
 def backup_all(args: CommandArgs) -> None:
     if optional_bool(args, "all_threads"):
-        _run_backup_fetch_batch(
+        run_backup_fetch_batch(
             args,
             backup_func=backup_thread,
             progress_text="正在完整备份",
@@ -168,7 +172,7 @@ def backup_all(args: CommandArgs) -> None:
 
 def backup_sub(args: CommandArgs) -> None:
     if optional_bool(args, "all_threads"):
-        _run_backup_fetch_batch(
+        run_backup_fetch_batch(
             args,
             backup_func=backup_thread_sub,
             progress_text="正在增量备份",

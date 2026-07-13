@@ -1,0 +1,395 @@
+from __future__ import annotations
+
+import hashlib
+import os
+import shutil
+import sqlite3
+from contextlib import closing
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from time import perf_counter
+from typing import Literal, cast
+
+from nga_tools.backup.image_store import IMAGE_INDEX_FILENAME
+from nga_tools.backup.post_version_selection import (
+    POST_VERSION_SELECTIONS_FILENAME,
+)
+from nga_tools.console import report_progress
+from nga_tools.core.atomic import replace_temp_file, temporary_sibling_path
+from nga_tools.core.sqlite import SQLITE_BUSY_TIMEOUT_SECONDS
+
+InitialState = Literal["empty", "warm", "existing"]
+_SQLITE_BACKUP_FILENAME = "archive.sqlite3"
+_FICLONE = 0x40049409
+
+
+@dataclass(frozen=True, slots=True)
+class PreparationStats:
+    initial_state: InitialState
+    elapsed_seconds: float
+    sqlite_database_count: int = 0
+    selection_file_count: int = 0
+    image_file_count: int = 0
+    image_file_bytes: int = 0
+    reflink_file_count: int = 0
+    copied_file_count: int = 0
+    validation_cache_path_updates: int = 0
+    source_fingerprint_before: str | None = None
+    source_fingerprint_after: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return cast(dict[str, object], asdict(self))
+
+
+@dataclass(frozen=True, slots=True)
+class _FileState:
+    exists: bool
+    size: int
+    mtime_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class _DatabaseState:
+    database: _FileState
+    wal: _FileState
+
+
+def validate_source_target_paths(source_output: Path, target_output: Path) -> None:
+    source = source_output.resolve()
+    target = target_output.resolve()
+    if source == target or source in target.parents or target in source.parents:
+        raise ValueError("source-output与target-output不能相同或互相嵌套。")
+    if not source.is_dir():
+        raise ValueError(f"source-output不存在或不是目录：{source}")
+
+
+def _ensure_empty_target(target_output: Path) -> None:
+    if target_output.exists():
+        if not target_output.is_dir():
+            raise ValueError(f"target-output已存在且不是目录：{target_output}")
+        if any(target_output.iterdir()):
+            raise ValueError(f"target-output必须不存在或为空：{target_output}")
+
+
+def _iter_archive_directories(source_output: Path) -> list[Path]:
+    return sorted(
+        (
+            child
+            for child in source_output.iterdir()
+            if child.is_dir() and (child / _SQLITE_BACKUP_FILENAME).is_file()
+        ),
+        key=lambda path: path.name,
+    )
+
+
+def _file_state(path: Path) -> _FileState:
+    try:
+        stat_result = path.stat()
+    except FileNotFoundError:
+        return _FileState(False, 0, 0)
+    return _FileState(True, stat_result.st_size, stat_result.st_mtime_ns)
+
+
+def _database_state(path: Path) -> _DatabaseState:
+    wal_state = _file_state(Path(f"{path}-wal"))
+    if wal_state.size == 0:
+        wal_state = _FileState(False, 0, 0)
+    return _DatabaseState(
+        database=_file_state(path),
+        wal=wal_state,
+    )
+
+
+def _source_database_states(source_output: Path) -> dict[str, _DatabaseState]:
+    database_paths = [source_output / IMAGE_INDEX_FILENAME]
+    database_paths.extend(
+        archive_dir / _SQLITE_BACKUP_FILENAME
+        for archive_dir in _iter_archive_directories(source_output)
+    )
+    return {
+        path.relative_to(source_output).as_posix(): _database_state(path)
+        for path in database_paths
+        if path.is_file()
+    }
+
+
+def _iter_image_files(source_output: Path) -> list[Path]:
+    images_root = source_output / "images_unique"
+    if not images_root.is_dir():
+        return []
+    return sorted(
+        (path for path in images_root.rglob("*") if path.is_file()),
+        key=lambda path: path.relative_to(images_root).as_posix(),
+    )
+
+
+def _iter_fingerprint_paths(source_output: Path) -> list[Path]:
+    paths: list[Path] = []
+    image_index = source_output / IMAGE_INDEX_FILENAME
+    if image_index.is_file():
+        paths.append(image_index)
+    image_index_wal = Path(f"{image_index}-wal")
+    if image_index_wal.is_file() and image_index_wal.stat().st_size:
+        paths.append(image_index_wal)
+    for archive_dir in _iter_archive_directories(source_output):
+        archive = archive_dir / _SQLITE_BACKUP_FILENAME
+        paths.append(archive)
+        archive_wal = Path(f"{archive}-wal")
+        if archive_wal.is_file() and archive_wal.stat().st_size:
+            paths.append(archive_wal)
+        selection = archive_dir / POST_VERSION_SELECTIONS_FILENAME
+        if selection.is_file():
+            paths.append(selection)
+    paths.extend(_iter_image_files(source_output))
+    return paths
+
+
+def source_state_fingerprint(source_output: Path) -> str:
+    source = source_output.resolve()
+    hasher = hashlib.sha256()
+    for path in _iter_fingerprint_paths(source):
+        stat_result = path.stat()
+        relative = path.relative_to(source).as_posix().encode("utf-8")
+        hasher.update(len(relative).to_bytes(8, "big"))
+        hasher.update(relative)
+        hasher.update(stat_result.st_size.to_bytes(8, "big", signed=False))
+        hasher.update(stat_result.st_mtime_ns.to_bytes(8, "big", signed=False))
+    return hasher.hexdigest()
+
+
+def _sqlite_online_backup(source_path: Path, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = temporary_sibling_path(target_path)
+    state_before = _database_state(source_path)
+    if not state_before.database.exists:
+        raise ValueError(f"暖状态源数据库不存在：{source_path}")
+    if state_before.wal.exists and state_before.wal.size:
+        raise ValueError(
+            f"暖状态源数据库存在未检查点的WAL：{source_path}。"
+            "请停止写入并完成检查点后重试。"
+        )
+    try:
+        source_uri = f"{source_path.resolve().as_uri()}?mode=ro&immutable=1"
+        with (
+            closing(
+                sqlite3.connect(
+                    source_uri,
+                    timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+                    uri=True,
+                )
+            ) as source_connection,
+            closing(
+                sqlite3.connect(
+                    temp_path,
+                    timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+                )
+            ) as target_connection,
+        ):
+            source_connection.execute(
+                f"PRAGMA busy_timeout = {int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}"
+            )
+            source_connection.backup(target_connection)
+        if _database_state(source_path) != state_before:
+            raise RuntimeError(
+                f"SQLite Online Backup期间源数据库发生变化：{source_path}"
+            )
+        replace_temp_file(temp_path, target_path)
+    except BaseException:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _try_reflink(source_path: Path, target_path: Path) -> bool:
+    try:
+        import fcntl
+    except ImportError:
+        return False
+
+    source_fd = os.open(source_path, os.O_RDONLY)
+    try:
+        target_fd = os.open(
+            target_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o666,
+        )
+        try:
+            fcntl.ioctl(target_fd, _FICLONE, source_fd)
+        except OSError:
+            os.close(target_fd)
+            target_fd = -1
+            target_path.unlink(missing_ok=True)
+            return False
+        finally:
+            if target_fd >= 0:
+                os.close(target_fd)
+    finally:
+        os.close(source_fd)
+    shutil.copystat(source_path, target_path, follow_symlinks=True)
+    return True
+
+
+def _copy_preserving_file(source_path: Path, target_path: Path) -> bool:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if _try_reflink(source_path, target_path):
+        return True
+    shutil.copy2(source_path, target_path)
+    return False
+
+
+def _rewrite_validation_cache_paths(
+    image_index: Path,
+    source_output: Path,
+    target_output: Path,
+) -> int:
+    source = source_output.resolve()
+    target = target_output.resolve()
+    with closing(
+        sqlite3.connect(image_index, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
+    ) as connection:
+        try:
+            rows = connection.execute(
+                "SELECT canonical_path FROM image_validation_cache"
+            ).fetchall()
+        except sqlite3.OperationalError as error:
+            if "no such table" in str(error).lower():
+                return 0
+            raise
+        updates: list[tuple[str, str]] = []
+        for row in rows:
+            raw_path = row[0]
+            if not isinstance(raw_path, str):
+                continue
+            old_path = Path(raw_path)
+            try:
+                relative = old_path.relative_to(source)
+            except ValueError:
+                continue
+            updates.append((str(target / relative), raw_path))
+        if updates:
+            with connection:
+                connection.executemany(
+                    """
+                    UPDATE image_validation_cache
+                    SET canonical_path = ?
+                    WHERE canonical_path = ?
+                    """,
+                    updates,
+                )
+        return len(updates)
+
+
+def _prepare_warm(source_output: Path, target_output: Path) -> PreparationStats:
+    started = perf_counter()
+    source = source_output.resolve()
+    target = target_output.resolve()
+    fingerprint_before = source_state_fingerprint(source)
+    database_states_before = _source_database_states(source)
+    target.mkdir(parents=True, exist_ok=True)
+
+    database_count = 0
+    selection_count = 0
+    reflink_count = 0
+    copied_count = 0
+    archive_dirs = _iter_archive_directories(source)
+    for index, archive_dir in enumerate(archive_dirs, start=1):
+        target_dir = target / archive_dir.name
+        _sqlite_online_backup(
+            archive_dir / _SQLITE_BACKUP_FILENAME,
+            target_dir / _SQLITE_BACKUP_FILENAME,
+        )
+        database_count += 1
+        selection_path = archive_dir / POST_VERSION_SELECTIONS_FILENAME
+        if selection_path.is_file():
+            was_reflink = _copy_preserving_file(
+                selection_path,
+                target_dir / POST_VERSION_SELECTIONS_FILENAME,
+            )
+            reflink_count += int(was_reflink)
+            copied_count += int(not was_reflink)
+            selection_count += 1
+        if index == len(archive_dirs) or index % 25 == 0:
+            report_progress(
+                "正在复制暖状态归档",
+                completed=index,
+                total=len(archive_dirs),
+            )
+
+    source_image_index = source / IMAGE_INDEX_FILENAME
+    if not source_image_index.is_file():
+        raise ValueError(f"暖状态缺少图片索引：{source_image_index}")
+    target_image_index = target / IMAGE_INDEX_FILENAME
+    _sqlite_online_backup(source_image_index, target_image_index)
+    database_count += 1
+    rewritten_paths = _rewrite_validation_cache_paths(
+        target_image_index,
+        source,
+        target,
+    )
+
+    image_files = _iter_image_files(source)
+    image_bytes = 0
+    for index, source_image in enumerate(image_files, start=1):
+        before = source_image.stat()
+        relative = source_image.relative_to(source)
+        was_reflink = _copy_preserving_file(source_image, target / relative)
+        after = source_image.stat()
+        if (
+            before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+        ):
+            raise RuntimeError(f"暖状态复制期间源图片发生变化：{source_image}")
+        image_bytes += before.st_size
+        reflink_count += int(was_reflink)
+        copied_count += int(not was_reflink)
+        if index == len(image_files) or index % 1000 == 0:
+            report_progress(
+                "正在复制暖状态图片",
+                completed=index,
+                total=len(image_files),
+            )
+
+    fingerprint_after = source_state_fingerprint(source)
+    if fingerprint_after != fingerprint_before:
+        raise RuntimeError("暖状态准备期间source-output发生变化，本次运行作废。")
+    if _source_database_states(source) != database_states_before:
+        raise RuntimeError("暖状态准备期间源SQLite状态发生变化，本次运行作废。")
+    return PreparationStats(
+        initial_state="warm",
+        elapsed_seconds=perf_counter() - started,
+        sqlite_database_count=database_count,
+        selection_file_count=selection_count,
+        image_file_count=len(image_files),
+        image_file_bytes=image_bytes,
+        reflink_file_count=reflink_count,
+        copied_file_count=copied_count,
+        validation_cache_path_updates=rewritten_paths,
+        source_fingerprint_before=fingerprint_before,
+        source_fingerprint_after=fingerprint_after,
+    )
+
+
+def prepare_target_state(
+    initial_state: InitialState,
+    source_output: Path,
+    target_output: Path,
+) -> PreparationStats:
+    validate_source_target_paths(source_output, target_output)
+    target = target_output.resolve()
+    if initial_state == "existing":
+        if not target.is_dir():
+            raise ValueError(f"existing要求target-output已存在：{target}")
+        return PreparationStats(initial_state="existing", elapsed_seconds=0.0)
+    _ensure_empty_target(target)
+    if initial_state == "empty":
+        started = perf_counter()
+        target.mkdir(parents=True, exist_ok=True)
+        return PreparationStats(
+            initial_state="empty",
+            elapsed_seconds=perf_counter() - started,
+        )
+    if initial_state == "warm":
+        return _prepare_warm(source_output, target)
+    raise ValueError(f"未知initial-state：{initial_state}")

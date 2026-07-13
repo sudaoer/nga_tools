@@ -368,7 +368,7 @@ def write_batch_timing_summary(
     planning_seconds: float | None = None,
     water_level_seconds: float | None = None,
     batch_execution_seconds: float | None = None,
-) -> None:
+) -> Path:
     snapshot_list = list(snapshots)
     image_failure_categories: Counter[str] = Counter()
     processing_reuse_results: Counter[str] = Counter()
@@ -496,3 +496,4 @@ def write_batch_timing_summary(
     started_log_path = _timestamped_log_path(path, started_at)
     write_text_atomically(started_log_path, "\n".join(lines) + "\n")
     _prune_timing_logs(path)
+    return started_log_path

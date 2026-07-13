@@ -6,6 +6,7 @@ from contextlib import ExitStack
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime
 from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
 
 from nga_tools.console import (
@@ -54,6 +55,8 @@ class ThreadBatchResult:
     successes: tuple[ThreadBatchSuccess, ...]
     failures: tuple[ThreadBatchFailure, ...]
     hidden_threads: tuple[ThreadBatchFailure, ...]
+    timing_snapshots: tuple[TimingSnapshot, ...] = ()
+    batch_timing_path: Path | None = None
 
 
 def thread_config_label(thread_config: ThreadConfig) -> str:
@@ -286,6 +289,7 @@ def run_thread_config_batch(
     forum_sync_seconds: float | None = None,
     planning_seconds: float | None = None,
     water_level_seconds: float | None = None,
+    raise_on_failure: bool = True,
 ) -> ThreadBatchResult:
     if worker_count <= 0:
         raise ValueError("workers必须大于0。")
@@ -362,8 +366,9 @@ def run_thread_config_batch(
         if command_wall_start is not None
         else batch_wall_seconds
     )
+    batch_timing_path: Path | None = None
     if batch_collector is not None:
-        write_batch_timing_summary(
+        batch_timing_path = write_batch_timing_summary(
             batch_timing_log_path(),
             task_name=effective_task_name,
             started_at=effective_started_at,
@@ -401,7 +406,9 @@ def run_thread_config_batch(
         tuple(successes),
         tuple(unexpected_failures),
         tuple(hidden_threads),
+        () if batch_collector is None else batch_collector.snapshots(),
+        batch_timing_path,
     )
-    if unexpected_failures:
+    if unexpected_failures and raise_on_failure:
         raise SystemExit(1)
     return result

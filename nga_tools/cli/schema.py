@@ -11,7 +11,7 @@ from nga_tools.commands.backup import (
 from nga_tools.commands.ankebak import backup_auto
 from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
 from nga_tools.commands.image import image_verify
-from nga_tools.commands.replay import replay_serve
+from nga_tools.commands.replay import replay_run, replay_serve
 from nga_tools.commands.types import CommandHandler
 from nga_tools.commands.web import web_serve
 from nga_tools.replay.server import DEFAULT_REPLAY_HOST, DEFAULT_REPLAY_PORT
@@ -180,6 +180,24 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": str,
         "metavar": "PATH",
         "help": "只读重放语料所在的output目录",
+    },
+    "target_output": {
+        "flags": ("--target-output",),
+        "type": str,
+        "metavar": "PATH",
+        "help": "重放备份写入的独立output目录",
+    },
+    "server_url": {
+        "flags": ("--server-url",),
+        "type": str,
+        "metavar": "URL",
+        "help": "已启动的本地重放服务origin",
+    },
+    "initial_state": {
+        "flags": ("--initial-state",),
+        "type": str,
+        "metavar": "STATE",
+        "help": "目标初始状态：empty、warm或existing",
     },
     "thread_config": {
         "flags": ("--thread-config",),
@@ -496,6 +514,61 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "port": DEFAULT_REPLAY_PORT,
             },
             "positive": ["port"],
+        },
+        "run": {
+            "handler": replay_run,
+            "summary": "针对本地重放服务运行共享backup all基准路径",
+            "usage": (
+                f"{PROGRAM_USAGE} replay run --server-url URL "
+                "--source-output PATH --target-output PATH "
+                "--initial-state (empty|warm|existing) "
+                "((--name NAME | --tid TID [--aid AID]) | --all-threads) "
+                "[--thread-config PATH] [--workers N] "
+                "[--api-concurrency N] [--image-concurrency N]"
+            ),
+            "examples": [
+                (
+                    f"{PROGRAM_USAGE} replay run "
+                    "--server-url http://127.0.0.1:8765 "
+                    "--source-output output --target-output replay-output/run-a "
+                    "--initial-state warm --all-threads --workers 8 "
+                    "--api-concurrency 4 --image-concurrency 50"
+                ),
+                (
+                    f"{PROGRAM_USAGE} replay run "
+                    "--server-url http://127.0.0.1:8765 "
+                    "--source-output output --target-output replay-output/sample "
+                    "--initial-state empty --name 帖子名"
+                ),
+            ],
+            "notes": [
+                "empty与warm拒绝非空目标；existing要求目标已经存在。",
+                "warm通过SQLite Online Backup复制数据库，并复制或reflink图片。",
+                "API和图片实际请求只允许访问server-url，不读取环境代理或NGA Cookie。",
+                "备份计时不含目标准备耗时，结果原子写入target-output下的replay_run JSON。",
+            ],
+            "args": [
+                "server_url",
+                "source_output",
+                "target_output",
+                "initial_state",
+                "thread_config",
+                "name",
+                "tid",
+                "aid",
+                "all_threads",
+                "workers",
+                "api_concurrency",
+                "image_concurrency",
+            ],
+            "required": [
+                "server_url",
+                "source_output",
+                "target_output",
+                "initial_state",
+            ],
+            "required_any": ["name", "tid", "all_threads"],
+            "positive": ["workers", "api_concurrency", "image_concurrency"],
         },
     },
 }

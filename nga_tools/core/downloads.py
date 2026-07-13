@@ -10,14 +10,21 @@ import aiohttp
 
 from nga_tools import network_limits
 from nga_tools.console import WarningCategory, report_warning
+from nga_tools.replay.offline import (
+    ReplayOfflineError,
+    assert_replay_request_allowed,
+    current_replay_network_policy,
+)
 
 
 class DownloadTask(TypedDict):
     url: str
+    request_url: NotRequired[str]
     save_path: str
 
 
 DownloadFailureKind = Literal[
+    "http_3xx",
     "http_4xx",
     "http_5xx",
     "timeout",
@@ -64,7 +71,8 @@ def download_files(
 ) -> DownloadSummary:
     async def fetch_and_save(
         session: aiohttp.ClientSession,
-        url: str,
+        logical_url: str,
+        request_url: str,
         save_path: str,
         semaphore: asyncio.Semaphore,
     ) -> DownloadFileResult:
@@ -74,8 +82,15 @@ def download_files(
             try:
                 async with semaphore:
                     async with network_limits.image_download_slot():
-                        async with session.get(url) as response:
-                            if response.status >= 400:
+                        assert_replay_request_allowed(request_url)
+                        replay_mode = current_replay_network_policy() is not None
+                        response_context = (
+                            session.get(request_url, allow_redirects=False)
+                            if replay_mode
+                            else session.get(request_url)
+                        )
+                        async with response_context as response:
+                            if response.status >= 300:
                                 raise aiohttp.ClientResponseError(
                                     request_info=response.request_info,
                                     history=response.history,
@@ -89,7 +104,11 @@ def download_files(
                                 os.makedirs(dirpath, exist_ok=True)
                             with open(save_path, "wb") as file:
                                 file.write(content)
-                return {"url": url, "save_path": save_path, "success": True}
+                return {
+                    "url": logical_url,
+                    "save_path": save_path,
+                    "success": True,
+                }
             except (
                 aiohttp.ClientConnectorError,
                 aiohttp.ClientPayloadError,
@@ -107,9 +126,12 @@ def download_files(
                 if not can_retry:
                     failure_kind: DownloadFailureKind
                     if isinstance(error, aiohttp.ClientResponseError):
-                        failure_kind = (
-                            "http_4xx" if 400 <= error.status < 500 else "http_5xx"
-                        )
+                        if 300 <= error.status < 400:
+                            failure_kind = "http_3xx"
+                        elif error.status < 500:
+                            failure_kind = "http_4xx"
+                        else:
+                            failure_kind = "http_5xx"
                     elif isinstance(error, asyncio.TimeoutError):
                         failure_kind = "timeout"
                     elif isinstance(error, aiohttp.ClientConnectorError):
@@ -117,7 +139,7 @@ def download_files(
                     else:
                         failure_kind = "payload"
                     result: DownloadFileResult = {
-                        "url": url,
+                        "url": logical_url,
                         "save_path": save_path,
                         "success": False,
                         "error": str(error),
@@ -130,13 +152,15 @@ def download_files(
                 report_warning(
                     WarningCategory.DOWNLOAD_RETRY,
                     f"Download failed ({error}), retrying {attempt + 1}/{retries} "
-                    f"after {wait:.1f}s: {url}"
+                    f"after {wait:.1f}s: {logical_url}"
                 )
                 await asyncio.sleep(wait)
                 attempt += 1
+            except ReplayOfflineError:
+                raise
             except Exception as error:
                 return {
-                    "url": url,
+                    "url": logical_url,
                     "save_path": save_path,
                     "success": False,
                     "error": (
@@ -146,14 +170,14 @@ def download_files(
                 }
         if last_exc:
             return {
-                "url": url,
+                "url": logical_url,
                 "save_path": save_path,
                 "success": False,
                 "error": str(last_exc),
                 "failure_kind": "unexpected_download",
             }
         return {
-            "url": url,
+            "url": logical_url,
             "save_path": save_path,
             "success": False,
             "error": "unknown",
@@ -165,7 +189,11 @@ def download_files(
         timeout = aiohttp.ClientTimeout(total=60)
         connector = aiohttp.TCPConnector(limit=effective_max_concurrency)
         semaphore = asyncio.Semaphore(effective_max_concurrency)
-        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            connector=connector,
+            trust_env=False,
+        ) as session:
             tasks: list[asyncio.Task[DownloadFileResult]] = []
             for item in url_filename_lists:
                 tasks.append(
@@ -173,6 +201,7 @@ def download_files(
                         fetch_and_save(
                             session,
                             item["url"],
+                            item.get("request_url", item["url"]),
                             item["save_path"],
                             semaphore,
                         )

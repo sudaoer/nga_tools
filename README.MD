@@ -192,9 +192,9 @@ pixi run python main.py replay serve --source-output output `
 
 当 `thread_configs.json` 中的帖子只有 `tid_aid` 归档而没有 `tid_all` 归档时，
 服务会根据楼层映射生成可供完整抓取流程消费的最小原帖分页。已知作者楼会按
-`pid` 和作者身份放回对应原楼层，但不复制正文；已恢复的匿名楼会保留正文，其余
-楼层只是空正文占位。因此这部分只适合测量分页数量、请求、归档写入和基础派生
-处理开销，不代表真实原帖正文或图片负载。如果存在
+`pid` 和作者身份放回对应原楼层，但不复制正文；已恢复的匿名楼会保留正文，已知
+被删除的楼层会保留空洞，其余楼层只是空正文占位。因此这部分只适合测量分页
+数量、请求、归档写入和基础派生处理开销，不代表真实原帖正文或图片负载。如果存在
 `tid_all/archive.sqlite3`，则优先原样重放其中的最新分页。
 
 限速配置分为 `api` 和 `image` 两组：`latency_ms` 是每个请求的固定首包延迟，
@@ -213,9 +213,25 @@ pixi run python main.py replay serve --source-output output `
 - `POST /__replay__/reset`：无在途请求时清空指标并重置带宽时间线。
 
 `corpus_id` 标识本次冻结的分页、楼层映射和图片索引状态，`profile_id` 标识规范化
-后的限速配置。基准结果应同时记录这两个 ID。当前命令只实现重放服务；把备份
-进程的 API 和图片请求改接到该服务、选择初始状态及记录整轮耗时属于模拟备份
-端的实现。
+后的限速配置。启动服务后可在另一个终端运行共享 `backup all` 路径：
+
+```powershell
+pixi run python main.py replay run `
+  --server-url http://127.0.0.1:8765 `
+  --source-output output --target-output replay-output/run-a `
+  --initial-state warm --all-threads --workers 8 `
+  --api-concurrency 4 --image-concurrency 50
+```
+
+`empty` 要求目标不存在或为空，从零创建归档；`warm` 通过 SQLite Online Backup
+复制数据库，并复制或 reflink 图片及版本选择文件；`existing` 要求目标已存在，
+可继续一次中断的重放运行。源与目标相同或互相嵌套时会拒绝运行，`empty` 和
+`warm` 不会覆盖非空目标。
+
+重放运行不会读取环境代理或发送 NGA Cookie，API 与图片的实际请求 origin 必须
+等于 `server-url`。准备耗时不计入备份墙钟；结束后会在目标根目录原子写入
+`replay_run-<timestamp>.json`，记录 Git commit、语料与 profile ID、并发参数、
+服务端指标、处理状态复用、失败分类、批量计时日志和数据库/内容验收结果。
 
 ### 运行日志
 
