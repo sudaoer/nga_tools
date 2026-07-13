@@ -174,11 +174,18 @@ class NGAClient:
         return total_pages
 
     def get_pid_redirect_target(self, pid: int) -> PidRedirectTarget | None:
+        return self._request_pid_redirect_target_with_session(self.session, pid)
+
+    def _request_pid_redirect_target_with_session(
+        self,
+        session: requests.Session,
+        pid: int,
+    ) -> PidRedirectTarget | None:
         if pid <= 0:
             raise ValueError("PID must be greater than 0.")
         url = f"{self.base_url.rstrip('/')}/read.php"
         with api_request_slot():
-            response = self.session.get(
+            response = session.get(
                 url,
                 params={"pid": str(pid), "opt": "128"},
                 allow_redirects=False,
@@ -191,6 +198,38 @@ class NGAClient:
         if location is None:
             return None
         return parse_pid_redirect_location(location)
+
+    def get_pid_redirect_targets(
+        self,
+        pids: Sequence[int],
+    ) -> dict[int, PidRedirectTarget | None]:
+        ordered_pids = list(dict.fromkeys(pids))
+        for pid in ordered_pids:
+            if pid <= 0:
+                raise ValueError("PID must be greater than 0.")
+        if not ordered_pids:
+            return {}
+
+        runtime = current_api_runtime()
+        if runtime is None or not self._parallel_page_fetch_enabled:
+            return {
+                pid: self.get_pid_redirect_target(pid)
+                for pid in ordered_pids
+            }
+
+        def fetch_runtime_target(
+            session: requests.Session,
+            pid: int,
+        ) -> PidRedirectTarget | None:
+            return self._request_pid_redirect_target_with_session(session, pid)
+
+        targets: dict[int, PidRedirectTarget | None] = {}
+        for pid, target in runtime.map_unordered(
+            ordered_pids,
+            fetch_runtime_target,
+        ):
+            targets[pid] = target
+        return targets
 
     def _request_page(self, tid: Tid, aid: Aid, page: int) -> PageData:
         return self._request_page_with_session(self.session, tid, aid, page)

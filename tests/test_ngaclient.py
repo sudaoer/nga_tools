@@ -284,6 +284,34 @@ class NGAClientPidRedirectTest:
             client.get_pid_redirect_target(0)
         session.get.assert_not_called()
 
+    def test_batch_uses_shared_api_runtime_concurrently(self) -> None:
+        tracker = _ConcurrentRequestTracker(expected_overlap=2)
+        client = NGAClient()
+
+        def request_target(
+            _session: requests.Session,
+            pid: int,
+        ) -> PidRedirectTarget:
+            tracker.enter(pid)
+            tracker.exit()
+            return PidRedirectTarget(tid=123, page_number=pid - 100)
+
+        with (
+            patch.object(
+                client,
+                "_request_pid_redirect_target_with_session",
+                side_effect=request_target,
+            ),
+            use_api_runtime(2),
+        ):
+            targets = client.get_pid_redirect_targets([101, 102])
+
+        assert tracker.max_active == 2
+        assert targets == {
+            101: PidRedirectTarget(tid=123, page_number=1),
+            102: PidRedirectTarget(tid=123, page_number=2),
+        }
+
 
 class NGAClientPageBatchTest:
     def test_fetches_pages_concurrently_with_thread_local_sessions(self) -> None:
