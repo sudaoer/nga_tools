@@ -93,6 +93,46 @@ class ImageDownloadRuntimeTest:
             finally:
                 runtime.close()
 
+    def test_streaming_mode_reports_without_retaining_results(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        async def fake_attempt(
+            _runtime: ImageDownloadRuntime,
+            _session: object,
+            item: image_store.utils.DownloadTask,
+            _retry_statuses: tuple[int, ...],
+        ) -> image_store.utils.DownloadFileResult:
+            return _success_result(item)
+
+        completed = 0
+
+        def on_progress(
+            current: int,
+            total: int,
+            _result: image_store.utils.DownloadFileResult,
+        ) -> None:
+            nonlocal completed
+            completed = current
+            assert total == 500
+
+        runtime = ImageDownloadRuntime(4)
+        runtime._download_attempt = MethodType(fake_attempt, runtime)
+        try:
+            result = runtime.download_streaming(
+                [_download_task(str(index), tmp_path) for index in range(500)],
+                retries=0,
+                backoff_factor=0,
+                retry_statuses=(),
+                batch_limit=4,
+                on_progress=on_progress,
+            )
+        finally:
+            runtime.close()
+
+        assert result is None
+        assert completed == 500
+
     def test_batches_are_scheduled_fairly(self, tmp_path: Path) -> None:
         initial_started = threading.Event()
         release_initial = threading.Event()
@@ -333,7 +373,7 @@ class ImageSingleFlightTest:
         with (
             patch("nga_tools.backup.image_store.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files",
+                "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
             ),
             patch(
@@ -345,7 +385,10 @@ class ImageSingleFlightTest:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 owner = executor.submit(image_store.download_image_tasks, [{"url": url}])
                 assert owner_started.wait(timeout=2)
-                waiter = executor.submit(image_store.download_image_tasks, [{"url": url}])
+                waiter = executor.submit(
+                    image_store.download_image_tasks_compact,
+                    [{"url": url}],
+                )
                 assert waiter_claimed.wait(timeout=2)
                 release_owner.set()
                 owner_result = owner.result(timeout=3)
@@ -353,7 +396,8 @@ class ImageSingleFlightTest:
 
             assert calls == 1
             assert len(owner_result["succeeded"]) == 1
-            assert len(waiter_result["succeeded"]) == 1
+            assert waiter_result["succeeded_count"] == 1
+            assert waiter_result["failed"] == []
             assert image_store.mapped_image_path_for_url(url) is not None
 
     def test_failed_owner_wakes_waiter_and_later_call_retries(
@@ -396,7 +440,7 @@ class ImageSingleFlightTest:
         with (
             patch("nga_tools.backup.image_store.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files",
+                "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
             ),
             use_image_index_writer(),
@@ -444,7 +488,7 @@ class ImageSingleFlightTest:
         with (
             patch("nga_tools.backup.image_store.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files",
+                "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
             ),
             patch(
@@ -508,7 +552,7 @@ class ImageSingleFlightTest:
         with (
             patch("nga_tools.backup.image_store.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files",
+                "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
             ),
             patch(

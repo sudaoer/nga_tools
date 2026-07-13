@@ -34,6 +34,12 @@ class PostImageReferenceScan:
     references: tuple[PostImageReference, ...]
 
 
+@dataclass(frozen=True)
+class ImageDownloadOutcome:
+    succeeded_count: int
+    failed: list[utils.DownloadFileResult]
+
+
 def parse_post_htmls_for_images(htmls: Sequence[PostHtml]) -> list[ParsedPostHtml]:
     parsed_htmls: list[ParsedPostHtml] = []
     for item in htmls:
@@ -142,11 +148,17 @@ def _record_image_preparation_metrics(
     record_timing_metric("图片待下载URL数", stats.pending_download_url_count)
 
 
-def download_images(
+def _run_download_images(
     tid: int,
     aid: Optional[int],
     files_to_download: list[image_store.ImageDownloadTask],
-) -> utils.DownloadSummary:
+    *,
+    collect_successes: bool,
+) -> tuple[
+    int,
+    list[utils.DownloadFileResult],
+    list[utils.DownloadFileResult],
+]:
     del tid, aid
     with time_section("图片下载准备"):
         preparation = image_store.prepare_image_download_tasks(files_to_download)
@@ -162,7 +174,9 @@ def download_images(
         total=pending_count,
     )
 
-    download_result: utils.DownloadSummary = {"succeeded": [], "failed": []}
+    succeeded_count = 0
+    succeeded: list[utils.DownloadFileResult] = []
+    failed_results: list[utils.DownloadFileResult] = []
 
     def update_progress(
         completed: int,
@@ -177,19 +191,30 @@ def download_images(
 
     with time_section("图片下载"):
         if pending_count > 0:
-            download_result = image_store.download_image_tasks(
-                pending_downloads,
-                on_progress=update_progress,
-            )
+            if collect_successes:
+                download_result = image_store.download_image_tasks(
+                    pending_downloads,
+                    on_progress=update_progress,
+                )
+                succeeded = download_result["succeeded"]
+                succeeded_count = len(succeeded)
+                failed_results = download_result["failed"]
+            else:
+                compact_result = image_store.download_image_tasks_compact(
+                    pending_downloads,
+                    on_progress=update_progress,
+                )
+                succeeded_count = compact_result["succeeded_count"]
+                failed_results = compact_result["failed"]
         else:
             report_progress("图片下载进度", completed=0, total=0)
 
     report_info("图片下载完成。")
     report_info(
-        f"成功下载{len(download_result['succeeded'])}个文件，"
-        f"失败{len(download_result['failed'])}个文件。"
+        f"成功下载{succeeded_count}个文件，"
+        f"失败{len(failed_results)}个文件。"
     )
-    for failed in download_result["failed"]:
+    for failed in failed_results:
         failed_url = failed["url"]
         failure_kind = failed.get("failure_kind", "unexpected_download")
         record_timing_metric(f"图片下载失败/{failure_kind}", 1)
@@ -202,7 +227,37 @@ def download_images(
             f"下载失败：{failed_url}（类别：{failure_kind}{status_text}，"
             f"详情：{error_text}）"
         )
-    return download_result
+    return succeeded_count, succeeded, failed_results
+
+
+def download_images(
+    tid: int,
+    aid: Optional[int],
+    files_to_download: list[image_store.ImageDownloadTask],
+) -> utils.DownloadSummary:
+    succeeded_count, succeeded, failed = _run_download_images(
+        tid,
+        aid,
+        files_to_download,
+        collect_successes=True,
+    )
+    if succeeded_count != len(succeeded):
+        raise RuntimeError("图片下载成功结果收集不完整。")
+    return {"succeeded": succeeded, "failed": failed}
+
+
+def download_images_compact(
+    tid: int,
+    aid: Optional[int],
+    files_to_download: list[image_store.ImageDownloadTask],
+) -> ImageDownloadOutcome:
+    succeeded_count, _succeeded, failed = _run_download_images(
+        tid,
+        aid,
+        files_to_download,
+        collect_successes=False,
+    )
+    return ImageDownloadOutcome(succeeded_count, failed)
 
 
 def _clean_repeated_url(error_text: str, url: str) -> str:

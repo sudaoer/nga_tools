@@ -23,6 +23,7 @@ from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_map import FloorLabels, FloorMapBuildResult
 from nga_tools.backup.floor_models import RecoveredMissingPost
 from nga_tools.backup.image_pipeline import (
+    ImageDownloadOutcome,
     collect_image_download_tasks,
     collect_image_download_tasks_from_parsed,
     parse_post_htmls_for_images,
@@ -173,25 +174,19 @@ def _run_backup(
         tid: int,
         aid: int | None,
         tasks: list[dict[str, str]],
-    ) -> dict[str, list[object]]:
+    ) -> ImageDownloadOutcome:
         del tid, aid
         if downloaded_urls is not None:
             downloaded_urls.append([task["url"] for task in tasks])
         if download_error is not None:
             raise download_error
         failed_urls = failed_download_urls or set()
-        return {
-            "succeeded": [
-                {"url": task["url"], "save_path": "", "success": True}
-                for task in tasks
-                if task["url"] not in failed_urls
-            ],
-            "failed": [
-                {"url": task["url"], "save_path": "", "success": False}
-                for task in tasks
-                if task["url"] in failed_urls
-            ],
-        }
+        failed = [
+            {"url": task["url"], "save_path": "", "success": False}
+            for task in tasks
+            if task["url"] in failed_urls
+        ]
+        return ImageDownloadOutcome(len(tasks) - len(failed), failed)
 
     def capture_full_processing(*args: object, **kwargs: object) -> None:
         if full_processing_calls is not None:

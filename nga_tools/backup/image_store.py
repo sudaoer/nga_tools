@@ -6,12 +6,13 @@ import os
 import sqlite3
 import tempfile
 import threading
+from collections import deque
+from concurrent.futures import Future
 from contextlib import closing, contextmanager
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, NotRequired, TypedDict
-from concurrent.futures import Future
 from urllib.parse import urlsplit
 
 from PIL import Image, ImageDraw
@@ -42,7 +43,6 @@ from nga_tools.backup.image_validation import (
     current_image_validation_cache,
     invalidate_current_image_validation,
 )
-from nga_tools.replay.offline import image_request_url
 from nga_tools.timing import time_section
 from nga_tools.backup.image_index_writer import (
     ImageMappingRow,
@@ -59,6 +59,11 @@ class StoredImageResult(TypedDict):
     unique_path: str
     reused: bool
     collision: NotRequired[bool]
+
+
+class CompactImageDownloadSummary(TypedDict):
+    succeeded_count: int
+    failed: list[utils.DownloadFileResult]
 
 
 @dataclass(frozen=True)
@@ -166,11 +171,9 @@ type _ImageClaimKey = tuple[str, str]
 
 _IMAGE_URL_CLAIMS_LOCK = threading.RLock()
 _IMAGE_URL_CLAIMS: dict[_ImageClaimKey, _ImageURLClaim] = {}
-_COMPLETED_IMAGE_URL_CLAIMS: dict[
-    _ImageClaimKey,
-    utils.DownloadFileResult,
-] = {}
+_COMPLETED_IMAGE_URL_CLAIMS: dict[_ImageClaimKey, str] = {}
 _image_coordination_scope_depth = 0
+_MAX_PENDING_IMAGE_MAPPING_RESULTS = 64
 
 
 @contextmanager
@@ -849,11 +852,17 @@ def _claim_image_url(
         existing = _IMAGE_URL_CLAIMS.get(claim_key)
         if existing is not None:
             return claim_key, existing, False
-        completed_result = _COMPLETED_IMAGE_URL_CLAIMS.get(claim_key)
-        if completed_result is not None:
-            completed_path = Path(completed_result["save_path"])
+        completed_path_text = _COMPLETED_IMAGE_URL_CLAIMS.get(claim_key)
+        if completed_path_text is not None:
+            completed_path = Path(completed_path_text)
             if image_file_is_valid(completed_path):
-                completed_claim = _ImageURLClaim(result=completed_result)
+                completed_claim = _ImageURLClaim(
+                    result={
+                        "url": url,
+                        "save_path": completed_path_text,
+                        "success": True,
+                    }
+                )
                 completed_claim.event.set()
                 return claim_key, completed_claim, False
             _COMPLETED_IMAGE_URL_CLAIMS.pop(claim_key, None)
@@ -874,7 +883,7 @@ def _release_image_url_claim(
     claim.event.set()
     with _IMAGE_URL_CLAIMS_LOCK:
         if result is not None and result["success"]:
-            _COMPLETED_IMAGE_URL_CLAIMS[claim_key] = result
+            _COMPLETED_IMAGE_URL_CLAIMS[claim_key] = result["save_path"]
         else:
             _COMPLETED_IMAGE_URL_CLAIMS.pop(claim_key, None)
         if _IMAGE_URL_CLAIMS.get(claim_key) is claim:
@@ -890,13 +899,20 @@ def _copy_claim_result(
     return copied
 
 
-def download_image_tasks(
+def _run_download_image_tasks(
     image_tasks: list[ImageDownloadTask],
-    on_progress: utils.DownloadProgressCallback | None = None,
-) -> utils.DownloadSummary:
+    on_progress: utils.DownloadProgressCallback | None,
+    *,
+    collect_successes: bool,
+) -> tuple[
+    int,
+    list[utils.DownloadFileResult],
+    list[utils.DownloadFileResult],
+]:
     if not image_tasks:
-        return {"succeeded": [], "failed": []}
+        return 0, [], []
 
+    succeeded_count = 0
     succeeded: list[utils.DownloadFileResult] = []
     failed: list[utils.DownloadFileResult] = []
     owners: list[tuple[ImageDownloadTask, _ImageClaimKey, _ImageURLClaim]] = []
@@ -911,24 +927,25 @@ def download_image_tasks(
     completed = 0
 
     def emit_result(result: utils.DownloadFileResult) -> None:
-        nonlocal completed
+        nonlocal completed, succeeded_count
         completed += 1
         if result["success"]:
-            succeeded.append(result)
+            succeeded_count += 1
+            if collect_successes:
+                succeeded.append(result)
         else:
             failed.append(result)
         if on_progress is not None:
             on_progress(completed, len(image_tasks), result)
 
-    pending_store_results: list[
+    pending_store_results: deque[
         tuple[
             utils.DownloadFileResult,
             Future[None],
             _ImageClaimKey,
             _ImageURLClaim,
         ]
-    ] = []
-    released_owner_claim_ids: set[int] = set()
+    ] = deque()
 
     def release_owner(
         claim_key: _ImageClaimKey,
@@ -936,8 +953,30 @@ def download_image_tasks(
         result: utils.DownloadFileResult,
     ) -> None:
         _release_image_url_claim(claim_key, claim, result=result)
-        released_owner_claim_ids.add(id(claim))
         emit_result(result)
+
+    def resolve_pending_store_result(
+        pending: tuple[
+            utils.DownloadFileResult,
+            Future[None],
+            _ImageClaimKey,
+            _ImageURLClaim,
+        ],
+    ) -> None:
+        result, mapping_future, claim_key, claim = pending
+        try:
+            mapping_future.result()
+        except Exception as error:
+            failed_result: utils.DownloadFileResult = {
+                "url": result["url"],
+                "save_path": str(unique_images_dir()),
+                "success": False,
+                "error": str(error),
+                "failure_kind": "image_store",
+            }
+            release_owner(claim_key, claim, failed_result)
+        else:
+            release_owner(claim_key, claim, result)
 
     with tempfile.TemporaryDirectory(prefix="nga_image_download_") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
@@ -954,19 +993,19 @@ def download_image_tasks(
             download_tasks.append(
                 {
                     "url": image_task["url"],
-                    "request_url": image_request_url(image_task["url"]),
                     "save_path": temp_path_str,
                 }
             )
+        owners.clear()
 
         def handle_progress(
             _completed: int,
             _total: int,
             download_result: utils.DownloadFileResult,
         ) -> None:
-            image_task, claim_key, claim = owner_by_temp_path[
+            image_task, claim_key, claim = owner_by_temp_path.pop(
                 download_result["save_path"]
-            ]
+            )
             result: utils.DownloadFileResult
             if download_result["success"]:
                 try:
@@ -985,6 +1024,13 @@ def download_image_tasks(
                     pending_store_results.append(
                         (result, mapping_future, claim_key, claim)
                     )
+                    if (
+                        len(pending_store_results)
+                        >= _MAX_PENDING_IMAGE_MAPPING_RESULTS
+                    ):
+                        resolve_pending_store_result(
+                            pending_store_results.popleft()
+                        )
                     return
                 except Exception as error:
                     result = {
@@ -1011,25 +1057,17 @@ def download_image_tasks(
 
         try:
             if download_tasks:
-                utils.download_files(download_tasks, on_progress=handle_progress)
-            for result, mapping_future, claim_key, claim in pending_store_results:
-                try:
-                    mapping_future.result()
-                except Exception as error:
-                    failed_result: utils.DownloadFileResult = {
-                        "url": result["url"],
-                        "save_path": str(unique_images_dir()),
-                        "success": False,
-                        "error": str(error),
-                        "failure_kind": "image_store",
-                    }
-                    release_owner(claim_key, claim, failed_result)
-                else:
-                    release_owner(claim_key, claim, result)
+                utils.download_files_streaming(
+                    download_tasks,
+                    on_progress=handle_progress,
+                )
+            while pending_store_results:
+                resolve_pending_store_result(pending_store_results.popleft())
         except BaseException as error:
-            for result, mapping_future, claim_key, claim in pending_store_results:
-                if id(claim) in released_owner_claim_ids:
-                    continue
+            while pending_store_results:
+                result, mapping_future, claim_key, claim = (
+                    pending_store_results.popleft()
+                )
                 try:
                     mapping_future.result()
                 except BaseException as mapping_error:
@@ -1044,10 +1082,8 @@ def download_image_tasks(
                         claim,
                         result=result,
                     )
-                released_owner_claim_ids.add(id(claim))
-            for _task, claim_key, claim in owners:
-                if id(claim) not in released_owner_claim_ids:
-                    _release_image_url_claim(claim_key, claim, error=error)
+            for _task, claim_key, claim in owner_by_temp_path.values():
+                _release_image_url_claim(claim_key, claim, error=error)
             raise
 
     for image_task, claim in waiters:
@@ -1060,4 +1096,30 @@ def download_image_tasks(
             raise RuntimeError(f"共享图片下载没有结果：{image_task['url']}")
         emit_result(_copy_claim_result(image_task["url"], claim.result))
 
+    return succeeded_count, succeeded, failed
+
+
+def download_image_tasks(
+    image_tasks: list[ImageDownloadTask],
+    on_progress: utils.DownloadProgressCallback | None = None,
+) -> utils.DownloadSummary:
+    succeeded_count, succeeded, failed = _run_download_image_tasks(
+        image_tasks,
+        on_progress,
+        collect_successes=True,
+    )
+    if succeeded_count != len(succeeded):
+        raise RuntimeError("图片下载成功结果收集不完整。")
     return {"succeeded": succeeded, "failed": failed}
+
+
+def download_image_tasks_compact(
+    image_tasks: list[ImageDownloadTask],
+    on_progress: utils.DownloadProgressCallback | None = None,
+) -> CompactImageDownloadSummary:
+    succeeded_count, _succeeded, failed = _run_download_image_tasks(
+        image_tasks,
+        on_progress,
+        collect_successes=False,
+    )
+    return {"succeeded_count": succeeded_count, "failed": failed}

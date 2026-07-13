@@ -92,3 +92,48 @@ def download_files(
             batch_limit=effective_max_concurrency,
             on_progress=on_progress,
         )
+
+
+def download_files_streaming(
+    url_filename_lists: list[DownloadTask],
+    retries: int = 5,
+    backoff_factor: float = 0.5,
+    retry_statuses: tuple[int, ...] = (429, 500, 502, 503, 504),
+    max_concurrency: int | None = None,
+    on_progress: DownloadProgressCallback | None = None,
+) -> None:
+    """Download files while delivering results only through ``on_progress``."""
+    pending_downloads = [
+        item for item in url_filename_lists if not os.path.exists(item["save_path"])
+    ]
+    if not pending_downloads:
+        return
+
+    from nga_tools.core.image_download_runtime import (
+        current_image_download_runtime,
+        use_image_download_runtime,
+    )
+
+    effective_max_concurrency = effective_download_concurrency(max_concurrency)
+    runtime = current_image_download_runtime()
+    if runtime is not None:
+        runtime.download_streaming(
+            pending_downloads,
+            retries=retries,
+            backoff_factor=backoff_factor,
+            retry_statuses=retry_statuses,
+            batch_limit=effective_max_concurrency,
+            on_progress=on_progress,
+        )
+        return
+    with use_image_download_runtime(
+        network_limits.get_image_concurrency()
+    ) as temporary_runtime:
+        temporary_runtime.download_streaming(
+            pending_downloads,
+            retries=retries,
+            backoff_factor=backoff_factor,
+            retry_statuses=retry_statuses,
+            batch_limit=effective_max_concurrency,
+            on_progress=on_progress,
+        )

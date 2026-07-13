@@ -26,7 +26,10 @@ from nga_tools.backup.floor_models import (
     FLOOR_MAP_VERSION,
     PAGE_JSON_RE,
 )
-from nga_tools.backup.image_pipeline import download_images as _download_images
+from nga_tools.backup.image_pipeline import (
+    ImageDownloadOutcome,
+    download_images_compact as _download_images,
+)
 from nga_tools.backup.image_reference_cache import (
     IMAGE_REFERENCE_EXTRACTOR_VERSION,
     collect_image_download_tasks_for_records as _collect_image_download_tasks_for_records,
@@ -63,7 +66,6 @@ from nga_tools.console import (
     report_progress,
     report_warning,
 )
-from nga_tools.core.downloads import DownloadSummary
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
 from nga_tools.timing import record_timing_label, record_timing_metric, time_section
@@ -279,7 +281,7 @@ def _download_images_for_records(
     archive_store: ThreadArchiveStore,
     floor_labels: FloorLabels,
     records: list[PostRecord],
-) -> DownloadSummary:
+) -> ImageDownloadOutcome:
     with time_section("Overlay应用"):
         effective_records = _apply_post_overlays_to_records(
             archive_store.read_post_overlays(),
@@ -294,8 +296,8 @@ def _download_images_for_records(
     return _download_images(tid, aid, collection.tasks)
 
 
-def _failed_image_urls(download_summary: DownloadSummary) -> set[str]:
-    return {item["url"] for item in download_summary["failed"]}
+def _failed_image_urls(download_summary: ImageDownloadOutcome) -> set[str]:
+    return {item["url"] for item in download_summary.failed}
 
 
 def _new_floor_state(
@@ -585,7 +587,7 @@ def _commit_completed_processing_state(
     floor_map_processing: FloorMapProcessingResult,
     unresolved_missing_lous: list[int],
     fingerprints_before: tuple[str, str],
-    download_summary: DownloadSummary,
+    download_summary: ImageDownloadOutcome,
 ) -> None:
     pending_image_urls = _failed_image_urls(download_summary)
     record_timing_metric("待重试图片URL数", len(pending_image_urls))

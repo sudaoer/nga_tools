@@ -27,6 +27,7 @@ from nga_tools.replay.offline import (
     ReplayOfflineError,
     assert_replay_request_allowed,
     current_replay_network_policy,
+    image_request_url,
 )
 
 
@@ -316,6 +317,47 @@ class ImageDownloadRuntime:
         batch_limit: int,
         on_progress: DownloadProgressCallback | None,
     ) -> DownloadSummary:
+        return self._download(
+            items,
+            retries=retries,
+            backoff_factor=backoff_factor,
+            retry_statuses=retry_statuses,
+            batch_limit=batch_limit,
+            on_progress=on_progress,
+            collect_results=True,
+        )
+
+    def download_streaming(
+        self,
+        items: list[DownloadTask],
+        *,
+        retries: int,
+        backoff_factor: float,
+        retry_statuses: tuple[int, ...],
+        batch_limit: int,
+        on_progress: DownloadProgressCallback | None,
+    ) -> None:
+        self._download(
+            items,
+            retries=retries,
+            backoff_factor=backoff_factor,
+            retry_statuses=retry_statuses,
+            batch_limit=batch_limit,
+            on_progress=on_progress,
+            collect_results=False,
+        )
+
+    def _download(
+        self,
+        items: list[DownloadTask],
+        *,
+        retries: int,
+        backoff_factor: float,
+        retry_statuses: tuple[int, ...],
+        batch_limit: int,
+        on_progress: DownloadProgressCallback | None,
+        collect_results: bool,
+    ) -> DownloadSummary:
         if not items:
             return {"succeeded": [], "failed": []}
         if batch_limit <= 0 or batch_limit > self.capacity:
@@ -349,10 +391,11 @@ class ImageDownloadRuntime:
                 result = event.result
                 self._run_in_loop(self._consume_result(batch.batch_id))
                 completed += 1
-                if result["success"]:
-                    succeeded.append(result)
-                else:
-                    failed.append(result)
+                if collect_results:
+                    if result["success"]:
+                        succeeded.append(result)
+                    else:
+                        failed.append(result)
                 if on_progress is not None:
                     on_progress(completed, len(items), result)
         except BaseException:
@@ -485,7 +528,13 @@ class ImageDownloadRuntime:
         retry_statuses: tuple[int, ...],
     ) -> DownloadFileResult | _AttemptFailure:
         logical_url = item["url"]
-        request_url = item.get("request_url", logical_url)
+        request_url = item.get("request_url")
+        if request_url is None:
+            request_url = (
+                image_request_url(logical_url)
+                if current_replay_network_policy() is not None
+                else logical_url
+            )
         target_path = Path(item["save_path"])
         temp_path: Path | None = None
         try:
