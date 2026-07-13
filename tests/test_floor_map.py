@@ -16,6 +16,7 @@ from nga_tools.backup.floor_map import (
     load_floor_map_build_result_if_current,
     read_author_posts_from_archive,
     read_unresolved_missing_author_lous_from_archive,
+    unresolved_missing_author_lous_from_stored_floor_map,
     _page_post_dicts,
     _scan_pending_author_pages,
     _scan_original_pages,
@@ -830,5 +831,34 @@ class FloorMapStoredMissingAuthorLousTest:
                 present_lous={4},
                 total_lou_count=8,
             )
+
+        assert missing_lous == [2]
+
+    def test_filters_an_already_read_floor_map_without_store_access(self) -> None:
+        stored_floor_map = StoredFloorMap(
+            version=FLOOR_MAP_VERSION,
+            generation_version=FLOOR_MAP_GENERATION_VERSION,
+            algorithm=FLOOR_MAP_HASH_ALGORITHM,
+            tid=123,
+            aid=456,
+            input_signature="fixture",
+            entries=[
+                {"pid": None, "author_lou": 2, "original_lou": 2},
+                {"pid": None, "author_lou": 4, "original_lou": 4},
+                {
+                    "pid": None,
+                    "author_lou": 6,
+                    "original_lou": 6,
+                    "original_pid": 6006,
+                },
+                {"pid": None, "author_lou": 8, "original_lou": 8},
+            ],
+        )
+
+        missing_lous = unresolved_missing_author_lous_from_stored_floor_map(
+            stored_floor_map,
+            present_lous={4},
+            total_lou_count=8,
+        )
 
         assert missing_lous == [2]

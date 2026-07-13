@@ -113,6 +113,21 @@ def read_unresolved_missing_author_lous_from_archive(
     if stored_floor_map is None:
         return []
 
+    return unresolved_missing_author_lous_from_stored_floor_map(
+        stored_floor_map,
+        present_lous=present_lous,
+        total_lou_count=total_lou_count,
+    )
+
+
+def unresolved_missing_author_lous_from_stored_floor_map(
+    stored_floor_map: StoredFloorMap,
+    *,
+    present_lous: set[int] | None = None,
+    total_lou_count: int | None = None,
+) -> list[int]:
+    """Filter unresolved author lous from an already-read floor map."""
+
     missing_lous: set[int] = set()
     for entry in stored_floor_map.entries:
         author_lou = entry["author_lou"]

@@ -51,6 +51,7 @@ from nga_tools.core.sqlite import (
     iter_in_clause_chunks,
 )
 from nga_tools.ngaclient.client import PageData
+from nga_tools.timing import time_section
 from nga_tools.word_count import (
     WORD_COUNT_VERSION,
     TextWordCount,
@@ -71,6 +72,8 @@ _BACKUP_PROCESSING_TABLES = frozenset(
     }
 )
 _LEGACY_BACKUP_PROCESSING_TABLE = "backup_processing_state"
+_LATEST_POST_INDEX = "idx_post_versions_latest_covering"
+_LEGACY_LATEST_POST_INDEX = "idx_post_versions_latest"
 _LATEST_POST_RECORDS_QUERY = """
     SELECT
         latest.id,
@@ -147,6 +150,24 @@ _LATEST_POST_ROWS_QUERY = """
     WHERE latest.row_number = 1
     ORDER BY latest.lou
     """
+_LATEST_AUTHOR_POST_REFS_QUERY = """
+    SELECT latest.pid, latest.lou, metadata.author_uid
+    FROM (
+        SELECT
+            pid,
+            lou,
+            ROW_NUMBER() OVER (
+                PARTITION BY lou
+                ORDER BY last_seen_at DESC, id DESC
+            ) AS row_number
+        FROM post_versions
+    ) AS latest
+    LEFT JOIN post_latest_metadata AS metadata
+        ON metadata.pid = latest.pid
+        AND metadata.lou = latest.lou
+    WHERE latest.row_number = 1
+    ORDER BY latest.lou
+    """
 
 
 @dataclass(frozen=True)
@@ -196,6 +217,13 @@ class ArchiveMigrationResult:
 class ArchiveEffectivePostStats:
     post_count: int
     max_lou: Optional[int]
+
+
+@dataclass(frozen=True)
+class AuthorFloorRefreshInputs:
+    post_refs: tuple[AuthorPostRef, ...]
+    stored_floor_map: StoredFloorMap | None
+    floor_map_error: str | None
 
 
 @dataclass(frozen=True)
@@ -398,25 +426,37 @@ class ThreadArchiveStore:
             self.ensure_schema()
             return
 
-        tracked_tables = (*_BACKUP_PROCESSING_TABLES, _LEGACY_BACKUP_PROCESSING_TABLE)
-        placeholders = ", ".join("?" for _item in tracked_tables)
+        tracked_objects = (
+            *_BACKUP_PROCESSING_TABLES,
+            _LEGACY_BACKUP_PROCESSING_TABLE,
+            _LATEST_POST_INDEX,
+            _LEGACY_LATEST_POST_INDEX,
+        )
+        placeholders = ", ".join("?" for _item in tracked_objects)
         with closing(self._connect_read()) as connection:
             rows = connection.execute(
                 f"""
-                SELECT name
+                SELECT type, name
                 FROM sqlite_schema
-                WHERE type = 'table' AND name IN ({placeholders})
+                WHERE name IN ({placeholders})
                 """,
-                tracked_tables,
+                tracked_objects,
             ).fetchall()
         table_names = {
-            row[0]
+            row[1]
             for row in rows
-            if row and isinstance(row[0], str)
+            if row[0] == "table" and isinstance(row[1], str)
+        }
+        index_names = {
+            row[1]
+            for row in rows
+            if row[0] == "index" and isinstance(row[1], str)
         }
         if (
             _BACKUP_PROCESSING_TABLES <= table_names
             and _LEGACY_BACKUP_PROCESSING_TABLE not in table_names
+            and _LATEST_POST_INDEX in index_names
+            and _LEGACY_LATEST_POST_INDEX not in index_names
         ):
             self._schema_initialized = True
             return
@@ -770,10 +810,11 @@ class ThreadArchiveStore:
         self._create_backup_processing_tables(connection)
         connection.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_post_versions_latest
-            ON post_versions(lou, last_seen_at, id)
+            CREATE INDEX IF NOT EXISTS idx_post_versions_latest_covering
+            ON post_versions(lou, last_seen_at DESC, id DESC, pid)
             """
         )
+        connection.execute(f"DROP INDEX IF EXISTS {_LEGACY_LATEST_POST_INDEX}")
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_post_observations_version
@@ -3525,38 +3566,42 @@ class ThreadArchiveStore:
             )
         return records
 
-    def read_latest_author_post_refs(self) -> list[AuthorPostRef]:
-        self.require_exists()
-        with closing(self._connect_read()) as connection:
-            rows = cast(
-                list[tuple[int, int, Optional[int]]],
-                connection.execute(
-                    """
-                    SELECT latest.pid, latest.lou, metadata.author_uid
-                    FROM (
-                        SELECT
-                            pid,
-                            lou,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY lou
-                                ORDER BY last_seen_at DESC, id DESC
-                            ) AS row_number
-                        FROM post_versions
-                    ) AS latest
-                    LEFT JOIN post_latest_metadata AS metadata
-                        ON metadata.pid = latest.pid
-                        AND metadata.lou = latest.lou
-                    WHERE latest.row_number = 1
-                    ORDER BY latest.lou
-                    """
-                ).fetchall(),
-            )
-
+    @staticmethod
+    def _read_latest_author_post_refs(
+        connection: sqlite3.Connection,
+    ) -> list[AuthorPostRef]:
+        rows = cast(
+            list[tuple[int, int, Optional[int]]],
+            connection.execute(_LATEST_AUTHOR_POST_REFS_QUERY).fetchall(),
+        )
         return [
             {"pid": pid, "author_lou": lou}
             for pid, lou, author_uid in rows
             if author_uid != -1
         ]
+
+    def read_latest_author_post_refs(self) -> list[AuthorPostRef]:
+        self.require_exists()
+        with closing(self._connect_read()) as connection:
+            return self._read_latest_author_post_refs(connection)
+
+    def read_author_floor_refresh_inputs(self) -> AuthorFloorRefreshInputs:
+        """Read author refs and the prior floor map from one SQLite snapshot."""
+        self.require_exists()
+        with closing(self._connect_read()) as connection:
+            connection.execute("BEGIN")
+            with time_section("楼主最新回复索引读取"):
+                post_refs = self._read_latest_author_post_refs(connection)
+            try:
+                with time_section("历史未恢复缺失楼读取"):
+                    stored_floor_map = self._read_floor_map(connection)
+            except ValueError as error:
+                return AuthorFloorRefreshInputs(
+                    tuple(post_refs),
+                    None,
+                    str(error),
+                )
+        return AuthorFloorRefreshInputs(tuple(post_refs), stored_floor_map, None)
 
     def read_latest_author_total_lou_count(self) -> Optional[int]:
         self.require_exists()

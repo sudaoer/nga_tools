@@ -9,7 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
-from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.archive_store import (
+    _LATEST_AUTHOR_POST_REFS_QUERY,
+    ThreadArchiveStore,
+)
 from nga_tools.backup.floor_models import (
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,
@@ -91,6 +94,139 @@ class ThreadArchiveStoreTest:
             "floor_map_entries",
             "floor_map_candidates",
         }
+
+    def test_author_floor_refresh_inputs_share_one_read_connection(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "vrows": 2,
+                    "result": [
+                        {
+                            "lou": 1,
+                            "pid": 1001,
+                            "content": "body",
+                            "author": {"uid": 456},
+                        }
+                    ],
+                },
+            )
+            expected_floor_map = _stored_floor_map(
+                [{"pid": 1001, "author_lou": 1, "original_lou": 3}]
+            )
+            store.replace_floor_map(expected_floor_map)
+
+            reader = ThreadArchiveStore(store.thread_folder)
+            with patch.object(
+                reader,
+                "_connect_read",
+                wraps=reader._connect_read,
+            ) as connect_read:
+                inputs = reader.read_author_floor_refresh_inputs()
+
+        assert connect_read.call_count == 1
+        assert inputs.post_refs == ({"pid": 1001, "author_lou": 1},)
+        assert inputs.stored_floor_map == expected_floor_map
+        assert inputs.floor_map_error is None
+
+    def test_latest_author_refs_keep_tie_break_and_anonymous_filtering(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            observed_at = "2026-07-13T01:00:00+00:00"
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {
+                            "lou": 1,
+                            "pid": 1001,
+                            "content": "old",
+                            "author": {"uid": 456},
+                        },
+                        {
+                            "lou": 2,
+                            "pid": 2001,
+                            "content": "visible",
+                            "author": {"uid": 456},
+                        },
+                    ],
+                },
+                observed_at=observed_at,
+            )
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {
+                            "lou": 1,
+                            "pid": 1002,
+                            "content": "new",
+                            "author": {"uid": 456},
+                        },
+                        {
+                            "lou": 2,
+                            "pid": 2002,
+                            "content": "anonymous",
+                            "author": {"uid": -1},
+                        },
+                    ],
+                },
+                observed_at=observed_at,
+            )
+
+            refs = store.read_latest_author_post_refs()
+
+        assert refs == [{"pid": 1002, "author_lou": 1}]
+
+    def test_schema_replaces_latest_post_index_with_covering_order(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                connection.execute(
+                    "DROP INDEX idx_post_versions_latest_covering"
+                )
+                connection.execute(
+                    """
+                    CREATE INDEX idx_post_versions_latest
+                    ON post_versions(lou, last_seen_at, id)
+                    """
+                )
+                connection.commit()
+
+            ThreadArchiveStore(
+                store.thread_folder
+            ).ensure_backup_processing_schema()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                indexes = dict(
+                    connection.execute(
+                        """
+                        SELECT name, sql
+                        FROM sqlite_schema
+                        WHERE type = 'index'
+                          AND name LIKE 'idx_post_versions_latest%'
+                        """
+                    ).fetchall()
+                )
+                query_plan = connection.execute(
+                    f"EXPLAIN QUERY PLAN {_LATEST_AUTHOR_POST_REFS_QUERY}"
+                ).fetchall()
+
+        assert set(indexes) == {"idx_post_versions_latest_covering"}
+        index_sql = indexes["idx_post_versions_latest_covering"]
+        assert index_sql is not None
+        normalized_index_sql = " ".join(index_sql.split())
+        assert "(lou, last_seen_at DESC, id DESC, pid)" in normalized_index_sql
+        assert any(
+            "USING COVERING INDEX idx_post_versions_latest_covering" in detail
+            for _node_id, _parent_id, _unused, detail in query_plan
+        )
 
     def test_floor_map_replace_removes_stale_entries_and_candidates(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

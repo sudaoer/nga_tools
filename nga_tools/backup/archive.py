@@ -20,6 +20,7 @@ from nga_tools.backup.floor_map import (
     load_floor_map_build_result_if_current,
     load_floor_labels_from_archive,
     read_unresolved_missing_author_lous_from_archive,
+    unresolved_missing_author_lous_from_stored_floor_map,
 )
 from nga_tools.backup.floor_models import (
     FLOOR_MAP_GENERATION_VERSION,
@@ -239,17 +240,28 @@ def _author_post_refs_and_missing_lous(
     archive_store: ThreadArchiveStore,
     author_total_lou_count: int | None,
 ) -> tuple[list[AuthorPostRef], list[int]]:
-    post_refs = archive_store.read_latest_author_post_refs()
+    inputs = archive_store.read_author_floor_refresh_inputs()
+    post_refs = list(inputs.post_refs)
     present_lous = {post["author_lou"] for post in post_refs}
     missing_lous = find_missing_author_lous(
         post_refs,
         author_total_lou_count,
     )
-    previous_missing_lous = read_unresolved_missing_author_lous_from_archive(
-        archive_store,
-        present_lous=present_lous,
-        total_lou_count=author_total_lou_count,
-    )
+    if inputs.floor_map_error is not None:
+        report_warning(
+            WarningCategory.FLOOR_MAP,
+            "楼层映射缺失楼缓存无效，忽略："
+            f"{archive_store.db_path}: {inputs.floor_map_error}",
+        )
+        previous_missing_lous: list[int] = []
+    elif inputs.stored_floor_map is None:
+        previous_missing_lous = []
+    else:
+        previous_missing_lous = unresolved_missing_author_lous_from_stored_floor_map(
+            inputs.stored_floor_map,
+            present_lous=present_lous,
+            total_lou_count=author_total_lou_count,
+        )
     return post_refs, _merge_missing_lou(missing_lous, previous_missing_lous)
 
 
@@ -413,17 +425,19 @@ def _refresh_author_floor_state(
             frozenset(),
         )
 
-    floor_processing = _build_floor_map_for_post_refs(
-        client,
-        archive_store,
-        tid,
-        aid,
-        post_refs,
-        missing_lous,
-    )
-    recovered_result = archive_store.upsert_recovered_posts(
-        floor_processing.build_result.recovered_missing_posts_by_author_lou
-    )
+    with time_section("缺失楼恢复与楼层映射"):
+        floor_processing = _build_floor_map_for_post_refs(
+            client,
+            archive_store,
+            tid,
+            aid,
+            post_refs,
+            missing_lous,
+        )
+    with time_section("恢复正文事务写入"):
+        recovered_result = archive_store.upsert_recovered_posts(
+            floor_processing.build_result.recovered_missing_posts_by_author_lou
+        )
     record_timing_metric(
         "本次恢复缺失楼数",
         recovered_result.inserted_count,
@@ -435,7 +449,8 @@ def _refresh_author_floor_state(
             recovered_result.effective_changed_lous,
             recovered_result.effective_added_lous,
         )
-    snapshot = archive_store.read_backup_processing_snapshot()
+    with time_section("处理状态快照重读"):
+        snapshot = archive_store.read_backup_processing_snapshot()
     if (
         not commit_even_if_unchanged
         and snapshot.change_state == expected_snapshot.change_state
@@ -446,13 +461,14 @@ def _refresh_author_floor_state(
             recovered_result.effective_changed_lous,
             recovered_result.effective_added_lous,
         )
-    committed = archive_store.commit_floor_processing_state(
-        _new_floor_state(
-            snapshot,
-            page_count=page_count,
-            author_total_lou_count=author_total_lou_count,
+    with time_section("楼层状态提交"):
+        committed = archive_store.commit_floor_processing_state(
+            _new_floor_state(
+                snapshot,
+                page_count=page_count,
+                author_total_lou_count=author_total_lou_count,
+            )
         )
-    )
     return _FloorStateRefreshResult(
         committed,
         snapshot,

@@ -1465,6 +1465,8 @@ class BackupRawArchiveTest:
 
         timing_text = timing_log.path.read_text(encoding="utf-8")
         for stage_name in (
+            "楼主最新回复索引读取",
+            "历史未恢复缺失楼读取",
             "读取完整归档记录",
             "正文解析与图片处理",
             "图片引用缓存读取",
@@ -1476,6 +1478,40 @@ class BackupRawArchiveTest:
             assert f"阶段：{stage_name}，结束时间：" in timing_text
         assert "指标：图片引用记录数，值：2\n" in timing_text
         assert "指标：恢复正文写入引发归档重读，值：0\n" in timing_text
+
+    def test_changed_archive_records_floor_refresh_substages(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": "first"},
+            {"lou": 3, "pid": 1003, "content": "third"},
+        ]
+        client.vrows = 4
+        _run_backup(thread_dir, client)
+        client.posts[1]["content"] = "third edited"
+        timing_path = tmp_path / "floor-refresh.timing.log"
+
+        with use_timing_log(
+            timing_path,
+            task_name="backup sub floor refresh",
+        ) as timing_log:
+            assert timing_log is not None
+            _run_backup(thread_dir, client)
+
+        timing_text = timing_log.path.read_text(encoding="utf-8")
+        for stage_name in (
+            "楼主最新回复索引读取",
+            "历史未恢复缺失楼读取",
+            "缺失楼恢复与楼层映射",
+            "恢复正文事务写入",
+            "处理状态快照重读",
+            "楼层状态提交",
+        ):
+            assert f"阶段：{stage_name}，开始时间：" in timing_text
+            assert f"阶段：{stage_name}，结束时间：" in timing_text
 
     def test_fast_path_timing_omits_full_archive_and_image_stages(
         self,
