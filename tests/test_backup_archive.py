@@ -450,6 +450,15 @@ class BackupRawArchiveTest:
         _run_backup(thread_dir, MutableFakeClient(), mode=mode)
 
         assert (thread_dir / "archive.sqlite3").is_file()
+        store = ThreadArchiveStore(thread_dir)
+        processing_snapshot = store.read_backup_processing_snapshot()
+        manifest = store.read_image_reference_manifest()
+        assert manifest is not None
+        assert processing_snapshot.image_state is not None
+        assert manifest.state.processed_archive_revision == (
+            processing_snapshot.image_state.processed_archive_revision
+        )
+        assert [post.lou for post in manifest.posts] == [1, 2]
         assert not (thread_dir / "html_modified").exists()
         assert not (thread_dir / "backup_state.json").exists()
         assert not (thread_dir / "floor_map.json").exists()
@@ -1479,10 +1488,14 @@ def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(
         },
     }
 
-    assert store.upsert_recovered_posts({2: recovered}) == 1
-    assert store.upsert_recovered_posts({2: recovered}) == 0
+    first_recovery = store.upsert_recovered_posts({2: recovered})
+    repeated_recovery = store.upsert_recovered_posts({2: recovered})
     rows = store.read_effective_post_rows({2})
 
+    assert first_recovery.inserted_count == 1
+    assert first_recovery.effective_changed_lous == frozenset({2})
+    assert repeated_recovery.inserted_count == 0
+    assert repeated_recovery.effective_changed_lous == frozenset()
     assert len(rows) == 1
     assert rows[0].lou == 2
     assert rows[0].pid == 2002

@@ -58,6 +58,7 @@ from nga_tools.backup.processing_state import (
     IMAGE_REFERENCE_STATE_VERSION,
     BackupProcessingSnapshot,
     FloorProcessingState,
+    ImageReferenceManifestPost,
     ImageReferenceState,
 )
 from nga_tools.console import (
@@ -81,6 +82,12 @@ class FloorMapProcessingResult:
 class _RecordProcessingResult:
     records: list[PostRecord]
     unresolved_missing_lous: list[int]
+
+
+@dataclass(frozen=True)
+class _ImageRecordProcessingResult:
+    download_summary: ImageDownloadOutcome
+    manifest_posts: tuple[ImageReferenceManifestPost, ...]
 
 
 ProcessingStateReuseReason = Literal[
@@ -251,11 +258,14 @@ def _records_with_recovered_and_missing_posts(
     missing_lous: list[int],
     records: list[PostRecord],
 ) -> _RecordProcessingResult:
-    recovered_count = archive_store.upsert_recovered_posts(
+    recovered_result = archive_store.upsert_recovered_posts(
         floor_map_result.recovered_missing_posts_by_author_lou
     )
-    record_timing_metric("本次恢复缺失楼数", recovered_count)
-    archive_reread_required = recovered_count > 0
+    record_timing_metric(
+        "本次恢复缺失楼数",
+        recovered_result.inserted_count,
+    )
+    archive_reread_required = bool(recovered_result.effective_changed_lous)
     record_timing_metric(
         "恢复正文写入引发归档重读",
         int(archive_reread_required),
@@ -281,7 +291,7 @@ def _download_images_for_records(
     archive_store: ThreadArchiveStore,
     floor_labels: FloorLabels,
     records: list[PostRecord],
-) -> ImageDownloadOutcome:
+) -> _ImageRecordProcessingResult:
     with time_section("Overlay应用"):
         effective_records = _apply_post_overlays_to_records(
             archive_store.read_post_overlays(),
@@ -293,7 +303,10 @@ def _download_images_for_records(
         effective_records,
         floor_labels,
     )
-    return _download_images(tid, aid, collection.tasks)
+    return _ImageRecordProcessingResult(
+        download_summary=_download_images(tid, aid, collection.tasks),
+        manifest_posts=collection.manifest_posts,
+    )
 
 
 def _failed_image_urls(download_summary: ImageDownloadOutcome) -> set[str]:
@@ -385,10 +398,13 @@ def _refresh_author_floor_state(
         post_refs,
         missing_lous,
     )
-    recovered_count = archive_store.upsert_recovered_posts(
+    recovered_result = archive_store.upsert_recovered_posts(
         floor_processing.build_result.recovered_missing_posts_by_author_lou
     )
-    record_timing_metric("本次恢复缺失楼数", recovered_count)
+    record_timing_metric(
+        "本次恢复缺失楼数",
+        recovered_result.inserted_count,
+    )
     if not floor_processing.cacheable:
         return False, expected_snapshot
     snapshot = archive_store.read_backup_processing_snapshot()
@@ -429,7 +445,7 @@ def _rebuild_image_reference_state(
                     f"无法加载楼层映射，使用普通楼层标签：{error}",
                 )
                 floor_labels = FloorLabels.plain()
-        download_summary = _download_images_for_records(
+        image_processing = _download_images_for_records(
             tid,
             aid,
             archive_store,
@@ -456,7 +472,8 @@ def _rebuild_image_reference_state(
     )
     return archive_store.commit_image_reference_state(
         state,
-        _failed_image_urls(download_summary),
+        _failed_image_urls(image_processing.download_summary),
+        manifest_posts=image_processing.manifest_posts,
     )
 
 
@@ -588,6 +605,7 @@ def _commit_completed_processing_state(
     unresolved_missing_lous: list[int],
     fingerprints_before: tuple[str, str],
     download_summary: ImageDownloadOutcome,
+    manifest_posts: tuple[ImageReferenceManifestPost, ...],
 ) -> None:
     pending_image_urls = _failed_image_urls(download_summary)
     record_timing_metric("待重试图片URL数", len(pending_image_urls))
@@ -623,6 +641,7 @@ def _commit_completed_processing_state(
     image_committed = archive_store.commit_image_reference_state(
         image_state,
         pending_image_urls,
+        manifest_posts=manifest_posts,
     )
     if not floor_committed or not image_committed:
         report_warning(
@@ -682,7 +701,7 @@ def _run_full_processing(
             )
 
     with time_section("正文解析与图片处理"):
-        download_summary = _download_images_for_records(
+        image_processing = _download_images_for_records(
             tid,
             aid,
             archive_store,
@@ -699,7 +718,8 @@ def _run_full_processing(
         floor_map_processing=floor_map_processing,
         unresolved_missing_lous=record_processing.unresolved_missing_lous,
         fingerprints_before=fingerprints_before,
-        download_summary=download_summary,
+        download_summary=image_processing.download_summary,
+        manifest_posts=image_processing.manifest_posts,
     )
 
 
@@ -709,6 +729,10 @@ def _record_archive_upsert_metrics(result: ArchivePagesUpsertResult) -> None:
     record_timing_metric("归档新增帖子版本数", result.post_versions_inserted)
     record_timing_metric("归档写入楼层观测数", result.post_observations)
     record_timing_metric("归档有效变更页数", result.effective_changed_pages)
+    record_timing_metric(
+        "归档有效变更楼层数",
+        len(result.effective_changed_lous),
+    )
 
 
 def _reuse_processing_state_after_page_refresh(

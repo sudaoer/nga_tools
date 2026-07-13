@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import json
 import sqlite3
+from collections import Counter
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,9 +33,14 @@ from nga_tools.backup.post_version_selection import (
     load_selections,
 )
 from nga_tools.backup.processing_state import (
+    IMAGE_REFERENCE_MANIFEST_VERSION,
     ArchiveChangeState,
     BackupProcessingSnapshot,
     FloorProcessingState,
+    ImageReferenceManifestEntry,
+    ImageReferenceManifestPost,
+    ImageReferenceManifestSnapshot,
+    ImageReferenceManifestState,
     ImageReferenceState,
 )
 from nga_tools.core.hashing import hash_text
@@ -56,6 +62,10 @@ _BACKUP_PROCESSING_TABLES = frozenset(
         "archive_change_state",
         "backup_floor_processing_state",
         "backup_image_reference_state",
+        "backup_image_reference_manifest_state",
+        "backup_image_reference_manifest_posts",
+        "backup_image_reference_manifest_entries",
+        "backup_image_reference_manifest_urls",
         "backup_pending_images",
     }
 )
@@ -144,6 +154,7 @@ class ArchivePageUpsertResult:
     post_versions_inserted: int
     post_observations: int
     effective_processing_inputs_changed: bool
+    effective_changed_lous: frozenset[int]
 
 
 @dataclass(frozen=True)
@@ -154,6 +165,13 @@ class ArchivePagesUpsertResult:
     post_observations: int
     effective_processing_inputs_changed: bool
     effective_changed_pages: int
+    effective_changed_lous: frozenset[int]
+
+
+@dataclass(frozen=True)
+class RecoveredPostsUpsertResult:
+    inserted_count: int
+    effective_changed_lous: frozenset[int]
 
 
 @dataclass(frozen=True)
@@ -632,6 +650,49 @@ class ThreadArchiveStore:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS backup_image_reference_manifest_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                format_version INTEGER NOT NULL,
+                processed_archive_revision INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backup_image_reference_manifest_posts (
+                lou INTEGER PRIMARY KEY CHECK(lou >= 0),
+                cache_key TEXT NOT NULL CHECK(cache_key != '')
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backup_image_reference_manifest_entries (
+                lou INTEGER NOT NULL CHECK(lou >= 0),
+                image_index INTEGER NOT NULL CHECK(image_index > 0),
+                url TEXT NOT NULL CHECK(url != ''),
+                valid INTEGER NOT NULL CHECK(valid IN (0, 1)),
+                PRIMARY KEY(lou, image_index)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backup_image_reference_manifest_urls (
+                url TEXT PRIMARY KEY CHECK(url != ''),
+                reference_count INTEGER NOT NULL CHECK(reference_count > 0),
+                valid INTEGER NOT NULL CHECK(valid IN (0, 1))
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_image_reference_manifest_entries_url
+            ON backup_image_reference_manifest_entries(url)
+            """
+        )
+        connection.execute(
+            """
             INSERT INTO archive_change_state (
                 singleton,
                 archive_revision,
@@ -914,6 +975,246 @@ class ThreadArchiveStore:
             [(url,) for url in sorted(pending_image_urls)],
         )
 
+    @staticmethod
+    def _clear_image_reference_manifest(
+        connection: sqlite3.Connection,
+    ) -> None:
+        connection.execute("DELETE FROM backup_image_reference_manifest_entries")
+        connection.execute("DELETE FROM backup_image_reference_manifest_posts")
+        connection.execute("DELETE FROM backup_image_reference_manifest_urls")
+        connection.execute("DELETE FROM backup_image_reference_manifest_state")
+
+    @staticmethod
+    def _validated_image_reference_manifest_posts(
+        posts: tuple[ImageReferenceManifestPost, ...],
+    ) -> tuple[
+        tuple[ImageReferenceManifestPost, ...],
+        Counter[str],
+        dict[str, bool],
+    ]:
+        posts_by_lou: dict[int, ImageReferenceManifestPost] = {}
+        reference_counts: Counter[str] = Counter()
+        validity_by_url: dict[str, bool] = {}
+        for post in posts:
+            if type(post.lou) is not int or post.lou < 0:
+                raise ValueError(f"图片引用清单楼层无效：{post.lou!r}")
+            if not post.cache_key:
+                raise ValueError(f"图片引用清单第{post.lou}楼缓存键为空。")
+            if post.lou in posts_by_lou:
+                raise ValueError(f"图片引用清单楼层重复：{post.lou}")
+            previous_image_index = 0
+            for reference in post.references:
+                if (
+                    type(reference.image_index) is not int
+                    or reference.image_index <= previous_image_index
+                ):
+                    raise ValueError(
+                        f"图片引用清单第{post.lou}楼序号无效："
+                        f"{reference.image_index!r}"
+                    )
+                if not reference.url or type(reference.valid) is not bool:
+                    raise ValueError(
+                        f"图片引用清单第{post.lou}楼引用无效："
+                        f"{reference!r}"
+                    )
+                previous_validity = validity_by_url.setdefault(
+                    reference.url,
+                    reference.valid,
+                )
+                if previous_validity != reference.valid:
+                    raise ValueError(
+                        f"图片引用清单URL合法性冲突：{reference.url}"
+                    )
+                reference_counts[reference.url] += 1
+                previous_image_index = reference.image_index
+            posts_by_lou[post.lou] = post
+        return (
+            tuple(posts_by_lou[lou] for lou in sorted(posts_by_lou)),
+            reference_counts,
+            validity_by_url,
+        )
+
+    @classmethod
+    def _replace_image_reference_manifest(
+        cls,
+        connection: sqlite3.Connection,
+        state: ImageReferenceManifestState,
+        posts: tuple[ImageReferenceManifestPost, ...],
+    ) -> None:
+        if (
+            type(state.format_version) is not int
+            or type(state.processed_archive_revision) is not int
+            or state.processed_archive_revision < 0
+        ):
+            raise ValueError(f"图片引用清单状态无效：{state!r}")
+        ordered_posts, reference_counts, validity_by_url = (
+            cls._validated_image_reference_manifest_posts(posts)
+        )
+        cls._clear_image_reference_manifest(connection)
+        connection.execute(
+            """
+            INSERT INTO backup_image_reference_manifest_state
+            (singleton, format_version, processed_archive_revision)
+            VALUES (1, ?, ?)
+            """,
+            (state.format_version, state.processed_archive_revision),
+        )
+        connection.executemany(
+            """
+            INSERT INTO backup_image_reference_manifest_posts (lou, cache_key)
+            VALUES (?, ?)
+            """,
+            [(post.lou, post.cache_key) for post in ordered_posts],
+        )
+        connection.executemany(
+            """
+            INSERT INTO backup_image_reference_manifest_entries
+            (lou, image_index, url, valid)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (
+                    post.lou,
+                    reference.image_index,
+                    reference.url,
+                    int(reference.valid),
+                )
+                for post in ordered_posts
+                for reference in post.references
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO backup_image_reference_manifest_urls
+            (url, reference_count, valid)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (url, reference_counts[url], int(validity_by_url[url]))
+                for url in sorted(reference_counts)
+            ],
+        )
+
+    def read_image_reference_manifest(
+        self,
+    ) -> ImageReferenceManifestSnapshot | None:
+        self.require_exists()
+        with closing(self._connect_read()) as connection:
+            state_row = connection.execute(
+                """
+                SELECT format_version, processed_archive_revision
+                FROM backup_image_reference_manifest_state
+                WHERE singleton = 1
+                """
+            ).fetchone()
+            post_rows = cast(
+                list[tuple[object, object]],
+                connection.execute(
+                    """
+                    SELECT lou, cache_key
+                    FROM backup_image_reference_manifest_posts
+                    ORDER BY lou
+                    """
+                ).fetchall(),
+            )
+            entry_rows = cast(
+                list[tuple[object, object, object, object]],
+                connection.execute(
+                    """
+                    SELECT lou, image_index, url, valid
+                    FROM backup_image_reference_manifest_entries
+                    ORDER BY lou, image_index
+                    """
+                ).fetchall(),
+            )
+            url_rows = cast(
+                list[tuple[object, object, object]],
+                connection.execute(
+                    """
+                    SELECT url, reference_count, valid
+                    FROM backup_image_reference_manifest_urls
+                    ORDER BY url
+                    """
+                ).fetchall(),
+            )
+
+        if state_row is None:
+            if post_rows or entry_rows or url_rows:
+                raise ValueError("图片引用清单缺少状态行。")
+            return None
+        if (
+            len(state_row) != 2
+            or type(state_row[0]) is not int
+            or type(state_row[1]) is not int
+            or state_row[1] < 0
+        ):
+            raise ValueError(f"图片引用清单状态行无效：{state_row!r}")
+        state = ImageReferenceManifestState(state_row[0], state_row[1])
+
+        references_by_lou: dict[int, list[ImageReferenceManifestEntry]] = {}
+        cache_key_by_lou: dict[int, str] = {}
+        for lou, cache_key in post_rows:
+            if type(lou) is not int or lou < 0 or not isinstance(cache_key, str) or not cache_key:
+                raise ValueError(f"图片引用清单帖子行无效：{(lou, cache_key)!r}")
+            if lou in cache_key_by_lou:
+                raise ValueError(f"图片引用清单楼层重复：{lou}")
+            cache_key_by_lou[lou] = cache_key
+            references_by_lou[lou] = []
+        for lou, image_index, url, valid in entry_rows:
+            if (
+                type(lou) is not int
+                or lou not in references_by_lou
+                or type(image_index) is not int
+                or not isinstance(url, str)
+                or type(valid) is not int
+                or valid not in (0, 1)
+            ):
+                raise ValueError(
+                    f"图片引用清单引用行无效："
+                    f"{(lou, image_index, url, valid)!r}"
+                )
+            references_by_lou[lou].append(
+                ImageReferenceManifestEntry(image_index, url, bool(valid))
+            )
+        posts = tuple(
+            ImageReferenceManifestPost(
+                lou=lou,
+                cache_key=cache_key_by_lou[lou],
+                references=tuple(references_by_lou[lou]),
+            )
+            for lou in sorted(cache_key_by_lou)
+        )
+        ordered_posts, reference_counts, validity_by_url = (
+            self._validated_image_reference_manifest_posts(posts)
+        )
+
+        stored_url_counts: list[tuple[str, int, bool]] = []
+        for url, reference_count, valid in url_rows:
+            if (
+                not isinstance(url, str)
+                or not url
+                or type(reference_count) is not int
+                or reference_count <= 0
+                or type(valid) is not int
+                or valid not in (0, 1)
+            ):
+                raise ValueError(
+                    f"图片引用清单URL行无效："
+                    f"{(url, reference_count, valid)!r}"
+                )
+            stored_url_counts.append((url, reference_count, bool(valid)))
+        expected_url_counts = [
+            (url, reference_counts[url], validity_by_url[url])
+            for url in sorted(reference_counts)
+        ]
+        if stored_url_counts != expected_url_counts:
+            raise ValueError("图片引用清单URL引用计数不一致。")
+        return ImageReferenceManifestSnapshot(
+            state=state,
+            posts=ordered_posts,
+            url_reference_counts=tuple(stored_url_counts),
+        )
+
     def clear_backup_processing_state(self) -> None:
         if not self.exists():
             return
@@ -922,6 +1223,7 @@ class ThreadArchiveStore:
                 connection.execute("DELETE FROM backup_pending_images")
                 connection.execute("DELETE FROM backup_floor_processing_state")
                 connection.execute("DELETE FROM backup_image_reference_state")
+                self._clear_image_reference_manifest(connection)
 
     def commit_floor_processing_state(self, state: FloorProcessingState) -> bool:
         self.require_exists()
@@ -957,6 +1259,8 @@ class ThreadArchiveStore:
         self,
         state: ImageReferenceState,
         pending_image_urls: set[str],
+        *,
+        manifest_posts: tuple[ImageReferenceManifestPost, ...] | None = None,
     ) -> bool:
         self.require_exists()
         with closing(self._connect_write()) as connection:
@@ -977,6 +1281,19 @@ class ThreadArchiveStore:
                     ),
                 )
                 self._replace_pending_images(connection, pending_image_urls)
+                if manifest_posts is None:
+                    self._clear_image_reference_manifest(connection)
+                else:
+                    self._replace_image_reference_manifest(
+                        connection,
+                        ImageReferenceManifestState(
+                            format_version=IMAGE_REFERENCE_MANIFEST_VERSION,
+                            processed_archive_revision=(
+                                state.processed_archive_revision
+                            ),
+                        ),
+                        manifest_posts,
+                    )
         return True
 
     def replace_pending_images_for_image_state(
@@ -2091,6 +2408,7 @@ class ThreadArchiveStore:
                 post_observations=0,
                 effective_processing_inputs_changed=False,
                 effective_changed_pages=0,
+                effective_changed_lous=frozenset(),
             )
 
         affected_lous_by_page = {
@@ -2187,6 +2505,7 @@ class ThreadArchiveStore:
                 bool(page_lous & changed_lous)
                 for page_lous in affected_lous_by_page.values()
             ),
+            effective_changed_lous=frozenset(changed_lous),
         )
 
     def upsert_page(
@@ -2210,6 +2529,7 @@ class ThreadArchiveStore:
             effective_processing_inputs_changed=(
                 result.effective_processing_inputs_changed
             ),
+            effective_changed_lous=result.effective_changed_lous,
         )
 
     def upsert_recovered_posts(
@@ -2217,13 +2537,14 @@ class ThreadArchiveStore:
         recovered_posts_by_author_lou: dict[int, RecoveredMissingPost],
         *,
         observed_at: str | None = None,
-    ) -> int:
+    ) -> RecoveredPostsUpsertResult:
         if not recovered_posts_by_author_lou:
-            return 0
+            return RecoveredPostsUpsertResult(0, frozenset())
 
         observed_at = _now_utc_iso() if observed_at is None else observed_at
         inserted_count = 0
         affected_lous = set(recovered_posts_by_author_lou)
+        changed_lous: set[int] = set()
         with closing(self._connect_write()) as connection:
             with connection:
                 inputs_before = self._read_effective_processing_inputs(
@@ -2266,9 +2587,17 @@ class ThreadArchiveStore:
                     connection,
                     affected_lous,
                 )
-                if inputs_before != inputs_after:
+                changed_lous = {
+                    lou
+                    for lou in affected_lous
+                    if inputs_before.get(lou) != inputs_after.get(lou)
+                }
+                if changed_lous:
                     self._increment_archive_revision(connection)
-        return inserted_count
+        return RecoveredPostsUpsertResult(
+            inserted_count,
+            frozenset(changed_lous),
+        )
 
     def refresh_stored_word_counts(self) -> int:
         self.require_exists()

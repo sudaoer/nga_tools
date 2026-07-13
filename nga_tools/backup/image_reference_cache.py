@@ -19,6 +19,10 @@ from nga_tools.backup.image_pipeline import (
 )
 from nga_tools.backup.image_store import ImageDownloadTask
 from nga_tools.backup.models import PostRecord
+from nga_tools.backup.processing_state import (
+    ImageReferenceManifestEntry,
+    ImageReferenceManifestPost,
+)
 from nga_tools.backup.post_html import load_post_htmls_for_records
 from nga_tools.console import WarningCategory, report_warning
 from nga_tools.core.hashing import hash_object, hash_text
@@ -31,6 +35,7 @@ IMAGE_REFERENCE_EXTRACTOR_VERSION = 1
 @dataclass(frozen=True)
 class ImageReferenceCollectionResult:
     tasks: list[ImageDownloadTask]
+    manifest_posts: tuple[ImageReferenceManifestPost, ...]
     record_count: int
     cache_hit_count: int
     cache_miss_count: int
@@ -297,6 +302,21 @@ def collect_image_download_tasks_for_records(
     record_timing_metric("图片引用缓存未命中记录数", cache_miss_count)
     return ImageReferenceCollectionResult(
         tasks=tasks,
+        manifest_posts=tuple(
+            ImageReferenceManifestPost(
+                lou=target.record["lou"],
+                cache_key=target.cache_key,
+                references=tuple(
+                    ImageReferenceManifestEntry(
+                        image_index=reference.image_index,
+                        url=reference.url,
+                        valid=reference.valid,
+                    )
+                    for reference in references_by_key[target.cache_key]
+                ),
+            )
+            for target in targets
+        ),
         record_count=len(records),
         cache_hit_count=cache_hit_count,
         cache_miss_count=cache_miss_count,

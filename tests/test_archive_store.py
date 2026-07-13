@@ -20,7 +20,12 @@ from nga_tools.backup.floor_models import (
 )
 from nga_tools.backup.post_version_selection import write_selections
 from nga_tools.backup.processing_state import (
+    IMAGE_REFERENCE_MANIFEST_VERSION,
     FloorProcessingState,
+    ImageReferenceManifestEntry,
+    ImageReferenceManifestPost,
+    ImageReferenceManifestSnapshot,
+    ImageReferenceManifestState,
     ImageReferenceState,
 )
 from nga_tools.core.hashing import hash_text
@@ -245,9 +250,11 @@ class ThreadArchiveStoreTest:
         assert first.post_versions_inserted == 2
         assert first.post_observations == 2
         assert first.effective_changed_pages == 2
+        assert first.effective_changed_lous == frozenset({1, 2})
         assert repeated.page_snapshots_inserted == 0
         assert repeated.post_versions_inserted == 0
         assert repeated.effective_changed_pages == 0
+        assert repeated.effective_changed_lous == frozenset()
         assert after_first.archive_revision == 1
         assert after_repeated.archive_revision == 1
         assert [record["lou"] for record in records] == [1, 2]
@@ -1027,13 +1034,45 @@ class ThreadArchiveStoreTest:
             )
 
             assert store.commit_floor_processing_state(floor_state)
+            manifest_posts = (
+                ImageReferenceManifestPost(
+                    lou=1,
+                    cache_key="cache-1",
+                    references=(
+                        ImageReferenceManifestEntry(
+                            image_index=1,
+                            url=(
+                                "https://img.nga.178.com/attachments/"
+                                "mon_202607/11/manifest-a.png"
+                            ),
+                            valid=True,
+                        ),
+                        ImageReferenceManifestEntry(
+                            image_index=2,
+                            url=(
+                                "https://img.nga.178.com/attachments/"
+                                "mon_202607/11/manifest-b.png"
+                            ),
+                            valid=True,
+                        ),
+                    ),
+                ),
+                ImageReferenceManifestPost(
+                    lou=2,
+                    cache_key="cache-2",
+                    references=(),
+                ),
+            )
             assert store.commit_image_reference_state(
                 image_state,
                 {"https://example.invalid/b.png", "https://example.invalid/a.png"},
+                manifest_posts=manifest_posts,
             )
             stored = store.read_backup_processing_snapshot()
+            stored_manifest = store.read_image_reference_manifest()
             store.clear_backup_processing_state()
             cleared = store.read_backup_processing_snapshot()
+            cleared_manifest = store.read_image_reference_manifest()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 table_names = {
                     row[0]
@@ -1045,6 +1084,10 @@ class ThreadArchiveStoreTest:
                             'archive_change_state',
                             'backup_floor_processing_state',
                             'backup_image_reference_state',
+                            'backup_image_reference_manifest_state',
+                            'backup_image_reference_manifest_posts',
+                            'backup_image_reference_manifest_entries',
+                            'backup_image_reference_manifest_urls',
                             'backup_pending_images'
                         )
                         """
@@ -1053,6 +1096,29 @@ class ThreadArchiveStoreTest:
 
         assert stored.floor_state == floor_state
         assert stored.image_state == image_state
+        assert stored_manifest == ImageReferenceManifestSnapshot(
+            state=ImageReferenceManifestState(
+                format_version=IMAGE_REFERENCE_MANIFEST_VERSION,
+                processed_archive_revision=(
+                    initial.change_state.archive_revision
+                ),
+            ),
+            posts=manifest_posts,
+            url_reference_counts=(
+                (
+                    "https://img.nga.178.com/attachments/"
+                    "mon_202607/11/manifest-a.png",
+                    1,
+                    True,
+                ),
+                (
+                    "https://img.nga.178.com/attachments/"
+                    "mon_202607/11/manifest-b.png",
+                    1,
+                    True,
+                ),
+            ),
+        )
         assert stored.pending_image_urls == (
             "https://example.invalid/a.png",
             "https://example.invalid/b.png",
@@ -1060,10 +1126,15 @@ class ThreadArchiveStoreTest:
         assert cleared.floor_state is None
         assert cleared.image_state is None
         assert cleared.pending_image_urls == ()
+        assert cleared_manifest is None
         assert table_names == {
             "archive_change_state",
             "backup_floor_processing_state",
             "backup_image_reference_state",
+            "backup_image_reference_manifest_state",
+            "backup_image_reference_manifest_posts",
+            "backup_image_reference_manifest_entries",
+            "backup_image_reference_manifest_urls",
             "backup_pending_images",
         }
 
@@ -1100,6 +1171,55 @@ class ThreadArchiveStoreTest:
 
         assert snapshot.image_state == image_state
         assert legacy_rows == [("https://example.invalid/legacy.png",)]
+
+    def test_processing_snapshot_does_not_scan_manifest_rows(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            initial = store.read_backup_processing_snapshot()
+            image_state = ImageReferenceState(
+                format_version=1,
+                processed_archive_revision=initial.change_state.archive_revision,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
+                image_reference_extractor_version=1,
+                completed_at="2026-07-11T00:00:00+00:00",
+            )
+            manifest_posts = (
+                ImageReferenceManifestPost(
+                    lou=1,
+                    cache_key="cache-1",
+                    references=(
+                        ImageReferenceManifestEntry(
+                            image_index=1,
+                            url=(
+                                "https://img.nga.178.com/attachments/"
+                                "mon_202607/11/corrupt-count.png"
+                            ),
+                            valid=True,
+                        ),
+                    ),
+                ),
+            )
+            assert store.commit_image_reference_state(
+                image_state,
+                set(),
+                manifest_posts=manifest_posts,
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                connection.execute(
+                    """
+                    UPDATE backup_image_reference_manifest_urls
+                    SET reference_count = 2
+                    """
+                )
+                connection.commit()
+
+            snapshot = store.read_backup_processing_snapshot()
+            with pytest.raises(ValueError, match="URL引用计数不一致"):
+                store.read_image_reference_manifest()
+
+        assert snapshot.image_state == image_state
 
     def test_legacy_processing_state_migrates_floor_state_and_drops_table(
         self,
@@ -1257,9 +1377,13 @@ class ThreadArchiveStoreTest:
             after_author = store.read_backup_processing_snapshot().change_state
 
         assert first.effective_processing_inputs_changed
+        assert first.effective_changed_lous == frozenset({1})
         assert not repeated.effective_processing_inputs_changed
+        assert repeated.effective_changed_lous == frozenset()
         assert changed_attachments.effective_processing_inputs_changed
+        assert changed_attachments.effective_changed_lous == frozenset({1})
         assert changed_author.effective_processing_inputs_changed
+        assert changed_author.effective_changed_lous == frozenset({1})
         assert after_first.archive_revision == 1
         assert after_repeated.archive_revision == 1
         assert after_attachments.archive_revision == 2
@@ -1313,14 +1437,18 @@ class ThreadArchiveStoreTest:
                     "attches": [],
                 },
             }
-            assert store.upsert_recovered_posts({2: recovered}) == 1
+            first_recovery = store.upsert_recovered_posts({2: recovered})
             after_recovery = store.read_backup_processing_snapshot().change_state
-            assert store.upsert_recovered_posts({2: recovered}) == 0
+            repeated_recovery = store.upsert_recovered_posts({2: recovered})
             after_repeat = store.read_backup_processing_snapshot().change_state
 
         assert after_floor_map.floor_map_revision == 1
         assert after_floor_map.archive_revision == 0
+        assert first_recovery.inserted_count == 1
+        assert first_recovery.effective_changed_lous == frozenset({2})
         assert after_recovery.archive_revision == 1
+        assert repeated_recovery.inserted_count == 0
+        assert repeated_recovery.effective_changed_lous == frozenset()
         assert after_repeat.archive_revision == 1
 
     def test_processing_state_commit_rejects_stale_archive_revision(self) -> None:

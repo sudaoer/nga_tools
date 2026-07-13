@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 FLOOR_PROCESSING_STATE_VERSION = 1
 IMAGE_REFERENCE_STATE_VERSION = 1
+IMAGE_REFERENCE_MANIFEST_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,33 @@ class ImageReferenceState:
     post_version_selections_fingerprint: str
     image_reference_extractor_version: int
     completed_at: str
+
+
+@dataclass(frozen=True)
+class ImageReferenceManifestState:
+    format_version: int
+    processed_archive_revision: int
+
+
+@dataclass(frozen=True)
+class ImageReferenceManifestEntry:
+    image_index: int
+    url: str
+    valid: bool
+
+
+@dataclass(frozen=True)
+class ImageReferenceManifestPost:
+    lou: int
+    cache_key: str
+    references: tuple[ImageReferenceManifestEntry, ...]
+
+
+@dataclass(frozen=True)
+class ImageReferenceManifestSnapshot:
+    state: ImageReferenceManifestState
+    posts: tuple[ImageReferenceManifestPost, ...]
+    url_reference_counts: tuple[tuple[str, int, bool], ...]
 
 
 @dataclass(frozen=True)

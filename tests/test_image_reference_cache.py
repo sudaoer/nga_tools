@@ -72,6 +72,11 @@ def test_unchanged_records_reuse_cached_references_without_parsing(
         )
 
     assert first.tasks == [{"url": image_url}]
+    assert first.manifest_posts[0].lou == 1
+    assert first.manifest_posts[0].cache_key == image_reference_cache_key(
+        _post_record(f"[img]{image_url}[/img]")
+    )
+    assert first.manifest_posts[0].references[0].url == image_url
     assert first.cache_hit_count == 0
     assert second.tasks == [{"url": image_url}]
     assert second.cache_hit_count == 1
