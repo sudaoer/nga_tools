@@ -80,10 +80,10 @@ def _jobs_for_threads(
         ):
             fresh_thread = None
 
-        if state is None or state.full_backup_is_due(
+        if state is None or state.full_backup_schedule_decision(
             now,
             full_backup_interval_hours,
-        ):
+        ).should_run:
             jobs.append(AnkebakJob(thread_config, "full", fresh_thread))
             continue
 
@@ -161,7 +161,7 @@ def backup_auto(args: CommandArgs) -> None:
     report_info(
         f"ankebak任务选择：配置{len(thread_configs)}个，"
         f"本轮新鲜主题{len(forum_result.fresh_threads)}个；"
-        f"周期完整备份{mode_counts['full']}个，"
+        f"概率/到期完整备份{mode_counts['full']}个，"
         f"增量备份{mode_counts['sub']}个，"
         f"本地维护{mode_counts['maintenance']}个，"
         f"本地检查失败{planning_failure_count}个，"

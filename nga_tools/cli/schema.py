@@ -285,7 +285,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
     "backup": {
         "auto": {
             "handler": backup_auto,
-            "summary": "同步版面并智能选择增量或周期完整备份",
+            "summary": "同步版面并智能选择增量或概率完整备份",
             "usage": (
                 f"{PROGRAM_USAGE} backup auto [--watch-config PATH] "
                 "[--workers N] [--api-concurrency N] "
@@ -297,7 +297,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "notes": [
                 "先执行默认forum sync，再仅备份本轮变化或有本地待处理工作的帖子。",
-                "达到config.json中的ankebak_full_backup_interval_hours后执行完整备份。",
+                "完整备份按距上次成功时间递增的稳定概率选择，"
+                "达到config.json中的ankebak_full_backup_interval_hours后必定执行。",
                 "首次启用时，缺少ankebak状态的帖子会立即执行完整备份。",
             ],
             "args": [

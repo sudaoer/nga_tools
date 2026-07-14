@@ -49,8 +49,8 @@ Copy-Item secrets.example.json secrets.json
 }
 ```
 
-`ankebak_full_backup_interval_hours` 控制智能备份执行周期性
-`backup all` 的间隔，单位为小时，默认 168 小时（7 天），必须大于 0。
+`ankebak_full_backup_interval_hours` 控制智能备份执行 `backup all` 的
+最长等待时间，单位为小时，默认 168 小时（7 天），必须大于 0。
 `backup_image_retry_max_interval_hours` 控制长期失败图片的最长重试等待时间，
 单位为小时，默认 168 小时（7 天），必须大于 0。
 
@@ -159,8 +159,9 @@ pixi run ankebak
 `forum sync`，再用本轮实际抓到的主题列表与上次成功备份水位比较。
 `replies` 和 `lastpost` 均未变化且没有本地待重试工作的帖子会跳过；发生变化
 时执行增量备份。只看作者帖若 `vrows` 和分页数也未变化，只校验第一页并处理
-待重试图片、缺失楼或本地派生输入，不再刷新尾页。达到
-`ankebak_full_backup_interval_hours` 后执行 `backup all`，以发现日常增量路径
+本轮应重试的图片、缺失楼或本地派生输入，不再刷新尾页。周期完整备份依据距
+上次成功 `backup all` 的时间使用稳定的 `x^3` 累计概率选择，频繁运行不会重复
+抽签；达到 `ankebak_full_backup_interval_hours` 后必定执行，以发现日常增量路径
 无法覆盖的旧页编辑。首次启用时所有尚无 ankebak 成功水位的帖子会立即完整
 备份。成功水位保存在 `output/forum_threads.sqlite3` 的
 `ankebak_thread_state` 表中，单帖失败不会推进水位。

@@ -83,14 +83,24 @@ class AnkebakStateStoreTest:
         assert state.last_backup_success_at == completed_at
         assert state.last_full_backup_success_at == completed_at
         assert state.forum_signature_matches(_forum_thread())
-        assert not state.full_backup_is_due(
-            completed_at + timedelta(hours=167),
+        waiting = state.full_backup_schedule_decision(
+            completed_at + timedelta(hours=84),
             168,
         )
-        assert state.full_backup_is_due(
+        probabilistic = state.full_backup_schedule_decision(
+            completed_at + timedelta(hours=120),
+            168,
+        )
+        deadline = state.full_backup_schedule_decision(
             completed_at + timedelta(hours=168),
             168,
         )
+        assert not waiting.should_run
+        assert waiting.cumulative_probability == 0.125
+        assert probabilistic.should_run
+        assert probabilistic.reason == "probability"
+        assert deadline.should_run
+        assert deadline.reason == "deadline"
 
     def test_incremental_success_preserves_full_timestamp(self, tmp_path: Path) -> None:
         store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")
@@ -116,6 +126,26 @@ class AnkebakStateStoreTest:
         assert state.last_full_backup_success_at == first
         assert state.forum_replies == 101
         assert state.forum_lastpost == 3000
+
+    def test_state_without_full_success_runs_full_immediately(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")
+        completed_at = datetime(2026, 7, 11, tzinfo=timezone.utc)
+        store.record_success(
+            tid=101,
+            aid=201,
+            forum_thread=_forum_thread(),
+            completed_at=completed_at,
+            full_backup=False,
+        )
+
+        state = store.load_states()[ankebak_target_key(101, 201)]
+        decision = state.full_backup_schedule_decision(completed_at, 168)
+
+        assert decision.should_run
+        assert decision.reason == "missing_timestamp"
 
 
 class AnkebakJobSelectionTest:
@@ -161,6 +191,31 @@ class AnkebakJobSelectionTest:
 
         assert jobs == []
         assert skipped == 1
+
+    def test_unchanged_signature_can_run_full_before_deadline(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")
+        completed_at = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)
+        store.record_success(
+            tid=101,
+            aid=201,
+            forum_thread=_forum_thread(),
+            completed_at=completed_at,
+            full_backup=True,
+        )
+
+        jobs, skipped = _jobs_for_threads(
+            [_thread_config()],
+            (_forum_thread(),),
+            store.load_states(),
+            now=completed_at + timedelta(hours=120),
+            full_backup_interval_hours=168,
+        )
+
+        assert [job.mode for job in jobs] == ["full"]
+        assert skipped == 0
 
     def test_changed_signature_uses_incremental_backup(self, tmp_path: Path) -> None:
         store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")
@@ -249,7 +304,11 @@ def test_backup_auto_isolates_planning_failure_and_omits_success_detail(
     tmp_path: Path,
 ) -> None:
     store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")
-    completed_at = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    completed_at = datetime.fromisoformat(
+        (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(
+            timespec="milliseconds"
+        )
+    )
     bad_config = _thread_config(tid=101, aid=201)
     good_config = _thread_config(tid=102, aid=202)
     for tid, aid in ((101, 201), (102, 202)):
@@ -309,6 +368,7 @@ def test_backup_auto_isolates_planning_failure_and_omits_success_detail(
     assert states[ankebak_target_key(101, 201)].last_backup_success_at == completed_at
     assert states[ankebak_target_key(102, 202)].last_backup_success_at > completed_at
     output_text = output.getvalue()
+    assert "概率/到期完整备份0个" in output_text
     assert "本地检查失败1个" in output_text
     assert "本地维护完成：" not in output_text
     assert "批量ankebak完成：成功1个，失败1个。" in output_text

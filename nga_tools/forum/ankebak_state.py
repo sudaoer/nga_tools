@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from nga_tools.core.retry_schedule import (
+    RetryScheduleDecision,
+    retry_schedule_decision,
+)
 from nga_tools.core.sqlite import SQLITE_BUSY_TIMEOUT_SECONDS, configure_connection
 from nga_tools.forum.thread_store import forum_thread_db_path
 from nga_tools.ngaclient.client import ForumThread
@@ -27,11 +31,17 @@ class AnkebakThreadState:
             and self.forum_lastpost == thread["lastpost"]
         )
 
-    def full_backup_is_due(self, now: datetime, interval_hours: int) -> bool:
-        if self.last_full_backup_success_at is None:
-            return True
-        return now - self.last_full_backup_success_at >= timedelta(
-            hours=interval_hours
+    def full_backup_schedule_decision(
+        self,
+        now: datetime,
+        interval_hours: int,
+    ) -> RetryScheduleDecision:
+        return retry_schedule_decision(
+            namespace="ankebak-full-backup",
+            target_key=self.target_key,
+            last_event_at=self.last_full_backup_success_at,
+            now=now,
+            max_interval=timedelta(hours=interval_hours),
         )
 
 
