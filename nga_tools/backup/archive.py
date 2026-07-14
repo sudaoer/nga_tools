@@ -29,8 +29,12 @@ from nga_tools.backup.floor_models import (
     PAGE_JSON_RE,
 )
 from nga_tools.backup.image_pipeline import (
-    ImageDownloadOutcome,
     download_images_compact as _download_images,
+)
+from nga_tools.backup.image_retry import (
+    ImageRetrySelection,
+    pending_image_retries_after_attempt,
+    select_image_retries,
 )
 from nga_tools.backup.image_reference_cache import (
     IMAGE_REFERENCE_EXTRACTOR_VERSION,
@@ -90,8 +94,13 @@ class _RecordProcessingResult:
 
 @dataclass(frozen=True)
 class _ImageRecordProcessingResult:
-    download_summary: ImageDownloadOutcome
+    pending_image_retries: tuple[PendingImageRetry, ...]
     manifest_posts: tuple[ImageReferenceManifestPost, ...]
+
+
+@dataclass(frozen=True)
+class _ScheduledImageDownloadResult:
+    pending_image_retries: tuple[PendingImageRetry, ...]
 
 
 @dataclass(frozen=True)
@@ -316,12 +325,74 @@ def _records_with_recovered_and_missing_posts(
     return _RecordProcessingResult(records, unresolved_missing_lous)
 
 
+def _thread_retry_target_key(tid: int, aid: Optional[int]) -> str:
+    return f"{tid}:{'all' if aid is None else aid}"
+
+
+def _select_pending_image_retries(
+    tid: int,
+    aid: Optional[int],
+    retries: tuple[PendingImageRetry, ...],
+    *,
+    now: datetime.datetime,
+    force: bool,
+) -> ImageRetrySelection:
+    return select_image_retries(
+        retries,
+        thread_target_key=_thread_retry_target_key(tid, aid),
+        now=now,
+        max_interval=datetime.timedelta(
+            hours=utils.get_config().backup_image_retry_max_interval_hours
+        ),
+        force=force,
+    )
+
+
+def _download_images_with_retry_policy(
+    tid: int,
+    aid: Optional[int],
+    tasks: list[ImageDownloadTask],
+    pending_image_retries: tuple[PendingImageRetry, ...],
+    *,
+    force: bool,
+) -> _ScheduledImageDownloadResult:
+    attempted_at = datetime.datetime.now(datetime.timezone.utc)
+    selection = _select_pending_image_retries(
+        tid,
+        aid,
+        pending_image_retries,
+        now=attempted_at,
+        force=force,
+    )
+    pending_urls = {retry.url for retry in pending_image_retries}
+    due_urls = {retry.url for retry in selection.due}
+    selected_tasks = [
+        task
+        for task in tasks
+        if task["url"] not in pending_urls or task["url"] in due_urls
+    ]
+    record_timing_metric("历史待重试图片URL数", len(pending_image_retries))
+    record_timing_metric("本次重试图片URL数", len(selection.due))
+    record_timing_metric("概率延后图片URL数", len(selection.deferred))
+    download_summary = _download_images(tid, aid, selected_tasks)
+    retries_after = pending_image_retries_after_attempt(
+        selection.deferred,
+        download_summary.failed,
+        attempted_at=attempted_at,
+    )
+    record_timing_metric("待重试图片URL数", len(retries_after))
+    return _ScheduledImageDownloadResult(retries_after)
+
+
 def _download_images_for_records(
     tid: int,
     aid: Optional[int],
     archive_store: ThreadArchiveStore,
     floor_labels: FloorLabels,
     records: list[PostRecord],
+    pending_image_retries: tuple[PendingImageRetry, ...],
+    *,
+    force_image_retries: bool,
 ) -> _ImageRecordProcessingResult:
     with time_section("Overlay应用"):
         effective_records = _apply_post_overlays_to_records(
@@ -334,26 +405,23 @@ def _download_images_for_records(
         effective_records,
         floor_labels,
     )
+    current_urls = {task["url"] for task in collection.tasks}
+    retained_pending = tuple(
+        retry
+        for retry in pending_image_retries
+        if retry.url in current_urls
+    )
+    download_result = _download_images_with_retry_policy(
+        tid,
+        aid,
+        collection.tasks,
+        retained_pending,
+        force=force_image_retries,
+    )
     return _ImageRecordProcessingResult(
-        download_summary=_download_images(tid, aid, collection.tasks),
+        pending_image_retries=download_result.pending_image_retries,
         manifest_posts=collection.manifest_posts,
     )
-
-
-def _failed_image_retries(
-    download_summary: ImageDownloadOutcome,
-) -> tuple[PendingImageRetry, ...]:
-    attempted_at = datetime.datetime.now(datetime.timezone.utc)
-    retries_by_url = {
-        item["url"]: PendingImageRetry(
-            url=item["url"],
-            last_attempt_at=attempted_at,
-            failure_kind=item.get("failure_kind", "unexpected_download"),
-            http_status=item.get("http_status"),
-        )
-        for item in download_summary.failed
-    }
-    return tuple(retries_by_url[url] for url in sorted(retries_by_url))
 
 
 def _new_floor_state(
@@ -498,6 +566,7 @@ def _rebuild_image_reference_state(
     *,
     post_overlays_hash: str,
     post_version_selections_hash: str,
+    pending_image_retries: tuple[PendingImageRetry, ...],
 ) -> bool:
     with time_section("图片引用集合重建"):
         records = archive_store.read_effective_post_records()
@@ -518,6 +587,8 @@ def _rebuild_image_reference_state(
             archive_store,
             floor_labels,
             records,
+            pending_image_retries,
+            force_image_retries=False,
         )
     fingerprints_after = (
         archive_store.post_overlays_fingerprint(),
@@ -539,7 +610,7 @@ def _rebuild_image_reference_state(
     )
     return archive_store.commit_image_reference_state(
         state,
-        _failed_image_retries(image_processing.download_summary),
+        image_processing.pending_image_retries,
         manifest_posts=image_processing.manifest_posts,
     )
 
@@ -673,15 +744,15 @@ def _try_incremental_image_reference_update(
                 manifest_counts, manifest_validity = _manifest_reference_summary(
                     collection.manifest_posts
                 )
-                retained_pending = {
-                    retry.url
+                retained_pending = tuple(
+                    retry
                     for retry in snapshot.pending_image_retries
                     if manifest_counts[retry.url] > 0
                     and manifest_validity.get(retry.url, False)
-                }
+                )
                 candidate_urls = {
                     task["url"] for task in collection.tasks
-                } | retained_pending
+                } | {retry.url for retry in retained_pending}
                 record_timing_metric(
                     "图片引用增量楼层数",
                     len(changes.changed_lous),
@@ -701,10 +772,12 @@ def _try_incremental_image_reference_update(
                     "图片增量候选URL数",
                     len(candidate_urls),
                 )
-                download_summary = _download_images(
+                download_result = _download_images_with_retry_policy(
                     tid,
                     aid,
                     _image_tasks_for_urls(candidate_urls),
+                    retained_pending,
+                    force=False,
                 )
             fingerprints_after = (
                 archive_store.post_overlays_fingerprint(),
@@ -725,7 +798,7 @@ def _try_incremental_image_reference_update(
             if not archive_store.commit_bootstrapped_image_reference_state(
                 expected_image_state,
                 new_state,
-                _failed_image_retries(download_summary),
+                download_result.pending_image_retries,
                 collection.manifest_posts,
             ):
                 return None
@@ -829,13 +902,15 @@ def _try_incremental_image_reference_update(
                 for url in new_counts
                 if url not in stored_counts and new_validity[url]
             }
-            retained_pending = {
-                retry.url
+            retained_pending = tuple(
+                retry
                 for retry in snapshot.pending_image_retries
                 if updated_reference_count(retry.url) > 0
                 and validity_by_url.get(retry.url, False)
+            )
+            candidate_urls = newly_referenced_urls | {
+                retry.url for retry in retained_pending
             }
-            candidate_urls = newly_referenced_urls | retained_pending
             record_timing_metric(
                 "图片引用增量楼层数",
                 len(changes.changed_lous),
@@ -848,10 +923,12 @@ def _try_incremental_image_reference_update(
                 "图片增量候选URL数",
                 len(candidate_urls),
             )
-            download_summary = _download_images(
+            download_result = _download_images_with_retry_policy(
                 tid,
                 aid,
                 _image_tasks_for_urls(candidate_urls),
+                retained_pending,
+                force=False,
             )
 
         fingerprints_after = (
@@ -873,7 +950,7 @@ def _try_incremental_image_reference_update(
         if not archive_store.commit_incremental_image_reference_state(
             expected_image_state,
             new_state,
-            _failed_image_retries(download_summary),
+            download_result.pending_image_retries,
             new_posts,
         ):
             return None
@@ -1019,6 +1096,7 @@ def _try_processing_state_reuse(
             archive_store,
             post_overlays_hash=post_overlays_hash,
             post_version_selections_hash=post_version_selections_hash,
+            pending_image_retries=snapshot.pending_image_retries,
         ):
             return ProcessingStateReuseResult(False, "archive_changed")
         return ProcessingStateReuseResult(True, "hit")
@@ -1029,18 +1107,20 @@ def _try_processing_state_reuse(
     )
     record_timing_label("图片引用处理模式", "hit")
     report_info("归档与派生输入未变化，跳过完整处理。")
-    record_timing_metric(
-        "待重试图片URL数",
-        len(snapshot.pending_image_retries),
-    )
     pending_tasks: list[ImageDownloadTask] = [
         {"url": retry.url} for retry in snapshot.pending_image_retries
     ]
     with time_section("未完成图片重试"):
-        download_summary = _download_images(tid, aid, pending_tasks)
+        download_result = _download_images_with_retry_policy(
+            tid,
+            aid,
+            pending_tasks,
+            snapshot.pending_image_retries,
+            force=False,
+        )
     if archive_store.replace_pending_images_for_image_state(
         snapshot.image_state,
-        _failed_image_retries(download_summary),
+        download_result.pending_image_retries,
     ):
         return ProcessingStateReuseResult(True, "hit")
 
@@ -1061,11 +1141,9 @@ def _commit_completed_processing_state(
     floor_map_processing: FloorMapProcessingResult,
     unresolved_missing_lous: list[int],
     fingerprints_before: tuple[str, str],
-    download_summary: ImageDownloadOutcome,
+    pending_image_retries: tuple[PendingImageRetry, ...],
     manifest_posts: tuple[ImageReferenceManifestPost, ...],
 ) -> None:
-    pending_image_retries = _failed_image_retries(download_summary)
-    record_timing_metric("待重试图片URL数", len(pending_image_retries))
     if aid is not None and not floor_map_processing.cacheable:
         report_info("楼层映射本次未形成可复用状态，下次继续完整处理。")
         return
@@ -1121,6 +1199,7 @@ def _run_full_processing(
     *,
     page_count: int,
     author_total_lou_count: int | None,
+    force_image_retries: bool,
 ) -> None:
     record_timing_label("图片引用处理模式", "full")
     fingerprints_before = (
@@ -1159,12 +1238,15 @@ def _run_full_processing(
             )
 
     with time_section("正文解析与图片处理"):
+        processing_snapshot = archive_store.read_backup_processing_snapshot()
         image_processing = _download_images_for_records(
             tid,
             aid,
             archive_store,
             floor_map_processing.build_result.floor_labels,
             record_processing.records,
+            processing_snapshot.pending_image_retries,
+            force_image_retries=force_image_retries,
         )
 
     _commit_completed_processing_state(
@@ -1176,7 +1258,7 @@ def _run_full_processing(
         floor_map_processing=floor_map_processing,
         unresolved_missing_lous=record_processing.unresolved_missing_lous,
         fingerprints_before=fingerprints_before,
-        download_summary=image_processing.download_summary,
+        pending_image_retries=image_processing.pending_image_retries,
         manifest_posts=image_processing.manifest_posts,
     )
 
@@ -1264,12 +1346,18 @@ def backup_local_work_kind(
         post_overlays_hash=archive_store.post_overlays_fingerprint(),
         post_version_selections_hash=selections_fingerprint(thread_folder),
     )
-    if (
-        not floor_current
-        or not image_current
-        or snapshot.pending_image_retries
-    ):
+    if not floor_current or not image_current:
         return "maintenance"
+    if snapshot.pending_image_retries:
+        retry_selection = _select_pending_image_retries(
+            tid,
+            aid,
+            snapshot.pending_image_retries,
+            now=datetime.datetime.now(datetime.timezone.utc),
+            force=False,
+        )
+        if retry_selection.due:
+            return "maintenance"
     if aid is not None and read_unresolved_missing_author_lous_from_archive(
         archive_store,
         total_lou_count=author_total_lou_count,
@@ -1336,6 +1424,7 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
         aid,
         page_count=pagination.page_count,
         author_total_lou_count=author_total_lou_count,
+        force_image_retries=False,
     )
 
 
@@ -1430,6 +1519,7 @@ def backup_thread(
         aid,
         page_count=page_count,
         author_total_lou_count=author_total_lou_count,
+        force_image_retries=force_processing,
     )
 
 
@@ -1622,4 +1712,5 @@ def backup_thread_sub(
         aid,
         page_count=page_count,
         author_total_lou_count=author_total_lou_count,
+        force_image_retries=force_processing,
     )

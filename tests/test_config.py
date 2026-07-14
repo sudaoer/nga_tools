@@ -9,6 +9,7 @@ from nga_tools.config import (
     DEFAULT_API_CONCURRENCY,
     DEFAULT_BACKUP_CONFIGS_WORKERS,
     DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS,
+    DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS,
     DEFAULT_IMAGE_CONCURRENCY,
     DEFAULT_TIMING_LOG_ENABLED,
     load_config,
@@ -74,6 +75,10 @@ class ConfigConcurrencyTest:
             app_config.ankebak_full_backup_interval_hours
             == DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS
         )
+        assert (
+            app_config.backup_image_retry_max_interval_hours
+            == DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS
+        )
 
     def test_load_config_accepts_custom_optional_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -85,6 +90,7 @@ class ConfigConcurrencyTest:
                     "backup_configs_workers": 3,
                     "timing_log_enabled": False,
                     "ankebak_full_backup_interval_hours": 36,
+                    "backup_image_retry_max_interval_hours": 72,
                 },
             )
 
@@ -95,6 +101,7 @@ class ConfigConcurrencyTest:
         assert app_config.backup_configs_workers == 3
         assert app_config.timing_log_enabled is False
         assert app_config.ankebak_full_backup_interval_hours == 36
+        assert app_config.backup_image_retry_max_interval_hours == 72
 
     @pytest.mark.parametrize(
         "config_overrides",
@@ -104,6 +111,7 @@ class ConfigConcurrencyTest:
             {"backup_configs_workers": 0},
             {"timing_log_enabled": "yes"},
             {"ankebak_full_backup_interval_hours": 0},
+            {"backup_image_retry_max_interval_hours": 0},
         ],
     )
     def test_load_config_rejects_invalid_optional_values(

@@ -40,6 +40,9 @@ def isolate_default_output_dir(
         ankebak_full_backup_interval_hours=(
             config.DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS
         ),
+        backup_image_retry_max_interval_hours=(
+            config.DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS
+        ),
     )
 
     paths._CREATED_FOLDERS.clear()

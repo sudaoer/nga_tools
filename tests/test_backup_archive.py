@@ -38,6 +38,7 @@ from nga_tools.backup.post_html import (
 from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.backup.post_version_selection import write_selections
 from nga_tools.backup.processing_state import BackupProcessingSnapshot
+from nga_tools.core.downloads import DownloadFailureKind, DownloadFileResult
 from nga_tools.ngaclient.client import NGAPageError
 from nga_tools.timing import use_timing_log
 
@@ -154,6 +155,8 @@ def _run_backup(
     parsed_lous: list[list[int]] | None = None,
     downloaded_urls: list[list[str]] | None = None,
     failed_download_urls: set[str] | None = None,
+    failed_download_kind: DownloadFailureKind = "unexpected_download",
+    failed_http_status: int | None = None,
     floor_map_cacheable: bool = True,
     aid: int | None = 456,
     full_processing_calls: list[str] | None = None,
@@ -187,11 +190,19 @@ def _run_backup(
         if download_error is not None:
             raise download_error
         failed_urls = failed_download_urls or set()
-        failed = [
-            {"url": task["url"], "save_path": "", "success": False}
-            for task in tasks
-            if task["url"] in failed_urls
-        ]
+        failed: list[DownloadFileResult] = []
+        for task in tasks:
+            if task["url"] not in failed_urls:
+                continue
+            result: DownloadFileResult = {
+                "url": task["url"],
+                "save_path": "",
+                "success": False,
+                "failure_kind": failed_download_kind,
+            }
+            if failed_http_status is not None:
+                result["http_status"] = failed_http_status
+            failed.append(result)
         return ImageDownloadOutcome(len(tasks) - len(failed), failed)
 
     def capture_full_processing(*args: object, **kwargs: object) -> None:
@@ -1049,6 +1060,175 @@ class BackupRawArchiveTest:
         assert full_processing_calls == ["full"]
         assert downloaded_urls == [[image_url], [image_url], []]
         assert after_success.pending_image_retries == ()
+
+    def test_recent_404_is_deferred_and_force_processing_retries_it(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        image_url = (
+            "https://img.nga.178.com/attachments/mon_202506/06/deferred.png"
+        )
+        thread_dir = tmp_path / "123_all"
+        client = MutableFakeClient()
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": f"[img]{image_url}[/img]"}
+        ]
+        downloaded_urls: list[list[str]] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            aid=None,
+            downloaded_urls=downloaded_urls,
+            failed_download_urls={image_url},
+            failed_download_kind="http_4xx",
+            failed_http_status=404,
+        )
+        with closing(
+            sqlite3.connect(thread_dir / "archive.sqlite3")
+        ) as connection:
+            connection.execute(
+                """
+                UPDATE backup_pending_images
+                SET last_attempt_at = '2099-01-01T00:00:00+00:00'
+                WHERE url = ?
+                """,
+                (image_url,),
+            )
+            connection.commit()
+
+        _run_backup(
+            thread_dir,
+            client,
+            aid=None,
+            downloaded_urls=downloaded_urls,
+            failed_download_urls={image_url},
+            failed_download_kind="http_4xx",
+            failed_http_status=404,
+        )
+        deferred_snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+        with patch.object(
+            archive_module.utils,
+            "get_folder",
+            side_effect=_fake_get_folder(thread_dir),
+        ):
+            local_work = backup_local_work_kind(123, None)
+
+        _run_backup(
+            thread_dir,
+            client,
+            aid=None,
+            downloaded_urls=downloaded_urls,
+            force_processing=True,
+        )
+        forced_snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+
+        assert downloaded_urls == [[image_url], [], [image_url]]
+        assert local_work is None
+        deferred_at = deferred_snapshot.pending_image_retries[0].last_attempt_at
+        assert deferred_at is not None
+        assert deferred_at.year == 2099
+        assert forced_snapshot.pending_image_retries == ()
+
+    def test_404_at_deadline_is_due_for_local_maintenance(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        image_url = (
+            "https://img.nga.178.com/attachments/mon_202506/06/due.png"
+        )
+        thread_dir = tmp_path / "123_all"
+        client = MutableFakeClient()
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": f"[img]{image_url}[/img]"}
+        ]
+        downloaded_urls: list[list[str]] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            aid=None,
+            downloaded_urls=downloaded_urls,
+            failed_download_urls={image_url},
+            failed_download_kind="http_4xx",
+            failed_http_status=404,
+        )
+        with closing(
+            sqlite3.connect(thread_dir / "archive.sqlite3")
+        ) as connection:
+            connection.execute(
+                """
+                UPDATE backup_pending_images
+                SET last_attempt_at = '2000-01-01T00:00:00+00:00'
+                WHERE url = ?
+                """,
+                (image_url,),
+            )
+            connection.commit()
+        with patch.object(
+            archive_module.utils,
+            "get_folder",
+            side_effect=_fake_get_folder(thread_dir),
+        ):
+            local_work = backup_local_work_kind(123, None)
+
+        _run_backup(
+            thread_dir,
+            client,
+            aid=None,
+            downloaded_urls=downloaded_urls,
+        )
+        snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+
+        assert local_work == "maintenance"
+        assert downloaded_urls == [[image_url], [image_url]]
+        assert snapshot.pending_image_retries == ()
+
+    def test_removed_image_reference_prunes_deferred_retry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        image_url = (
+            "https://img.nga.178.com/attachments/mon_202506/06/removed.png"
+        )
+        thread_dir = tmp_path / "123_all"
+        client = MutableFakeClient()
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": f"[img]{image_url}[/img]"}
+        ]
+        downloaded_urls: list[list[str]] = []
+        _run_backup(
+            thread_dir,
+            client,
+            aid=None,
+            downloaded_urls=downloaded_urls,
+            failed_download_urls={image_url},
+            failed_download_kind="http_4xx",
+            failed_http_status=404,
+        )
+
+        client.posts = [{"lou": 1, "pid": 1001, "content": "image removed"}]
+        _run_backup(
+            thread_dir,
+            client,
+            aid=None,
+            downloaded_urls=downloaded_urls,
+            failed_download_urls={image_url},
+            failed_download_kind="http_4xx",
+            failed_http_status=404,
+        )
+        snapshot = ThreadArchiveStore(
+            thread_dir
+        ).read_backup_processing_snapshot()
+
+        assert downloaded_urls == [[image_url], []]
+        assert snapshot.pending_image_retries == ()
 
     def test_unresolved_missing_floor_uses_fast_path_after_initial_processing(
         self,

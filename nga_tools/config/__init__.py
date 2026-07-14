@@ -20,6 +20,7 @@ DEFAULT_IMAGE_CONCURRENCY = 50
 DEFAULT_BACKUP_CONFIGS_WORKERS = 4
 DEFAULT_TIMING_LOG_ENABLED = True
 DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS = 168
+DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS = 168
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class AppConfig:
     backup_configs_workers: int
     timing_log_enabled: bool
     ankebak_full_backup_interval_hours: int
+    backup_image_retry_max_interval_hours: int
 
     @property
     def html_style(self) -> str:
@@ -325,6 +327,12 @@ def load_config(
             "ankebak_full_backup_interval_hours",
             resolved_config_path,
             DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS,
+        ),
+        backup_image_retry_max_interval_hours=_optional_positive_int(
+            config_data,
+            "backup_image_retry_max_interval_hours",
+            resolved_config_path,
+            DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS,
         ),
     )
 
