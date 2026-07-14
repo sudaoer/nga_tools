@@ -42,7 +42,9 @@ from nga_tools.backup.processing_state import (
     ImageReferenceManifestSnapshot,
     ImageReferenceManifestState,
     ImageReferenceState,
+    PendingImageRetry,
 )
+from nga_tools.core.downloads import DOWNLOAD_FAILURE_KINDS
 from nga_tools.core.hashing import hash_text
 from nga_tools.core.sqlite import (
     SQLITE_BUSY_TIMEOUT_SECONDS,
@@ -72,6 +74,9 @@ _BACKUP_PROCESSING_TABLES = frozenset(
     }
 )
 _LEGACY_BACKUP_PROCESSING_TABLE = "backup_processing_state"
+_PENDING_IMAGE_COLUMNS = frozenset(
+    {"url", "last_attempt_at", "failure_kind", "http_status"}
+)
 _LATEST_POST_INDEX = "idx_post_versions_latest_covering"
 _LEGACY_LATEST_POST_INDEX = "idx_post_versions_latest"
 _LATEST_POST_RECORDS_QUERY = """
@@ -442,6 +447,11 @@ class ThreadArchiveStore:
                 """,
                 tracked_objects,
             ).fetchall()
+            pending_image_columns = (
+                _table_columns(connection, "backup_pending_images")
+                if _table_exists(connection, "backup_pending_images")
+                else set[str]()
+            )
         table_names = {
             row[1]
             for row in rows
@@ -454,6 +464,7 @@ class ThreadArchiveStore:
         }
         if (
             _BACKUP_PROCESSING_TABLES <= table_names
+            and _PENDING_IMAGE_COLUMNS <= pending_image_columns
             and _LEGACY_BACKUP_PROCESSING_TABLE not in table_names
             and _LATEST_POST_INDEX in index_names
             and _LEGACY_LATEST_POST_INDEX not in index_names
@@ -749,10 +760,29 @@ class ThreadArchiveStore:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS backup_pending_images (
-                url TEXT PRIMARY KEY
+                url TEXT PRIMARY KEY,
+                last_attempt_at TEXT,
+                failure_kind TEXT,
+                http_status INTEGER
             )
             """
         )
+        pending_image_columns = _table_columns(
+            connection,
+            "backup_pending_images",
+        )
+        if "last_attempt_at" not in pending_image_columns:
+            connection.execute(
+                "ALTER TABLE backup_pending_images ADD COLUMN last_attempt_at TEXT"
+            )
+        if "failure_kind" not in pending_image_columns:
+            connection.execute(
+                "ALTER TABLE backup_pending_images ADD COLUMN failure_kind TEXT"
+            )
+        if "http_status" not in pending_image_columns:
+            connection.execute(
+                "ALTER TABLE backup_pending_images ADD COLUMN http_status INTEGER"
+            )
         if _table_exists(connection, _LEGACY_BACKUP_PROCESSING_TABLE):
             connection.execute(
                 """
@@ -954,9 +984,13 @@ class ThreadArchiveStore:
         with closing(self._connect_read()) as connection:
             change_state = self._read_archive_change_state(connection)
             pending_rows = cast(
-                list[tuple[object]],
+                list[tuple[object, object, object, object]],
                 connection.execute(
-                    "SELECT url FROM backup_pending_images ORDER BY url"
+                    """
+                    SELECT url, last_attempt_at, failure_kind, http_status
+                    FROM backup_pending_images
+                    ORDER BY url
+                    """
                 ).fetchall(),
             )
             floor_row = connection.execute(
@@ -978,11 +1012,61 @@ class ThreadArchiveStore:
                 FROM backup_image_reference_state WHERE singleton = 1
                 """
             ).fetchone()
-        pending_image_urls: list[str] = []
-        for (url,) in pending_rows:
+        pending_image_retries: list[PendingImageRetry] = []
+        for url, last_attempt_at, failure_kind, http_status in pending_rows:
             if not isinstance(url, str) or not url:
                 raise ValueError(f"backup待重试图片URL无效：{url!r}")
-            pending_image_urls.append(url)
+            if last_attempt_at is None:
+                if failure_kind is not None or http_status is not None:
+                    raise ValueError(
+                        f"backup待重试图片旧状态无效：{(url, failure_kind, http_status)!r}"
+                    )
+                parsed_last_attempt_at = None
+                parsed_failure_kind = None
+            else:
+                if not isinstance(last_attempt_at, str):
+                    raise ValueError(
+                        f"backup待重试图片时间无效：{last_attempt_at!r}"
+                    )
+                try:
+                    parsed_last_attempt_at = datetime.datetime.fromisoformat(
+                        last_attempt_at
+                    )
+                except ValueError as error:
+                    raise ValueError(
+                        f"backup待重试图片时间无效：{last_attempt_at!r}"
+                    ) from error
+                if (
+                    parsed_last_attempt_at.tzinfo is None
+                    or parsed_last_attempt_at.utcoffset() is None
+                ):
+                    raise ValueError(
+                        f"backup待重试图片时间缺少时区：{last_attempt_at!r}"
+                    )
+                if (
+                    not isinstance(failure_kind, str)
+                    or failure_kind not in DOWNLOAD_FAILURE_KINDS
+                ):
+                    raise ValueError(
+                        f"backup待重试图片失败类别无效：{failure_kind!r}"
+                    )
+                parsed_failure_kind = failure_kind
+            if http_status is not None and (
+                type(http_status) is not int
+                or http_status < 100
+                or http_status > 599
+            ):
+                raise ValueError(
+                    f"backup待重试图片HTTP状态无效：{http_status!r}"
+                )
+            pending_image_retries.append(
+                PendingImageRetry(
+                    url=url,
+                    last_attempt_at=parsed_last_attempt_at,
+                    failure_kind=parsed_failure_kind,
+                    http_status=http_status,
+                )
+            )
         floor_state: FloorProcessingState | None = None
         if floor_row is not None:
             if any(type(value) is not int for value in floor_row[:4] + floor_row[5:7]):
@@ -1002,7 +1086,7 @@ class ThreadArchiveStore:
             image_state = ImageReferenceState(*image_row)
         return BackupProcessingSnapshot(
             change_state=change_state,
-            pending_image_urls=tuple(pending_image_urls),
+            pending_image_retries=tuple(pending_image_retries),
             floor_state=floor_state,
             image_state=image_state,
         )
@@ -1010,14 +1094,65 @@ class ThreadArchiveStore:
     @staticmethod
     def _replace_pending_images(
         connection: sqlite3.Connection,
-        pending_image_urls: set[str],
+        pending_image_retries: tuple[PendingImageRetry, ...],
     ) -> None:
-        if any(not url for url in pending_image_urls):
-            raise ValueError("backup待重试图片URL不能为空。")
+        rows: list[tuple[str, str | None, str | None, int | None]] = []
+        seen_urls: set[str] = set()
+        for retry in sorted(pending_image_retries, key=lambda item: item.url):
+            if not retry.url:
+                raise ValueError("backup待重试图片URL不能为空。")
+            if retry.url in seen_urls:
+                raise ValueError(f"backup待重试图片URL重复：{retry.url}")
+            seen_urls.add(retry.url)
+            if retry.last_attempt_at is None:
+                if retry.failure_kind is not None or retry.http_status is not None:
+                    raise ValueError(
+                        f"backup待重试图片旧状态无效：{retry.url}"
+                    )
+                last_attempt_text = None
+            else:
+                if (
+                    retry.last_attempt_at.tzinfo is None
+                    or retry.last_attempt_at.utcoffset() is None
+                ):
+                    raise ValueError(
+                        f"backup待重试图片时间缺少时区：{retry.url}"
+                    )
+                if retry.failure_kind not in DOWNLOAD_FAILURE_KINDS:
+                    raise ValueError(
+                        f"backup待重试图片失败类别无效：{retry.failure_kind!r}"
+                    )
+                last_attempt_text = retry.last_attempt_at.astimezone(
+                    datetime.timezone.utc
+                ).isoformat(timespec="microseconds")
+            if retry.http_status is not None and (
+                type(retry.http_status) is not int
+                or retry.http_status < 100
+                or retry.http_status > 599
+            ):
+                raise ValueError(
+                    f"backup待重试图片HTTP状态无效：{retry.http_status!r}"
+                )
+            rows.append(
+                (
+                    retry.url,
+                    last_attempt_text,
+                    retry.failure_kind,
+                    retry.http_status,
+                )
+            )
         connection.execute("DELETE FROM backup_pending_images")
         connection.executemany(
-            "INSERT INTO backup_pending_images (url) VALUES (?)",
-            [(url,) for url in sorted(pending_image_urls)],
+            """
+            INSERT INTO backup_pending_images (
+                url,
+                last_attempt_at,
+                failure_kind,
+                http_status
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            rows,
         )
 
     @staticmethod
@@ -1454,7 +1589,7 @@ class ThreadArchiveStore:
     def commit_image_reference_state(
         self,
         state: ImageReferenceState,
-        pending_image_urls: set[str],
+        pending_image_retries: tuple[PendingImageRetry, ...],
         *,
         manifest_posts: tuple[ImageReferenceManifestPost, ...] | None = None,
     ) -> bool:
@@ -1465,7 +1600,7 @@ class ThreadArchiveStore:
                 if change_state.archive_revision != state.processed_archive_revision:
                     return False
                 self._replace_image_reference_state(connection, state)
-                self._replace_pending_images(connection, pending_image_urls)
+                self._replace_pending_images(connection, pending_image_retries)
                 if manifest_posts is None:
                     self._clear_image_reference_manifest(connection)
                 else:
@@ -1531,7 +1666,7 @@ class ThreadArchiveStore:
         self,
         expected_state: ImageReferenceState,
         state: ImageReferenceState,
-        pending_image_urls: set[str],
+        pending_image_retries: tuple[PendingImageRetry, ...],
         manifest_posts: tuple[ImageReferenceManifestPost, ...],
     ) -> bool:
         self.require_exists()
@@ -1568,7 +1703,7 @@ class ThreadArchiveStore:
                 if manifest_data_exists:
                     raise ValueError("图片引用清单缺少状态行。")
                 self._replace_image_reference_state(connection, state)
-                self._replace_pending_images(connection, pending_image_urls)
+                self._replace_pending_images(connection, pending_image_retries)
                 self._replace_image_reference_manifest(
                     connection,
                     ImageReferenceManifestState(
@@ -1583,7 +1718,7 @@ class ThreadArchiveStore:
         self,
         expected_state: ImageReferenceState,
         state: ImageReferenceState,
-        pending_image_urls: set[str],
+        pending_image_retries: tuple[PendingImageRetry, ...],
         changed_posts: tuple[ImageReferenceManifestPost, ...],
     ) -> bool:
         if not changed_posts:
@@ -1766,13 +1901,13 @@ class ThreadArchiveStore:
                     (state.processed_archive_revision,),
                 )
                 self._replace_image_reference_state(connection, state)
-                self._replace_pending_images(connection, pending_image_urls)
+                self._replace_pending_images(connection, pending_image_retries)
         return True
 
     def replace_pending_images_for_image_state(
         self,
         expected_state: ImageReferenceState,
-        pending_image_urls: set[str],
+        pending_image_retries: tuple[PendingImageRetry, ...],
     ) -> bool:
         self.require_exists()
         with closing(self._connect_write()) as connection:
@@ -1795,7 +1930,7 @@ class ThreadArchiveStore:
                     expected_state.completed_at,
                 ):
                     return False
-                self._replace_pending_images(connection, pending_image_urls)
+                self._replace_pending_images(connection, pending_image_retries)
         return True
 
     @staticmethod

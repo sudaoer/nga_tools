@@ -1048,7 +1048,7 @@ class BackupRawArchiveTest:
 
         assert full_processing_calls == ["full"]
         assert downloaded_urls == [[image_url], [image_url], []]
-        assert after_success.pending_image_urls == ()
+        assert after_success.pending_image_retries == ()
 
     def test_unresolved_missing_floor_uses_fast_path_after_initial_processing(
         self,
@@ -1091,7 +1091,9 @@ class BackupRawArchiveTest:
 
         assert first_snapshot.floor_state is not None
         assert first_snapshot.image_state is not None
-        assert first_snapshot.pending_image_urls == (image_url,)
+        assert tuple(
+            retry.url for retry in first_snapshot.pending_image_retries
+        ) == (image_url,)
         assert downloaded_urls == [[image_url], [image_url]]
         assert full_processing_calls == ["full"]
 
@@ -1302,7 +1304,7 @@ class BackupRawArchiveTest:
         ).read_backup_processing_snapshot()
         assert snapshot.floor_state is None
         assert snapshot.image_state is None
-        assert snapshot.pending_image_urls == ()
+        assert snapshot.pending_image_retries == ()
 
     def test_invalid_processing_state_is_treated_as_fast_path_miss(
         self,

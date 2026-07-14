@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+
+from nga_tools.core.downloads import DownloadFailureKind
 
 
 FLOOR_PROCESSING_STATE_VERSION = 1
@@ -65,8 +68,16 @@ class ImageReferenceManifestSnapshot:
 
 
 @dataclass(frozen=True)
+class PendingImageRetry:
+    url: str
+    last_attempt_at: datetime | None
+    failure_kind: DownloadFailureKind | None
+    http_status: int | None
+
+
+@dataclass(frozen=True)
 class BackupProcessingSnapshot:
     change_state: ArchiveChangeState
-    pending_image_urls: tuple[str, ...]
+    pending_image_retries: tuple[PendingImageRetry, ...]
     floor_state: FloorProcessingState | None = None
     image_state: ImageReferenceState | None = None

@@ -23,6 +23,18 @@ DownloadFailureKind = Literal[
     "unexpected_download",
     "image_store",
 ]
+DOWNLOAD_FAILURE_KINDS: frozenset[DownloadFailureKind] = frozenset(
+    {
+        "http_3xx",
+        "http_4xx",
+        "http_5xx",
+        "timeout",
+        "connection",
+        "payload",
+        "unexpected_download",
+        "image_store",
+    }
+)
 
 
 class DownloadFileResult(TypedDict):

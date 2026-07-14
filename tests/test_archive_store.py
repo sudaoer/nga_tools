@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -30,9 +31,28 @@ from nga_tools.backup.processing_state import (
     ImageReferenceManifestSnapshot,
     ImageReferenceManifestState,
     ImageReferenceState,
+    PendingImageRetry,
 )
+from nga_tools.core.downloads import DownloadFailureKind
 from nga_tools.core.hashing import hash_text
 from nga_tools.word_count import WORD_COUNT_VERSION
+
+
+_PENDING_RETRY_AT = datetime(2026, 7, 11, tzinfo=timezone.utc)
+
+
+def _pending_retry(
+    url: str,
+    *,
+    failure_kind: DownloadFailureKind = "http_4xx",
+    http_status: int | None = 404,
+) -> PendingImageRetry:
+    return PendingImageRetry(
+        url=url,
+        last_attempt_at=_PENDING_RETRY_AT,
+        failure_kind=failure_kind,
+        http_status=http_status,
+    )
 
 
 def _stored_floor_map(
@@ -1203,7 +1223,10 @@ class ThreadArchiveStoreTest:
             )
             assert store.commit_image_reference_state(
                 image_state,
-                {"https://example.invalid/b.png", "https://example.invalid/a.png"},
+                (
+                    _pending_retry("https://example.invalid/b.png"),
+                    _pending_retry("https://example.invalid/a.png"),
+                ),
                 manifest_posts=manifest_posts,
             )
             stored = store.read_backup_processing_snapshot()
@@ -1257,13 +1280,13 @@ class ThreadArchiveStoreTest:
                 ),
             ),
         )
-        assert stored.pending_image_urls == (
-            "https://example.invalid/a.png",
-            "https://example.invalid/b.png",
+        assert stored.pending_image_retries == (
+            _pending_retry("https://example.invalid/a.png"),
+            _pending_retry("https://example.invalid/b.png"),
         )
         assert cleared.floor_state is None
         assert cleared.image_state is None
-        assert cleared.pending_image_urls == ()
+        assert cleared.pending_image_retries == ()
         assert cleared_manifest is None
         assert table_names == {
             "archive_change_state",
@@ -1299,7 +1322,7 @@ class ThreadArchiveStoreTest:
                 )
                 connection.commit()
 
-            assert store.commit_image_reference_state(image_state, set())
+            assert store.commit_image_reference_state(image_state, ())
             snapshot = store.read_backup_processing_snapshot()
             store.clear_backup_processing_state()
             with closing(sqlite3.connect(store.db_path)) as connection:
@@ -1341,7 +1364,7 @@ class ThreadArchiveStoreTest:
             )
             assert store.commit_image_reference_state(
                 image_state,
-                set(),
+                (),
                 manifest_posts=manifest_posts,
             )
             with closing(sqlite3.connect(store.db_path)) as connection:
@@ -1400,7 +1423,7 @@ class ThreadArchiveStoreTest:
             )
             assert store.commit_image_reference_state(
                 old_state,
-                {old_url},
+                (_pending_retry(old_url),),
                 manifest_posts=old_posts,
             )
             store.upsert_page(
@@ -1442,14 +1465,14 @@ class ThreadArchiveStoreTest:
             assert store.commit_incremental_image_reference_state(
                 old_state,
                 new_state,
-                {new_url},
+                (_pending_retry(new_url),),
                 changed_posts,
             )
             manifest = store.read_image_reference_manifest()
             assert not store.commit_incremental_image_reference_state(
                 old_state,
                 new_state,
-                set(),
+                (),
                 changed_posts,
             )
 
@@ -1473,7 +1496,7 @@ class ThreadArchiveStoreTest:
                 image_reference_extractor_version=1,
                 completed_at="2026-07-11T00:00:00+00:00",
             )
-            assert store.commit_image_reference_state(old_state, set())
+            assert store.commit_image_reference_state(old_state, ())
             store.upsert_page(
                 1,
                 {
@@ -1497,13 +1520,13 @@ class ThreadArchiveStoreTest:
             assert store.commit_bootstrapped_image_reference_state(
                 old_state,
                 new_state,
-                set(),
+                (),
                 posts,
             )
             assert not store.commit_bootstrapped_image_reference_state(
                 old_state,
                 new_state,
-                set(),
+                (),
                 posts,
             )
             manifest = store.read_image_reference_manifest()
@@ -1561,6 +1584,48 @@ class ThreadArchiveStoreTest:
         assert snapshot.image_state is None
         assert legacy_exists is None
 
+    def test_legacy_pending_image_urls_gain_retry_metadata_columns(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            thread_folder = Path(temp_dir_name)
+            ThreadArchiveStore(thread_folder).ensure_schema()
+            db_path = thread_folder / "archive.sqlite3"
+            with closing(sqlite3.connect(db_path)) as connection:
+                connection.execute("DROP TABLE backup_pending_images")
+                connection.execute(
+                    "CREATE TABLE backup_pending_images (url TEXT PRIMARY KEY)"
+                )
+                connection.execute(
+                    "INSERT INTO backup_pending_images (url) VALUES (?)",
+                    ("https://example.invalid/legacy-retry.png",),
+                )
+                connection.commit()
+
+            store = ThreadArchiveStore(thread_folder)
+            store.ensure_backup_processing_schema()
+            snapshot = store.read_backup_processing_snapshot()
+            with closing(sqlite3.connect(db_path)) as connection:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(backup_pending_images)"
+                    )
+                }
+
+        assert columns == {
+            "url",
+            "last_attempt_at",
+            "failure_kind",
+            "http_status",
+        }
+        assert snapshot.pending_image_retries == (
+            PendingImageRetry(
+                url="https://example.invalid/legacy-retry.png",
+                last_attempt_at=None,
+                failure_kind=None,
+                http_status=None,
+            ),
+        )
+
     def test_current_processing_schema_skips_full_schema_initialization(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             thread_folder = Path(temp_dir_name)
@@ -1585,7 +1650,7 @@ class ThreadArchiveStoreTest:
                         image_reference_extractor_version=1,
                         completed_at="2026-07-11T00:00:00+00:00",
                     ),
-                    set(),
+                    (),
                 )
 
         assert committed
@@ -1770,13 +1835,13 @@ class ThreadArchiveStoreTest:
 
             committed = store.commit_image_reference_state(
                 stale_state,
-                {"https://example.invalid/stale.png"},
+                (_pending_retry("https://example.invalid/stale.png"),),
             )
             snapshot = store.read_backup_processing_snapshot()
 
         assert not committed
         assert snapshot.image_state is None
-        assert snapshot.pending_image_urls == ()
+        assert snapshot.pending_image_retries == ()
 
     def test_pending_retry_update_rejects_changed_archive(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1793,7 +1858,7 @@ class ThreadArchiveStoreTest:
             )
             assert store.commit_image_reference_state(
                 image_state,
-                {"https://example.invalid/original.png"},
+                (_pending_retry("https://example.invalid/original.png"),),
             )
             store.upsert_page(
                 1,
@@ -1805,11 +1870,11 @@ class ThreadArchiveStoreTest:
 
             replaced = store.replace_pending_images_for_image_state(
                 image_state,
-                {"https://example.invalid/replacement.png"},
+                (_pending_retry("https://example.invalid/replacement.png"),),
             )
             snapshot = store.read_backup_processing_snapshot()
 
         assert not replaced
-        assert snapshot.pending_image_urls == (
-            "https://example.invalid/original.png",
+        assert snapshot.pending_image_retries == (
+            _pending_retry("https://example.invalid/original.png"),
         )

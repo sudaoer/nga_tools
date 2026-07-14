@@ -63,6 +63,7 @@ from nga_tools.backup.processing_state import (
     FloorProcessingState,
     ImageReferenceManifestPost,
     ImageReferenceState,
+    PendingImageRetry,
 )
 from nga_tools.console import (
     WarningCategory,
@@ -339,8 +340,20 @@ def _download_images_for_records(
     )
 
 
-def _failed_image_urls(download_summary: ImageDownloadOutcome) -> set[str]:
-    return {item["url"] for item in download_summary.failed}
+def _failed_image_retries(
+    download_summary: ImageDownloadOutcome,
+) -> tuple[PendingImageRetry, ...]:
+    attempted_at = datetime.datetime.now(datetime.timezone.utc)
+    retries_by_url = {
+        item["url"]: PendingImageRetry(
+            url=item["url"],
+            last_attempt_at=attempted_at,
+            failure_kind=item.get("failure_kind", "unexpected_download"),
+            http_status=item.get("http_status"),
+        )
+        for item in download_summary.failed
+    }
+    return tuple(retries_by_url[url] for url in sorted(retries_by_url))
 
 
 def _new_floor_state(
@@ -526,7 +539,7 @@ def _rebuild_image_reference_state(
     )
     return archive_store.commit_image_reference_state(
         state,
-        _failed_image_urls(image_processing.download_summary),
+        _failed_image_retries(image_processing.download_summary),
         manifest_posts=image_processing.manifest_posts,
     )
 
@@ -661,9 +674,10 @@ def _try_incremental_image_reference_update(
                     collection.manifest_posts
                 )
                 retained_pending = {
-                    url
-                    for url in snapshot.pending_image_urls
-                    if manifest_counts[url] > 0 and manifest_validity.get(url, False)
+                    retry.url
+                    for retry in snapshot.pending_image_retries
+                    if manifest_counts[retry.url] > 0
+                    and manifest_validity.get(retry.url, False)
                 }
                 candidate_urls = {
                     task["url"] for task in collection.tasks
@@ -711,7 +725,7 @@ def _try_incremental_image_reference_update(
             if not archive_store.commit_bootstrapped_image_reference_state(
                 expected_image_state,
                 new_state,
-                _failed_image_urls(download_summary),
+                _failed_image_retries(download_summary),
                 collection.manifest_posts,
             ):
                 return None
@@ -774,7 +788,7 @@ def _try_incremental_image_reference_update(
             queried_urls = (
                 set(old_counts)
                 | set(new_counts)
-                | set(snapshot.pending_image_urls)
+                | {retry.url for retry in snapshot.pending_image_retries}
             )
             stored_counts = (
                 archive_store.read_image_reference_manifest_url_counts(
@@ -797,10 +811,10 @@ def _try_incremental_image_reference_update(
                     raise ValueError(
                         f"图片引用清单URL计数无效：{url}"
                     )
-            for url in snapshot.pending_image_urls:
-                if url not in stored_counts and url not in new_counts:
+            for retry in snapshot.pending_image_retries:
+                if retry.url not in stored_counts and retry.url not in new_counts:
                     raise ValueError(
-                        f"待重试图片URL不在引用清单中：{url}"
+                        f"待重试图片URL不在引用清单中：{retry.url}"
                     )
 
             def updated_reference_count(url: str) -> int:
@@ -816,10 +830,10 @@ def _try_incremental_image_reference_update(
                 if url not in stored_counts and new_validity[url]
             }
             retained_pending = {
-                url
-                for url in snapshot.pending_image_urls
-                if updated_reference_count(url) > 0
-                and validity_by_url.get(url, False)
+                retry.url
+                for retry in snapshot.pending_image_retries
+                if updated_reference_count(retry.url) > 0
+                and validity_by_url.get(retry.url, False)
             }
             candidate_urls = newly_referenced_urls | retained_pending
             record_timing_metric(
@@ -859,7 +873,7 @@ def _try_incremental_image_reference_update(
         if not archive_store.commit_incremental_image_reference_state(
             expected_image_state,
             new_state,
-            _failed_image_urls(download_summary),
+            _failed_image_retries(download_summary),
             new_posts,
         ):
             return None
@@ -1015,15 +1029,18 @@ def _try_processing_state_reuse(
     )
     record_timing_label("图片引用处理模式", "hit")
     report_info("归档与派生输入未变化，跳过完整处理。")
-    record_timing_metric("待重试图片URL数", len(snapshot.pending_image_urls))
+    record_timing_metric(
+        "待重试图片URL数",
+        len(snapshot.pending_image_retries),
+    )
     pending_tasks: list[ImageDownloadTask] = [
-        {"url": url} for url in snapshot.pending_image_urls
+        {"url": retry.url} for retry in snapshot.pending_image_retries
     ]
     with time_section("未完成图片重试"):
         download_summary = _download_images(tid, aid, pending_tasks)
     if archive_store.replace_pending_images_for_image_state(
         snapshot.image_state,
-        _failed_image_urls(download_summary),
+        _failed_image_retries(download_summary),
     ):
         return ProcessingStateReuseResult(True, "hit")
 
@@ -1047,8 +1064,8 @@ def _commit_completed_processing_state(
     download_summary: ImageDownloadOutcome,
     manifest_posts: tuple[ImageReferenceManifestPost, ...],
 ) -> None:
-    pending_image_urls = _failed_image_urls(download_summary)
-    record_timing_metric("待重试图片URL数", len(pending_image_urls))
+    pending_image_retries = _failed_image_retries(download_summary)
+    record_timing_metric("待重试图片URL数", len(pending_image_retries))
     if aid is not None and not floor_map_processing.cacheable:
         report_info("楼层映射本次未形成可复用状态，下次继续完整处理。")
         return
@@ -1080,7 +1097,7 @@ def _commit_completed_processing_state(
     floor_committed = archive_store.commit_floor_processing_state(floor_state)
     image_committed = archive_store.commit_image_reference_state(
         image_state,
-        pending_image_urls,
+        pending_image_retries,
         manifest_posts=manifest_posts,
     )
     if not floor_committed or not image_committed:
@@ -1247,7 +1264,11 @@ def backup_local_work_kind(
         post_overlays_hash=archive_store.post_overlays_fingerprint(),
         post_version_selections_hash=selections_fingerprint(thread_folder),
     )
-    if not floor_current or not image_current or snapshot.pending_image_urls:
+    if (
+        not floor_current
+        or not image_current
+        or snapshot.pending_image_retries
+    ):
         return "maintenance"
     if aid is not None and read_unresolved_missing_author_lous_from_archive(
         archive_store,
