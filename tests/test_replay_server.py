@@ -241,6 +241,27 @@ class ReplayCorpusTest:
     ) -> None:
         output_dir, thread_config, _image_path = _build_source(tmp_path)
         archive_path = output_dir / "123_456" / "archive.sqlite3"
+        with sqlite3.connect(archive_path) as connection:
+            connection.execute(
+                """
+                UPDATE post_latest_metadata
+                SET image_attachments_json = ?
+                WHERE pid = 100 AND lou = 0
+                """,
+                (
+                    json.dumps(
+                        [
+                            {
+                                "url": IMAGE_URL,
+                                "path": "mon_202607/12/replay-image.png",
+                                "name": "replay-image.png",
+                            }
+                        ]
+                    ),
+                ),
+            )
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         tracked_paths = [
             archive_path,
             Path(f"{archive_path}-wal"),
@@ -281,7 +302,7 @@ class ReplayCorpusTest:
                 "content": "latest",
                 "author": {"uid": 456, "username": "author"},
                 "postdate": "2026-07-12 12:34",
-                "attches": [{"type": "img", "attachurl": IMAGE_URL}],
+                "attches": [],
             }
         ]
         second_content_page = corpus.page(123, 456, 2)
@@ -335,7 +356,7 @@ class ReplayCorpusTest:
         assert corpus.manifest.available_image_mapping_count == 1
         assert corpus.manifest.unavailable_image_mapping_count == 1
         manifest_data = corpus.manifest.as_dict()
-        assert manifest_data["corpus_format_version"] == 6
+        assert manifest_data["corpus_format_version"] == 7
         assert {
             "exact_page_count",
             "exact_page_payload_bytes",

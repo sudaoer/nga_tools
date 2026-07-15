@@ -85,8 +85,7 @@ def _latest_post_signature(
                 latest.source_hash,
                 metadata.author_name,
                 metadata.author_uid,
-                metadata.postdate_json,
-                metadata.image_attachments_json
+                metadata.postdate_json
             FROM (
                 SELECT
                     lou,

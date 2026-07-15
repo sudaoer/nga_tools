@@ -13,7 +13,7 @@ from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.core.hashing import hash_text
 from nga_tools.core.sqlite import configure_readonly_connection
 
-_CORPUS_FORMAT_VERSION = 6
+_CORPUS_FORMAT_VERSION = 7
 
 PageKey: TypeAlias = tuple[int, Optional[int], int]
 ProgressCallback: TypeAlias = Callable[[int, int, str], None]
@@ -67,7 +67,6 @@ class _ReplayPost:
     author_name: str | None
     author_uid: int | None
     postdate: int | str | None
-    attachment_urls: tuple[str, ...]
 
     def response_post(
         self,
@@ -85,10 +84,7 @@ class _ReplayPost:
             "lou": self.lou if lou is None else lou,
             "content": self.content,
             "author": author,
-            "attches": [
-                {"type": "img", "attachurl": url}
-                for url in self.attachment_urls
-            ],
+            "attches": [],
         }
         if self.postdate is not None:
             post["postdate"] = self.postdate
@@ -380,37 +376,6 @@ def _postdate_from_json(value: object, *, source: str) -> int | str | None:
     raise ReplayCorpusError(f"{source} postdate_json内容无效。")
 
 
-def _attachment_urls_from_json(value: object, *, source: str) -> tuple[str, ...]:
-    if not isinstance(value, str):
-        raise ReplayCorpusError(f"{source} image_attachments_json无效。")
-    try:
-        raw_attachments: object = json.loads(value)
-    except json.JSONDecodeError as error:
-        raise ReplayCorpusError(
-            f"{source} image_attachments_json不是有效JSON。"
-        ) from error
-    if not isinstance(raw_attachments, list):
-        raise ReplayCorpusError(f"{source} image_attachments_json不是数组。")
-
-    urls: list[str] = []
-    for raw_attachment in cast(list[object], raw_attachments):
-        if not isinstance(raw_attachment, dict):
-            raise ReplayCorpusError(f"{source} 图片附件不是对象。")
-        attachment = cast(dict[str, object], raw_attachment)
-        url = attachment.get("url")
-        path = attachment.get("path")
-        name = attachment.get("name")
-        if (
-            not isinstance(url, str)
-            or not url
-            or not isinstance(path, str)
-            or not isinstance(name, str)
-        ):
-            raise ReplayCorpusError(f"{source} 图片附件字段无效。")
-        urls.append(url)
-    return tuple(urls)
-
-
 def _read_archive_content(path: Path) -> _ArchiveContent:
     try:
         connection, database_state = _connect_frozen(path)
@@ -440,8 +405,7 @@ def _read_archive_content(path: Path) -> _ArchiveContent:
                         metadata.pid,
                         metadata.author_name,
                         metadata.author_uid,
-                        metadata.postdate_json,
-                        metadata.image_attachments_json
+                        metadata.postdate_json
                     FROM latest
                     LEFT JOIN post_latest_metadata AS metadata
                         ON metadata.pid = latest.pid
@@ -457,7 +421,7 @@ def _read_archive_content(path: Path) -> _ArchiveContent:
 
     posts_by_lou: dict[int, _ReplayPost] = {}
     for row in rows:
-        if len(row) != 9:
+        if len(row) != 8:
             raise ReplayCorpusError(f"重放归档内容行字段数无效：{path}")
         (
             raw_lou,
@@ -468,7 +432,6 @@ def _read_archive_content(path: Path) -> _ArchiveContent:
             raw_author_name,
             raw_author_uid,
             raw_postdate_json,
-            raw_attachments_json,
         ) = row
         if type(raw_lou) is not int or raw_lou < 0:
             raise ReplayCorpusError(f"重放归档内容lou无效：{path}: {raw_lou!r}")
@@ -494,10 +457,6 @@ def _read_archive_content(path: Path) -> _ArchiveContent:
             author_name=raw_author_name,
             author_uid=raw_author_uid,
             postdate=_postdate_from_json(raw_postdate_json, source=source),
-            attachment_urls=_attachment_urls_from_json(
-                raw_attachments_json,
-                source=source,
-            ),
         )
         if raw_lou in posts_by_lou:
             raise ReplayCorpusError(f"重放归档包含重复有效楼层{raw_lou}：{path}")

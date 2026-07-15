@@ -348,6 +348,29 @@ class ReplayStateTest:
                 "warm",
             )
 
+    def test_validation_ignores_latest_post_attachment_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source, _thread_config = _build_warm_source(tmp_path)
+        target = tmp_path / "target-output"
+        prepare_target_state("warm", source, target)
+        with sqlite3.connect(target / "123_456" / "archive.sqlite3") as connection:
+            connection.execute(
+                "UPDATE post_latest_metadata SET image_attachments_json = 'changed'"
+            )
+            connection.commit()
+
+        validation = validate_replay_output(
+            source,
+            target,
+            [{"thread_name": "sample", "tid": 123, "aid": 456}],
+            "warm",
+        )
+
+        assert validation.checked_archive_count == 1
+        assert validation.compared_archive_count == 1
+
     def test_initial_state_guards_nonempty_and_nested_targets(
         self,
         tmp_path: Path,
