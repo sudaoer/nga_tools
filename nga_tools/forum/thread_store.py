@@ -13,6 +13,7 @@ from nga_tools.core.sqlite import (
     configure_connection,
 )
 from nga_tools.ngaclient.client import ForumThread
+from nga_tools.storage import ensure_storage_metadata, read_storage_metadata
 
 FORUM_THREAD_DB_FILENAME = "forum_threads.sqlite3"
 
@@ -60,9 +61,26 @@ class ForumThreadStore:
         self.db_path = forum_thread_db_path() if db_path is None else db_path
 
     def _connect(self) -> sqlite3.Connection:
+        existed = self.db_path.is_file()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
         configure_connection(connection)
+        existing_metadata = read_storage_metadata(connection)
+        if existing_metadata is None and existed:
+            existing_tables = connection.execute(
+                """
+                SELECT name FROM sqlite_schema
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                """
+            ).fetchall()
+            if existing_tables:
+                connection.close()
+                raise ValueError(
+                    f"forum_threads仍是旧单库布局：{self.db_path}。"
+                    "请先运行 backup migrate-layout --all。"
+                )
+        ensure_storage_metadata(connection, role="forum_data")
+        connection.commit()
         return connection
 
     def _ensure_table(self, connection: sqlite3.Connection, fid: int) -> str:

@@ -11,8 +11,16 @@ from nga_tools.core.retry_schedule import (
     retry_schedule_decision,
 )
 from nga_tools.core.sqlite import SQLITE_BUSY_TIMEOUT_SECONDS, configure_connection
-from nga_tools.forum.thread_store import forum_thread_db_path
+from nga_tools.config import get_config
 from nga_tools.ngaclient.client import ForumThread
+from nga_tools.storage import ensure_storage_metadata
+
+
+BACKUP_STATE_DB_FILENAME = "backup_state.sqlite3"
+
+
+def backup_state_db_path() -> Path:
+    return Path(get_config().output_dir) / BACKUP_STATE_DB_FILENAME
 
 
 @dataclass(frozen=True)
@@ -60,7 +68,7 @@ def _parse_timestamp(value: object) -> datetime:
 
 class AnkebakStateStore:
     def __init__(self, db_path: Path | None = None) -> None:
-        self.db_path = forum_thread_db_path() if db_path is None else db_path
+        self.db_path = backup_state_db_path() if db_path is None else db_path
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +77,8 @@ class AnkebakStateStore:
             timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
         )
         configure_connection(connection)
+        ensure_storage_metadata(connection, role="backup_state")
+        connection.commit()
         return connection
 
     @staticmethod

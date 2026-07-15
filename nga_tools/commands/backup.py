@@ -336,11 +336,15 @@ def backup_migrate_layout(args: CommandArgs) -> None:
             tid, aid = resolve_command_thread_target(args)
             aid_text = "all" if aid is None else str(aid)
             folders = [output_root / f"{tid}_{aid_text}"]
-        if not folders:
+        if not folders and not optional_bool(args, "all"):
             report_info("没有找到需要迁移的archive.sqlite3。")
             return
 
-        result = migrate_layout(output_root, folders)
+        result = migrate_layout(
+            output_root,
+            folders,
+            include_global=optional_bool(args, "all"),
+        )
 
     report_info(
         f"布局迁移完成：run_id={result.run_id}，"

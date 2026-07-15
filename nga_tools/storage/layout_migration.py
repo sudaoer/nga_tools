@@ -27,6 +27,7 @@ from nga_tools.backup.image_reference_cache import (
     IMAGE_REFERENCE_EXTRACTOR_VERSION,
     deserialize_image_references,
 )
+from nga_tools.backup.image_store import IMAGE_CACHE_FILENAME, IMAGE_INDEX_FILENAME
 from nga_tools.backup.processing_state import (
     FLOOR_PROCESSING_STATE_VERSION,
     IMAGE_REFERENCE_MANIFEST_VERSION,
@@ -45,8 +46,11 @@ from nga_tools.backup.thread_stores import (
 from nga_tools.core.atomic import replace_temp_file, write_json_atomically
 from nga_tools.core.downloads import DOWNLOAD_FAILURE_KINDS, DownloadFailureKind
 from nga_tools.core.output_lock import use_output_folder_lock
+from nga_tools.forum.ankebak_state import BACKUP_STATE_DB_FILENAME
+from nga_tools.forum.thread_store import FORUM_THREAD_DB_FILENAME
 from nga_tools.storage import (
     STORAGE_LAYOUT_VERSION,
+    ensure_storage_metadata,
     read_storage_metadata,
 )
 
@@ -59,6 +63,13 @@ _THREAD_DATABASE_FILENAMES = (
     ARCHIVE_DB_FILENAME,
     ARCHIVE_STATE_DB_FILENAME,
     ARCHIVE_CACHE_DB_FILENAME,
+)
+_GLOBAL_TARGET_NAME = "@global"
+_GLOBAL_DATABASE_FILENAMES = (
+    FORUM_THREAD_DB_FILENAME,
+    BACKUP_STATE_DB_FILENAME,
+    IMAGE_INDEX_FILENAME,
+    IMAGE_CACHE_FILENAME,
 )
 _LEGACY_ARCHIVE_TABLES = (
     "backup_processing_state",
@@ -304,6 +315,319 @@ def _thread_layout_is_complete(thread_folder: Path) -> bool:
             return True
     except (OSError, sqlite3.Error, ValueError):
         return False
+
+
+def _database_has_role(
+    path: Path,
+    role: str,
+    *,
+    forbidden_tables: tuple[str, ...] = (),
+) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with closing(sqlite3.connect(path)) as connection:
+            metadata = read_storage_metadata(connection)
+            return (
+                metadata is not None
+                and metadata.role == role
+                and metadata.layout_version == STORAGE_LAYOUT_VERSION
+                and not any(
+                    _table_exists(connection, table_name)
+                    for table_name in forbidden_tables
+                )
+            )
+    except (sqlite3.Error, ValueError):
+        return False
+
+
+def _global_layout_is_complete(output_root: Path) -> bool:
+    forum_path = output_root / FORUM_THREAD_DB_FILENAME
+    backup_state_path = output_root / BACKUP_STATE_DB_FILENAME
+    image_index_path = output_root / IMAGE_INDEX_FILENAME
+    image_cache_path = output_root / IMAGE_CACHE_FILENAME
+    forum_complete = not forum_path.exists() or (
+        _database_has_role(
+            forum_path,
+            "forum_data",
+            forbidden_tables=("ankebak_thread_state",),
+        )
+        and _database_has_role(backup_state_path, "backup_state")
+    )
+    if backup_state_path.exists() and not _database_has_role(
+        backup_state_path,
+        "backup_state",
+    ):
+        forum_complete = False
+    image_complete = not image_index_path.exists() or (
+        _database_has_role(
+            image_index_path,
+            "image_index",
+            forbidden_tables=("image_validation_cache",),
+        )
+        and _database_has_role(image_cache_path, "image_cache")
+    )
+    if image_cache_path.exists() and not _database_has_role(
+        image_cache_path,
+        "image_cache",
+    ):
+        image_complete = False
+    return forum_complete and image_complete
+
+
+def _dynamic_table_fingerprints(
+    path: Path,
+    table_prefix: str,
+) -> dict[str, str]:
+    with closing(sqlite3.connect(path)) as connection:
+        table_names = [
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT name FROM sqlite_schema
+                WHERE type = 'table' AND name LIKE ?
+                ORDER BY name
+                """,
+                (f"{table_prefix}%",),
+            )
+            if isinstance(row[0], str)
+        ]
+        return {
+            table_name: _table_fingerprint(connection, table_name)
+            for table_name in table_names
+        }
+
+
+def _ensure_backup_state_schema(connection: sqlite3.Connection) -> None:
+    ensure_storage_metadata(connection, role="backup_state")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ankebak_thread_state (
+            target_key TEXT PRIMARY KEY,
+            tid INTEGER NOT NULL,
+            aid INTEGER,
+            forum_replies INTEGER,
+            forum_lastpost INTEGER,
+            last_backup_success_at TEXT NOT NULL,
+            last_full_backup_success_at TEXT
+        )
+        """
+    )
+    connection.commit()
+
+
+def _valid_timestamp_text(value: object, *, optional: bool = False) -> bool:
+    if value is None:
+        return optional
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def _copy_ankebak_state(
+    source_path: Path,
+    destination_path: Path,
+) -> int:
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(destination_path)) as destination:
+        _ensure_backup_state_schema(destination)
+        if not source_path.is_file():
+            return 0
+        with closing(sqlite3.connect(source_path)) as source:
+            if not _table_exists(source, "ankebak_thread_state"):
+                return 0
+            rows = source.execute(
+                """
+                SELECT target_key, tid, aid, forum_replies, forum_lastpost,
+                       last_backup_success_at, last_full_backup_success_at
+                FROM ankebak_thread_state ORDER BY target_key
+                """
+            ).fetchall()
+        valid_rows: list[tuple[object, ...]] = []
+        for row in rows:
+            (
+                target_key,
+                tid,
+                aid,
+                forum_replies,
+                forum_lastpost,
+                last_backup_success_at,
+                last_full_backup_success_at,
+            ) = row
+            if (
+                not isinstance(target_key, str)
+                or not target_key
+                or type(tid) is not int
+                or (aid is not None and type(aid) is not int)
+                or (forum_replies is not None and type(forum_replies) is not int)
+                or (forum_lastpost is not None and type(forum_lastpost) is not int)
+                or not _valid_timestamp_text(last_backup_success_at)
+                or not _valid_timestamp_text(
+                    last_full_backup_success_at,
+                    optional=True,
+                )
+            ):
+                continue
+            valid_rows.append(tuple(row))
+        with destination:
+            destination.executemany(
+                """
+                INSERT INTO ankebak_thread_state VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(target_key) DO UPDATE SET
+                    tid = excluded.tid,
+                    aid = excluded.aid,
+                    forum_replies = excluded.forum_replies,
+                    forum_lastpost = excluded.forum_lastpost,
+                    last_backup_success_at = excluded.last_backup_success_at,
+                    last_full_backup_success_at = excluded.last_full_backup_success_at
+                """,
+                valid_rows,
+            )
+        return len(valid_rows)
+
+
+def _prepare_forum_data(source_path: Path, destination_path: Path) -> None:
+    _snapshot_sqlite(source_path, destination_path)
+    fingerprints_before = _dynamic_table_fingerprints(
+        destination_path,
+        "forum_threads_fid_",
+    )
+    with closing(sqlite3.connect(destination_path)) as connection:
+        ensure_storage_metadata(connection, role="forum_data")
+        with connection:
+            connection.execute("DROP TABLE IF EXISTS ankebak_thread_state")
+        connection.execute("VACUUM")
+    fingerprints_after = _dynamic_table_fingerprints(
+        destination_path,
+        "forum_threads_fid_",
+    )
+    if fingerprints_after != fingerprints_before:
+        raise ValueError("forum_threads持久数据指纹不一致。")
+
+
+def _ensure_image_cache_schema(connection: sqlite3.Connection) -> None:
+    ensure_storage_metadata(connection, role="image_cache")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS image_validation_cache (
+            relative_path TEXT PRIMARY KEY,
+            size INTEGER NOT NULL,
+            mtime_ns INTEGER NOT NULL,
+            valid INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+
+
+def _relative_image_cache_path(
+    output_root: Path,
+    raw_path: object,
+) -> tuple[str, Path] | None:
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    raw = Path(raw_path)
+    try:
+        resolved_path = (
+            raw.resolve(strict=False)
+            if raw.is_absolute()
+            else (output_root / raw).resolve(strict=False)
+        )
+        relative_path = resolved_path.relative_to(output_root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not relative_path.parts or relative_path.parts[0] != "images_unique":
+        return None
+    return relative_path.as_posix(), resolved_path
+
+
+def _copy_image_validation_cache(
+    source_path: Path,
+    destination_path: Path,
+    output_root: Path,
+) -> int:
+    with closing(sqlite3.connect(destination_path)) as destination:
+        _ensure_image_cache_schema(destination)
+        if not source_path.is_file():
+            return 0
+        with closing(sqlite3.connect(source_path)) as source:
+            if not _table_exists(source, "image_validation_cache"):
+                return 0
+            columns = {
+                row[1]
+                for row in source.execute(
+                    "PRAGMA table_info(image_validation_cache)"
+                )
+                if isinstance(row[1], str)
+            }
+            path_column = (
+                "canonical_path"
+                if "canonical_path" in columns
+                else "relative_path"
+                if "relative_path" in columns
+                else None
+            )
+            if path_column is None:
+                return 0
+            rows = source.execute(
+                f"""
+                SELECT {path_column}, size, mtime_ns, valid, updated_at
+                FROM image_validation_cache ORDER BY {path_column}
+                """
+            )
+            valid_rows: list[tuple[str, int, int, int, str]] = []
+            for raw_path, size, mtime_ns, valid, updated_at in rows:
+                normalized = _relative_image_cache_path(output_root, raw_path)
+                if (
+                    normalized is None
+                    or type(size) is not int
+                    or type(mtime_ns) is not int
+                    or type(valid) is not int
+                    or valid not in (0, 1)
+                    or not isinstance(updated_at, str)
+                ):
+                    continue
+                relative_path, file_path = normalized
+                try:
+                    file_stat = file_path.stat()
+                except OSError:
+                    continue
+                if file_stat.st_size != size or file_stat.st_mtime_ns != mtime_ns:
+                    continue
+                valid_rows.append(
+                    (relative_path, size, mtime_ns, valid, updated_at)
+                )
+        with destination:
+            destination.executemany(
+                """
+                INSERT INTO image_validation_cache VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(relative_path) DO UPDATE SET
+                    size = excluded.size,
+                    mtime_ns = excluded.mtime_ns,
+                    valid = excluded.valid,
+                    updated_at = excluded.updated_at
+                """,
+                valid_rows,
+            )
+        return len(valid_rows)
+
+
+def _prepare_image_index(source_path: Path, destination_path: Path) -> None:
+    _snapshot_sqlite(source_path, destination_path)
+    with closing(sqlite3.connect(destination_path)) as connection:
+        fingerprint_before = _table_fingerprint(connection, "image_mappings")
+        ensure_storage_metadata(connection, role="image_index")
+        with connection:
+            connection.execute("DROP TABLE IF EXISTS image_validation_cache")
+        connection.execute("VACUUM")
+        fingerprint_after = _table_fingerprint(connection, "image_mappings")
+    if fingerprint_after != fingerprint_before:
+        raise ValueError("image_index持久映射指纹不一致。")
 
 
 def _read_pending_images(
@@ -789,6 +1113,132 @@ def _ensure_original_backups(
     return originals
 
 
+def _ensure_global_original_backups(
+    output_root: Path,
+    run_root: Path,
+    entry: dict[str, object],
+) -> dict[str, bool]:
+    raw_originals = entry.get("originals")
+    if isinstance(raw_originals, dict):
+        original_values = cast(dict[object, object], raw_originals)
+        originals = {
+            filename: original_values.get(filename) is True
+            for filename in _GLOBAL_DATABASE_FILENAMES
+        }
+        for filename, existed in originals.items():
+            backup_path = run_root / "files" / _GLOBAL_TARGET_NAME / filename
+            if existed and not backup_path.is_file():
+                raise FileNotFoundError(f"迁移回滚副本缺失：{backup_path}")
+        return originals
+
+    originals: dict[str, bool] = {}
+    for filename in _GLOBAL_DATABASE_FILENAMES:
+        source = output_root / filename
+        existed = source.is_file()
+        originals[filename] = existed
+        if existed:
+            _snapshot_sqlite(
+                source,
+                run_root / "files" / _GLOBAL_TARGET_NAME / filename,
+            )
+    entry["originals"] = originals
+    entry["status"] = "backed_up"
+    return originals
+
+
+def _migrate_global_databases(
+    output_root: Path,
+    run_root: Path,
+    entry: dict[str, object],
+) -> dict[str, int] | None:
+    if _global_layout_is_complete(output_root):
+        return None
+    originals = _ensure_global_original_backups(output_root, run_root, entry)
+    staging = output_root / f".layout-global-migration-{run_root.name}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    migrated_ankebak_rows = 0
+    migrated_image_cache_rows = 0
+    try:
+        legacy_forum = (
+            run_root
+            / "files"
+            / _GLOBAL_TARGET_NAME
+            / FORUM_THREAD_DB_FILENAME
+        )
+        legacy_image_index = (
+            run_root
+            / "files"
+            / _GLOBAL_TARGET_NAME
+            / IMAGE_INDEX_FILENAME
+        )
+        if originals[FORUM_THREAD_DB_FILENAME]:
+            _prepare_forum_data(
+                legacy_forum,
+                staging / FORUM_THREAD_DB_FILENAME,
+            )
+            migrated_ankebak_rows = _copy_ankebak_state(
+                legacy_forum,
+                staging / BACKUP_STATE_DB_FILENAME,
+            )
+        elif originals[BACKUP_STATE_DB_FILENAME]:
+            _snapshot_sqlite(
+                run_root
+                / "files"
+                / _GLOBAL_TARGET_NAME
+                / BACKUP_STATE_DB_FILENAME,
+                staging / BACKUP_STATE_DB_FILENAME,
+            )
+
+        if originals[IMAGE_INDEX_FILENAME]:
+            _prepare_image_index(
+                legacy_image_index,
+                staging / IMAGE_INDEX_FILENAME,
+            )
+            migrated_image_cache_rows = _copy_image_validation_cache(
+                legacy_image_index,
+                staging / IMAGE_CACHE_FILENAME,
+                output_root,
+            )
+        elif originals[IMAGE_CACHE_FILENAME]:
+            _snapshot_sqlite(
+                run_root
+                / "files"
+                / _GLOBAL_TARGET_NAME
+                / IMAGE_CACHE_FILENAME,
+                staging / IMAGE_CACHE_FILENAME,
+            )
+
+        staged_filenames = [
+            filename
+            for filename in _GLOBAL_DATABASE_FILENAMES
+            if (staging / filename).is_file()
+        ]
+        for filename in staged_filenames:
+            _finalize_sqlite(staging / filename)
+        entry["stats"] = {
+            "migrated_ankebak_rows": migrated_ankebak_rows,
+            "migrated_image_cache_rows": migrated_image_cache_rows,
+        }
+        for filename in (
+            BACKUP_STATE_DB_FILENAME,
+            IMAGE_CACHE_FILENAME,
+            FORUM_THREAD_DB_FILENAME,
+            IMAGE_INDEX_FILENAME,
+        ):
+            staged_path = staging / filename
+            if staged_path.is_file():
+                os.replace(staged_path, output_root / filename)
+        return {
+            "migrated_ankebak_rows": migrated_ankebak_rows,
+            "migrated_image_cache_rows": migrated_image_cache_rows,
+        }
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
 def _migrate_thread(
     thread_folder: Path,
     run_root: Path,
@@ -850,6 +1300,8 @@ def _migrate_thread(
 def migrate_layout(
     output_root: Path,
     thread_folders: list[Path],
+    *,
+    include_global: bool = False,
 ) -> LayoutMigrationResult:
     resolved_output_root = output_root.resolve()
     ordered_folders = sorted(
@@ -859,7 +1311,18 @@ def migrate_layout(
     for folder in ordered_folders:
         if folder.parent != resolved_output_root:
             raise ValueError(f"迁移目标不在output根目录内：{folder}")
-    target_names = tuple(folder.name for folder in ordered_folders)
+    has_global_databases = any(
+        (resolved_output_root / filename).is_file()
+        for filename in _GLOBAL_DATABASE_FILENAMES
+    )
+    global_target_names = (
+        (_GLOBAL_TARGET_NAME,)
+        if include_global and has_global_databases
+        else ()
+    )
+    target_names = global_target_names + tuple(
+        folder.name for folder in ordered_folders
+    )
     backup_root = resolved_output_root / MIGRATION_BACKUP_DIRNAME
     resumable = _find_resumable_run(backup_root, target_names)
     if resumable is None:
@@ -871,6 +1334,42 @@ def migrate_layout(
     migrated_count = 0
     skipped_count = 0
     failures: list[tuple[Path, str]] = []
+    if global_target_names:
+        entry = _entry_for(manifest, _GLOBAL_TARGET_NAME)
+        if entry.get("status") in ("completed", "skipped"):
+            skipped_count += 1
+        else:
+            try:
+                with use_output_folder_lock(resolved_output_root):
+                    if not _global_layout_is_complete(resolved_output_root):
+                        _ensure_global_original_backups(
+                            resolved_output_root,
+                            run_root,
+                            entry,
+                        )
+                        manifest["updated_at"] = _now_utc_iso()
+                        _write_manifest(run_root, manifest)
+                    global_stats = _migrate_global_databases(
+                        resolved_output_root,
+                        run_root,
+                        entry,
+                    )
+            except Exception as error:
+                error_text = f"{type(error).__name__}: {error}"
+                entry["status"] = "failed"
+                entry["error"] = error_text
+                failures.append((resolved_output_root, error_text))
+            else:
+                entry.pop("error", None)
+                if global_stats is None:
+                    entry["status"] = "skipped"
+                    skipped_count += 1
+                else:
+                    entry["status"] = "completed"
+                    migrated_count += 1
+            manifest["updated_at"] = _now_utc_iso()
+            _write_manifest(run_root, manifest)
+
     for folder in ordered_folders:
         entry = _entry_for(manifest, folder.name)
         if entry.get("status") in ("completed", "skipped"):
@@ -878,6 +1377,10 @@ def migrate_layout(
             continue
         try:
             with use_output_folder_lock(folder):
+                if not _thread_layout_is_complete(folder):
+                    _ensure_original_backups(folder, run_root, entry)
+                    manifest["updated_at"] = _now_utc_iso()
+                    _write_manifest(run_root, manifest)
                 stats = _migrate_thread(folder, run_root, entry)
         except Exception as error:
             error_text = f"{type(error).__name__}: {error}"
@@ -921,6 +1424,27 @@ def rollback_layout(output_root: Path, run_id: str) -> LayoutRollbackResult:
         if not isinstance(raw_originals, dict):
             continue
         original_values = cast(dict[object, object], raw_originals)
+        if target_name == _GLOBAL_TARGET_NAME:
+            for filename in (
+                BACKUP_STATE_DB_FILENAME,
+                IMAGE_CACHE_FILENAME,
+                FORUM_THREAD_DB_FILENAME,
+                IMAGE_INDEX_FILENAME,
+            ):
+                target = resolved_output_root / filename
+                existed = original_values.get(filename) is True
+                if existed:
+                    backup_path = (
+                        run_root / "files" / _GLOBAL_TARGET_NAME / filename
+                    )
+                    _snapshot_sqlite(backup_path, target)
+                else:
+                    _remove_sqlite_file(target)
+            entry["status"] = "rolled_back"
+            restored_count += 1
+            manifest["updated_at"] = _now_utc_iso()
+            _write_manifest(run_root, manifest)
+            continue
         thread_folder = resolved_output_root / target_name
         if (
             thread_folder.exists()

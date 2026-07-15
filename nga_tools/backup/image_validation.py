@@ -64,7 +64,8 @@ class ImageValidationCache:
     """Command-scoped, thread-safe cache for expensive image validation.
 
     Backed by an optional persistent SQLite store that survives across
-    process invocations, keyed on ``(canonical_path, size, mtime_ns)``.
+    process invocations. Runtime memory uses canonical paths; persistence
+    converts them to output-relative paths plus ``(size, mtime_ns)``.
     """
 
     def __init__(self) -> None:

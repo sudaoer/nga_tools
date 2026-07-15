@@ -16,7 +16,10 @@ from nga_tools.cli import args_parse
 from nga_tools.commands.ankebak import _jobs_for_threads, backup_auto
 from nga_tools.commands.forum import DefaultForumSyncResult
 from nga_tools.console import ConsoleReporter, use_reporter
-from nga_tools.forum.ankebak_state import AnkebakStateStore, ankebak_target_key
+from nga_tools.forum.ankebak_state import (
+    AnkebakStateStore,
+    ankebak_target_key,
+)
 from nga_tools.forum.thread_configs import ThreadConfig
 from nga_tools.ngaclient.client import ForumThread
 
@@ -65,6 +68,22 @@ def _captured_reporter() -> Iterator[io.StringIO]:
 
 
 class AnkebakStateStoreTest:
+    def test_default_store_uses_dedicated_backup_state_database(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        with patch(
+            "nga_tools.forum.ankebak_state.get_config",
+            return_value=SimpleNamespace(output_dir=str(output_dir)),
+        ):
+            store = AnkebakStateStore()
+            store.load_states()
+
+        assert store.db_path == output_dir / "backup_state.sqlite3"
+        assert store.db_path.is_file()
+        assert not (output_dir / "forum_threads.sqlite3").exists()
+
     def test_records_forum_signature_and_full_success(self, tmp_path: Path) -> None:
         store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")
         completed_at = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)

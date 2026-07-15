@@ -466,12 +466,11 @@ def test_persistent_cache_flush_writes_only_new_entries(tmp_path: Path) -> None:
         cache_b.flush_new_entries()
 
         import sqlite3
-        from nga_tools.backup.image_store import image_index_path
-        with closing(sqlite3.connect(image_index_path())) as conn:
+        from nga_tools.backup.image_store import image_cache_path
+        with closing(sqlite3.connect(image_cache_path())) as conn:
             rows = conn.execute(
-                "SELECT canonical_path FROM image_validation_cache ORDER BY canonical_path"
+                "SELECT relative_path FROM image_validation_cache ORDER BY relative_path"
             ).fetchall()
         paths = [r[0] for r in rows]
-        assert len(paths) == 2
-        assert any("cached.png" in p for p in paths)
-        assert any("new.png" in p for p in paths)
+        assert paths == ["images_unique/cached.png", "images_unique/new.png"]
+        assert not (output_dir / "image_index.sqlite3").exists()

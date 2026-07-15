@@ -4,10 +4,13 @@ import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.image_store import image_mappings_by_url
 from nga_tools.backup.post_version_selection import selections_fingerprint
+from nga_tools.forum.ankebak_state import AnkebakStateStore
 from nga_tools.storage import layout_migration, read_storage_metadata
 from nga_tools.storage.layout_migration import migrate_layout, rollback_layout
 
@@ -178,6 +181,75 @@ def _table_names(path: Path) -> set[str]:
         }
 
 
+def _make_legacy_globals(output_root: Path) -> tuple[Path, Path]:
+    output_root.mkdir(parents=True, exist_ok=True)
+    forum_path = output_root / "forum_threads.sqlite3"
+    with closing(sqlite3.connect(forum_path)) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE forum_threads_fid_784 (
+                tid INTEGER PRIMARY KEY,
+                aid INTEGER NOT NULL,
+                author TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                postdate INTEGER NOT NULL,
+                postdate_text TEXT NOT NULL,
+                lastpost INTEGER NOT NULL,
+                lastpost_text TEXT NOT NULL,
+                replies INTEGER NOT NULL
+            );
+            CREATE TABLE ankebak_thread_state (
+                target_key TEXT PRIMARY KEY,
+                tid INTEGER NOT NULL,
+                aid INTEGER,
+                forum_replies INTEGER,
+                forum_lastpost INTEGER,
+                last_backup_success_at TEXT NOT NULL,
+                last_full_backup_success_at TEXT
+            );
+            INSERT INTO forum_threads_fid_784 VALUES
+            (123, 456, 'author', 'subject', 1, 'one', 2, 'two', 3);
+            INSERT INTO ankebak_thread_state VALUES
+            ('123:456', 123, 456, 3, 2,
+             '2026-07-15T00:00:00+00:00',
+             '2026-07-15T00:00:00+00:00');
+            """
+        )
+
+    image_file = output_root / "images_unique" / "abc.png"
+    image_file.parent.mkdir()
+    image_file.write_bytes(b"image-bytes")
+    image_stat = image_file.stat()
+    image_index_path = output_root / "image_index.sqlite3"
+    with closing(sqlite3.connect(image_index_path)) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE image_mappings (
+                url TEXT PRIMARY KEY,
+                unique_rel_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE image_validation_cache (
+                canonical_path TEXT PRIMARY KEY,
+                size INTEGER NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                valid INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO image_mappings VALUES
+            ('https://img.nga.178.com/attachments/mon_202607/15/abc.png',
+             'images_unique/abc.png', 'created', 'updated');
+            """
+        )
+        connection.execute(
+            "INSERT INTO image_validation_cache VALUES (?, ?, ?, 1, 'updated')",
+            (str(image_file.resolve()), image_stat.st_size, image_stat.st_mtime_ns),
+        )
+        connection.commit()
+    return forum_path, image_index_path
+
+
 def test_layout_migration_splits_valid_state_cache_and_preserves_data(
     tmp_path: Path,
 ) -> None:
@@ -275,3 +347,41 @@ def test_layout_migration_skips_invalid_cache_rows(tmp_path: Path) -> None:
     store = ThreadArchiveStore(thread_folder)
     assert store.read_post_image_reference_cache({"cache"}) == {}
     assert "post_image_reference_cache" not in _table_names(store.db_path)
+
+
+def test_layout_migration_splits_global_data_state_and_cache(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    forum_path, image_index_path = _make_legacy_globals(output_root)
+
+    result = migrate_layout(output_root, [], include_global=True)
+
+    assert result.migrated_count == 1
+    assert result.failures == ()
+    assert "ankebak_thread_state" not in _table_names(forum_path)
+    assert "image_validation_cache" not in _table_names(image_index_path)
+    state_store = AnkebakStateStore(output_root / "backup_state.sqlite3")
+    assert state_store.load_states()["123:456"].tid == 123
+    with closing(sqlite3.connect(output_root / "image_cache.sqlite3")) as connection:
+        rows = connection.execute(
+            """
+            SELECT relative_path, size, valid
+            FROM image_validation_cache
+            """
+        ).fetchall()
+    assert rows == [("images_unique/abc.png", 11, 1)]
+    with patch(
+        "nga_tools.backup.image_store.get_config",
+        return_value=SimpleNamespace(output_dir=str(output_root)),
+    ):
+        mappings = image_mappings_by_url()
+    assert list(mappings) == [
+        "https://img.nga.178.com/attachments/mon_202607/15/abc.png"
+    ]
+
+    rollback_layout(output_root, result.run_id)
+    assert not (output_root / "backup_state.sqlite3").exists()
+    assert not (output_root / "image_cache.sqlite3").exists()
+    assert "ankebak_thread_state" in _table_names(forum_path)
+    assert "image_validation_cache" in _table_names(image_index_path)
