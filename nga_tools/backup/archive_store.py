@@ -16,12 +16,11 @@ from nga_tools.backup.floor_models import (
     RecoveredMissingPost,
     StoredFloorMap,
 )
-from nga_tools.backup.models import PostData, PostRecord
 from nga_tools.backup.archive_posts import (
     ArchivePostMetadata,
-    image_attachments_from_json,
     metadata_from_raw_post,
 )
+from nga_tools.backup.models import PostData, PostRecord
 from nga_tools.backup.post_data import post_data_from_raw, post_source_hash
 from nga_tools.backup.post_overlay import (
     PostOverlay,
@@ -68,14 +67,14 @@ from nga_tools.word_count import (
 ARCHIVE_DB_FILENAME = "archive.sqlite3"
 _LATEST_POST_INDEX = "idx_post_versions_latest_covering"
 _LEGACY_LATEST_POST_INDEX = "idx_post_versions_latest"
+_EMPTY_IMAGE_ATTACHMENTS_JSON = "[]"
 _LATEST_POST_RECORDS_QUERY = """
     SELECT
         latest.id,
         latest.lou,
         latest.pid,
         latest.content,
-        latest.source_hash,
-        post_latest_metadata.image_attachments_json
+        latest.source_hash
     FROM (
         SELECT
             id,
@@ -90,9 +89,6 @@ _LATEST_POST_RECORDS_QUERY = """
         FROM post_versions
         {where_lous}
     ) AS latest
-    LEFT JOIN post_latest_metadata
-        ON post_latest_metadata.pid = latest.pid
-        AND post_latest_metadata.lou = latest.lou
     WHERE latest.row_number = 1
     ORDER BY latest.lou
     """
@@ -122,8 +118,7 @@ _LATEST_POST_ROWS_QUERY = """
         latest.source_hash,
         post_latest_metadata.author_name,
         post_latest_metadata.author_uid,
-        post_latest_metadata.postdate_json,
-        post_latest_metadata.image_attachments_json
+        post_latest_metadata.postdate_json
     FROM (
         SELECT
             id,
@@ -230,7 +225,6 @@ class ArchivePostVersionRow:
     author_name: Optional[str]
     author_uid: Optional[int]
     postdate_json: Optional[str]
-    image_attachments_json: Optional[str]
     manual_selection: bool
 
 
@@ -261,7 +255,6 @@ class _LatestPostMetadata:
     author_name: Optional[str]
     author_uid: Optional[int]
     postdate_json: Optional[str]
-    image_attachments_json: str
     first_seen_at: str
     last_seen_at: str
     seen_count: int
@@ -2401,7 +2394,6 @@ class ThreadArchiveStore:
                 author_name=metadata["author_name"],
                 author_uid=metadata["author_uid"],
                 postdate_json=metadata["postdate_json"],
-                image_attachments_json=metadata["image_attachments_json"],
                 first_seen_at=first_seen_at,
                 last_seen_at=last_seen_at,
                 seen_count=seen_count,
@@ -2422,7 +2414,6 @@ class ThreadArchiveStore:
             current.author_name = metadata["author_name"]
             current.author_uid = metadata["author_uid"]
             current.postdate_json = metadata["postdate_json"]
-            current.image_attachments_json = metadata["image_attachments_json"]
             current.selected_last_seen_at = last_seen_at
             current.selected_old_id = old_id
 
@@ -2527,7 +2518,7 @@ class ThreadArchiveStore:
                     metadata.author_name,
                     metadata.author_uid,
                     metadata.postdate_json,
-                    metadata.image_attachments_json,
+                    _EMPTY_IMAGE_ATTACHMENTS_JSON,
                     metadata.first_seen_at,
                     metadata.last_seen_at,
                     metadata.seen_count,
@@ -2794,7 +2785,7 @@ class ThreadArchiveStore:
                 metadata["author_name"],
                 metadata["author_uid"],
                 metadata["postdate_json"],
-                metadata["image_attachments_json"],
+                _EMPTY_IMAGE_ATTACHMENTS_JSON,
                 observed_at,
                 observed_at,
                 seen_increment,
@@ -3337,49 +3328,8 @@ class ThreadArchiveStore:
 
         return [records_by_lou[lou] for lou in sorted(records_by_lou)]
 
-    def _image_attachments_json_for_version(
-        self,
-        connection: sqlite3.Connection,
-        version_id: int,
-        fallback_json: Optional[str],
-    ) -> Optional[str]:
-        snapshot_row = cast(
-            Optional[tuple[str, int]],
-            connection.execute(
-                """
-                SELECT page_snapshots.page_json, post_observations.position
-                FROM post_observations
-                JOIN page_snapshots
-                    ON page_snapshots.id = post_observations.page_snapshot_id
-                WHERE post_observations.post_version_id = ?
-                ORDER BY page_snapshots.last_seen_at DESC, page_snapshots.id DESC
-                LIMIT 1
-                """,
-                (version_id,),
-            ).fetchone(),
-        )
-        if snapshot_row is None:
-            return fallback_json
-
-        page_json, position = snapshot_row
-        try:
-            raw_page: object = json.loads(page_json)
-        except json.JSONDecodeError:
-            return fallback_json
-        if not isinstance(raw_page, dict):
-            return fallback_json
-        raw_posts = cast(dict[str, object], raw_page).get("result")
-        if not isinstance(raw_posts, list):
-            return fallback_json
-        post_items = cast(list[object], raw_posts)
-        if position < 0 or position >= len(post_items):
-            return fallback_json
-        metadata = metadata_from_raw_post(post_items[position])
-        return metadata["image_attachments_json"]
-
+    @staticmethod
     def _effective_post_row_from_sql_row(
-        self,
-        connection: sqlite3.Connection,
         row: tuple[
             int,
             int,
@@ -3389,11 +3339,9 @@ class ThreadArchiveStore:
             Optional[str],
             Optional[int],
             Optional[str],
-            Optional[str],
         ],
         *,
         manual_selection: bool,
-        use_version_snapshot: bool | None = None,
     ) -> ArchivePostVersionRow:
         (
             version_id,
@@ -3404,16 +3352,7 @@ class ThreadArchiveStore:
             author_name,
             author_uid,
             postdate_json,
-            image_attachments_json,
         ) = row
-        if use_version_snapshot is None:
-            use_version_snapshot = manual_selection
-        if use_version_snapshot:
-            image_attachments_json = self._image_attachments_json_for_version(
-                connection,
-                version_id,
-                image_attachments_json,
-            )
         return ArchivePostVersionRow(
             version_id=version_id,
             lou=lou,
@@ -3423,7 +3362,6 @@ class ThreadArchiveStore:
             author_name=author_name,
             author_uid=author_uid,
             postdate_json=postdate_json,
-            image_attachments_json=image_attachments_json,
             manual_selection=manual_selection,
         )
 
@@ -3455,7 +3393,6 @@ class ThreadArchiveStore:
                         Optional[str],
                         Optional[int],
                         Optional[str],
-                        Optional[str],
                     ]
                 ],
                 connection.execute(
@@ -3465,7 +3402,6 @@ class ThreadArchiveStore:
             )
             rows_by_lou = {
                 row[1]: self._effective_post_row_from_sql_row(
-                    connection,
                     row,
                     manual_selection=False,
                 )
@@ -3488,7 +3424,6 @@ class ThreadArchiveStore:
                             Optional[str],
                             Optional[int],
                             Optional[str],
-                            Optional[str],
                         ]
                     ],
                     connection.execute(
@@ -3501,8 +3436,7 @@ class ThreadArchiveStore:
                             post_versions.source_hash,
                             post_latest_metadata.author_name,
                             post_latest_metadata.author_uid,
-                            post_latest_metadata.postdate_json,
-                            post_latest_metadata.image_attachments_json
+                            post_latest_metadata.postdate_json
                         FROM post_versions
                         LEFT JOIN post_latest_metadata
                             ON post_latest_metadata.pid = post_versions.pid
@@ -3515,7 +3449,6 @@ class ThreadArchiveStore:
                 if selected_row is None:
                     continue
                 rows_by_lou[lou] = self._effective_post_row_from_sql_row(
-                    connection,
                     selected_row,
                     manual_selection=True,
                 )
@@ -3539,7 +3472,6 @@ class ThreadArchiveStore:
                         Optional[str],
                         Optional[int],
                         Optional[str],
-                        Optional[str],
                     ]
                 ],
                 connection.execute(
@@ -3552,8 +3484,7 @@ class ThreadArchiveStore:
                         post_versions.source_hash,
                         post_latest_metadata.author_name,
                         post_latest_metadata.author_uid,
-                        post_latest_metadata.postdate_json,
-                        post_latest_metadata.image_attachments_json
+                        post_latest_metadata.postdate_json
                     FROM post_versions
                     LEFT JOIN post_latest_metadata
                         ON post_latest_metadata.pid = post_versions.pid
@@ -3566,10 +3497,8 @@ class ThreadArchiveStore:
             if row is None:
                 return None
             return self._effective_post_row_from_sql_row(
-                connection,
                 row,
                 manual_selection=False,
-                use_version_snapshot=True,
             )
 
     def read_latest_post_records(self, lous: set[int] | None = None) -> list[PostRecord]:
@@ -3587,7 +3516,7 @@ class ThreadArchiveStore:
 
         with closing(self._connect_read()) as connection:
             rows = cast(
-                list[tuple[int, int, int, str, str, Optional[str]]],
+                list[tuple[int, int, int, str, str]],
                 connection.execute(
                     _LATEST_POST_RECORDS_QUERY.format(where_lous=where_lous),
                     params,
@@ -3595,8 +3524,7 @@ class ThreadArchiveStore:
             )
 
         records: list[PostRecord] = []
-        for _version_id, lou, pid, content, source_hash, image_attachments_json in rows:
-            image_attachments = image_attachments_from_json(image_attachments_json)
+        for _version_id, lou, pid, content, source_hash in rows:
             records.append(
                 {
                     "lou": lou,
@@ -3605,7 +3533,6 @@ class ThreadArchiveStore:
                         "lou": lou,
                         "pid": pid,
                         "content": content,
-                        "image_attachments": image_attachments,
                     },
                     "html": None,
                     "source_hash": source_hash,
@@ -3619,7 +3546,6 @@ class ThreadArchiveStore:
     ) -> list[PostRecord]:
         records: list[PostRecord] = []
         for row in self.read_effective_post_rows(lous):
-            image_attachments = image_attachments_from_json(row.image_attachments_json)
             records.append(
                 {
                     "lou": row.lou,
@@ -3628,7 +3554,6 @@ class ThreadArchiveStore:
                         "lou": row.lou,
                         "pid": row.pid,
                         "content": row.content,
-                        "image_attachments": image_attachments,
                     },
                     "html": None,
                     "source_hash": row.source_hash,

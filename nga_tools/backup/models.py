@@ -6,17 +6,10 @@ from typing import Optional, TypedDict
 from bs4 import BeautifulSoup, Tag
 
 
-class ImageAttachment(TypedDict):
-    url: str
-    path: str
-    name: str
-
-
 class PostData(TypedDict):
     lou: int
     pid: int
     content: str
-    image_attachments: list[ImageAttachment]
 
 
 class PostHtml(TypedDict):

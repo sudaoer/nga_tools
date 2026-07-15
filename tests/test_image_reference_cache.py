@@ -13,7 +13,7 @@ from nga_tools.backup.image_reference_cache import (
     deserialize_image_references,
     image_reference_cache_key,
 )
-from nga_tools.backup.models import ImageAttachment, PostRecord
+from nga_tools.backup.models import PostRecord
 from nga_tools.backup.post_overlay import (
     apply_post_overlays_to_records,
     make_post_overlay,
@@ -32,7 +32,6 @@ def _image_url(name: str) -> str:
 def _post_record(
     content: str,
     *,
-    attachments: list[ImageAttachment] | None = None,
     source_hash: str | None = None,
 ) -> PostRecord:
     return {
@@ -42,7 +41,6 @@ def _post_record(
             "lou": 1,
             "pid": 1001,
             "content": content,
-            "image_attachments": attachments or [],
         },
         "html": None,
         "source_hash": source_hash or hash_text(content),
@@ -83,48 +81,6 @@ def test_unchanged_records_reuse_cached_references_without_parsing(
     assert second.cache_hit_count == 1
     assert second.cache_miss_lous == frozenset()
     assert parser_mock.call_count == 1
-
-
-def test_attachment_change_reuses_cache_when_content_is_same(
-    tmp_path: Path,
-) -> None:
-    store = ThreadArchiveStore(tmp_path / "thread")
-    store.ensure_schema()
-    first_url = _image_url("attachment-first")
-    second_url = _image_url("attachment-second")
-    content = "[img]./mon_202607/11/relative.png[/img]"
-    first_attachment: ImageAttachment = {
-        "url": first_url,
-        "path": "mon_202607/11/attachment-first.png",
-        "name": "attachment-first.png",
-    }
-    second_attachment: ImageAttachment = {
-        "url": second_url,
-        "path": "mon_202607/11/attachment-second.png",
-        "name": "attachment-second.png",
-    }
-    first_record = _post_record(content, attachments=[first_attachment])
-    second_record = _post_record(content, attachments=[second_attachment])
-
-    first = collect_image_download_tasks_for_records(
-        store,
-        [first_record],
-        FloorLabels.plain(),
-    )
-    second = collect_image_download_tasks_for_records(
-        store,
-        [second_record],
-        FloorLabels.plain(),
-    )
-
-    assert image_reference_cache_key(first_record) == image_reference_cache_key(
-        second_record
-    )
-    assert first.tasks == []
-    assert first.cache_miss_count == 1
-    assert second.tasks == []
-    assert second.cache_hit_count == 1
-    assert second.cache_miss_count == 0
 
 
 def test_cached_invalid_reference_reemits_same_warning(tmp_path: Path) -> None:

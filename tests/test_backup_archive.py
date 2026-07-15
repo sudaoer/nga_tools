@@ -837,7 +837,7 @@ class BackupRawArchiveTest:
             in timing_log.path.read_text(encoding="utf-8")
         )
 
-    def test_attachment_change_persists_without_reprocessing_images(
+    def test_attachment_change_writes_empty_metadata_without_reprocessing_images(
         self,
         tmp_path: Path,
     ) -> None:
@@ -865,9 +865,25 @@ class BackupRawArchiveTest:
             parsed_lous=parsed_lous,
         )
 
-        row = ThreadArchiveStore(thread_dir).read_effective_post_rows({1})[0]
-        assert row.image_attachments_json is not None
-        assert "mon_202607/11/new.png" in row.image_attachments_json
+        with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
+            attachment_row = connection.execute(
+                """
+                SELECT image_attachments_json
+                FROM post_latest_metadata
+                WHERE pid = 1001 AND lou = 1
+                """
+            ).fetchone()
+            attachment_column = next(
+                row
+                for row in connection.execute(
+                    "PRAGMA table_info(post_latest_metadata)"
+                ).fetchall()
+                if row[1] == "image_attachments_json"
+            )
+
+        assert attachment_row == ("[]",)
+        assert attachment_column[2] == "TEXT"
+        assert attachment_column[3] == 1
         assert full_processing_calls == ["full"]
         assert parsed_lous == [[1, 2]]
 
@@ -1892,6 +1908,14 @@ def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(
     first_recovery = store.upsert_recovered_posts({2: recovered})
     repeated_recovery = store.upsert_recovered_posts({2: recovered})
     rows = store.read_effective_post_rows({2})
+    with closing(sqlite3.connect(store.db_path)) as connection:
+        recovered_attachment_row = connection.execute(
+            """
+            SELECT image_attachments_json
+            FROM post_latest_metadata
+            WHERE pid = 2002 AND lou = 2
+            """
+        ).fetchone()
 
     assert first_recovery.inserted_count == 1
     assert first_recovery.effective_changed_lous == frozenset({2})
@@ -1904,7 +1928,7 @@ def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(
     assert rows[0].pid == 2002
     assert rows[0].author_uid == -1
     assert rows[0].postdate_json == '"2026-07-11 10:00"'
-    assert rows[0].image_attachments_json is not None
+    assert recovered_attachment_row == ("[]",)
     assert store.read_latest_author_post_refs() == [
         {"pid": 1001, "author_lou": 1}
     ]

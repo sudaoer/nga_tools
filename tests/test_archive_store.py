@@ -1016,7 +1016,11 @@ class ThreadArchiveStoreTest:
                 ).fetchone()
                 metadata_row = connection.execute(
                     """
-                    SELECT author_name, author_uid, seen_count
+                    SELECT
+                        author_name,
+                        author_uid,
+                        image_attachments_json,
+                        seen_count
                     FROM post_latest_metadata
                     WHERE pid = 1001 AND lou = 1
                     """
@@ -1026,7 +1030,7 @@ class ThreadArchiveStoreTest:
         assert "post_json" not in columns
         assert version_row == (1, hash_text("same body"), 2)
         assert observation_row == (2, 1)
-        assert metadata_row == ("author", 2001, 2)
+        assert metadata_row == ("author", 2001, "[]", 2)
 
     def test_read_latest_post_record_summaries_skip_post_json(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

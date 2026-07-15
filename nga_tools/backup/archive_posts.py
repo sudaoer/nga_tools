@@ -3,9 +3,6 @@ from __future__ import annotations
 import json
 from typing import Optional, TypedDict, cast
 
-from nga_tools.backup.models import ImageAttachment
-from nga_tools.backup.post_data import post_image_attachments
-
 PostDate = int | str
 
 
@@ -13,7 +10,6 @@ class ArchivePostMetadata(TypedDict):
     author_name: Optional[str]
     author_uid: Optional[int]
     postdate_json: Optional[str]
-    image_attachments_json: str
 
 
 def _json_text(value: object) -> str:
@@ -68,33 +64,6 @@ def postdate_from_json(value: Optional[str]) -> Optional[PostDate]:
     return None
 
 
-def image_attachments_to_json(attachments: list[ImageAttachment]) -> str:
-    return _json_text(attachments)
-
-
-def image_attachments_from_json(value: Optional[str]) -> list[ImageAttachment]:
-    if value is None:
-        return []
-    try:
-        raw_attachments: object = json.loads(value)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(raw_attachments, list):
-        return []
-
-    attachments: list[ImageAttachment] = []
-    for raw_attachment in cast(list[object], raw_attachments):
-        if not isinstance(raw_attachment, dict):
-            continue
-        attachment = cast(dict[str, object], raw_attachment)
-        url = attachment.get("url")
-        path = attachment.get("path")
-        name = attachment.get("name")
-        if isinstance(url, str) and isinstance(path, str) and isinstance(name, str):
-            attachments.append({"url": url, "path": path, "name": name})
-    return attachments
-
-
 def metadata_from_raw_post(raw_post: object) -> ArchivePostMetadata:
     post_dict: dict[str, object] = (
         cast(dict[str, object], raw_post) if isinstance(raw_post, dict) else {}
@@ -104,7 +73,4 @@ def metadata_from_raw_post(raw_post: object) -> ArchivePostMetadata:
         "author_name": author_name,
         "author_uid": author_uid,
         "postdate_json": postdate_to_json(_optional_postdate(post_dict)),
-        "image_attachments_json": image_attachments_to_json(
-            post_image_attachments(post_dict)
-        ),
     }
