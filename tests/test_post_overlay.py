@@ -167,6 +167,7 @@ def test_old_archive_without_overlay_table_ignores_legacy_json(tmp_path: Path) -
     thread_dir.mkdir()
     store = ThreadArchiveStore(thread_dir)
     sqlite3.connect(store.db_path).close()
+    store.ensure_schema()
     legacy_path = thread_dir / "post_overlays.json"
     legacy_text = '{"version":1,"overlays":{"1":{"bbcode":"legacy"}}}\n'
     legacy_path.write_text(legacy_text, encoding="utf-8")

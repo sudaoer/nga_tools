@@ -7,7 +7,9 @@ import pytest
 from nga_tools.config import get_config
 from nga_tools.core.output_lock import (
     ThreadOutputLockError,
+    output_root_lock_path,
     thread_output_lock_path,
+    use_output_root_lock,
     use_thread_output_lock,
 )
 
@@ -35,3 +37,14 @@ def test_thread_output_lock_allows_different_threads() -> None:
     with use_thread_output_lock(123, 456):
         with use_thread_output_lock(123, None):
             pass
+
+
+def test_output_root_lock_fails_fast_for_same_root(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    assert output_root_lock_path(output_root) == (
+        output_root / ".nga_tools-output.lock"
+    )
+    with use_output_root_lock(output_root):
+        with pytest.raises(ThreadOutputLockError):
+            with use_output_root_lock(output_root):
+                pass

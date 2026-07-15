@@ -242,6 +242,31 @@ class BackupCliTest:
 
         assert context.value.code == 2
 
+    def test_backup_migrate_layout_parses_all_and_rollback(self) -> None:
+        all_args = args_parse(["backup", "migrate-layout", "--all"])
+        rollback_args = args_parse(
+            ["backup", "migrate-layout", "--rollback", "run-123"]
+        )
+
+        assert all_args["all"] is True
+        assert rollback_args["rollback"] == "run-123"
+
+    def test_backup_migrate_layout_rejects_rollback_with_target(self) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(
+                    [
+                        "backup",
+                        "migrate-layout",
+                        "--rollback",
+                        "run-123",
+                        "--tid",
+                        "123",
+                    ]
+                )
+
+        assert context.value.code == 2
+
 
 def _backup_config_app_config(
     workers: int = 4,

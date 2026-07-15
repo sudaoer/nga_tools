@@ -4,6 +4,7 @@ from typing import Literal, NotRequired, TypedDict
 
 from nga_tools.commands.backup import (
     backup_all,
+    backup_migrate_layout,
     backup_migrate_store,
     backup_sub,
     pdf_generate,
@@ -142,6 +143,12 @@ ARG_DEFS: dict[str, ArgDef] = {
         "flags": ("--all",),
         "action": "store_true",
         "help": "处理所有已有备份目录",
+    },
+    "rollback": {
+        "flags": ("--rollback",),
+        "type": str,
+        "metavar": "RUN_ID",
+        "help": "按迁移运行ID恢复保留的旧布局",
     },
     "all_threads": {
         "flags": ("--all-threads", "--all_threads"),
@@ -392,6 +399,30 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "args": ["name", "tid", "aid", "all"],
             "required_any": ["name", "tid", "all"],
+        },
+        "migrate-layout": {
+            "handler": backup_migrate_layout,
+            "summary": "把现有SQLite备份迁移为数据、状态和缓存分库",
+            "usage": (
+                f"{PROGRAM_USAGE} backup migrate-layout "
+                "((--name NAME | --tid TID [--aid AID]) | --all | "
+                "--rollback RUN_ID)"
+            ),
+            "examples": [
+                f"{PROGRAM_USAGE} backup migrate-layout --name 帖子名",
+                f"{PROGRAM_USAGE} backup migrate-layout --all",
+                (
+                    f"{PROGRAM_USAGE} backup migrate-layout "
+                    "--rollback 20260715T120000Z-1234abcd"
+                ),
+            ],
+            "notes": [
+                "迁移会保留可回滚SQLite快照，并在中断后按同一清单续跑。",
+                "archive.sqlite3最后发布；旧缓存表不会保留在活动数据文件中。",
+                "只迁移与当前修订和格式匹配的状态及可解析缓存。",
+            ],
+            "args": ["name", "tid", "aid", "all", "rollback"],
+            "required_any": ["name", "tid", "all", "rollback"],
         },
         "pdf": {
             "handler": pdf_generate,

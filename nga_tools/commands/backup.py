@@ -27,9 +27,14 @@ from nga_tools.commands.types import (
     CommandArgs,
     optional_bool,
     optional_int,
+    optional_str,
     required_int,
 )
-from nga_tools.core.output_lock import use_output_folder_lock, use_thread_output_lock
+from nga_tools.core.output_lock import (
+    use_output_folder_lock,
+    use_output_root_lock,
+    use_thread_output_lock,
+)
 from nga_tools.core.paths import timing_log_path, warning_log_path
 from nga_tools.forum.thread_configs import (
     ThreadConfig,
@@ -43,6 +48,7 @@ from nga_tools.backup.image_index_writer import use_image_index_writer
 from nga_tools.backup.image_store_metrics import use_image_store_metrics
 from nga_tools.backup.image_store import use_image_download_coordination
 from nga_tools.timing import time_section, use_timing_log
+from nga_tools.storage.layout_migration import migrate_layout, rollback_layout
 
 
 class BackupFetchFunc(Protocol):
@@ -299,6 +305,55 @@ def backup_migrate_store(args: CommandArgs) -> None:
     ):
         with time_section("归档迁移"):
             _migrate_store_for_thread_folder(thread_folder)
+
+
+def _layout_candidate_folders(output_dir: Path) -> list[Path]:
+    if not output_dir.is_dir():
+        return []
+    return sorted(
+        folder
+        for folder in output_dir.iterdir()
+        if folder.is_dir() and (folder / "archive.sqlite3").is_file()
+    )
+
+
+def backup_migrate_layout(args: CommandArgs) -> None:
+    app_config = get_config()
+    output_root = Path(app_config.output_dir)
+    rollback_run_id = optional_str(args, "rollback")
+    with use_output_root_lock(output_root):
+        if rollback_run_id is not None:
+            result = rollback_layout(output_root, rollback_run_id)
+            report_info(
+                f"布局迁移已回滚：run_id={result.run_id}，"
+                f"恢复{result.restored_count}个帖子目录。"
+            )
+            return
+
+        if optional_bool(args, "all"):
+            folders = _layout_candidate_folders(output_root)
+        else:
+            tid, aid = resolve_command_thread_target(args)
+            aid_text = "all" if aid is None else str(aid)
+            folders = [output_root / f"{tid}_{aid_text}"]
+        if not folders:
+            report_info("没有找到需要迁移的archive.sqlite3。")
+            return
+
+        result = migrate_layout(output_root, folders)
+
+    report_info(
+        f"布局迁移完成：run_id={result.run_id}，"
+        f"迁移{result.migrated_count}个，跳过{result.skipped_count}个，"
+        f"失败{len(result.failures)}个。"
+    )
+    for folder, error in result.failures:
+        report_warning(
+            WarningCategory.MIGRATION,
+            f"布局迁移失败：{folder}：{error}",
+        )
+    if result.failures:
+        raise SystemExit(1)
 
 
 def pdf_generate(args: CommandArgs) -> None:

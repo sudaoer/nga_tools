@@ -126,11 +126,25 @@ def _validate_args(
                 + _format_arg_names(target_args)
             )
 
-    if command == "backup" and action == "migrate-store" and args.get("all"):
+    if (
+        command == "backup"
+        and action in ("migrate-store", "migrate-layout")
+        and args.get("all")
+    ):
         target_args = sorted(provided_args & {"aid", "name", "tid"})
         if target_args:
             parser.error(
                 "--all不能与以下单帖参数一起使用："
+                + _format_arg_names(target_args)
+            )
+
+    if command == "backup" and action == "migrate-layout" and args.get(
+        "rollback"
+    ):
+        target_args = sorted(provided_args & {"aid", "all", "name", "tid"})
+        if target_args:
+            parser.error(
+                "--rollback不能与以下迁移目标参数一起使用："
                 + _format_arg_names(target_args)
             )
 

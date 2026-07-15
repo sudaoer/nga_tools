@@ -840,8 +840,17 @@ class ThreadArchiveStore:
         if not self.state_store.exists():
             self.state_store.ensure_schema(source_store_id)
         try:
-            return self._read_backup_processing_snapshot_from_state(change_state)
+            with closing(self._connect_state_read()):
+                pass
         except (OSError, sqlite3.Error, ValueError):
+            self.state_store.recreate_after_error(source_store_id)
+            return BackupProcessingSnapshot(
+                change_state=change_state,
+                pending_image_retries=(),
+            )
+        try:
+            return self._read_backup_processing_snapshot_from_state(change_state)
+        except (OSError, sqlite3.Error):
             self.state_store.recreate_after_error(source_store_id)
             return BackupProcessingSnapshot(
                 change_state=change_state,
@@ -1425,6 +1434,16 @@ class ThreadArchiveStore:
                 connection.execute("DELETE FROM backup_floor_processing_state")
                 connection.execute("DELETE FROM backup_image_reference_state")
                 self._clear_image_reference_manifest(connection)
+
+    def replace_pending_image_retries(
+        self,
+        pending_image_retries: tuple[PendingImageRetry, ...],
+    ) -> None:
+        """Replace rebuildable retry state without marking image processing current."""
+        self.require_exists()
+        with closing(self._connect_state_write()) as connection:
+            with connection:
+                self._replace_pending_images(connection, pending_image_retries)
 
     def commit_floor_processing_state(self, state: FloorProcessingState) -> bool:
         self.require_exists()

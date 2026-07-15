@@ -11,6 +11,7 @@ from filelock import FileLock, Timeout
 from nga_tools.core import paths
 
 LOCK_FILENAME = ".nga_tools.lock"
+OUTPUT_ROOT_LOCK_FILENAME = ".nga_tools-output.lock"
 
 _PROCESS_LOCKS: dict[Path, LockType] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
@@ -26,6 +27,10 @@ def thread_output_lock_path(tid: int, aid: int | None) -> Path:
 
 def output_folder_lock_path(folder: Path) -> Path:
     return folder / LOCK_FILENAME
+
+
+def output_root_lock_path(output_root: Path) -> Path:
+    return output_root / OUTPUT_ROOT_LOCK_FILENAME
 
 
 def _lock_key(lock_path: Path) -> Path:
@@ -92,3 +97,26 @@ def use_thread_output_lock(
     folder = Path(paths.get_folder(tid, aid))
     with use_output_folder_lock(folder, timeout=timeout):
         yield
+
+
+@contextmanager
+def use_output_root_lock(
+    output_root: Path,
+    *,
+    timeout: float = 0,
+) -> Generator[None, None, None]:
+    output_root.mkdir(parents=True, exist_ok=True)
+    lock_path = output_root_lock_path(output_root)
+    process_lock = _process_lock_for(lock_path)
+    if not _acquire_process_lock(process_lock, timeout):
+        raise _lock_error(output_root, lock_path)
+
+    file_lock = FileLock(str(lock_path))
+    try:
+        try:
+            with file_lock.acquire(timeout=timeout):
+                yield
+        except Timeout as error:
+            raise _lock_error(output_root, lock_path) from error
+    finally:
+        process_lock.release()

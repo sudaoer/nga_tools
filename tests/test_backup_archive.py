@@ -397,7 +397,7 @@ class SparseAuthorPageTest:
 
 
 class BackupRawArchiveTest:
-    def test_local_work_planning_migrates_legacy_processing_schema(
+    def test_local_work_planning_ignores_legacy_archive_processing_schema(
         self,
         tmp_path: Path,
     ) -> None:
@@ -425,17 +425,14 @@ class BackupRawArchiveTest:
             )
             connection.execute(
                 """
-                INSERT INTO backup_processing_state
-                SELECT 1, 1, processed_archive_revision,
-                       processed_floor_map_revision, page_count,
-                       author_total_lou_count, 'overlay', 'selection',
-                       floor_map_format_version, floor_map_generation_version,
-                       floor_map_hash_algorithm, 1, completed_at
-                FROM backup_floor_processing_state WHERE singleton = 1
+                INSERT INTO backup_processing_state VALUES
+                (1, 999, 999, 999, 999, 999, 'legacy', 'legacy',
+                 999, 999, 'legacy', 999, 'legacy')
                 """
             )
-            connection.execute("DROP TABLE backup_floor_processing_state")
-            connection.execute("DROP TABLE backup_image_reference_state")
+            connection.commit()
+        with sqlite3.connect(thread_dir / "archive_state.sqlite3") as connection:
+            connection.execute("DELETE FROM backup_image_reference_state")
             connection.commit()
 
         with patch.object(
@@ -626,7 +623,7 @@ class BackupRawArchiveTest:
             full_processing_calls=full_processing_calls,
         )
         store = ThreadArchiveStore(thread_dir)
-        with closing(sqlite3.connect(store.db_path)) as connection:
+        with closing(sqlite3.connect(store.state_store.db_path)) as connection:
             connection.execute(
                 "DELETE FROM backup_image_reference_manifest_entries"
             )
@@ -663,7 +660,7 @@ class BackupRawArchiveTest:
         parsed_lous: list[list[int]] = []
         _run_backup(thread_dir, client, parsed_lous=parsed_lous)
         store = ThreadArchiveStore(thread_dir)
-        with closing(sqlite3.connect(store.db_path)) as connection:
+        with closing(sqlite3.connect(store.state_store.db_path)) as connection:
             connection.execute(
                 "DELETE FROM backup_image_reference_manifest_entries"
             )
@@ -686,7 +683,7 @@ class BackupRawArchiveTest:
         labels: list[tuple[str, str]] = []
         _run_backup(thread_dir, client)
         store = ThreadArchiveStore(thread_dir)
-        with closing(sqlite3.connect(store.db_path)) as connection:
+        with closing(sqlite3.connect(store.state_store.db_path)) as connection:
             connection.execute(
                 "DELETE FROM backup_image_reference_manifest_entries WHERE lou = 2"
             )
@@ -1085,7 +1082,7 @@ class BackupRawArchiveTest:
             failed_http_status=404,
         )
         with closing(
-            sqlite3.connect(thread_dir / "archive.sqlite3")
+            sqlite3.connect(thread_dir / "archive_state.sqlite3")
         ) as connection:
             connection.execute(
                 """
@@ -1158,7 +1155,7 @@ class BackupRawArchiveTest:
             failed_http_status=404,
         )
         with closing(
-            sqlite3.connect(thread_dir / "archive.sqlite3")
+            sqlite3.connect(thread_dir / "archive_state.sqlite3")
         ) as connection:
             connection.execute(
                 """
@@ -1498,7 +1495,7 @@ class BackupRawArchiveTest:
             client,
             full_processing_calls=full_processing_calls,
         )
-        with sqlite3.connect(thread_dir / "archive.sqlite3") as connection:
+        with sqlite3.connect(thread_dir / "archive_state.sqlite3") as connection:
             connection.execute(
                 "UPDATE backup_image_reference_state SET completed_at = ''"
             )
