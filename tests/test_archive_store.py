@@ -220,9 +220,7 @@ class ThreadArchiveStoreTest:
                 )
                 connection.commit()
 
-            ThreadArchiveStore(
-                store.thread_folder
-            ).ensure_backup_processing_schema()
+            ThreadArchiveStore(store.thread_folder).ensure_schema()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 indexes = dict(
                     connection.execute(
@@ -571,9 +569,7 @@ class ThreadArchiveStoreTest:
             ensure_schema_on_read.assert_not_called()
             with closing(reader._connect_read()) as connection:
                 with pytest.raises(sqlite3.OperationalError, match="readonly"):
-                    connection.execute(
-                        "INSERT INTO backup_pending_images (url) VALUES ('x')"
-                    )
+                    connection.execute("DELETE FROM archive_change_state")
 
     def test_refresh_stored_word_counts_migrates_old_schema(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1234,7 +1230,7 @@ class ThreadArchiveStoreTest:
             store.clear_backup_processing_state()
             cleared = store.read_backup_processing_snapshot()
             cleared_manifest = store.read_image_reference_manifest()
-            with closing(sqlite3.connect(store.db_path)) as connection:
+            with closing(sqlite3.connect(store.state_store.db_path)) as connection:
                 table_names = {
                     row[0]
                     for row in connection.execute(
@@ -1242,7 +1238,6 @@ class ThreadArchiveStoreTest:
                         SELECT name
                         FROM sqlite_schema
                         WHERE type = 'table' AND name IN (
-                            'archive_change_state',
                             'backup_floor_processing_state',
                             'backup_image_reference_state',
                             'backup_image_reference_manifest_state',
@@ -1289,7 +1284,6 @@ class ThreadArchiveStoreTest:
         assert cleared.pending_image_retries == ()
         assert cleared_manifest is None
         assert table_names == {
-            "archive_change_state",
             "backup_floor_processing_state",
             "backup_image_reference_state",
             "backup_image_reference_manifest_state",
@@ -1367,7 +1361,7 @@ class ThreadArchiveStoreTest:
                 (),
                 manifest_posts=manifest_posts,
             )
-            with closing(sqlite3.connect(store.db_path)) as connection:
+            with closing(sqlite3.connect(store.state_store.db_path)) as connection:
                 connection.execute(
                     """
                     UPDATE backup_image_reference_manifest_urls
@@ -1534,7 +1528,7 @@ class ThreadArchiveStoreTest:
         assert manifest is not None
         assert manifest.posts == posts
 
-    def test_legacy_processing_state_migrates_floor_state_and_drops_table(
+    def test_legacy_processing_state_is_not_read_by_runtime(
         self,
     ) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1578,19 +1572,15 @@ class ThreadArchiveStoreTest:
                     """
                 ).fetchone()
 
-        assert snapshot.floor_state is not None
-        assert snapshot.floor_state.page_count == 2
-        assert snapshot.floor_state.author_total_lou_count == 21
+        assert snapshot.floor_state is None
         assert snapshot.image_state is None
-        assert legacy_exists is None
+        assert legacy_exists == (1,)
 
-    def test_legacy_pending_image_urls_gain_retry_metadata_columns(self) -> None:
+    def test_legacy_pending_image_urls_are_not_read_by_runtime(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             thread_folder = Path(temp_dir_name)
-            ThreadArchiveStore(thread_folder).ensure_schema()
             db_path = thread_folder / "archive.sqlite3"
             with closing(sqlite3.connect(db_path)) as connection:
-                connection.execute("DROP TABLE backup_pending_images")
                 connection.execute(
                     "CREATE TABLE backup_pending_images (url TEXT PRIMARY KEY)"
                 )
@@ -1601,9 +1591,10 @@ class ThreadArchiveStoreTest:
                 connection.commit()
 
             store = ThreadArchiveStore(thread_folder)
+            store.ensure_schema()
             store.ensure_backup_processing_schema()
             snapshot = store.read_backup_processing_snapshot()
-            with closing(sqlite3.connect(db_path)) as connection:
+            with closing(sqlite3.connect(store.state_store.db_path)) as connection:
                 columns = {
                     row[1]
                     for row in connection.execute(
@@ -1617,14 +1608,7 @@ class ThreadArchiveStoreTest:
             "failure_kind",
             "http_status",
         }
-        assert snapshot.pending_image_retries == (
-            PendingImageRetry(
-                url="https://example.invalid/legacy-retry.png",
-                last_attempt_at=None,
-                failure_kind=None,
-                http_status=None,
-            ),
-        )
+        assert snapshot.pending_image_retries == ()
 
     def test_current_processing_schema_skips_full_schema_initialization(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

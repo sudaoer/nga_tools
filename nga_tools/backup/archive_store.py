@@ -44,6 +44,10 @@ from nga_tools.backup.processing_state import (
     ImageReferenceState,
     PendingImageRetry,
 )
+from nga_tools.backup.thread_stores import (
+    ThreadArchiveCacheStore,
+    ThreadArchiveStateStore,
+)
 from nga_tools.core.downloads import DOWNLOAD_FAILURE_KINDS
 from nga_tools.core.hashing import hash_text
 from nga_tools.core.sqlite import (
@@ -53,6 +57,7 @@ from nga_tools.core.sqlite import (
     iter_in_clause_chunks,
 )
 from nga_tools.ngaclient.client import PageData
+from nga_tools.storage import ensure_storage_metadata, read_storage_metadata
 from nga_tools.timing import time_section
 from nga_tools.word_count import (
     WORD_COUNT_VERSION,
@@ -61,22 +66,6 @@ from nga_tools.word_count import (
 )
 
 ARCHIVE_DB_FILENAME = "archive.sqlite3"
-_BACKUP_PROCESSING_TABLES = frozenset(
-    {
-        "archive_change_state",
-        "backup_floor_processing_state",
-        "backup_image_reference_state",
-        "backup_image_reference_manifest_state",
-        "backup_image_reference_manifest_posts",
-        "backup_image_reference_manifest_entries",
-        "backup_image_reference_manifest_urls",
-        "backup_pending_images",
-    }
-)
-_LEGACY_BACKUP_PROCESSING_TABLE = "backup_processing_state"
-_PENDING_IMAGE_COLUMNS = frozenset(
-    {"url", "last_attempt_at", "failure_kind", "http_status"}
-)
 _LATEST_POST_INDEX = "idx_post_versions_latest_covering"
 _LEGACY_LATEST_POST_INDEX = "idx_post_versions_latest"
 _LATEST_POST_RECORDS_QUERY = """
@@ -382,7 +371,10 @@ class ThreadArchiveStore:
     def __init__(self, thread_folder: Path) -> None:
         self.thread_folder = thread_folder
         self.db_path = thread_folder / ARCHIVE_DB_FILENAME
+        self.state_store = ThreadArchiveStateStore(thread_folder)
+        self.cache_store = ThreadArchiveCacheStore(thread_folder)
         self._schema_initialized = False
+        self._store_id: str | None = None
 
     def exists(self) -> bool:
         return self.db_path.is_file()
@@ -391,7 +383,8 @@ class ThreadArchiveStore:
         if not self.exists():
             raise RuntimeError(
                 f"缺少archive.sqlite3：{self.db_path}。"
-                "请先运行 backup migrate-store 或重新运行备份初始化。"
+                "请先运行 backup migrate-layout、backup migrate-store "
+                "或重新运行备份初始化。"
             )
 
     def _connect_write(self) -> sqlite3.Connection:
@@ -419,59 +412,52 @@ class ThreadArchiveStore:
             uri=True,
         )
         configure_readonly_connection(connection)
+        try:
+            metadata = read_storage_metadata(connection)
+            if metadata is None or metadata.role != "archive_data":
+                raise ValueError(
+                    f"archive不是当前分库格式：{self.db_path}。"
+                    "请先运行 backup migrate-layout。"
+                )
+            self._store_id = metadata.store_id
+        except BaseException:
+            connection.close()
+            raise
         return connection
+
+    def archive_store_id(self) -> str:
+        if self._store_id is not None:
+            return self._store_id
+        with closing(self._connect_read()) as connection:
+            metadata = read_storage_metadata(connection)
+            if metadata is None:
+                raise ValueError(f"archive缺少storage_metadata：{self.db_path}")
+            self._store_id = metadata.store_id
+        return self._store_id
+
+    def _connect_state_write(self) -> sqlite3.Connection:
+        return self.state_store.connect_write(self.archive_store_id())
+
+    def _connect_state_read(self) -> sqlite3.Connection:
+        return self.state_store.connect_read(self.archive_store_id())
+
+    def _connect_cache_write(self) -> sqlite3.Connection:
+        return self.cache_store.connect_write(self.archive_store_id())
+
+    def _connect_cache_read(self) -> sqlite3.Connection:
+        return self.cache_store.connect_read(self.archive_store_id())
 
     def ensure_schema(self) -> None:
         with closing(self._connect_write()):
             pass
 
     def ensure_backup_processing_schema(self) -> None:
-        """Run the full schema migration only when processing-state tables need it."""
+        """Ensure the data, state, and cache databases use layout v2."""
         if not self.exists():
             self.ensure_schema()
-            return
-
-        tracked_objects = (
-            *_BACKUP_PROCESSING_TABLES,
-            _LEGACY_BACKUP_PROCESSING_TABLE,
-            _LATEST_POST_INDEX,
-            _LEGACY_LATEST_POST_INDEX,
-        )
-        placeholders = ", ".join("?" for _item in tracked_objects)
-        with closing(self._connect_read()) as connection:
-            rows = connection.execute(
-                f"""
-                SELECT type, name
-                FROM sqlite_schema
-                WHERE name IN ({placeholders})
-                """,
-                tracked_objects,
-            ).fetchall()
-            pending_image_columns = (
-                _table_columns(connection, "backup_pending_images")
-                if _table_exists(connection, "backup_pending_images")
-                else set[str]()
-            )
-        table_names = {
-            row[1]
-            for row in rows
-            if row[0] == "table" and isinstance(row[1], str)
-        }
-        index_names = {
-            row[1]
-            for row in rows
-            if row[0] == "index" and isinstance(row[1], str)
-        }
-        if (
-            _BACKUP_PROCESSING_TABLES <= table_names
-            and _PENDING_IMAGE_COLUMNS <= pending_image_columns
-            and _LEGACY_BACKUP_PROCESSING_TABLE not in table_names
-            and _LATEST_POST_INDEX in index_names
-            and _LEGACY_LATEST_POST_INDEX not in index_names
-        ):
-            self._schema_initialized = True
-            return
-        self.ensure_schema()
+        source_store_id = self.archive_store_id()
+        self.state_store.ensure_schema(source_store_id)
+        self.cache_store.ensure_schema(source_store_id)
 
     def _create_post_versions_table(
         self,
@@ -575,23 +561,6 @@ class ThreadArchiveStore:
             """
         )
 
-    def _create_post_image_reference_cache_table(
-        self,
-        connection: sqlite3.Connection,
-    ) -> None:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS post_image_reference_cache (
-                cache_key TEXT PRIMARY KEY,
-                source_hash TEXT NOT NULL,
-                extractor_version INTEGER NOT NULL,
-                references_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-
     def _create_post_overlays_table(
         self,
         connection: sqlite3.Connection,
@@ -661,7 +630,7 @@ class ThreadArchiveStore:
         )
         connection.execute(f"DROP TABLE {legacy_table}")
 
-    def _create_backup_processing_tables(
+    def _create_archive_change_state_table(
         self,
         connection: sqlite3.Connection,
     ) -> None:
@@ -676,78 +645,6 @@ class ThreadArchiveStore:
         )
         connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS backup_floor_processing_state (
-                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                format_version INTEGER NOT NULL,
-                processed_archive_revision INTEGER NOT NULL,
-                processed_floor_map_revision INTEGER NOT NULL,
-                page_count INTEGER NOT NULL,
-                author_total_lou_count INTEGER,
-                floor_map_format_version INTEGER NOT NULL,
-                floor_map_generation_version INTEGER NOT NULL,
-                floor_map_hash_algorithm TEXT NOT NULL,
-                completed_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS backup_image_reference_state (
-                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                format_version INTEGER NOT NULL,
-                processed_archive_revision INTEGER NOT NULL,
-                post_overlays_fingerprint TEXT NOT NULL,
-                post_version_selections_fingerprint TEXT NOT NULL,
-                image_reference_extractor_version INTEGER NOT NULL,
-                completed_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS backup_image_reference_manifest_state (
-                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                format_version INTEGER NOT NULL,
-                processed_archive_revision INTEGER NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS backup_image_reference_manifest_posts (
-                lou INTEGER PRIMARY KEY CHECK(lou >= 0),
-                cache_key TEXT NOT NULL CHECK(cache_key != '')
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS backup_image_reference_manifest_entries (
-                lou INTEGER NOT NULL CHECK(lou >= 0),
-                image_index INTEGER NOT NULL CHECK(image_index > 0),
-                url TEXT NOT NULL CHECK(url != ''),
-                valid INTEGER NOT NULL CHECK(valid IN (0, 1)),
-                PRIMARY KEY(lou, image_index)
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS backup_image_reference_manifest_urls (
-                url TEXT PRIMARY KEY CHECK(url != ''),
-                reference_count INTEGER NOT NULL CHECK(reference_count > 0),
-                valid INTEGER NOT NULL CHECK(valid IN (0, 1))
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_image_reference_manifest_entries_url
-            ON backup_image_reference_manifest_entries(url)
-            """
-        )
-        connection.execute(
-            """
             INSERT INTO archive_change_state (
                 singleton,
                 archive_revision,
@@ -757,55 +654,9 @@ class ThreadArchiveStore:
             ON CONFLICT(singleton) DO NOTHING
             """
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS backup_pending_images (
-                url TEXT PRIMARY KEY,
-                last_attempt_at TEXT,
-                failure_kind TEXT,
-                http_status INTEGER
-            )
-            """
-        )
-        pending_image_columns = _table_columns(
-            connection,
-            "backup_pending_images",
-        )
-        if "last_attempt_at" not in pending_image_columns:
-            connection.execute(
-                "ALTER TABLE backup_pending_images ADD COLUMN last_attempt_at TEXT"
-            )
-        if "failure_kind" not in pending_image_columns:
-            connection.execute(
-                "ALTER TABLE backup_pending_images ADD COLUMN failure_kind TEXT"
-            )
-        if "http_status" not in pending_image_columns:
-            connection.execute(
-                "ALTER TABLE backup_pending_images ADD COLUMN http_status INTEGER"
-            )
-        if _table_exists(connection, _LEGACY_BACKUP_PROCESSING_TABLE):
-            connection.execute(
-                """
-                INSERT INTO backup_floor_processing_state (
-                    singleton, format_version, processed_archive_revision,
-                    processed_floor_map_revision, page_count,
-                    author_total_lou_count, floor_map_format_version,
-                    floor_map_generation_version, floor_map_hash_algorithm,
-                    completed_at
-                )
-                SELECT singleton, 1, processed_archive_revision,
-                       processed_floor_map_revision, page_count,
-                       author_total_lou_count, floor_map_format_version,
-                       floor_map_generation_version, floor_map_hash_algorithm,
-                       completed_at
-                FROM backup_processing_state
-                WHERE singleton = 1
-                ON CONFLICT(singleton) DO NOTHING
-                """
-            )
-            connection.execute(f"DROP TABLE {_LEGACY_BACKUP_PROCESSING_TABLE}")
-
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
+        metadata = ensure_storage_metadata(connection, role="archive_data")
+        self._store_id = metadata.store_id
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS page_snapshots (
@@ -835,9 +686,8 @@ class ThreadArchiveStore:
         self._create_post_latest_metadata_table(connection)
         self._create_post_observations_table(connection)
         self._create_floor_map_tables(connection)
-        self._create_post_image_reference_cache_table(connection)
         self._ensure_post_overlays_table(connection)
-        self._create_backup_processing_tables(connection)
+        self._create_archive_change_state_table(connection)
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_post_versions_latest_covering
@@ -979,10 +829,30 @@ class ThreadArchiveStore:
             floor_map_revision=row[1],
         )
 
+    def _read_current_archive_change_state(self) -> ArchiveChangeState:
+        with closing(self._connect_read()) as connection:
+            return self._read_archive_change_state(connection)
+
     def read_backup_processing_snapshot(self) -> BackupProcessingSnapshot:
         self.require_exists()
-        with closing(self._connect_read()) as connection:
-            change_state = self._read_archive_change_state(connection)
+        change_state = self._read_current_archive_change_state()
+        source_store_id = self.archive_store_id()
+        if not self.state_store.exists():
+            self.state_store.ensure_schema(source_store_id)
+        try:
+            return self._read_backup_processing_snapshot_from_state(change_state)
+        except (OSError, sqlite3.Error, ValueError):
+            self.state_store.recreate_after_error(source_store_id)
+            return BackupProcessingSnapshot(
+                change_state=change_state,
+                pending_image_retries=(),
+            )
+
+    def _read_backup_processing_snapshot_from_state(
+        self,
+        change_state: ArchiveChangeState,
+    ) -> BackupProcessingSnapshot:
+        with closing(self._connect_state_read()) as connection:
             pending_rows = cast(
                 list[tuple[object, object, object, object]],
                 connection.execute(
@@ -1279,7 +1149,7 @@ class ThreadArchiveStore:
         self,
     ) -> ImageReferenceManifestSnapshot | None:
         self.require_exists()
-        with closing(self._connect_read()) as connection:
+        with closing(self._connect_state_read()) as connection:
             state_row = connection.execute(
                 """
                 SELECT format_version, processed_archive_revision
@@ -1399,7 +1269,7 @@ class ThreadArchiveStore:
         self,
     ) -> ImageReferenceManifestState | None:
         self.require_exists()
-        with closing(self._connect_read()) as connection:
+        with closing(self._connect_state_read()) as connection:
             row = connection.execute(
                 """
                 SELECT format_version, processed_archive_revision
@@ -1427,7 +1297,7 @@ class ThreadArchiveStore:
             return {}
         post_rows: list[tuple[object, object]] = []
         entry_rows: list[tuple[object, object, object, object]] = []
-        with closing(self._connect_read()) as connection:
+        with closing(self._connect_state_read()) as connection:
             for chunk in iter_in_clause_chunks(sorted(lous)):
                 placeholders = ",".join("?" for _value in chunk)
                 post_rows.extend(
@@ -1511,7 +1381,7 @@ class ThreadArchiveStore:
         if not urls:
             return {}
         rows: list[tuple[object, object, object]] = []
-        with closing(self._connect_read()) as connection:
+        with closing(self._connect_state_read()) as connection:
             for chunk in iter_in_clause_chunks(sorted(urls)):
                 placeholders = ",".join("?" for _value in chunk)
                 rows.extend(
@@ -1549,7 +1419,7 @@ class ThreadArchiveStore:
     def clear_backup_processing_state(self) -> None:
         if not self.exists():
             return
-        with closing(self._connect_write()) as connection:
+        with closing(self._connect_state_write()) as connection:
             with connection:
                 connection.execute("DELETE FROM backup_pending_images")
                 connection.execute("DELETE FROM backup_floor_processing_state")
@@ -1558,14 +1428,14 @@ class ThreadArchiveStore:
 
     def commit_floor_processing_state(self, state: FloorProcessingState) -> bool:
         self.require_exists()
-        with closing(self._connect_write()) as connection:
+        expected_change_state = ArchiveChangeState(
+            state.processed_archive_revision,
+            state.processed_floor_map_revision,
+        )
+        if self._read_current_archive_change_state() != expected_change_state:
+            return False
+        with closing(self._connect_state_write()) as connection:
             with connection:
-                change_state = self._read_archive_change_state(connection)
-                if change_state != ArchiveChangeState(
-                    state.processed_archive_revision,
-                    state.processed_floor_map_revision,
-                ):
-                    return False
                 connection.execute("DELETE FROM backup_floor_processing_state")
                 connection.execute(
                     """
@@ -1584,7 +1454,7 @@ class ThreadArchiveStore:
                         state.completed_at,
                     ),
                 )
-        return True
+        return self._read_current_archive_change_state() == expected_change_state
 
     def commit_image_reference_state(
         self,
@@ -1594,11 +1464,13 @@ class ThreadArchiveStore:
         manifest_posts: tuple[ImageReferenceManifestPost, ...] | None = None,
     ) -> bool:
         self.require_exists()
-        with closing(self._connect_write()) as connection:
+        if (
+            self._read_current_archive_change_state().archive_revision
+            != state.processed_archive_revision
+        ):
+            return False
+        with closing(self._connect_state_write()) as connection:
             with connection:
-                change_state = self._read_archive_change_state(connection)
-                if change_state.archive_revision != state.processed_archive_revision:
-                    return False
                 self._replace_image_reference_state(connection, state)
                 self._replace_pending_images(connection, pending_image_retries)
                 if manifest_posts is None:
@@ -1614,7 +1486,10 @@ class ThreadArchiveStore:
                         ),
                         manifest_posts,
                     )
-        return True
+        return (
+            self._read_current_archive_change_state().archive_revision
+            == state.processed_archive_revision
+        )
 
     @staticmethod
     def _image_reference_state_values(
@@ -1670,11 +1545,13 @@ class ThreadArchiveStore:
         manifest_posts: tuple[ImageReferenceManifestPost, ...],
     ) -> bool:
         self.require_exists()
-        with closing(self._connect_write()) as connection:
+        if (
+            self._read_current_archive_change_state().archive_revision
+            != state.processed_archive_revision
+        ):
+            return False
+        with closing(self._connect_state_write()) as connection:
             with connection:
-                change_state = self._read_archive_change_state(connection)
-                if change_state.archive_revision != state.processed_archive_revision:
-                    return False
                 if not self._stored_image_reference_state_matches(
                     connection,
                     expected_state,
@@ -1712,7 +1589,10 @@ class ThreadArchiveStore:
                     ),
                     manifest_posts,
                 )
-        return True
+        return (
+            self._read_current_archive_change_state().archive_revision
+            == state.processed_archive_revision
+        )
 
     def commit_incremental_image_reference_state(
         self,
@@ -1729,11 +1609,13 @@ class ThreadArchiveStore:
         changed_lous = [post.lou for post in ordered_posts]
 
         self.require_exists()
-        with closing(self._connect_write()) as connection:
+        if (
+            self._read_current_archive_change_state().archive_revision
+            != state.processed_archive_revision
+        ):
+            return False
+        with closing(self._connect_state_write()) as connection:
             with connection:
-                change_state = self._read_archive_change_state(connection)
-                if change_state.archive_revision != state.processed_archive_revision:
-                    return False
                 if not self._stored_image_reference_state_matches(
                     connection,
                     expected_state,
@@ -1902,7 +1784,10 @@ class ThreadArchiveStore:
                 )
                 self._replace_image_reference_state(connection, state)
                 self._replace_pending_images(connection, pending_image_retries)
-        return True
+        return (
+            self._read_current_archive_change_state().archive_revision
+            == state.processed_archive_revision
+        )
 
     def replace_pending_images_for_image_state(
         self,
@@ -1910,14 +1795,13 @@ class ThreadArchiveStore:
         pending_image_retries: tuple[PendingImageRetry, ...],
     ) -> bool:
         self.require_exists()
-        with closing(self._connect_write()) as connection:
+        if (
+            self._read_current_archive_change_state().archive_revision
+            != expected_state.processed_archive_revision
+        ):
+            return False
+        with closing(self._connect_state_write()) as connection:
             with connection:
-                change_state = self._read_archive_change_state(connection)
-                if (
-                    change_state.archive_revision
-                    != expected_state.processed_archive_revision
-                ):
-                    return False
                 row = connection.execute(
                     """
                     SELECT format_version, processed_archive_revision, completed_at
@@ -1931,7 +1815,10 @@ class ThreadArchiveStore:
                 ):
                     return False
                 self._replace_pending_images(connection, pending_image_retries)
-        return True
+        return (
+            self._read_current_archive_change_state().archive_revision
+            == expected_state.processed_archive_revision
+        )
 
     @staticmethod
     def _increment_archive_revision(connection: sqlite3.Connection) -> None:
@@ -1957,13 +1844,25 @@ class ThreadArchiveStore:
         self,
         cache_keys: set[str],
     ) -> dict[str, PostImageReferenceCacheEntry]:
+        if not cache_keys or not self.cache_store.exists():
+            return {}
+        try:
+            return self._read_post_image_reference_cache(cache_keys)
+        except (OSError, sqlite3.Error, ValueError):
+            self.cache_store.recreate_after_error(self.archive_store_id())
+            return {}
+
+    def _read_post_image_reference_cache(
+        self,
+        cache_keys: set[str],
+    ) -> dict[str, PostImageReferenceCacheEntry]:
         if not cache_keys:
             return {}
         self.require_exists()
 
         entries: dict[str, PostImageReferenceCacheEntry] = {}
         sorted_cache_keys = sorted(cache_keys)
-        with closing(self._connect_read()) as connection:
+        with closing(self._connect_cache_read()) as connection:
             for start in range(0, len(sorted_cache_keys), 900):
                 chunk = sorted_cache_keys[start : start + 900]
                 placeholders = ",".join("?" for _ in chunk)
@@ -2021,7 +1920,7 @@ class ThreadArchiveStore:
             )
             for entry in entries
         ]
-        with closing(self._connect_write()) as connection:
+        with closing(self._connect_cache_write()) as connection:
             with connection:
                 connection.executemany(
                     """
