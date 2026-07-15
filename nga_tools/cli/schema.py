@@ -42,6 +42,7 @@ class ActionConfig(TypedDict):
     defaults: NotRequired[dict[str, object]]
     positive: NotRequired[list[str]]
     child_warning_summary: NotRequired[bool]
+    output_root_lock: NotRequired[bool]
 
 
 ARG_DEFS: dict[str, ArgDef] = {
@@ -287,6 +288,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "defaults": {"page_delay_seconds": 3},
             "positive": ["start_page", "page_delay_seconds", "api_concurrency"],
+            "output_root_lock": True,
         },
     },
     "backup": {
@@ -316,6 +318,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "write_json",
             ],
             "positive": ["workers", "api_concurrency", "image_concurrency"],
+            "output_root_lock": True,
         },
         "all": {
             "handler": backup_all,
@@ -344,6 +347,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "required_any": ["name", "tid", "all_threads"],
             "positive": ["workers", "api_concurrency", "image_concurrency"],
+            "output_root_lock": True,
         },
         "sub": {
             "handler": backup_sub,
@@ -379,6 +383,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "required_any": ["name", "tid", "all_threads"],
             "positive": ["workers", "api_concurrency", "image_concurrency"],
+            "output_root_lock": True,
         },
         "migrate-store": {
             "handler": backup_migrate_store,
@@ -399,6 +404,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "args": ["name", "tid", "aid", "all"],
             "required_any": ["name", "tid", "all"],
+            "output_root_lock": True,
         },
         "migrate-layout": {
             "handler": backup_migrate_layout,
@@ -461,6 +467,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "required_any": ["name", "tid", "all_threads"],
             "defaults": {"lou_per_pdf": 200},
             "positive": ["workers", "lou_per_pdf", "pdf_workers"],
+            "output_root_lock": True,
         },
     },
     "image": {
@@ -477,6 +484,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "提供帖子参数时会从archive正文解析引用并校验对应图片文件。",
             ],
             "args": ["name", "tid", "aid"],
+            "output_root_lock": True,
         },
     },
     "web": {

@@ -127,7 +127,7 @@ def test_empty_post_overlay_is_stored_and_replaces_the_floor(tmp_path: Path) -> 
 def test_existing_nonempty_overlay_table_is_migrated(tmp_path: Path) -> None:
     thread_dir = tmp_path / "101_201"
     thread_dir.mkdir()
-    store = ThreadArchiveStore(thread_dir)
+    store = ThreadArchiveStore(thread_dir, allow_layout_upgrade=True)
     with sqlite3.connect(store.db_path) as connection:
         connection.execute(
             """

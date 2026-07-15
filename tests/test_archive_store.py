@@ -573,7 +573,10 @@ class ThreadArchiveStoreTest:
 
     def test_refresh_stored_word_counts_migrates_old_schema(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
-            store = ThreadArchiveStore(Path(temp_dir_name))
+            store = ThreadArchiveStore(
+                Path(temp_dir_name),
+                allow_layout_upgrade=True,
+            )
             with closing(sqlite3.connect(store.db_path)) as connection:
                 connection.execute(
                     """
@@ -891,7 +894,10 @@ class ThreadArchiveStoreTest:
         self,
     ) -> None:
         with TemporaryDirectory() as temp_dir_name:
-            store = ThreadArchiveStore(Path(temp_dir_name))
+            store = ThreadArchiveStore(
+                Path(temp_dir_name),
+                allow_layout_upgrade=True,
+            )
             with closing(sqlite3.connect(store.db_path)) as connection:
                 connection.execute(
                     """
@@ -1562,8 +1568,8 @@ class ThreadArchiveStoreTest:
                 )
                 connection.commit()
 
-            store.ensure_schema()
-            snapshot = store.read_backup_processing_snapshot()
+            with pytest.raises(ValueError, match="backup migrate-layout"):
+                store.ensure_schema()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 legacy_exists = connection.execute(
                     """
@@ -1572,9 +1578,8 @@ class ThreadArchiveStoreTest:
                     """
                 ).fetchone()
 
-        assert snapshot.floor_state is None
-        assert snapshot.image_state is None
         assert legacy_exists == (1,)
+        assert not store.state_store.db_path.exists()
 
     def test_legacy_pending_image_urls_are_not_read_by_runtime(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1591,24 +1596,10 @@ class ThreadArchiveStoreTest:
                 connection.commit()
 
             store = ThreadArchiveStore(thread_folder)
-            store.ensure_schema()
-            store.ensure_backup_processing_schema()
-            snapshot = store.read_backup_processing_snapshot()
-            with closing(sqlite3.connect(store.state_store.db_path)) as connection:
-                columns = {
-                    row[1]
-                    for row in connection.execute(
-                        "PRAGMA table_info(backup_pending_images)"
-                    )
-                }
+            with pytest.raises(ValueError, match="backup migrate-layout"):
+                store.ensure_backup_processing_schema()
 
-        assert columns == {
-            "url",
-            "last_attempt_at",
-            "failure_kind",
-            "http_status",
-        }
-        assert snapshot.pending_image_retries == ()
+        assert not store.state_store.db_path.exists()
 
     def test_current_processing_schema_skips_full_schema_initialization(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

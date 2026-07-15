@@ -368,13 +368,19 @@ def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
 
 
 class ThreadArchiveStore:
-    def __init__(self, thread_folder: Path) -> None:
+    def __init__(
+        self,
+        thread_folder: Path,
+        *,
+        allow_layout_upgrade: bool = False,
+    ) -> None:
         self.thread_folder = thread_folder
         self.db_path = thread_folder / ARCHIVE_DB_FILENAME
         self.state_store = ThreadArchiveStateStore(thread_folder)
         self.cache_store = ThreadArchiveCacheStore(thread_folder)
         self._schema_initialized = False
         self._store_id: str | None = None
+        self._allow_layout_upgrade = allow_layout_upgrade
 
     def exists(self) -> bool:
         return self.db_path.is_file()
@@ -655,6 +661,24 @@ class ThreadArchiveStore:
             """
         )
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
+        existing_metadata = read_storage_metadata(connection)
+        if existing_metadata is None and not self._allow_layout_upgrade:
+            existing_tables = {
+                row[0]
+                for row in connection.execute(
+                    """
+                    SELECT name FROM sqlite_schema
+                    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                    """
+                )
+                if isinstance(row[0], str)
+            }
+            if existing_tables:
+                raise ValueError(
+                    f"archive仍是旧单库布局：{self.db_path}。"
+                    "请先运行 backup migrate-layout；运行时不会原地读取或"
+                    "升级旧缓存。"
+                )
         metadata = ensure_storage_metadata(connection, role="archive_data")
         self._store_id = metadata.store_id
         connection.execute(

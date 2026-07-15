@@ -811,7 +811,7 @@ def _migrate_thread(
     try:
         staged_archive = staging / ARCHIVE_DB_FILENAME
         _snapshot_sqlite(legacy_archive, staged_archive)
-        staged_store = ThreadArchiveStore(staging)
+        staged_store = ThreadArchiveStore(staging, allow_layout_upgrade=True)
         staged_store.ensure_schema()
         fingerprints_before = _durable_fingerprints(staged_archive)
         stats = _copy_legacy_auxiliary_data(
