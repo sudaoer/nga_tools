@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol, TypeAlias, cast
 
+from nga_tools.backup.archive_schema import require_current_archive_schema
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.core.hashing import hash_text
 from nga_tools.core.sqlite import configure_readonly_connection
@@ -380,6 +381,7 @@ def _read_archive_content(path: Path) -> _ArchiveContent:
     try:
         connection, database_state = _connect_frozen(path)
         with closing(connection):
+            require_current_archive_schema(connection, path)
             rows = cast(
                 list[tuple[object, ...]],
                 connection.execute(
@@ -416,7 +418,7 @@ def _read_archive_content(path: Path) -> _ArchiveContent:
                 ).fetchall(),
             )
         _verify_frozen(path, database_state)
-    except sqlite3.Error as error:
+    except (sqlite3.Error, ValueError) as error:
         raise ReplayCorpusError(f"无法读取重放归档内容：{path}: {error}") from error
 
     posts_by_lou: dict[int, _ReplayPost] = {}
@@ -528,6 +530,7 @@ def _read_floor_map(
             expected_state=expected_database_state,
         )
         with closing(connection):
+            require_current_archive_schema(connection, path)
             state_row = connection.execute(
                 "SELECT tid, aid FROM floor_map_state WHERE singleton = 1"
             ).fetchone()
@@ -562,7 +565,7 @@ def _read_floor_map(
                     ).fetchall(),
                 )
         _verify_frozen(path, database_state)
-    except sqlite3.Error as error:
+    except (sqlite3.Error, ValueError) as error:
         raise ReplayCorpusError(f"无法读取重放楼层映射：{path}: {error}") from error
 
     if state_row is None:

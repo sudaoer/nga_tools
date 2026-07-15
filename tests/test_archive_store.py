@@ -386,8 +386,11 @@ class ThreadArchiveStoreTest:
             after_repeated = store.read_backup_processing_snapshot().change_state
             records = store.read_effective_post_records()
             with closing(sqlite3.connect(store.db_path)) as connection:
-                page_seen_counts = connection.execute(
-                    "SELECT seen_count FROM page_snapshots ORDER BY page_number"
+                page_rows = connection.execute(
+                    """
+                    SELECT page_number, total_page, vrows, last_seen_at
+                    FROM archive_pages ORDER BY page_number
+                    """
                 ).fetchall()
                 post_seen_counts = connection.execute(
                     "SELECT seen_count FROM post_versions ORDER BY lou"
@@ -397,12 +400,10 @@ class ThreadArchiveStoreTest:
                 ).fetchall()
 
         assert first.pages_processed == 2
-        assert first.page_snapshots_inserted == 2
         assert first.post_versions_inserted == 2
         assert first.effective_changed_pages == 2
         assert first.effective_changed_lous == frozenset({1, 2})
         assert first.effective_added_lous == frozenset({1, 2})
-        assert repeated.page_snapshots_inserted == 0
         assert repeated.post_versions_inserted == 0
         assert repeated.effective_changed_pages == 0
         assert repeated.effective_changed_lous == frozenset()
@@ -410,7 +411,10 @@ class ThreadArchiveStoreTest:
         assert after_first.archive_revision == 1
         assert after_repeated.archive_revision == 1
         assert [record["lou"] for record in records] == [1, 2]
-        assert page_seen_counts == [(2,), (2,)]
+        assert page_rows == [
+            (1, 2, None, "2026-07-11T02:00:00+00:00"),
+            (2, 2, None, "2026-07-11T02:00:00+00:00"),
+        ]
         assert post_seen_counts == [(2,), (2,)]
         assert metadata_seen_counts == [(2,), (2,)]
 
@@ -464,7 +468,7 @@ class ThreadArchiveStoreTest:
         assert changed
         assert revision_after == revision_before
 
-    def test_latest_page_one_pagination_uses_newest_snapshot(self) -> None:
+    def test_latest_page_one_pagination_uses_newest_state(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.upsert_page(
@@ -483,6 +487,57 @@ class ThreadArchiveStoreTest:
         assert pagination is not None
         assert pagination.page_count == 3
         assert pagination.vrows == 8
+
+    def test_compact_page_state_rejects_stale_updates_and_clears_vrows(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.upsert_page(
+                1,
+                {"totalPage": 3, "vrows": 8, "result": []},
+                observed_at="2026-07-11T02:00:00+00:00",
+            )
+            store.upsert_page(
+                1,
+                {"totalPage": 1, "vrows": 2, "result": []},
+                observed_at="2026-07-11T01:00:00+00:00",
+            )
+            after_stale = store.read_latest_page_one_pagination()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                stored_at = connection.execute(
+                    "SELECT last_seen_at FROM archive_pages WHERE page_number = 1"
+                ).fetchone()
+
+            store.upsert_page(
+                1,
+                {"totalPage": 2, "result": []},
+                observed_at="2026-07-11T03:00:00+00:00",
+            )
+            after_newer = store.read_latest_page_one_pagination()
+
+        assert after_stale is not None
+        assert after_stale.page_count == 3
+        assert after_stale.vrows == 8
+        assert stored_at == ("2026-07-11T02:00:00+00:00",)
+        assert after_newer is not None
+        assert after_newer.page_count == 2
+        assert after_newer.vrows is None
+
+    def test_runtime_rejects_unmigrated_archive_schema(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            thread_folder = Path(temp_dir_name)
+            store = ThreadArchiveStore(thread_folder)
+            store.upsert_page(1, {"totalPage": 1, "result": []})
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                connection.execute("PRAGMA user_version = 0")
+                connection.commit()
+
+            reader = ThreadArchiveStore(thread_folder)
+            with pytest.raises(ValueError, match="backup migrate-layout"):
+                reader.read_page_numbers()
+            with pytest.raises(ValueError, match="backup migrate-layout"):
+                reader.ensure_schema()
 
     def test_upsert_pages_rolls_back_every_page_when_one_write_fails(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -897,12 +952,33 @@ class ThreadArchiveStoreTest:
                 connection.execute(
                     """
                     CREATE TABLE page_snapshots (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        page_number INTEGER NOT NULL,
+                        response_hash TEXT NOT NULL,
+                        page_json TEXT NOT NULL,
+                        current_page INTEGER,
+                        total_page INTEGER,
+                        vrows INTEGER,
+                        msg TEXT,
+                        first_seen_at TEXT NOT NULL,
+                        last_seen_at TEXT NOT NULL,
+                        seen_count INTEGER NOT NULL,
+                        UNIQUE(page_number, response_hash)
                     )
                     """
                 )
-                connection.execute("INSERT INTO page_snapshots DEFAULT VALUES")
-                connection.execute("INSERT INTO page_snapshots DEFAULT VALUES")
+                connection.execute(
+                    """
+                    INSERT INTO page_snapshots (
+                        page_number, response_hash, page_json, total_page,
+                        first_seen_at, last_seen_at, seen_count
+                    ) VALUES
+                        (1, 'page-1', '{}', 1, '2026-07-07T01:00:00+00:00',
+                         '2026-07-07T01:00:00+00:00', 1),
+                        (1, 'page-2', '{}', 2, '2026-07-07T02:00:00+00:00',
+                         '2026-07-07T02:00:00+00:00', 1)
+                    """
+                )
                 connection.execute(
                     """
                     CREATE TABLE post_versions (
@@ -1133,13 +1209,13 @@ class ThreadArchiveStoreTest:
             first = store.migrate_json_pages()
             second = store.migrate_json_pages()
             json_still_exists = page_path.is_file()
+            page_numbers = store.read_page_numbers()
 
         assert json_still_exists
         assert first.page_files == 1
-        assert first.page_snapshots_inserted == 1
         assert first.post_versions_inserted == 1
-        assert second.page_snapshots_inserted == 0
         assert second.post_versions_inserted == 0
+        assert page_numbers == {1}
 
     def test_processing_state_and_pending_images_round_trip_atomically(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

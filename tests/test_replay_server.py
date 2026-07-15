@@ -366,16 +366,11 @@ class ReplayCorpusTest:
         reloaded = load_replay_corpus(output_dir, thread_config)
         assert reloaded.manifest.corpus_id == corpus.manifest.corpus_id
 
-    def test_loads_without_recorded_page_response_tables(
+    def test_loads_from_compact_archive_schema(
         self,
         tmp_path: Path,
     ) -> None:
         output_dir, thread_config, _image_path = _build_source(tmp_path)
-        archive_path = output_dir / "123_456" / "archive.sqlite3"
-        with sqlite3.connect(archive_path) as connection:
-            connection.execute("DROP TABLE page_snapshots")
-            connection.commit()
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
         corpus = load_replay_corpus(output_dir, thread_config)
 
@@ -383,6 +378,17 @@ class ReplayCorpusTest:
         assert first_page is not None
         assert json.loads(first_page.payload)["result"][0]["content"] == "latest"
         assert corpus.manifest.archive_content_page_count == 2
+
+    def test_rejects_unmigrated_archive_schema(self, tmp_path: Path) -> None:
+        output_dir, thread_config, _image_path = _build_source(tmp_path)
+        archive_path = output_dir / "123_456" / "archive.sqlite3"
+        with sqlite3.connect(archive_path) as connection:
+            connection.execute("PRAGMA user_version = 0")
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        with pytest.raises(ReplayCorpusError, match="backup migrate-layout"):
+            load_replay_corpus(output_dir, thread_config)
 
     def test_synthesizes_original_pages_from_tid_all_content(
         self,
@@ -404,12 +410,6 @@ class ReplayCorpusTest:
             },
             observed_at="2026-07-12T02:00:00+00:00",
         )
-        original_archive = output_dir / "123_all" / "archive.sqlite3"
-        with sqlite3.connect(original_archive) as connection:
-            connection.execute("DROP TABLE page_snapshots")
-            connection.commit()
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-
         corpus = load_replay_corpus(output_dir, thread_config)
 
         first_page = corpus.page(123, None, 1)

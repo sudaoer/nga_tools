@@ -7,12 +7,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.archive_store import (
+    PostImageReferenceCacheEntry,
+    ThreadArchiveStore,
+)
+from nga_tools.backup.floor_models import (
+    FLOOR_MAP_GENERATION_VERSION,
+    FLOOR_MAP_HASH_ALGORITHM,
+    FLOOR_MAP_VERSION,
+)
 from nga_tools.backup.image_reference_cache import (
     IMAGE_REFERENCE_EXTRACTOR_VERSION,
 )
 from nga_tools.backup.image_store import image_mappings_by_url
 from nga_tools.backup.post_version_selection import selections_fingerprint
+from nga_tools.backup.processing_state import FloorProcessingState
 from nga_tools.forum.ankebak_state import AnkebakStateStore
 from nga_tools.storage import layout_migration, read_storage_metadata
 from nga_tools.storage.layout_migration import migrate_layout, rollback_layout
@@ -170,6 +179,45 @@ def _make_legacy_thread(output_root: Path, name: str = "123_456") -> Path:
         connection.execute(
             "INSERT INTO backup_image_references VALUES ('legacy-poison')"
         )
+        connection.executescript(
+            """
+            DROP TABLE archive_pages;
+            CREATE TABLE page_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                page_number INTEGER NOT NULL,
+                response_hash TEXT NOT NULL,
+                page_json TEXT NOT NULL,
+                current_page INTEGER,
+                total_page INTEGER,
+                vrows INTEGER,
+                msg TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                seen_count INTEGER NOT NULL,
+                UNIQUE(page_number, response_hash)
+            );
+            INSERT INTO page_snapshots (
+                page_number, response_hash, page_json, current_page,
+                total_page, vrows, first_seen_at, last_seen_at, seen_count
+            ) VALUES
+                (1, 'old', '{"snapshot":"old"}', 1, 3, 30,
+                 '2026-07-14T00:00:00+00:00',
+                 '2026-07-14T00:00:00+00:00', 1),
+                (1, 'new', '{"snapshot":"new"}', 1, 1, NULL,
+                 '2026-07-15T00:00:00+00:00',
+                 '2026-07-15T00:00:00+00:00', 1);
+            CREATE TABLE post_observations (
+                page_snapshot_id INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                lou INTEGER NOT NULL,
+                post_version_id INTEGER NOT NULL,
+                PRIMARY KEY(page_snapshot_id, position)
+            );
+            INSERT INTO post_observations VALUES (2, 0, 1001, 1, 1);
+            PRAGMA user_version = 0;
+            """
+        )
         connection.execute("DROP TABLE storage_metadata")
         connection.commit()
     return thread_folder
@@ -278,6 +326,9 @@ def test_layout_migration_splits_valid_state_cache_and_preserves_data(
     assert "cache" in store.read_post_image_reference_cache({"cache"})
 
     archive_tables = _table_names(store.db_path)
+    assert "archive_pages" in archive_tables
+    assert "page_snapshots" not in archive_tables
+    assert "post_observations" not in archive_tables
     assert "backup_image_references" not in archive_tables
     assert "backup_image_reference_state" not in archive_tables
     assert "post_image_reference_cache" not in archive_tables
@@ -298,7 +349,17 @@ def test_layout_migration_splits_valid_state_cache_and_preserves_data(
         (run_root / "manifest.json").read_text(encoding="utf-8")
     )
     assert manifest_data["status"] == "completed"
-    assert manifest_data["entries"][thread_folder.name]["durable_fingerprints"]
+    assert manifest_data["archive_schema_version"] == 1
+    thread_entry = manifest_data["entries"][thread_folder.name]
+    assert thread_entry["durable_fingerprints"]
+    assert thread_entry["stats"]["page_snapshot_rows_removed"] == 2
+    assert thread_entry["stats"]["post_observation_rows_removed"] == 1
+    assert thread_entry["stats"]["archive_page_rows"] == 1
+    with closing(sqlite3.connect(store.db_path)) as connection:
+        assert connection.execute(
+            "SELECT page_number, total_page, vrows FROM archive_pages"
+        ).fetchall() == [(1, 1, None)]
+        assert connection.execute("PRAGMA user_version").fetchone() == (1,)
 
 
 def test_layout_migration_resumes_failed_run_and_rollback_restores_old_layout(
@@ -335,6 +396,100 @@ def test_layout_migration_resumes_failed_run_and_rollback_restores_old_layout(
         assert connection.execute(
             "SELECT url FROM backup_image_references"
         ).fetchone() == ("legacy-poison",)
+
+
+def test_archive_schema_migration_preserves_split_state_and_cache(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    thread_folder = output_root / "123_456"
+    store = ThreadArchiveStore(thread_folder)
+    store.upsert_page(
+        1,
+        {"totalPage": 1, "vrows": 4, "result": []},
+        observed_at="2026-07-15T00:00:00+00:00",
+    )
+    snapshot = store.read_backup_processing_snapshot()
+    floor_state = FloorProcessingState(
+        format_version=1,
+        processed_archive_revision=snapshot.change_state.archive_revision,
+        processed_floor_map_revision=snapshot.change_state.floor_map_revision,
+        page_count=1,
+        author_total_lou_count=4,
+        floor_map_format_version=FLOOR_MAP_VERSION,
+        floor_map_generation_version=FLOOR_MAP_GENERATION_VERSION,
+        floor_map_hash_algorithm=FLOOR_MAP_HASH_ALGORITHM,
+        completed_at="2026-07-15T00:00:00+00:00",
+    )
+    assert store.commit_floor_processing_state(floor_state)
+    cache_entry = PostImageReferenceCacheEntry(
+        cache_key="cache-key",
+        source_hash="source-hash",
+        extractor_version=IMAGE_REFERENCE_EXTRACTOR_VERSION,
+        references_json="[]",
+    )
+    store.upsert_post_image_reference_cache([cache_entry])
+
+    with closing(sqlite3.connect(store.db_path)) as connection:
+        page_row = connection.execute(
+            """
+            SELECT page_number, total_page, vrows, last_seen_at
+            FROM archive_pages
+            """
+        ).fetchone()
+        assert page_row is not None
+        connection.executescript(
+            """
+            DROP TABLE archive_pages;
+            CREATE TABLE page_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                page_number INTEGER NOT NULL,
+                response_hash TEXT NOT NULL,
+                page_json TEXT NOT NULL,
+                current_page INTEGER,
+                total_page INTEGER,
+                vrows INTEGER,
+                msg TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                seen_count INTEGER NOT NULL,
+                UNIQUE(page_number, response_hash)
+            );
+            PRAGMA user_version = 0;
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO page_snapshots (
+                page_number, response_hash, page_json, total_page, vrows,
+                first_seen_at, last_seen_at, seen_count
+            ) VALUES (?, 'snapshot', '{}', ?, ?, ?, ?, 1)
+            """,
+            (
+                page_row[0],
+                page_row[1],
+                page_row[2],
+                page_row[3],
+                page_row[3],
+            ),
+        )
+        connection.commit()
+
+    result = migrate_layout(output_root, [thread_folder])
+
+    assert result.failures == ()
+    migrated_store = ThreadArchiveStore(thread_folder)
+    assert (
+        migrated_store.read_backup_processing_snapshot().floor_state
+        == floor_state
+    )
+    assert migrated_store.read_post_image_reference_cache({"cache-key"}) == {
+        "cache-key": cache_entry
+    }
+    pagination = migrated_store.read_latest_page_one_pagination()
+    assert pagination is not None
+    assert pagination.page_count == 1
+    assert pagination.vrows == 4
 
 
 def test_layout_migration_skips_invalid_cache_rows(tmp_path: Path) -> None:

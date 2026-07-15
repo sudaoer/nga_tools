@@ -15,8 +15,12 @@ from bs4 import BeautifulSoup, Tag
 from nga_tools import utils
 from nga_tools.backup import image_store
 from nga_tools.backup.archive_posts import postdate_from_json
-from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
-from nga_tools.backup.archive_store import ArchivePostVersionRow
+from nga_tools.backup.archive_schema import require_current_archive_schema
+from nga_tools.backup.archive_store import (
+    ARCHIVE_DB_FILENAME,
+    ArchivePostVersionRow,
+    ThreadArchiveStore,
+)
 from nga_tools.backup.floor_map import load_floor_labels_from_archive
 from nga_tools.backup.floor_models import (
     MISSING_POST_HTML,
@@ -288,6 +292,7 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
         )
     """
     with closing(_connect_readonly(db_path)) as connection:
+        require_current_archive_schema(connection, db_path)
         post_row = cast(
             tuple[int, Optional[int], Optional[int]],
             connection.execute(
@@ -322,9 +327,7 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
         )
         page_row = cast(
             tuple[int],
-            connection.execute(
-                "SELECT COUNT(DISTINCT page_number) FROM page_snapshots"
-            ).fetchone(),
+            connection.execute("SELECT COUNT(*) FROM archive_pages").fetchone(),
         )
         body_word_count: Optional[int] = None
         body_chinese_char_count: Optional[int] = None

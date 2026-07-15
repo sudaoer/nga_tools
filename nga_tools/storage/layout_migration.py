@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
+from nga_tools.backup.archive_schema import (
+    ARCHIVE_SCHEMA_VERSION,
+    require_current_archive_schema,
+)
 from nga_tools.backup.archive_store import (
     ARCHIVE_DB_FILENAME,
     PostImageReferenceCacheEntry,
@@ -82,12 +86,12 @@ _LEGACY_ARCHIVE_TABLES = (
     "backup_pending_images",
     "post_image_reference_cache",
     "backup_image_references",
+    "post_observations",
 )
 _DURABLE_ARCHIVE_TABLES = (
-    "page_snapshots",
+    "archive_pages",
     "post_versions",
     "post_latest_metadata",
-    "post_observations",
     "post_overlays",
     "floor_map_state",
     "floor_map_entries",
@@ -103,6 +107,19 @@ class ThreadLayoutMigrationStats:
     migrated_manifest_posts: int
     migrated_pending_images: int
     migrated_cache_entries: int
+    page_snapshot_rows_removed: int = 0
+    page_snapshot_json_bytes_removed: int = 0
+    post_observation_rows_removed: int = 0
+    archive_page_rows: int = 0
+
+
+@dataclass(frozen=True)
+class _PageSchemaMigrationStats:
+    page_snapshot_rows_removed: int
+    page_snapshot_json_bytes_removed: int
+    post_observation_rows_removed: int
+    archive_page_rows: int
+    expected_rows: tuple[tuple[object, object, object, object], ...]
 
 
 @dataclass(frozen=True)
@@ -272,6 +289,104 @@ def _durable_fingerprints(path: Path) -> dict[str, str]:
         }
 
 
+def _read_page_schema_migration_stats(
+    path: Path,
+) -> _PageSchemaMigrationStats:
+    with closing(sqlite3.connect(path)) as connection:
+        has_snapshots = _table_exists(connection, "page_snapshots")
+        has_compact_pages = _table_exists(connection, "archive_pages")
+        if has_snapshots and has_compact_pages:
+            raise ValueError(
+                f"archive同时包含page_snapshots与archive_pages：{path}"
+            )
+
+        page_snapshot_rows = 0
+        page_snapshot_json_bytes = 0
+        if has_snapshots:
+            snapshot_stats = connection.execute(
+                """
+                SELECT COUNT(*), COALESCE(SUM(LENGTH(page_json)), 0)
+                FROM page_snapshots
+                """
+            ).fetchone()
+            if (
+                snapshot_stats is None
+                or type(snapshot_stats[0]) is not int
+                or type(snapshot_stats[1]) is not int
+            ):
+                raise ValueError(f"archive page_snapshots统计无效：{path}")
+            page_snapshot_rows, page_snapshot_json_bytes = snapshot_stats
+            expected_rows = tuple(
+                connection.execute(
+                    """
+                    SELECT page_number, total_page, vrows, last_seen_at
+                    FROM (
+                        SELECT
+                            page_number,
+                            total_page,
+                            vrows,
+                            last_seen_at,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY page_number
+                                ORDER BY last_seen_at DESC, id DESC
+                            ) AS row_number
+                        FROM page_snapshots
+                    )
+                    WHERE row_number = 1
+                    ORDER BY page_number
+                    """
+                ).fetchall()
+            )
+        elif has_compact_pages:
+            expected_rows = tuple(
+                connection.execute(
+                    """
+                    SELECT page_number, total_page, vrows, last_seen_at
+                    FROM archive_pages
+                    ORDER BY page_number
+                    """
+                ).fetchall()
+            )
+        else:
+            expected_rows = ()
+
+        post_observation_rows = 0
+        if _table_exists(connection, "post_observations"):
+            observation_row = connection.execute(
+                "SELECT COUNT(*) FROM post_observations"
+            ).fetchone()
+            if observation_row is None or type(observation_row[0]) is not int:
+                raise ValueError(f"archive post_observations统计无效：{path}")
+            post_observation_rows = observation_row[0]
+
+    return _PageSchemaMigrationStats(
+        page_snapshot_rows_removed=page_snapshot_rows,
+        page_snapshot_json_bytes_removed=page_snapshot_json_bytes,
+        post_observation_rows_removed=post_observation_rows,
+        archive_page_rows=len(expected_rows),
+        expected_rows=expected_rows,
+    )
+
+
+def _validate_page_schema_migration(
+    path: Path,
+    stats: _PageSchemaMigrationStats,
+) -> None:
+    with closing(sqlite3.connect(path)) as connection:
+        require_current_archive_schema(connection, path)
+        actual_rows = tuple(
+            connection.execute(
+                """
+                SELECT page_number, total_page, vrows, last_seen_at
+                FROM archive_pages
+                ORDER BY page_number
+                """
+            ).fetchall()
+        )
+    if actual_rows != stats.expected_rows:
+        raise ValueError(f"archive分页状态迁移前后不一致：{path}")
+
+
 def _drop_legacy_archive_tables(path: Path) -> None:
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("PRAGMA foreign_keys = OFF")
@@ -293,6 +408,7 @@ def _archive_is_clean_layout(path: Path) -> bool:
                 or metadata.layout_version != STORAGE_LAYOUT_VERSION
             ):
                 return False
+            require_current_archive_schema(connection, path)
             return not any(
                 _table_exists(connection, table_name)
                 for table_name in _LEGACY_ARCHIVE_TABLES
@@ -1050,6 +1166,8 @@ def _find_resumable_run(
             continue
         if (
             manifest.get("status") == "incomplete"
+            and manifest.get("archive_schema_version")
+            == ARCHIVE_SCHEMA_VERSION
             and _target_names(manifest) == target_names
         ):
             return run_root, manifest
@@ -1070,6 +1188,7 @@ def _create_manifest(
         "created_at": _now_utc_iso(),
         "updated_at": _now_utc_iso(),
         "status": "incomplete",
+        "archive_schema_version": ARCHIVE_SCHEMA_VERSION,
         "targets": list(target_names),
         "entries": {
             target_name: {"status": "pending"}
@@ -1254,6 +1373,7 @@ def _migrate_thread(
     legacy_archive = (
         run_root / "files" / thread_folder.name / ARCHIVE_DB_FILENAME
     )
+    page_schema_stats = _read_page_schema_migration_stats(legacy_archive)
     staging = thread_folder / f".layout-migration-{run_root.name}"
     if staging.exists():
         shutil.rmtree(staging)
@@ -1261,10 +1381,17 @@ def _migrate_thread(
     try:
         staged_archive = staging / ARCHIVE_DB_FILENAME
         _snapshot_sqlite(legacy_archive, staged_archive)
+        for filename in (ARCHIVE_STATE_DB_FILENAME, ARCHIVE_CACHE_DB_FILENAME):
+            if originals[filename]:
+                _snapshot_sqlite(
+                    run_root / "files" / thread_folder.name / filename,
+                    staging / filename,
+                )
         staged_store = ThreadArchiveStore(staging, allow_layout_upgrade=True)
         staged_store.ensure_schema()
+        _validate_page_schema_migration(staged_archive, page_schema_stats)
         fingerprints_before = _durable_fingerprints(staged_archive)
-        stats = _copy_legacy_auxiliary_data(
+        auxiliary_stats = _copy_legacy_auxiliary_data(
             legacy_archive,
             staged_store,
             thread_folder,
@@ -1275,6 +1402,23 @@ def _migrate_thread(
             raise ValueError(
                 f"持久数据指纹不一致：{thread_folder.name}"
             )
+        stats = ThreadLayoutMigrationStats(
+            migrated_floor_state=auxiliary_stats.migrated_floor_state,
+            migrated_image_state=auxiliary_stats.migrated_image_state,
+            migrated_manifest_posts=auxiliary_stats.migrated_manifest_posts,
+            migrated_pending_images=auxiliary_stats.migrated_pending_images,
+            migrated_cache_entries=auxiliary_stats.migrated_cache_entries,
+            page_snapshot_rows_removed=(
+                page_schema_stats.page_snapshot_rows_removed
+            ),
+            page_snapshot_json_bytes_removed=(
+                page_schema_stats.page_snapshot_json_bytes_removed
+            ),
+            post_observation_rows_removed=(
+                page_schema_stats.post_observation_rows_removed
+            ),
+            archive_page_rows=page_schema_stats.archive_page_rows,
+        )
         for filename in _THREAD_DATABASE_FILENAMES:
             _finalize_sqlite(staging / filename)
         entry["durable_fingerprints"] = fingerprints_after
@@ -1284,6 +1428,14 @@ def _migrate_thread(
             "migrated_manifest_posts": stats.migrated_manifest_posts,
             "migrated_pending_images": stats.migrated_pending_images,
             "migrated_cache_entries": stats.migrated_cache_entries,
+            "page_snapshot_rows_removed": stats.page_snapshot_rows_removed,
+            "page_snapshot_json_bytes_removed": (
+                stats.page_snapshot_json_bytes_removed
+            ),
+            "post_observation_rows_removed": (
+                stats.post_observation_rows_removed
+            ),
+            "archive_page_rows": stats.archive_page_rows,
         }
         for filename in (
             ARCHIVE_STATE_DB_FILENAME,

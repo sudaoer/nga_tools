@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from nga_tools.backup import image_store
+from nga_tools.backup.archive_schema import ARCHIVE_SCHEMA_VERSION
 from nga_tools.backup.archive_store import (
     PostImageReferenceCacheEntry,
     ThreadArchiveStore,
@@ -56,6 +57,9 @@ def test_thread_databases_have_disjoint_roles_and_source_binding(
     state_tables = _table_names(store.state_store.db_path)
     cache_tables = _table_names(store.cache_store.db_path)
     assert "archive_change_state" in data_tables
+    assert "archive_pages" in data_tables
+    assert "page_snapshots" not in data_tables
+    assert "post_observations" not in data_tables
     assert "backup_floor_processing_state" not in data_tables
     assert "post_image_reference_cache" not in data_tables
     assert "backup_floor_processing_state" in state_tables
@@ -68,6 +72,9 @@ def test_thread_databases_have_disjoint_roles_and_source_binding(
         closing(sqlite3.connect(store.cache_store.db_path)) as cache_connection,
     ):
         data_metadata = read_storage_metadata(data_connection)
+        archive_schema_version = data_connection.execute(
+            "PRAGMA user_version"
+        ).fetchone()
         state_metadata = read_storage_metadata(state_connection)
         cache_metadata = read_storage_metadata(cache_connection)
 
@@ -78,6 +85,7 @@ def test_thread_databases_have_disjoint_roles_and_source_binding(
     assert state_metadata.role == "archive_state"
     assert cache_metadata.role == "archive_cache"
     assert data_metadata.layout_version == STORAGE_LAYOUT_VERSION
+    assert archive_schema_version == (ARCHIVE_SCHEMA_VERSION,)
     assert state_metadata.source_store_id == data_metadata.store_id
     assert cache_metadata.source_store_id == data_metadata.store_id
 

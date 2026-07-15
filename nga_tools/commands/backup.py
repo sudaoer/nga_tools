@@ -237,7 +237,6 @@ def _migrate_store_for_thread_folder(thread_folder: Path) -> None:
     report_info(
         f"迁移完成：{thread_folder}，"
         f"读取JSON页{result.page_files}个，"
-        f"新增页快照{result.page_snapshots_inserted}个，"
         f"新增帖子版本{result.post_versions_inserted}个。"
     )
 

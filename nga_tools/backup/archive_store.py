@@ -9,16 +9,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, cast
 
+from nga_tools.backup.archive_posts import (
+    ArchivePostMetadata,
+    metadata_from_raw_post,
+)
+from nga_tools.backup.archive_schema import (
+    ARCHIVE_SCHEMA_VERSION,
+    read_archive_schema_version,
+    require_current_archive_schema,
+)
 from nga_tools.backup.floor_models import (
     PAGE_JSON_RE,
     AuthorPostRef,
     FloorMapEntry,
     RecoveredMissingPost,
     StoredFloorMap,
-)
-from nga_tools.backup.archive_posts import (
-    ArchivePostMetadata,
-    metadata_from_raw_post,
 )
 from nga_tools.backup.models import PostData, PostRecord
 from nga_tools.backup.post_data import post_data_from_raw, post_source_hash
@@ -161,7 +166,6 @@ _LATEST_AUTHOR_POST_REFS_QUERY = """
 
 @dataclass(frozen=True)
 class ArchivePageUpsertResult:
-    page_snapshot_inserted: bool
     post_versions_inserted: int
     effective_processing_inputs_changed: bool
     effective_changed_lous: frozenset[int]
@@ -171,7 +175,6 @@ class ArchivePageUpsertResult:
 @dataclass(frozen=True)
 class ArchivePagesUpsertResult:
     pages_processed: int
-    page_snapshots_inserted: int
     post_versions_inserted: int
     effective_processing_inputs_changed: bool
     effective_changed_pages: int
@@ -195,7 +198,6 @@ class ArchivePagePagination:
 @dataclass(frozen=True)
 class ArchiveMigrationResult:
     page_files: int
-    page_snapshots_inserted: int
     post_versions_inserted: int
 
 
@@ -271,9 +273,8 @@ class _PreparedArchivePost:
 @dataclass(frozen=True)
 class _PreparedArchivePage:
     page_number: int
-    page_data: PageData
-    page_json: str
-    response_hash: str
+    total_page: Optional[int]
+    vrows: Optional[int]
     observed_at: str
     count_observation: bool
     posts: tuple[_PreparedArchivePost, ...]
@@ -288,15 +289,6 @@ def _mtime_utc_iso(path: Path) -> str:
         path.stat().st_mtime,
         datetime.timezone.utc,
     ).isoformat()
-
-
-def _json_text(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
 
 
 def _read_json_object(path: Path) -> dict[str, object]:
@@ -315,13 +307,6 @@ def _read_json_object(path: Path) -> dict[str, object]:
 def _optional_int(data: dict[str, object], key: str) -> Optional[int]:
     value = data.get(key)
     if type(value) is int:
-        return value
-    return None
-
-
-def _optional_str(data: dict[str, object], key: str) -> Optional[str]:
-    value = data.get(key)
-    if isinstance(value, str):
         return value
     return None
 
@@ -415,6 +400,7 @@ class ThreadArchiveStore:
                     f"archive不是当前分库格式：{self.db_path}。"
                     "请先运行 backup migrate-layout。"
                 )
+            require_current_archive_schema(connection, self.db_path)
             self._store_id = metadata.store_id
         except BaseException:
             connection.close()
@@ -454,6 +440,112 @@ class ThreadArchiveStore:
         source_store_id = self.archive_store_id()
         self.state_store.ensure_schema(source_store_id)
         self.cache_store.ensure_schema(source_store_id)
+
+    def _create_archive_pages_table(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS archive_pages (
+                page_number INTEGER PRIMARY KEY CHECK(page_number >= 1),
+                total_page INTEGER,
+                vrows INTEGER,
+                last_seen_at TEXT NOT NULL
+            )
+            """
+        )
+
+    def _migrate_legacy_page_schema(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        has_snapshots = _table_exists(connection, "page_snapshots")
+        has_compact_pages = _table_exists(connection, "archive_pages")
+        if has_snapshots and has_compact_pages:
+            raise ValueError(
+                f"archive同时包含page_snapshots与archive_pages：{self.db_path}"
+            )
+        if has_compact_pages:
+            raise ValueError(
+                f"archive_pages缺少schema版本标记：{self.db_path}"
+            )
+
+        expected_rows: list[tuple[object, object, object, object]] = []
+        if has_snapshots:
+            columns = _table_columns(connection, "page_snapshots")
+            required_columns = {
+                "id",
+                "page_number",
+                "page_json",
+                "total_page",
+                "vrows",
+                "last_seen_at",
+            }
+            if not required_columns <= columns:
+                raise ValueError(
+                    f"archive page_snapshots字段不完整：{self.db_path} "
+                    f"columns={sorted(columns)}"
+                )
+            expected_rows = connection.execute(
+                """
+                SELECT page_number, total_page, vrows, last_seen_at
+                FROM (
+                    SELECT
+                        page_number,
+                        total_page,
+                        vrows,
+                        last_seen_at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY page_number
+                            ORDER BY last_seen_at DESC, id DESC
+                        ) AS row_number
+                    FROM page_snapshots
+                )
+                WHERE row_number = 1
+                ORDER BY page_number
+                """
+            ).fetchall()
+
+        self._create_archive_pages_table(connection)
+        if has_snapshots:
+            connection.execute(
+                """
+                INSERT INTO archive_pages (
+                    page_number,
+                    total_page,
+                    vrows,
+                    last_seen_at
+                )
+                SELECT page_number, total_page, vrows, last_seen_at
+                FROM (
+                    SELECT
+                        page_number,
+                        total_page,
+                        vrows,
+                        last_seen_at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY page_number
+                            ORDER BY last_seen_at DESC, id DESC
+                        ) AS row_number
+                    FROM page_snapshots
+                )
+                WHERE row_number = 1
+                """
+            )
+        actual_rows = connection.execute(
+            """
+            SELECT page_number, total_page, vrows, last_seen_at
+            FROM archive_pages
+            ORDER BY page_number
+            """
+        ).fetchall()
+        if actual_rows != expected_rows:
+            raise ValueError(f"archive分页状态迁移校验失败：{self.db_path}")
+
+        connection.execute("DROP TABLE IF EXISTS post_observations")
+        connection.execute("DROP TABLE IF EXISTS page_snapshots")
+        connection.execute(f"PRAGMA user_version = {ARCHIVE_SCHEMA_VERSION}")
 
     def _create_post_versions_table(
         self,
@@ -632,18 +724,19 @@ class ThreadArchiveStore:
         )
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         existing_metadata = read_storage_metadata(connection)
-        if existing_metadata is None and not self._allow_layout_upgrade:
-            existing_tables = {
-                row[0]
-                for row in connection.execute(
-                    """
-                    SELECT name FROM sqlite_schema
-                    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                    """
-                )
-                if isinstance(row[0], str)
-            }
-            if existing_tables:
+        existing_tables = {
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT name FROM sqlite_schema
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                """
+            )
+            if isinstance(row[0], str)
+        }
+        new_database = existing_metadata is None and not existing_tables
+        if existing_metadata is None and existing_tables:
+            if not self._allow_layout_upgrade:
                 raise ValueError(
                     f"archive仍是旧单库布局：{self.db_path}。"
                     "请先运行 backup migrate-layout；运行时不会原地读取或"
@@ -651,24 +744,18 @@ class ThreadArchiveStore:
                 )
         metadata = ensure_storage_metadata(connection, role="archive_data")
         self._store_id = metadata.store_id
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS page_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                page_number INTEGER NOT NULL,
-                response_hash TEXT NOT NULL,
-                page_json TEXT NOT NULL,
-                current_page INTEGER,
-                total_page INTEGER,
-                vrows INTEGER,
-                msg TEXT,
-                first_seen_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL,
-                seen_count INTEGER NOT NULL,
-                UNIQUE(page_number, response_hash)
-            )
-            """
-        )
+        if new_database:
+            self._create_archive_pages_table(connection)
+            connection.execute(f"PRAGMA user_version = {ARCHIVE_SCHEMA_VERSION}")
+        elif read_archive_schema_version(connection) != ARCHIVE_SCHEMA_VERSION:
+            if not self._allow_layout_upgrade:
+                raise ValueError(
+                    f"archive仍是旧分页存储schema：{self.db_path}。"
+                    "请先运行 backup migrate-layout；运行时不会读取或升级旧表。"
+                )
+            self._migrate_legacy_page_schema(connection)
+        else:
+            require_current_archive_schema(connection, self.db_path)
         if not _table_exists(connection, "post_versions"):
             self._create_post_versions_table(connection)
         else:
@@ -688,6 +775,7 @@ class ThreadArchiveStore:
             """
         )
         connection.execute(f"DROP INDEX IF EXISTS {_LEGACY_LATEST_POST_INDEX}")
+        connection.execute(f"PRAGMA user_version = {ARCHIVE_SCHEMA_VERSION}")
         connection.commit()
 
     @staticmethod
@@ -2453,86 +2541,33 @@ class ThreadArchiveStore:
                 ),
             )
 
-    def _page_snapshot_id(
-        self,
-        connection: sqlite3.Connection,
-        page_number: int,
-        response_hash: str,
-    ) -> Optional[int]:
-        row = connection.execute(
-            """
-            SELECT id
-            FROM page_snapshots
-            WHERE page_number = ? AND response_hash = ?
-            """,
-            (page_number, response_hash),
-        ).fetchone()
-        if row is None:
-            return None
-        value = row[0]
-        if type(value) is int:
-            return value
-        raise ValueError(f"archive page_snapshots.id字段无效：{value!r}")
-
-    def _upsert_page_snapshot(
+    def _upsert_archive_page(
         self,
         connection: sqlite3.Connection,
         page: _PreparedArchivePage,
-    ) -> bool:
-        inserted = self._page_snapshot_id(
-            connection,
-            page.page_number,
-            page.response_hash,
-        ) is None
-        seen_increment = 1 if page.count_observation else 0
-        page_object = cast(dict[str, object], page.page_data)
+    ) -> None:
         connection.execute(
             """
-            INSERT INTO page_snapshots (
+            INSERT INTO archive_pages (
                 page_number,
-                response_hash,
-                page_json,
-                current_page,
                 total_page,
                 vrows,
-                msg,
-                first_seen_at,
-                last_seen_at,
-                seen_count
+                last_seen_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(page_number, response_hash) DO UPDATE SET
-                page_json = excluded.page_json,
-                current_page = excluded.current_page,
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(page_number) DO UPDATE SET
                 total_page = excluded.total_page,
                 vrows = excluded.vrows,
-                msg = excluded.msg,
-                first_seen_at = CASE
-                    WHEN page_snapshots.first_seen_at > excluded.first_seen_at
-                    THEN excluded.first_seen_at
-                    ELSE page_snapshots.first_seen_at
-                END,
-                last_seen_at = CASE
-                    WHEN page_snapshots.last_seen_at < excluded.last_seen_at
-                    THEN excluded.last_seen_at
-                    ELSE page_snapshots.last_seen_at
-                END,
-                seen_count = page_snapshots.seen_count + ?
+                last_seen_at = excluded.last_seen_at
+            WHERE excluded.last_seen_at >= archive_pages.last_seen_at
             """,
             (
                 page.page_number,
-                page.response_hash,
-                page.page_json,
-                _optional_int(page_object, "currentPage"),
-                _optional_int(page_object, "totalPage"),
-                _optional_int(page_object, "vrows"),
-                _optional_str(page_object, "msg"),
+                page.total_page,
+                page.vrows,
                 page.observed_at,
-                page.observed_at,
-                seen_increment,
             ),
         )
-        return inserted
 
     def _post_version_id(
         self,
@@ -2764,7 +2799,6 @@ class ThreadArchiveStore:
         if not isinstance(raw_posts, list):
             raise ValueError("NGA响应中缺少帖子列表。")
         raw_post_items = cast(list[object], raw_posts)
-        page_json = _json_text(page_data)
         prepared_posts: list[_PreparedArchivePost] = []
         for raw_post in raw_post_items:
             post = post_data_from_raw(raw_post)
@@ -2779,9 +2813,8 @@ class ThreadArchiveStore:
             )
         return _PreparedArchivePage(
             page_number=page_number,
-            page_data=page_data,
-            page_json=page_json,
-            response_hash=hash_text(page_json),
+            total_page=_optional_int(page_data, "totalPage"),
+            vrows=_optional_int(page_data, "vrows"),
             observed_at=observed_at,
             count_observation=count_observation,
             posts=tuple(prepared_posts),
@@ -2839,7 +2872,6 @@ class ThreadArchiveStore:
         if not prepared_pages:
             return ArchivePagesUpsertResult(
                 pages_processed=0,
-                page_snapshots_inserted=0,
                 post_versions_inserted=0,
                 effective_processing_inputs_changed=False,
                 effective_changed_pages=0,
@@ -2856,7 +2888,6 @@ class ThreadArchiveStore:
             for page_lous in affected_lous_by_page.values()
             for lou in page_lous
         }
-        page_snapshots_inserted = 0
         post_versions_inserted = 0
         changed_lous: set[int] = set()
 
@@ -2867,9 +2898,7 @@ class ThreadArchiveStore:
                     affected_lous,
                 )
                 for page in prepared_pages:
-                    snapshot_inserted = self._upsert_page_snapshot(connection, page)
-                    if snapshot_inserted:
-                        page_snapshots_inserted += 1
+                    self._upsert_archive_page(connection, page)
                     for prepared_post in page.posts:
                         post = prepared_post.post
                         _version_id, version_inserted = self._upsert_post_version(
@@ -2905,7 +2934,6 @@ class ThreadArchiveStore:
 
         return ArchivePagesUpsertResult(
             pages_processed=len(prepared_pages),
-            page_snapshots_inserted=page_snapshots_inserted,
             post_versions_inserted=post_versions_inserted,
             effective_processing_inputs_changed=bool(changed_lous),
             effective_changed_pages=sum(
@@ -2933,7 +2961,6 @@ class ThreadArchiveStore:
         )
 
         return ArchivePageUpsertResult(
-            page_snapshot_inserted=result.page_snapshots_inserted == 1,
             post_versions_inserted=result.post_versions_inserted,
             effective_processing_inputs_changed=(
                 result.effective_processing_inputs_changed
@@ -3475,10 +3502,8 @@ class ThreadArchiveStore:
             row = connection.execute(
                 """
                 SELECT vrows
-                FROM page_snapshots
+                FROM archive_pages
                 WHERE page_number = 1
-                ORDER BY last_seen_at DESC, id DESC
-                LIMIT 1
                 """
             ).fetchone()
 
@@ -3501,10 +3526,8 @@ class ThreadArchiveStore:
                 connection.execute(
                     """
                     SELECT total_page, vrows
-                    FROM page_snapshots
+                    FROM archive_pages
                     WHERE page_number = 1
-                    ORDER BY last_seen_at DESC, id DESC
-                    LIMIT 1
                     """
                 ).fetchone(),
             )
@@ -3529,7 +3552,7 @@ class ThreadArchiveStore:
             rows = cast(
                 list[tuple[int]],
                 connection.execute(
-                    "SELECT DISTINCT page_number FROM page_snapshots"
+                    "SELECT page_number FROM archive_pages"
                 ).fetchall(),
             )
 
@@ -3558,7 +3581,6 @@ class ThreadArchiveStore:
         if not page_paths:
             raise RuntimeError(f"缺少JSON备份文件：{folder_json}/page_*.json")
 
-        page_snapshots_inserted = 0
         post_versions_inserted = 0
         for path in page_paths:
             page_data = cast(PageData, _read_json_object(path))
@@ -3568,13 +3590,10 @@ class ThreadArchiveStore:
                 observed_at=_mtime_utc_iso(path),
                 count_observation=False,
             )
-            if result.page_snapshot_inserted:
-                page_snapshots_inserted += 1
             post_versions_inserted += result.post_versions_inserted
 
         self.refresh_stored_word_counts()
         return ArchiveMigrationResult(
             page_files=len(page_paths),
-            page_snapshots_inserted=page_snapshots_inserted,
             post_versions_inserted=post_versions_inserted,
         )

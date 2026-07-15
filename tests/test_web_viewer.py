@@ -243,6 +243,24 @@ class WebViewerDataTest:
         assert summaries[0]["statsLoaded"] is False
         assert summaries[0]["postCount"] is None
 
+    def test_full_scan_rejects_unmigrated_archive_schema(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "hello")])
+        with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
+            connection.execute("PRAGMA user_version = 0")
+            connection.commit()
+
+        summaries = scan_thread_summaries(output_dir, {}, detail="full")
+
+        assert len(summaries) == 1
+        assert summaries[0]["status"] == "invalid"
+        assert summaries[0]["message"] is not None
+        assert "backup migrate-layout" in summaries[0]["message"]
+
     def test_scans_stored_word_count_summary(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
         thread_dir = output_dir / "101_201"
@@ -1182,7 +1200,7 @@ class WebDatabaseViewerTest:
         assert schema_response.status_code == 200
         table_names = {item["name"] for item in schema_response.json()["tables"]}
         assert {
-            "page_snapshots",
+            "archive_pages",
             "post_versions",
             "archive_change_state",
             "post_overlays",
