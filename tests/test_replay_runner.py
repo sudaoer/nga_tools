@@ -330,6 +330,24 @@ class ReplayStateTest:
                 "warm",
             )
 
+    def test_validation_checks_latest_post_metadata(self, tmp_path: Path) -> None:
+        source, _thread_config = _build_warm_source(tmp_path)
+        target = tmp_path / "target-output"
+        prepare_target_state("warm", source, target)
+        with sqlite3.connect(target / "123_456" / "archive.sqlite3") as connection:
+            connection.execute(
+                "UPDATE post_latest_metadata SET author_name = 'changed'"
+            )
+            connection.commit()
+
+        with pytest.raises(RuntimeError, match="正文或元数据"):
+            validate_replay_output(
+                source,
+                target,
+                [{"thread_name": "sample", "tid": 123, "aid": 456}],
+                "warm",
+            )
+
     def test_initial_state_guards_nonempty_and_nested_targets(
         self,
         tmp_path: Path,
@@ -821,6 +839,7 @@ class ReplayRunnerTest:
         reports = list(target.glob("replay_run-*.json"))
         assert len(reports) == 1
         report = json.loads(reports[0].read_text(encoding="utf-8"))
+        assert report["format_version"] == 2
         assert report["corpus_id"] == "corpus-1"
         assert report["profile_hash"] == "profile-1"
         assert report["initial_state"] == "empty"
@@ -886,7 +905,7 @@ class ReplayRunnerTest:
             for metric in (
                 "requests",
                 "response_bytes",
-                "synthetic_original_requests",
+                "floor_map_original_requests",
                 "statuses",
             ):
                 assert first_traffic[metric] == second_traffic[metric]

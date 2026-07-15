@@ -40,12 +40,35 @@ MISSING_IMAGE_URL = (
 )
 
 
-def _author_post(lou: int, pid: int, content: str) -> dict[str, object]:
-    return {
+def _author_post(
+    lou: int,
+    pid: int,
+    content: str,
+    *,
+    attachment_urls: tuple[str, ...] = (),
+) -> dict[str, object]:
+    post: dict[str, object] = {
         "lou": lou,
         "pid": pid,
         "content": content,
         "author": {"uid": 456, "username": "author"},
+        "postdate": "2026-07-12 12:34",
+        "attches": [
+            {"type": "img", "attachurl": url}
+            for url in attachment_urls
+        ],
+    }
+    return post
+
+
+def _anonymous_post(lou: int, pid: int, content: str) -> dict[str, object]:
+    return {
+        "lou": lou,
+        "pid": pid,
+        "content": content,
+        "author": {"uid": -1, "username": "匿名"},
+        "postdate": 1_784_108_800,
+        "attches": [],
     }
 
 
@@ -124,8 +147,12 @@ def _build_source(tmp_path: Path) -> tuple[Path, Path, Path]:
     )
     store.upsert_pages(
         {
-            1: _page(1, 2, [_author_post(0, 100, "latest")]),
-            2: _page(2, 2, [_author_post(1, 101, "second")]),
+            1: _page(
+                1,
+                2,
+                [_author_post(0, 100, "latest", attachment_urls=(IMAGE_URL,))],
+            ),
+            2: _page(2, 2, [_author_post(21, 101, "second")]),
         },
         observed_at="2026-07-12T00:00:00+00:00",
     )
@@ -139,17 +166,37 @@ def _build_source(tmp_path: Path) -> tuple[Path, Path, Path]:
             input_signature="test-signature",
             entries=[
                 {"pid": 100, "author_lou": 0, "original_lou": 0},
-                {"pid": 101, "author_lou": 1, "original_lou": 25},
-                {"pid": None, "author_lou": 2, "original_lou": 10},
+                {"pid": 101, "author_lou": 21, "original_lou": 25},
                 {
                     "pid": None,
-                    "author_lou": 3,
+                    "author_lou": 10,
+                    "original_lou": 10,
+                    "original_pid": 900,
+                },
+                {"pid": None, "author_lou": 11, "original_lou": 13},
+                {
+                    "pid": None,
+                    "author_lou": 12,
                     "original_lou": None,
                     "candidate_original_lous": [11, 12],
                 },
-                {"pid": 0, "author_lou": 4, "original_lou": 2},
             ],
         )
+    )
+    store.upsert_recovered_posts(
+        {
+            10: {
+                "original_pid": 900,
+                "original_lou": 10,
+                "content": "recovered anonymous",
+                "raw_post": _anonymous_post(
+                    10,
+                    900,
+                    "recovered anonymous",
+                ),
+            }
+        },
+        observed_at="2026-07-12T01:00:00+00:00",
     )
     thread_config = tmp_path / "thread_configs.json"
     thread_config.write_text(
@@ -188,7 +235,7 @@ def _unlimited_profile() -> ReplayProfile:
 
 
 class ReplayCorpusTest:
-    def test_loads_latest_pages_images_and_synthetic_original(
+    def test_loads_content_pages_images_and_floor_map_original(
         self,
         tmp_path: Path,
     ) -> None:
@@ -221,35 +268,59 @@ class ReplayCorpusTest:
         }
         assert source_states_after == source_states_before
 
-        exact_page = corpus.page(123, 456, 1)
-        assert exact_page is not None
-        assert exact_page.synthetic_original is False
-        exact_data = json.loads(exact_page.payload)
-        assert exact_data["result"][0]["content"] == "latest"
+        content_page = corpus.page(123, 456, 1)
+        assert content_page is not None
+        assert content_page.floor_map_original is False
+        content_data = json.loads(content_page.payload)
+        assert content_data["totalPage"] == 2
+        assert content_data["vrows"] == 22
+        assert content_data["result"] == [
+            {
+                "pid": 100,
+                "lou": 0,
+                "content": "latest",
+                "author": {"uid": 456, "username": "author"},
+                "postdate": "2026-07-12 12:34",
+                "attches": [{"type": "img", "attachurl": IMAGE_URL}],
+            }
+        ]
+        second_content_page = corpus.page(123, 456, 2)
+        assert second_content_page is not None
+        assert json.loads(second_content_page.payload)["result"][0]["content"] == (
+            "second"
+        )
 
-        synthetic_first = corpus.page(123, None, 1)
-        assert synthetic_first is not None
-        assert synthetic_first.synthetic_original is True
-        first_data = json.loads(synthetic_first.payload)
+        floor_map_first = corpus.page(123, None, 1)
+        assert floor_map_first is not None
+        assert floor_map_first.floor_map_original is True
+        first_data = json.loads(floor_map_first.payload)
         assert first_data["totalPage"] == 2
         assert len(first_data["result"]) == 17
-        assert {10, 11, 12}.isdisjoint(
+        assert {11, 12, 13}.isdisjoint(
             {post["lou"] for post in first_data["result"]}
         )
         assert first_data["result"][0]["pid"] == 100
+        assert first_data["result"][0]["content"] == "latest"
+        recovered = next(post for post in first_data["result"] if post["lou"] == 10)
+        assert recovered["pid"] == 900
+        assert recovered["content"] == "recovered anonymous"
+        assert recovered["author"] == {"uid": -1, "username": "匿名"}
 
-        synthetic_second = corpus.page(123, None, 2)
-        assert synthetic_second is not None
-        second_data = json.loads(synthetic_second.payload)
+        floor_map_second = corpus.page(123, None, 2)
+        assert floor_map_second is not None
+        second_data = json.loads(floor_map_second.payload)
         assert [post["lou"] for post in second_data["result"]] == list(range(20, 26))
         assert second_data["result"][-1]["pid"] == 101
+        assert second_data["result"][-1]["content"] == "second"
         assert corpus.page(123, None, 3) is None
 
         assert corpus.image(IMAGE_URL) is not None
         assert corpus.image(MISSING_IMAGE_URL) is None
-        assert corpus.manifest.exact_page_count == 2
-        assert corpus.manifest.synthetic_thread_count == 1
-        assert corpus.manifest.locatable_pid_count == 2
+        assert corpus.manifest.archive_content_post_count == 3
+        assert corpus.manifest.archive_content_page_count == 2
+        assert corpus.manifest.floor_map_original_thread_count == 1
+        assert corpus.manifest.floor_map_original_page_count == 2
+        assert corpus.manifest.locatable_pid_count == 3
         first_pid_target = corpus.pid_target(100)
         assert first_pid_target is not None
         assert first_pid_target.tid == 123
@@ -257,33 +328,110 @@ class ReplayCorpusTest:
         second_pid_target = corpus.pid_target(101)
         assert second_pid_target is not None
         assert second_pid_target.page_number == 2
+        recovered_pid_target = corpus.pid_target(900)
+        assert recovered_pid_target is not None
+        assert recovered_pid_target.page_number == 1
         assert corpus.manifest.image_mapping_count == 2
         assert corpus.manifest.available_image_mapping_count == 1
         assert corpus.manifest.unavailable_image_mapping_count == 1
+        manifest_data = corpus.manifest.as_dict()
+        assert manifest_data["corpus_format_version"] == 6
+        assert {
+            "exact_page_count",
+            "exact_page_payload_bytes",
+            "synthetic_thread_count",
+        }.isdisjoint(manifest_data)
 
         reloaded = load_replay_corpus(output_dir, thread_config)
         assert reloaded.manifest.corpus_id == corpus.manifest.corpus_id
 
-    def test_uses_newer_last_page_when_first_page_count_is_stale(
+    def test_loads_without_recorded_page_response_tables(
         self,
         tmp_path: Path,
     ) -> None:
         output_dir, thread_config, _image_path = _build_source(tmp_path)
-        store = ThreadArchiveStore(output_dir / "123_456")
-        store.upsert_page(
-            3,
-            _page(3, 3, [_author_post(2, 102, "third")]),
-            observed_at="2026-07-13T00:00:00+00:00",
-        )
+        archive_path = output_dir / "123_456" / "archive.sqlite3"
+        with sqlite3.connect(archive_path) as connection:
+            connection.execute("DROP TABLE post_observations")
+            connection.execute("DROP TABLE page_snapshots")
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
         corpus = load_replay_corpus(output_dir, thread_config)
 
-        assert corpus.manifest.exact_page_count == 3
-        for page_number in range(1, 4):
-            replay_page = corpus.page(123, 456, page_number)
-            assert replay_page is not None
-            assert json.loads(replay_page.payload)["totalPage"] == 3
-        assert corpus.page(123, 456, 4) is None
+        first_page = corpus.page(123, 456, 1)
+        assert first_page is not None
+        assert json.loads(first_page.payload)["result"][0]["content"] == "latest"
+        assert corpus.manifest.archive_content_page_count == 2
+
+    def test_synthesizes_original_pages_from_tid_all_content(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir, thread_config, _image_path = _build_source(tmp_path)
+        original_store = ThreadArchiveStore(output_dir / "123_all")
+        original_store.upsert_pages(
+            {
+                1: _page(
+                    1,
+                    2,
+                    [
+                        _author_post(0, 100, "original latest"),
+                        _anonymous_post(10, 900, "recovered anonymous"),
+                    ],
+                ),
+                2: _page(2, 2, [_author_post(25, 101, "original second")]),
+            },
+            observed_at="2026-07-12T02:00:00+00:00",
+        )
+        original_archive = output_dir / "123_all" / "archive.sqlite3"
+        with sqlite3.connect(original_archive) as connection:
+            connection.execute("DROP TABLE post_observations")
+            connection.execute("DROP TABLE page_snapshots")
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        corpus = load_replay_corpus(output_dir, thread_config)
+
+        first_page = corpus.page(123, None, 1)
+        assert first_page is not None
+        assert first_page.floor_map_original is False
+        first_data = json.loads(first_page.payload)
+        assert first_data["vrows"] == 26
+        assert [post["lou"] for post in first_data["result"]] == [0, 10]
+        assert first_data["result"][0]["content"] == "original latest"
+        assert first_data["result"][1]["content"] == "recovered anonymous"
+
+        second_page = corpus.page(123, None, 2)
+        assert second_page is not None
+        assert json.loads(second_page.payload)["result"] == [
+            {
+                "pid": 101,
+                "lou": 25,
+                "content": "original second",
+                "author": {"uid": 456, "username": "author"},
+                "postdate": "2026-07-12 12:34",
+                "attches": [],
+            }
+        ]
+        assert corpus.manifest.archive_content_post_count == 6
+        assert corpus.manifest.archive_content_page_count == 4
+        assert corpus.manifest.floor_map_original_thread_count == 0
+        assert corpus.manifest.floor_map_original_page_count == 0
+
+        author_archive = output_dir / "123_456" / "archive.sqlite3"
+        with sqlite3.connect(author_archive) as connection:
+            connection.execute("DELETE FROM floor_map_candidates")
+            connection.execute("DELETE FROM floor_map_entries")
+            connection.execute("DELETE FROM floor_map_state")
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        corpus_without_floor_map = load_replay_corpus(output_dir, thread_config)
+        original_page = corpus_without_floor_map.page(123, None, 1)
+        assert original_page is not None
+        assert original_page.floor_map_original is False
+        assert corpus_without_floor_map.manifest.locatable_pid_count == 0
 
     def test_rejects_database_with_uncheckpointed_wal(
         self,
@@ -327,12 +475,12 @@ class ReplayServerTest:
         assert exact_response.status_code == 200
         assert exact_response.json()["result"][0]["content"] == "latest"
 
-        synthetic_response = client.post(
+        floor_map_response = client.post(
             "/app_api.php?__lib=post&__act=list",
             data={"tid": "123", "page": "2"},
         )
-        assert synthetic_response.status_code == 200
-        assert synthetic_response.json()["result"][-1]["pid"] == 101
+        assert floor_map_response.status_code == 200
+        assert floor_map_response.json()["result"][-1]["pid"] == 101
 
         redirect_response = client.get(
             "/read.php",
@@ -376,7 +524,7 @@ class ReplayServerTest:
 
         metrics = client.get("/__replay__/metrics").json()
         assert metrics["api"]["requests"] == 5
-        assert metrics["api"]["synthetic_original_requests"] == 1
+        assert metrics["api"]["floor_map_original_requests"] == 1
         assert metrics["api"]["statuses"] == {"200": 4, "302": 1}
         assert metrics["api"]["operations"] == {
             "author_post_list": 1,

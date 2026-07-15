@@ -18,7 +18,7 @@ ReplayOperation: TypeAlias = Literal[
 class _TrafficState:
     requests: int = 0
     response_bytes: int = 0
-    synthetic_original_requests: int = 0
+    floor_map_original_requests: int = 0
     latency_wait_seconds: float = 0.0
     bandwidth_wait_seconds: float = 0.0
     service_seconds: float = 0.0
@@ -31,7 +31,7 @@ class _TrafficState:
         return {
             "requests": self.requests,
             "response_bytes": self.response_bytes,
-            "synthetic_original_requests": self.synthetic_original_requests,
+            "floor_map_original_requests": self.floor_map_original_requests,
             "latency_wait_seconds": self.latency_wait_seconds,
             "bandwidth_wait_seconds": self.bandwidth_wait_seconds,
             "service_seconds": self.service_seconds,
@@ -63,7 +63,7 @@ class ReplayMetrics:
         self,
         kind: TrafficKind,
         *,
-        synthetic_original: bool,
+        floor_map_original: bool,
         operation: ReplayOperation | None,
     ) -> None:
         with self._lock:
@@ -71,8 +71,8 @@ class ReplayMetrics:
             state.requests += 1
             state.active += 1
             state.max_active = max(state.max_active, state.active)
-            if synthetic_original:
-                state.synthetic_original_requests += 1
+            if floor_map_original:
+                state.floor_map_original_requests += 1
             if operation is not None:
                 state.operations[operation] += 1
 

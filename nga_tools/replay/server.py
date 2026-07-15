@@ -74,7 +74,7 @@ class ReplayService:
         source: ByteSource,
         *,
         status: int,
-        synthetic_original: bool = False,
+        floor_map_original: bool = False,
         operation: ReplayOperation | None = None,
     ) -> ByteSource:
         shaper = self._shaper(kind)
@@ -85,7 +85,7 @@ class ReplayService:
         async with shaper.slot():
             self.metrics.begin(
                 kind,
-                synthetic_original=synthetic_original,
+                floor_map_original=floor_map_original,
                 operation=operation,
             )
             try:
@@ -127,7 +127,7 @@ def _streaming_response(
     status: int,
     content_type: str,
     content_length: int,
-    synthetic_original: bool = False,
+    floor_map_original: bool = False,
     operation: ReplayOperation | None = None,
     headers: dict[str, str] | None = None,
 ) -> StreamingResponse:
@@ -139,7 +139,7 @@ def _streaming_response(
             kind,
             source,
             status=status,
-            synthetic_original=synthetic_original,
+            floor_map_original=floor_map_original,
             operation=operation,
         ),
         status_code=status,
@@ -152,7 +152,7 @@ def _api_response(
     service: ReplayService,
     payload: bytes,
     *,
-    synthetic_original: bool,
+    floor_map_original: bool,
     operation: ReplayOperation | None = None,
 ) -> StreamingResponse:
     return _streaming_response(
@@ -162,7 +162,7 @@ def _api_response(
         status=200,
         content_type="application/json",
         content_length=len(payload),
-        synthetic_original=synthetic_original,
+        floor_map_original=floor_map_original,
         operation=operation,
     )
 
@@ -171,7 +171,7 @@ def _api_error_response(service: ReplayService, message: str) -> StreamingRespon
     return _api_response(
         service,
         _json_bytes({"code": -1, "msg": message, "result": []}),
-        synthetic_original=False,
+        floor_map_original=False,
     )
 
 
@@ -310,7 +310,7 @@ def create_replay_app(corpus: ReplayCorpus, profile: ReplayProfile) -> FastAPI:
         return _api_response(
             service,
             replay_page.payload,
-            synthetic_original=replay_page.synthetic_original,
+            floor_map_original=replay_page.floor_map_original,
             operation=(
                 "original_post_list" if aid is None else "author_post_list"
             ),
@@ -383,8 +383,9 @@ def load_replay_app(
     manifest = corpus.manifest
     report_info(
         f"重放语料加载完成：帖子{manifest.thread_count}个，"
-        f"精确分页{manifest.exact_page_count}页，"
-        f"合成原帖{manifest.synthetic_thread_count}个，"
+        f"内容分页{manifest.archive_content_page_count}页，"
+        f"楼层映射原帖{manifest.floor_map_original_thread_count}个/"
+        f"{manifest.floor_map_original_page_count}页，"
         f"可用图片映射{manifest.available_image_mapping_count}条。"
     )
     report_info(f"Corpus ID：{manifest.corpus_id}")

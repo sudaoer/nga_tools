@@ -228,7 +228,7 @@ def _write_run_report(
     success_count = len(selected_configs) - failures - hidden_threads
     report_path = _new_report_path(target_output, started_at)
     payload: JsonObject = {
-        "format_version": 1,
+        "format_version": 2,
         "started_at": started_at.isoformat(),
         "ended_at": ended_at.isoformat(),
         "status": "failed" if failures or validation_error else "completed",

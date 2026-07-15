@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Optional, Protocol, TypeAlias, cast
 
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
+from nga_tools.core.hashing import hash_text
 from nga_tools.core.sqlite import configure_readonly_connection
 
-_CORPUS_FORMAT_VERSION = 5
+_CORPUS_FORMAT_VERSION = 6
 
 PageKey: TypeAlias = tuple[int, Optional[int], int]
 ProgressCallback: TypeAlias = Callable[[int, int, str], None]
@@ -31,7 +32,7 @@ class ReplayCorpusError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class ReplayPage:
     payload: bytes
-    synthetic_original: bool
+    floor_map_original: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,18 +60,67 @@ class ImageReplayEntry:
 
 
 @dataclass(frozen=True, slots=True)
-class _SyntheticPost:
+class _ReplayPost:
     pid: int
-    author_uid: int
+    lou: int
     content: str
+    author_name: str | None
+    author_uid: int | None
+    postdate: int | str | None
+    attachment_urls: tuple[str, ...]
+
+    def response_post(
+        self,
+        *,
+        lou: int | None = None,
+        pid: int | None = None,
+    ) -> dict[str, object]:
+        author: dict[str, object] = {}
+        if self.author_uid is not None:
+            author["uid"] = self.author_uid
+        if self.author_name is not None:
+            author["username"] = self.author_name
+        post: dict[str, object] = {
+            "pid": self.pid if pid is None else pid,
+            "lou": self.lou if lou is None else lou,
+            "content": self.content,
+            "author": author,
+            "attches": [
+                {"type": "img", "attachurl": url}
+                for url in self.attachment_urls
+            ],
+        }
+        if self.postdate is not None:
+            post["postdate"] = self.postdate
+        return post
 
 
 @dataclass(frozen=True, slots=True)
-class _SyntheticThread:
+class _FloorMapEntry:
+    author_lou: int
+    pid: int | None
+    original_lou: int | None
+    original_pid: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _FloorMapData:
+    entries_by_author_lou: dict[int, _FloorMapEntry]
+    candidates_by_author_lou: dict[int, tuple[int, ...]]
+
+    @property
+    def author_row_count(self) -> int:
+        if not self.entries_by_author_lou:
+            return 0
+        return max(self.entries_by_author_lou) + 1
+
+
+@dataclass(frozen=True, slots=True)
+class _FloorMapOriginalThread:
     tid: int
     source_aid: int
     row_count: int
-    posts_by_original_lou: dict[int, _SyntheticPost]
+    posts_by_original_lou: dict[int, _ReplayPost]
     omitted_original_lous: frozenset[int]
 
     @property
@@ -99,35 +149,25 @@ class _SyntheticThread:
                         "lou": original_lou,
                         "content": "",
                         "author": {"uid": 0, "username": "replay-filler"},
+                        "attches": [],
                     }
                 )
                 continue
-            posts.append(
-                {
-                    "pid": known_post.pid,
-                    "lou": original_lou,
-                    "content": known_post.content,
-                    "author": {
-                        "uid": known_post.author_uid,
-                        "username": (
-                            "匿名" if known_post.author_uid == -1 else "replay-author"
-                        ),
-                    },
-                }
-            )
+            posts.append(known_post.response_post(lou=original_lou))
 
         payload = json.dumps(
             {
                 "code": 0,
                 "currentPage": page_number,
                 "totalPage": self.page_count,
+                "vrows": self.row_count,
                 "result": posts,
             },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        return ReplayPage(payload=payload, synthetic_original=True)
+        return ReplayPage(payload=payload, floor_map_original=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,9 +176,11 @@ class ReplayManifest:
     source_output: str
     thread_config: str
     thread_count: int
-    exact_page_count: int
-    exact_page_payload_bytes: int
-    synthetic_thread_count: int
+    archive_content_post_count: int
+    archive_content_page_count: int
+    archive_content_page_payload_bytes: int
+    floor_map_original_thread_count: int
+    floor_map_original_page_count: int
     locatable_pid_count: int
     image_mapping_count: int
     available_image_mapping_count: int
@@ -153,9 +195,15 @@ class ReplayManifest:
             "source_output": self.source_output,
             "thread_config": self.thread_config,
             "thread_count": self.thread_count,
-            "exact_page_count": self.exact_page_count,
-            "exact_page_payload_bytes": self.exact_page_payload_bytes,
-            "synthetic_thread_count": self.synthetic_thread_count,
+            "archive_content_post_count": self.archive_content_post_count,
+            "archive_content_page_count": self.archive_content_page_count,
+            "archive_content_page_payload_bytes": (
+                self.archive_content_page_payload_bytes
+            ),
+            "floor_map_original_thread_count": (
+                self.floor_map_original_thread_count
+            ),
+            "floor_map_original_page_count": self.floor_map_original_page_count,
             "locatable_pid_count": self.locatable_pid_count,
             "image_mapping_count": self.image_mapping_count,
             "available_image_mapping_count": self.available_image_mapping_count,
@@ -167,22 +215,22 @@ class ReplayManifest:
 
 @dataclass(frozen=True, slots=True)
 class ReplayCorpus:
-    exact_pages: dict[PageKey, bytes]
-    synthetic_threads: dict[int, _SyntheticThread]
+    content_pages: dict[PageKey, bytes]
+    floor_map_original_threads: dict[int, _FloorMapOriginalThread]
     pid_targets: dict[int, ReplayPidTarget]
     images_by_url: dict[str, ImageReplayEntry]
     manifest: ReplayManifest
 
     def page(self, tid: int, aid: Optional[int], page_number: int) -> ReplayPage | None:
-        exact_payload = self.exact_pages.get((tid, aid, page_number))
-        if exact_payload is not None:
-            return ReplayPage(payload=exact_payload, synthetic_original=False)
+        content_payload = self.content_pages.get((tid, aid, page_number))
+        if content_payload is not None:
+            return ReplayPage(payload=content_payload, floor_map_original=False)
         if aid is not None:
             return None
-        synthetic_thread = self.synthetic_threads.get(tid)
-        if synthetic_thread is None:
+        original_thread = self.floor_map_original_threads.get(tid)
+        if original_thread is None:
             return None
-        return synthetic_thread.page(page_number)
+        return original_thread.page(page_number)
 
     def image(self, url: str) -> ImageReplayEntry | None:
         entry = self.images_by_url.get(_normalize_image_url(url))
@@ -215,9 +263,8 @@ class _DatabaseState:
 
 
 @dataclass(frozen=True, slots=True)
-class _LatestArchivePages:
-    page_count: int
-    pages: dict[int, tuple[str, bytes]]
+class _ArchiveContent:
+    posts_by_lou: dict[int, _ReplayPost]
     database_state: _DatabaseState
 
 
@@ -317,110 +364,185 @@ def _read_thread_configs(path: Path, hasher: _Hasher) -> list[_ThreadReplayConfi
     return configs
 
 
-def _page_object(page_json: str, *, source: str) -> dict[str, object]:
+def _postdate_from_json(value: object, *, source: str) -> int | str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ReplayCorpusError(f"{source} postdate_json无效。")
     try:
-        raw_page: object = json.loads(page_json)
+        raw_postdate: object = json.loads(value)
     except json.JSONDecodeError as error:
-        raise ReplayCorpusError(f"{source}不是有效JSON。") from error
-    if not isinstance(raw_page, dict):
-        raise ReplayCorpusError(f"{source}顶层不是对象。")
-    page = cast(dict[str, object], raw_page)
-    if not isinstance(page.get("result"), list):
-        raise ReplayCorpusError(f"{source}缺少result数组。")
-    return page
+        raise ReplayCorpusError(f"{source} postdate_json不是有效JSON。") from error
+    if type(raw_postdate) is int:
+        return raw_postdate
+    if isinstance(raw_postdate, str) and raw_postdate.strip():
+        return raw_postdate.strip()
+    raise ReplayCorpusError(f"{source} postdate_json内容无效。")
 
 
-def _read_latest_archive_pages(path: Path) -> _LatestArchivePages:
+def _attachment_urls_from_json(value: object, *, source: str) -> tuple[str, ...]:
+    if not isinstance(value, str):
+        raise ReplayCorpusError(f"{source} image_attachments_json无效。")
+    try:
+        raw_attachments: object = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ReplayCorpusError(
+            f"{source} image_attachments_json不是有效JSON。"
+        ) from error
+    if not isinstance(raw_attachments, list):
+        raise ReplayCorpusError(f"{source} image_attachments_json不是数组。")
+
+    urls: list[str] = []
+    for raw_attachment in cast(list[object], raw_attachments):
+        if not isinstance(raw_attachment, dict):
+            raise ReplayCorpusError(f"{source} 图片附件不是对象。")
+        attachment = cast(dict[str, object], raw_attachment)
+        url = attachment.get("url")
+        path = attachment.get("path")
+        name = attachment.get("name")
+        if (
+            not isinstance(url, str)
+            or not url
+            or not isinstance(path, str)
+            or not isinstance(name, str)
+        ):
+            raise ReplayCorpusError(f"{source} 图片附件字段无效。")
+        urls.append(url)
+    return tuple(urls)
+
+
+def _read_archive_content(path: Path) -> _ArchiveContent:
     try:
         connection, database_state = _connect_frozen(path)
         with closing(connection):
             rows = cast(
-                list[tuple[object, object, object]],
+                list[tuple[object, ...]],
                 connection.execute(
                     """
-                    WITH ranked AS (
+                    WITH latest AS (
                         SELECT
-                            page_number,
-                            response_hash,
-                            page_json,
+                            id,
+                            lou,
+                            pid,
+                            content,
+                            source_hash,
                             ROW_NUMBER() OVER (
-                                PARTITION BY page_number
+                                PARTITION BY lou
                                 ORDER BY last_seen_at DESC, id DESC
                             ) AS row_number
-                        FROM page_snapshots
+                        FROM post_versions
                     )
-                    SELECT page_number, response_hash, page_json
-                    FROM ranked
-                    WHERE row_number = 1
-                    ORDER BY page_number
+                    SELECT
+                        latest.lou,
+                        latest.pid,
+                        latest.content,
+                        latest.source_hash,
+                        metadata.pid,
+                        metadata.author_name,
+                        metadata.author_uid,
+                        metadata.postdate_json,
+                        metadata.image_attachments_json
+                    FROM latest
+                    LEFT JOIN post_latest_metadata AS metadata
+                        ON metadata.pid = latest.pid
+                        AND metadata.lou = latest.lou
+                    WHERE latest.row_number = 1
+                    ORDER BY latest.lou
                     """
                 ).fetchall(),
             )
         _verify_frozen(path, database_state)
     except sqlite3.Error as error:
-        raise ReplayCorpusError(f"无法读取重放源归档：{path}: {error}") from error
+        raise ReplayCorpusError(f"无法读取重放归档内容：{path}: {error}") from error
 
-    latest_by_page: dict[int, tuple[str, str]] = {}
-    for raw_page_number, raw_response_hash, raw_page_json in rows:
-        if (
-            type(raw_page_number) is not int
-            or raw_page_number < 1
-            or not isinstance(raw_response_hash, str)
-            or not isinstance(raw_page_json, str)
-        ):
-            raise ReplayCorpusError(f"重放源归档分页行无效：{path}")
-        if (
-            hashlib.sha256(raw_page_json.encode("utf-8")).hexdigest()
-            != raw_response_hash
-        ):
+    posts_by_lou: dict[int, _ReplayPost] = {}
+    for row in rows:
+        if len(row) != 9:
+            raise ReplayCorpusError(f"重放归档内容行字段数无效：{path}")
+        (
+            raw_lou,
+            raw_pid,
+            raw_content,
+            raw_source_hash,
+            raw_metadata_pid,
+            raw_author_name,
+            raw_author_uid,
+            raw_postdate_json,
+            raw_attachments_json,
+        ) = row
+        if type(raw_lou) is not int or raw_lou < 0:
+            raise ReplayCorpusError(f"重放归档内容lou无效：{path}: {raw_lou!r}")
+        if type(raw_pid) is not int or raw_pid < 0:
+            raise ReplayCorpusError(f"重放归档内容pid无效：{path}: {raw_pid!r}")
+        if not isinstance(raw_content, str) or not isinstance(raw_source_hash, str):
+            raise ReplayCorpusError(f"重放归档正文或source_hash无效：{path}")
+        if hash_text(raw_content) != raw_source_hash:
             raise ReplayCorpusError(
-                f"重放源归档第{raw_page_number}页response_hash不匹配：{path}"
+                f"重放归档第{raw_lou}楼source_hash与正文不匹配：{path}"
             )
-        latest_by_page[raw_page_number] = (raw_response_hash, raw_page_json)
+        if raw_metadata_pid != raw_pid:
+            raise ReplayCorpusError(f"重放归档第{raw_lou}楼缺少最新元数据：{path}")
+        if raw_author_name is not None and not isinstance(raw_author_name, str):
+            raise ReplayCorpusError(f"重放归档第{raw_lou}楼作者名无效：{path}")
+        if raw_author_uid is not None and type(raw_author_uid) is not int:
+            raise ReplayCorpusError(f"重放归档第{raw_lou}楼作者UID无效：{path}")
+        source = f"{path}第{raw_lou}楼"
+        post = _ReplayPost(
+            pid=raw_pid,
+            lou=raw_lou,
+            content=raw_content,
+            author_name=raw_author_name,
+            author_uid=raw_author_uid,
+            postdate=_postdate_from_json(raw_postdate_json, source=source),
+            attachment_urls=_attachment_urls_from_json(
+                raw_attachments_json,
+                source=source,
+            ),
+        )
+        if raw_lou in posts_by_lou:
+            raise ReplayCorpusError(f"重放归档包含重复有效楼层{raw_lou}：{path}")
+        posts_by_lou[raw_lou] = post
+    return _ArchiveContent(
+        posts_by_lou=posts_by_lou,
+        database_state=database_state,
+    )
 
-    page_one = latest_by_page.get(1)
-    if page_one is None:
-        raise ReplayCorpusError(f"重放源归档缺少第一页：{path}")
-    page_one_object = _page_object(page_one[1], source=f"{path}第1页")
-    reported_page_count = page_one_object.get("totalPage", 1)
-    if type(reported_page_count) is not int or reported_page_count < 1:
-        raise ReplayCorpusError(f"重放源归档第一页totalPage无效：{path}")
-    page_count = max(reported_page_count, max(latest_by_page))
 
-    missing_pages = [
-        page_number
-        for page_number in range(1, page_count + 1)
-        if page_number not in latest_by_page
-    ]
-    if missing_pages:
-        preview = ", ".join(str(page) for page in missing_pages[:10])
-        raise ReplayCorpusError(f"重放源归档缺少分页{preview}：{path}")
+def _page_count(row_count: int) -> int:
+    return max(
+        1,
+        (row_count + ORIGINAL_POSTS_PER_PAGE - 1) // ORIGINAL_POSTS_PER_PAGE,
+    )
 
-    selected_pages: dict[int, tuple[str, bytes]] = {}
-    for page_number in range(1, page_count + 1):
-        _response_hash, page_json = latest_by_page[page_number]
-        page = _page_object(page_json, source=f"{path}第{page_number}页")
-        current_page = page.get("currentPage")
-        if current_page is not None and current_page != page_number:
-            raise ReplayCorpusError(
-                f"重放源归档currentPage与页号不一致：{path}第{page_number}页"
-            )
-        page["totalPage"] = page_count
-        payload = json.dumps(
-            page,
+
+def _content_page_payloads(
+    posts_by_lou: dict[int, _ReplayPost],
+    *,
+    row_count: int,
+) -> dict[int, bytes]:
+    total_pages = _page_count(row_count)
+    payloads: dict[int, bytes] = {}
+    for page_number in range(1, total_pages + 1):
+        start_lou = (page_number - 1) * ORIGINAL_POSTS_PER_PAGE
+        end_lou = min(start_lou + ORIGINAL_POSTS_PER_PAGE, row_count)
+        posts = [
+            post.response_post()
+            for lou in range(start_lou, end_lou)
+            if (post := posts_by_lou.get(lou)) is not None
+        ]
+        payloads[page_number] = json.dumps(
+            {
+                "code": 0,
+                "currentPage": page_number,
+                "totalPage": total_pages,
+                "vrows": row_count,
+                "result": posts,
+            },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        selected_pages[page_number] = (
-            hashlib.sha256(payload).hexdigest(),
-            payload,
-        )
-    return _LatestArchivePages(
-        page_count=page_count,
-        pages=selected_pages,
-        database_state=database_state,
-    )
+    return payloads
 
 
 def _optional_int(value: object, *, source: str) -> Optional[int]:
@@ -431,15 +553,16 @@ def _optional_int(value: object, *, source: str) -> Optional[int]:
     raise ReplayCorpusError(f"{source}不是整数或null：{value!r}")
 
 
-def _read_pid_targets(
+def _read_floor_map(
     path: Path,
     config: _ThreadReplayConfig,
     hasher: _Hasher,
     *,
     expected_database_state: _DatabaseState,
-) -> dict[int, ReplayPidTarget]:
+    required: bool,
+) -> _FloorMapData | None:
     if config.aid is None:
-        return {}
+        raise ReplayCorpusError("原帖归档不需要作者楼层映射。")
     try:
         connection, database_state = _connect_frozen(
             path,
@@ -450,51 +573,142 @@ def _read_pid_targets(
                 "SELECT tid, aid FROM floor_map_state WHERE singleton = 1"
             ).fetchone()
             if state_row is None:
-                _hash_fields(hasher, "pid_targets_missing", config.tid, config.aid)
-                rows: list[tuple[object, object, object]] = []
+                if required:
+                    raise ReplayCorpusError(
+                        f"重放源归档缺少匹配的楼层映射：{path}"
+                    )
+                entry_rows: list[tuple[object, object, object, object]] = []
+                candidate_rows: list[tuple[object, object, object]] = []
             elif state_row != (config.tid, config.aid):
-                raise ReplayCorpusError(f"重放源归档楼层映射与配置不匹配：{path}")
+                raise ReplayCorpusError(f"重放源归档缺少匹配的楼层映射：{path}")
             else:
-                rows = cast(
+                entry_rows = cast(
+                    list[tuple[object, object, object, object]],
+                    connection.execute(
+                        """
+                        SELECT author_lou, pid, original_lou, original_pid
+                        FROM floor_map_entries
+                        ORDER BY author_lou
+                        """
+                    ).fetchall(),
+                )
+                candidate_rows = cast(
                     list[tuple[object, object, object]],
                     connection.execute(
                         """
-                        SELECT pid, original_pid, original_lou
-                        FROM floor_map_entries
-                        WHERE original_lou IS NOT NULL
-                        ORDER BY author_lou
+                        SELECT author_lou, candidate_index, original_lou
+                        FROM floor_map_candidates
+                        ORDER BY author_lou, candidate_index
                         """
                     ).fetchall(),
                 )
         _verify_frozen(path, database_state)
     except sqlite3.Error as error:
-        raise ReplayCorpusError(f"无法读取重放PID索引：{path}: {error}") from error
+        raise ReplayCorpusError(f"无法读取重放楼层映射：{path}: {error}") from error
 
-    targets: dict[int, ReplayPidTarget] = {}
-    for raw_pid, raw_original_pid, raw_original_lou in rows:
+    if state_row is None:
+        _hash_fields(hasher, "floor_map_missing", config.tid, config.aid)
+        return None
+
+    entries_by_author_lou: dict[int, _FloorMapEntry] = {}
+    for raw_author_lou, raw_pid, raw_original_lou, raw_original_pid in entry_rows:
+        if type(raw_author_lou) is not int or raw_author_lou < 0:
+            raise ReplayCorpusError(f"重放源楼层映射author_lou无效：{path}")
+        pid = _optional_int(raw_pid, source=f"{path} pid")
         original_lou = _optional_int(
             raw_original_lou,
             source=f"{path} original_lou",
         )
-        if original_lou is None or original_lou < 0:
-            raise ReplayCorpusError(f"重放源PID索引original_lou无效：{path}")
+        original_pid = _optional_int(
+            raw_original_pid,
+            source=f"{path} original_pid",
+        )
+        if pid is not None and pid < 0:
+            raise ReplayCorpusError(f"重放源楼层映射pid无效：{path}")
+        if original_lou is not None and original_lou < 0:
+            raise ReplayCorpusError(f"重放源楼层映射original_lou无效：{path}")
+        if original_pid is not None and original_pid <= 0:
+            raise ReplayCorpusError(f"重放源楼层映射original_pid无效：{path}")
+        if original_pid is not None and (pid is not None or original_lou is None):
+            raise ReplayCorpusError(f"重放源楼层映射恢复字段组合无效：{path}")
+        entry = _FloorMapEntry(
+            author_lou=raw_author_lou,
+            pid=pid,
+            original_lou=original_lou,
+            original_pid=original_pid,
+        )
+        if raw_author_lou in entries_by_author_lou:
+            raise ReplayCorpusError(
+                f"重放源楼层映射包含重复author_lou={raw_author_lou}：{path}"
+            )
+        entries_by_author_lou[raw_author_lou] = entry
+        _hash_fields(
+            hasher,
+            "floor",
+            config.tid,
+            config.aid,
+            raw_author_lou,
+            pid,
+            original_lou,
+            original_pid,
+        )
+
+    candidate_lists: dict[int, list[int]] = {}
+    for raw_author_lou, raw_candidate_index, raw_original_lou in candidate_rows:
+        if (
+            type(raw_author_lou) is not int
+            or type(raw_candidate_index) is not int
+            or raw_candidate_index < 0
+            or type(raw_original_lou) is not int
+            or raw_original_lou < 0
+        ):
+            raise ReplayCorpusError(f"重放源楼层候选行无效：{path}")
+        entry = entries_by_author_lou.get(raw_author_lou)
+        if entry is None or entry.pid is not None or entry.original_lou is not None:
+            raise ReplayCorpusError(f"重放源楼层候选没有匹配的缺失楼：{path}")
+        candidates = candidate_lists.setdefault(raw_author_lou, [])
+        if raw_candidate_index != len(candidates):
+            raise ReplayCorpusError(f"重放源楼层候选序号不连续：{path}")
+        candidates.append(raw_original_lou)
+        _hash_fields(
+            hasher,
+            "candidate",
+            config.tid,
+            config.aid,
+            raw_author_lou,
+            raw_candidate_index,
+            raw_original_lou,
+        )
+
+    return _FloorMapData(
+        entries_by_author_lou=entries_by_author_lou,
+        candidates_by_author_lou={
+            author_lou: tuple(candidates)
+            for author_lou, candidates in candidate_lists.items()
+        },
+    )
+
+
+def _pid_targets_from_floor_map(
+    config: _ThreadReplayConfig,
+    floor_map: _FloorMapData,
+    hasher: _Hasher,
+) -> dict[int, ReplayPidTarget]:
+    targets: dict[int, ReplayPidTarget] = {}
+    for entry in floor_map.entries_by_author_lou.values():
+        if entry.original_lou is None:
+            continue
         target = ReplayPidTarget(
             tid=config.tid,
-            page_number=original_lou // ORIGINAL_POSTS_PER_PAGE + 1,
+            page_number=entry.original_lou // ORIGINAL_POSTS_PER_PAGE + 1,
         )
-        for raw_value, field_name in (
-            (raw_pid, "pid"),
-            (raw_original_pid, "original_pid"),
-        ):
-            pid = _optional_int(raw_value, source=f"{path} {field_name}")
-            if pid is None:
-                continue
-            if pid <= 0:
+        for pid in (entry.pid, entry.original_pid):
+            if pid is None or pid <= 0:
                 continue
             existing = targets.get(pid)
             if existing is not None and existing != target:
                 raise ReplayCorpusError(
-                    f"重放源PID {pid} 映射到多个目标：{existing}、{target}"
+                    f"重放语料PID {pid} 映射到多个目标：{existing}、{target}"
                 )
             targets[pid] = target
 
@@ -509,150 +723,140 @@ def _read_pid_targets(
     return targets
 
 
-def _build_synthetic_thread(
+def _validate_original_archive_content(
+    path: Path,
+    original_content: _ArchiveContent,
+    author_content: _ArchiveContent,
+    floor_map: _FloorMapData,
+) -> None:
+    for entry in floor_map.entries_by_author_lou.values():
+        if entry.original_lou is None:
+            continue
+        expected_pid = entry.pid if entry.pid is not None else entry.original_pid
+        if expected_pid is None:
+            continue
+        original_post = original_content.posts_by_lou.get(entry.original_lou)
+        if original_post is None or original_post.pid != expected_pid:
+            raise ReplayCorpusError(
+                "原帖内容与作者楼层映射不匹配："
+                f"{path}: original_lou={entry.original_lou}, pid={expected_pid}"
+            )
+        if entry.original_pid is None:
+            continue
+        recovered_post = author_content.posts_by_lou.get(entry.author_lou)
+        if (
+            recovered_post is None
+            or recovered_post.response_post(lou=entry.original_lou)
+            != original_post.response_post()
+        ):
+            raise ReplayCorpusError(
+                "原帖内容与作者归档恢复楼不一致："
+                f"{path}: original_lou={entry.original_lou}"
+            )
+
+
+def _build_floor_map_original_thread(
     path: Path,
     config: _ThreadReplayConfig,
+    content: _ArchiveContent,
+    floor_map: _FloorMapData,
     hasher: _Hasher,
-    *,
-    expected_database_state: _DatabaseState,
-) -> _SyntheticThread:
+) -> _FloorMapOriginalThread:
     if config.aid is None:
-        raise ReplayCorpusError("原帖归档不需要合成原帖响应。")
-    try:
-        connection, database_state = _connect_frozen(
-            path,
-            expected_state=expected_database_state,
-        )
-        with closing(connection):
-            state_row = connection.execute(
-                "SELECT tid, aid FROM floor_map_state WHERE singleton = 1"
-            ).fetchone()
-            if state_row != (config.tid, config.aid):
-                raise ReplayCorpusError(f"重放源归档缺少匹配的楼层映射：{path}")
-            entry_rows = cast(
-                list[tuple[object, object, object, object]],
-                connection.execute(
-                    """
-                    SELECT author_lou, pid, original_lou, original_pid
-                    FROM floor_map_entries
-                    ORDER BY author_lou
-                    """
-                ).fetchall(),
+        raise ReplayCorpusError("原帖归档不需要楼层映射合成响应。")
+
+    posts_by_original_lou: dict[int, _ReplayPost] = {}
+    omitted_original_lous: set[int] = set()
+    max_original_lou = -1
+    for entry in floor_map.entries_by_author_lou.values():
+        post = content.posts_by_lou.get(entry.author_lou)
+        if entry.pid is not None:
+            if entry.original_lou is None:
+                raise ReplayCorpusError(
+                    f"重放源存在未映射的作者帖子，无法合成原帖：{path}"
+                )
+            if post is None or post.pid != entry.pid or post.author_uid == -1:
+                raise ReplayCorpusError(
+                    f"重放源作者楼内容与楼层映射不匹配：{path} "
+                    f"author_lou={entry.author_lou}"
+                )
+            replay_post = post
+        elif entry.original_lou is None:
+            continue
+        elif entry.original_pid is None:
+            omitted_original_lous.add(entry.original_lou)
+            max_original_lou = max(max_original_lou, entry.original_lou)
+            continue
+        else:
+            if (
+                post is None
+                or post.pid != entry.original_pid
+                or post.author_uid != -1
+            ):
+                raise ReplayCorpusError(
+                    f"重放源恢复楼内容与楼层映射不匹配：{path} "
+                    f"author_lou={entry.author_lou}"
+                )
+            replay_post = post
+
+        original_lou = entry.original_lou
+        existing = posts_by_original_lou.get(original_lou)
+        if existing is not None and existing != replay_post:
+            raise ReplayCorpusError(
+                f"多个内容楼映射到同一原楼层{original_lou}：{path}"
             )
-            candidate_rows = cast(
-                list[tuple[object, object, object]],
-                connection.execute(
-                    """
-                    SELECT author_lou, candidate_index, original_lou
-                    FROM floor_map_candidates
-                    ORDER BY author_lou, candidate_index
-                    """
-                ).fetchall(),
+        posts_by_original_lou[original_lou] = replay_post
+        max_original_lou = max(max_original_lou, original_lou)
+
+    for author_lou, candidates in floor_map.candidates_by_author_lou.items():
+        for original_lou in candidates:
+            if original_lou in posts_by_original_lou:
+                raise ReplayCorpusError(
+                    "缺失楼候选原楼层与已知内容冲突："
+                    f"{path}: author_lou={author_lou}, original_lou={original_lou}"
+                )
+            omitted_original_lous.add(original_lou)
+            max_original_lou = max(max_original_lou, original_lou)
+
+    for author_lou, post in content.posts_by_lou.items():
+        entry = floor_map.entries_by_author_lou.get(author_lou)
+        if entry is None:
+            expected_pid = None
+        elif post.author_uid == -1:
+            expected_pid = entry.original_pid
+        else:
+            expected_pid = entry.pid
+        if expected_pid != post.pid:
+            raise ReplayCorpusError(
+                f"重放源第{author_lou}楼内容无法通过楼层映射路由：{path}"
             )
-
-            posts_by_original_lou: dict[int, _SyntheticPost] = {}
-            omitted_original_lous: set[int] = set()
-            max_original_lou = -1
-            for raw_author_lou, raw_pid, raw_original_lou, raw_original_pid in entry_rows:
-                if type(raw_author_lou) is not int or raw_author_lou < 0:
-                    raise ReplayCorpusError(f"重放源楼层映射author_lou无效：{path}")
-                pid = _optional_int(raw_pid, source=f"{path} pid")
-                original_lou = _optional_int(
-                    raw_original_lou,
-                    source=f"{path} original_lou",
-                )
-                original_pid = _optional_int(
-                    raw_original_pid,
-                    source=f"{path} original_pid",
-                )
-                _hash_fields(
-                    hasher,
-                    "floor",
-                    config.tid,
-                    config.aid,
-                    raw_author_lou,
-                    pid,
-                    original_lou,
-                    original_pid,
-                )
-                if original_lou is not None:
-                    max_original_lou = max(max_original_lou, original_lou)
-                if pid is not None:
-                    if original_lou is None:
-                        raise ReplayCorpusError(
-                            f"重放源存在未映射的作者帖子，无法合成原帖：{path}"
-                        )
-                    existing = posts_by_original_lou.get(original_lou)
-                    synthetic_post = _SyntheticPost(pid, config.aid, "")
-                    if existing is not None and existing != synthetic_post:
-                        raise ReplayCorpusError(
-                            f"多个作者帖子映射到同一原楼层{original_lou}：{path}"
-                        )
-                    posts_by_original_lou[original_lou] = synthetic_post
-                    continue
-                if original_lou is None:
-                    continue
-                if original_pid is None:
-                    omitted_original_lous.add(original_lou)
-                    continue
-
-                content_row = connection.execute(
-                    """
-                    SELECT content
-                    FROM post_versions
-                    WHERE lou = ? AND pid = ?
-                    ORDER BY last_seen_at DESC, id DESC
-                    LIMIT 1
-                    """,
-                    (raw_author_lou, original_pid),
-                ).fetchone()
-                if content_row is None or not isinstance(content_row[0], str):
-                    continue
-                recovered_content = content_row[0]
-                posts_by_original_lou[original_lou] = _SyntheticPost(
-                    original_pid,
-                    -1,
-                    recovered_content,
-                )
-                _hash_fields(
-                    hasher,
-                    "recovered",
-                    config.tid,
-                    original_lou,
-                    original_pid,
-                    hashlib.sha256(recovered_content.encode("utf-8")).hexdigest(),
-                )
-
-            for raw_author_lou, raw_candidate_index, raw_original_lou in candidate_rows:
-                if (
-                    type(raw_author_lou) is not int
-                    or type(raw_candidate_index) is not int
-                    or type(raw_original_lou) is not int
-                ):
-                    raise ReplayCorpusError(f"重放源楼层候选行无效：{path}")
-                _hash_fields(
-                    hasher,
-                    "candidate",
-                    config.tid,
-                    config.aid,
-                    raw_author_lou,
-                    raw_candidate_index,
-                    raw_original_lou,
-                )
-                if raw_original_lou in posts_by_original_lou:
-                    raise ReplayCorpusError(
-                        "缺失楼候选原楼层与已恢复帖子冲突："
-                        f"{path}: original_lou={raw_original_lou}"
-                    )
-                omitted_original_lous.add(raw_original_lou)
-                max_original_lou = max(max_original_lou, raw_original_lou)
-        _verify_frozen(path, database_state)
-    except sqlite3.Error as error:
-        raise ReplayCorpusError(f"无法读取重放楼层映射：{path}: {error}") from error
 
     configured_rows = 0 if config.replies is None else config.replies + 1
     row_count = max(1, configured_rows, max_original_lou + 1)
-    return _SyntheticThread(
+    _hash_fields(
+        hasher,
+        "floor_map_original",
+        config.tid,
+        config.aid,
+        row_count,
+    )
+    for original_lou, post in sorted(posts_by_original_lou.items()):
+        response_json = json.dumps(
+            post.response_post(lou=original_lou),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        _hash_fields(
+            hasher,
+            "floor_map_original_post",
+            original_lou,
+            hash_text(response_json),
+        )
+    for original_lou in sorted(omitted_original_lous):
+        _hash_fields(hasher, "floor_map_original_omitted", original_lou)
+
+    return _FloorMapOriginalThread(
         tid=config.tid,
         source_aid=config.aid,
         row_count=row_count,
@@ -779,12 +983,40 @@ def load_replay_corpus(
     hasher = hashlib.sha256()
     _hash_fields(hasher, "corpus_format", _CORPUS_FORMAT_VERSION)
     configs = _read_thread_configs(resolved_thread_config, hasher)
-    exact_pages: dict[PageKey, bytes] = {}
-    synthetic_threads: dict[int, _SyntheticThread] = {}
+    content_pages: dict[PageKey, bytes] = {}
+    floor_map_original_threads: dict[int, _FloorMapOriginalThread] = {}
     pid_targets: dict[int, ReplayPidTarget] = {}
-    exact_payload_bytes = 0
+    archive_content_post_count = 0
+    archive_content_page_payload_bytes = 0
     total_configs = len(configs)
     total_work_items = total_configs + 1
+
+    def register_content_pages(
+        *,
+        tid: int,
+        aid: int | None,
+        posts_by_lou: dict[int, _ReplayPost],
+        row_count: int,
+    ) -> None:
+        nonlocal archive_content_page_payload_bytes
+        page_payloads = _content_page_payloads(
+            posts_by_lou,
+            row_count=row_count,
+        )
+        for page_number, payload in page_payloads.items():
+            key = (tid, aid, page_number)
+            if key in content_pages:
+                raise ReplayCorpusError(f"重放语料包含重复分页：{key}")
+            content_pages[key] = payload
+            archive_content_page_payload_bytes += len(payload)
+            _hash_fields(
+                hasher,
+                "archive_content_page",
+                tid,
+                aid,
+                page_number,
+                hashlib.sha256(payload).hexdigest(),
+            )
 
     for index, config in enumerate(configs, start=1):
         if on_progress is not None:
@@ -794,12 +1026,36 @@ def load_replay_corpus(
             config.tid,
             config.aid,
         )
-        latest_pages = _read_latest_archive_pages(configured_archive)
-        archive_pid_targets = _read_pid_targets(
+        configured_content = _read_archive_content(configured_archive)
+        archive_content_post_count += len(configured_content.posts_by_lou)
+        if config.aid is None:
+            configured_rows = 0 if config.replies is None else config.replies + 1
+            content_rows = (
+                0
+                if not configured_content.posts_by_lou
+                else max(configured_content.posts_by_lou) + 1
+            )
+            register_content_pages(
+                tid=config.tid,
+                aid=None,
+                posts_by_lou=configured_content.posts_by_lou,
+                row_count=max(configured_rows, content_rows),
+            )
+            continue
+
+        original_archive = _archive_path(resolved_output, config.tid, None)
+        has_original_archive = original_archive.is_file()
+        floor_map = _read_floor_map(
             configured_archive,
             config,
             hasher,
-            expected_database_state=latest_pages.database_state,
+            expected_database_state=configured_content.database_state,
+            required=not has_original_archive,
+        )
+        archive_pid_targets = (
+            {}
+            if floor_map is None
+            else _pid_targets_from_floor_map(config, floor_map, hasher)
         )
         for pid, target in archive_pid_targets.items():
             existing = pid_targets.get(pid)
@@ -808,42 +1064,58 @@ def load_replay_corpus(
                     f"重放语料PID {pid} 映射到多个目标：{existing}、{target}"
                 )
             pid_targets[pid] = target
-        for page_number, (response_hash, payload) in latest_pages.pages.items():
-            key = (config.tid, config.aid, page_number)
-            exact_pages[key] = payload
-            exact_payload_bytes += len(payload)
-            _hash_fields(
-                hasher,
-                "page",
-                config.tid,
-                config.aid,
-                page_number,
-                response_hash,
-            )
 
-        if config.aid is None:
-            continue
-        original_archive = _archive_path(resolved_output, config.tid, None)
-        if original_archive.is_file():
-            original_pages = _read_latest_archive_pages(original_archive)
-            for page_number, (response_hash, payload) in original_pages.pages.items():
-                key = (config.tid, None, page_number)
-                exact_pages[key] = payload
-                exact_payload_bytes += len(payload)
-                _hash_fields(
-                    hasher,
-                    "page",
-                    config.tid,
-                    None,
-                    page_number,
-                    response_hash,
+        author_posts = {
+            lou: post
+            for lou, post in configured_content.posts_by_lou.items()
+            if post.author_uid != -1
+        }
+        author_content_rows = 0 if not author_posts else max(author_posts) + 1
+        register_content_pages(
+            tid=config.tid,
+            aid=config.aid,
+            posts_by_lou=author_posts,
+            row_count=max(
+                0 if floor_map is None else floor_map.author_row_count,
+                author_content_rows,
+            ),
+        )
+
+        if has_original_archive:
+            original_content = _read_archive_content(original_archive)
+            archive_content_post_count += len(original_content.posts_by_lou)
+            if floor_map is not None:
+                _validate_original_archive_content(
+                    original_archive,
+                    original_content,
+                    configured_content,
+                    floor_map,
                 )
+            configured_rows = 0 if config.replies is None else config.replies + 1
+            original_content_rows = (
+                0
+                if not original_content.posts_by_lou
+                else max(original_content.posts_by_lou) + 1
+            )
+            register_content_pages(
+                tid=config.tid,
+                aid=None,
+                posts_by_lou=original_content.posts_by_lou,
+                row_count=max(configured_rows, original_content_rows),
+            )
         else:
-            synthetic_threads[config.tid] = _build_synthetic_thread(
-                configured_archive,
-                config,
-                hasher,
-                expected_database_state=latest_pages.database_state,
+            if floor_map is None:
+                raise ReplayCorpusError(
+                    f"缺少原帖归档和楼层映射，无法合成原帖：{configured_archive}"
+                )
+            floor_map_original_threads[config.tid] = (
+                _build_floor_map_original_thread(
+                    configured_archive,
+                    config,
+                    configured_content,
+                    floor_map,
+                    hasher,
+                )
             )
 
     if on_progress is not None:
@@ -856,9 +1128,13 @@ def load_replay_corpus(
         source_output=str(resolved_output),
         thread_config=str(resolved_thread_config),
         thread_count=total_configs,
-        exact_page_count=len(exact_pages),
-        exact_page_payload_bytes=exact_payload_bytes,
-        synthetic_thread_count=len(synthetic_threads),
+        archive_content_post_count=archive_content_post_count,
+        archive_content_page_count=len(content_pages),
+        archive_content_page_payload_bytes=archive_content_page_payload_bytes,
+        floor_map_original_thread_count=len(floor_map_original_threads),
+        floor_map_original_page_count=sum(
+            thread.page_count for thread in floor_map_original_threads.values()
+        ),
         locatable_pid_count=len(pid_targets),
         image_mapping_count=image_result.mapping_count,
         available_image_mapping_count=len(image_result.images_by_url),
@@ -867,8 +1143,8 @@ def load_replay_corpus(
         unique_image_file_bytes=image_result.unique_file_bytes,
     )
     return ReplayCorpus(
-        exact_pages=exact_pages,
-        synthetic_threads=synthetic_threads,
+        content_pages=content_pages,
+        floor_map_original_threads=floor_map_original_threads,
         pid_targets=pid_targets,
         images_by_url=image_result.images_by_url,
         manifest=manifest,

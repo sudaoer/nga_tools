@@ -79,7 +79,14 @@ def _latest_post_signature(
     with closing(_connect_readonly(path, immutable=immutable)) as connection:
         rows = connection.execute(
             """
-            SELECT lou, pid, source_hash
+            SELECT
+                latest.lou,
+                latest.pid,
+                latest.source_hash,
+                metadata.author_name,
+                metadata.author_uid,
+                metadata.postdate_json,
+                metadata.image_attachments_json
             FROM (
                 SELECT
                     lou,
@@ -90,9 +97,12 @@ def _latest_post_signature(
                         ORDER BY last_seen_at DESC, id DESC
                     ) AS row_number
                 FROM post_versions
-            )
-            WHERE row_number = 1
-            ORDER BY lou
+            ) AS latest
+            LEFT JOIN post_latest_metadata AS metadata
+                ON metadata.pid = latest.pid
+                AND metadata.lou = latest.lou
+            WHERE latest.row_number = 1
+            ORDER BY latest.lou
             """
         ).fetchall()
     return len(rows), hash_object(rows)
@@ -204,7 +214,7 @@ def validate_replay_output(
         )
         if target_signature != source_signature:
             raise RuntimeError(
-                "重放目标有效帖子数量或正文hash与源归档不一致："
+                "重放目标有效帖子数量、正文或元数据与源归档不一致："
                 f"{target_dir.name}"
             )
         source_floor_entries, source_floor_candidates = _floor_map_rows(

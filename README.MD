@@ -189,18 +189,19 @@ pixi run python main.py replay serve --source-output output `
 ```
 
 服务启动时以 SQLite `immutable` 只读模式打开各帖 `archive.sqlite3` 和全局
-`image_index.sqlite3`，冻结每页最新响应并把 API 分页预载入内存；图片仍从
+`image_index.sqlite3`，从最新归一化正文、作者、时间和图片附件元数据合成 API
+分页并预载入内存；不会读取归档中的 NGA 原始分页响应。图片仍从
 `images_unique/` 流式读取。源数据库必须已经完成 WAL 检查点；如果 WAL 仍有
 内容，说明快照尚未静止，服务会拒绝启动。启动后源目录应保持不变，图片若被
 删除、替换或修改，该 URL 会按缺失处理。服务不会访问 NGA，也不会修改源数据
 库或图片内容。
 
 当 `thread_configs.json` 中的帖子只有 `tid_aid` 归档而没有 `tid_all` 归档时，
-服务会根据楼层映射生成可供完整抓取流程消费的最小原帖分页。已知作者楼会按
-`pid` 和作者身份放回对应原楼层，但不复制正文；已恢复的匿名楼会保留正文，已知
-被删除的楼层会保留空洞，其余楼层只是空正文占位。因此这部分只适合测量分页
-数量、请求、归档写入和基础派生处理开销，不代表真实原帖正文或图片负载。如果存在
-`tid_all/archive.sqlite3`，则优先原样重放其中的最新分页。
+服务会根据楼层映射生成可供完整抓取流程消费的原帖分页。已知作者楼和已恢复的
+匿名楼会按原楼层放回归一化正文及附件元数据；已知被删除或存在歧义的楼层会保留
+空洞，其余无法恢复的非作者楼使用空正文占位。因此占位部分不代表真实原帖正文或
+图片负载。如果存在 `tid_all/archive.sqlite3`，其原帖分页同样从最新归一化内容
+合成，不依赖记录的 NGA 原始响应。
 
 限速配置分为 `api` 和 `image` 两组：`latency_ms` 是每个请求的固定首包延迟，
 `bandwidth_bytes_per_second` 是该组所有并发请求共享的全局带宽，设为 `0` 表示
@@ -217,8 +218,9 @@ pixi run python main.py replay serve --source-output output `
 - `GET /__replay__/metrics`：API/图片请求数、字节数、状态码和等待耗时。
 - `POST /__replay__/reset`：无在途请求时清空指标并重置带宽时间线。
 
-`corpus_id` 标识本次冻结的分页、楼层映射和图片索引状态，`profile_id` 标识规范化
-后的限速配置。启动服务后可在另一个终端运行共享 `backup all` 路径：
+`corpus_id` 标识本次冻结的归一化内容合成分页、楼层映射和图片索引状态，
+`profile_id` 标识规范化后的限速配置。启动服务后可在另一个终端运行共享
+`backup all` 路径：
 
 ```powershell
 pixi run python main.py replay run `
