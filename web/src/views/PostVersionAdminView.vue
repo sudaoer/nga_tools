@@ -15,7 +15,7 @@ import type {
   PostVersionThreadSummary,
 } from '../types'
 
-type VersionDiffPartKind = 'same' | 'current' | 'latest'
+type VersionDiffPartKind = 'same' | 'preview' | 'latest'
 
 interface VersionDiffPart {
   id: string
@@ -74,13 +74,13 @@ const versionDiffParts = computed<VersionDiffPart[]>(() => {
   ) {
     return []
   }
-  return diffChars(latestOption.content, previewedOption.content)
+  return diffChars(previewedOption.content, latestOption.content)
     .filter((part) => part.value.length > 0)
     .map((part, index) => {
       const kind: VersionDiffPartKind = part.added
-        ? 'current'
+        ? 'latest'
         : part.removed
-          ? 'latest'
+          ? 'preview'
           : 'same'
       return {
         id: `${index}-${kind}`,
@@ -598,8 +598,8 @@ onMounted(() => {
               </div>
             </div>
             <div class="version-diff-legend" aria-label="差异图例">
-              <span><i class="version-diff-added"></i>当前版本独有</span>
-              <span><i class="version-diff-removed"></i>最新版独有</span>
+              <span><i class="version-diff-removed"></i>预览版本独有</span>
+              <span><i class="version-diff-added"></i>最新版独有</span>
             </div>
           </header>
 
@@ -612,8 +612,8 @@ onMounted(() => {
             :key="part.id"
           ><span
             :class="{
-              'version-diff-added': part.kind === 'current',
-              'version-diff-removed': part.kind === 'latest',
+              'version-diff-removed': part.kind === 'preview',
+              'version-diff-added': part.kind === 'latest',
             }"
           >{{ part.value }}</span></template></pre>
         </section>
