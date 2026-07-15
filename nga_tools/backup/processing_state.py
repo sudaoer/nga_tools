@@ -9,6 +9,8 @@ from nga_tools.core.downloads import DownloadFailureKind
 FLOOR_PROCESSING_STATE_VERSION = 1
 IMAGE_REFERENCE_STATE_VERSION = 1
 IMAGE_REFERENCE_MANIFEST_VERSION = 1
+AUDIO_PROCESSING_STATE_VERSION = 1
+AUDIO_REFERENCE_EXTRACTOR_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -76,8 +78,26 @@ class PendingImageRetry:
 
 
 @dataclass(frozen=True)
+class AudioProcessingState:
+    format_version: int
+    extractor_version: int
+    processed_max_post_version_id: int
+    completed_at: str
+
+
+@dataclass(frozen=True)
+class PendingAudioRetry:
+    url: str
+    last_attempt_at: datetime | None
+    failure_kind: DownloadFailureKind | None
+    http_status: int | None
+
+
+@dataclass(frozen=True)
 class BackupProcessingSnapshot:
     change_state: ArchiveChangeState
     pending_image_retries: tuple[PendingImageRetry, ...]
     floor_state: FloorProcessingState | None = None
     image_state: ImageReferenceState | None = None
+    audio_state: AudioProcessingState | None = None
+    pending_audio_retries: tuple[PendingAudioRetry, ...] = ()

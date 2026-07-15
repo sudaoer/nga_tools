@@ -25,9 +25,19 @@ class ReplayProfile:
     api: TrafficProfile
     image: TrafficProfile
     chunk_bytes: int
+    audio: TrafficProfile | None = None
+
+    @property
+    def effective_audio(self) -> TrafficProfile:
+        return self.image if self.audio is None else self.audio
 
     def as_dict(self) -> dict[str, object]:
-        return cast(dict[str, object], asdict(self))
+        return {
+            "api": asdict(self.api),
+            "image": asdict(self.image),
+            "audio": asdict(self.effective_audio),
+            "chunk_bytes": self.chunk_bytes,
+        }
 
     @property
     def profile_id(self) -> str:
@@ -114,20 +124,35 @@ def _parse_traffic_profile(data: JsonObject, *, source: str) -> TrafficProfile:
 def load_replay_profile(path: Path) -> ReplayProfile:
     data = _read_json_object(path)
     source = str(path)
-    _reject_extra_keys(data, {"api", "image", "chunk_bytes"}, source=source)
+    _reject_extra_keys(
+        data,
+        {"api", "image", "audio", "chunk_bytes"},
+        source=source,
+    )
+    image = _parse_traffic_profile(
+        _required_object(data, "image", source=source),
+        source=f"{source}.image",
+    )
+    raw_audio = data.get("audio")
+    audio = (
+        image
+        if raw_audio is None
+        else _parse_traffic_profile(
+            _required_object(data, "audio", source=source),
+            source=f"{source}.audio",
+        )
+    )
     return ReplayProfile(
         api=_parse_traffic_profile(
             _required_object(data, "api", source=source),
             source=f"{source}.api",
         ),
-        image=_parse_traffic_profile(
-            _required_object(data, "image", source=source),
-            source=f"{source}.image",
-        ),
+        image=image,
         chunk_bytes=_required_int(
             data,
             "chunk_bytes",
             source=source,
             minimum=1,
         ),
+        audio=audio,
     )

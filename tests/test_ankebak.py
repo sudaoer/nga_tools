@@ -348,6 +348,7 @@ def test_backup_auto_isolates_planning_failure_and_omits_success_detail(
     app_config = SimpleNamespace(
         api_concurrency=4,
         image_concurrency=16,
+        audio_concurrency=8,
         backup_configs_workers=1,
         timing_log_enabled=False,
         ankebak_full_backup_interval_hours=168,
@@ -406,6 +407,8 @@ def test_backup_auto_cli_parses_network_and_watch_options() -> None:
             "2",
             "--image-concurrency",
             "20",
+            "--audio-concurrency",
+            "6",
         ]
     )
 
@@ -413,3 +416,4 @@ def test_backup_auto_cli_parses_network_and_watch_options() -> None:
     assert args["workers"] == 3
     assert args["api_concurrency"] == 2
     assert args["image_concurrency"] == 20
+    assert args["audio_concurrency"] == 6

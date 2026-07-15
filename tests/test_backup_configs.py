@@ -105,12 +105,15 @@ class BackupCliTest:
                 "3",
                 "--image-concurrency",
                 "20",
+                "--audio-concurrency",
+                "6",
                 "--write-json",
             ]
         )
 
         assert args['api_concurrency'] == 3
         assert args['image_concurrency'] == 20
+        assert args['audio_concurrency'] == 6
         assert args['write_json'] is True
 
     def test_hyphenated_pdf_options_parse(self) -> None:
@@ -276,6 +279,7 @@ def _backup_config_app_config(
     return SimpleNamespace(
         api_concurrency=4,
         image_concurrency=50,
+        audio_concurrency=8,
         backup_configs_workers=workers,
         timing_log_enabled=timing_log_enabled,
     )

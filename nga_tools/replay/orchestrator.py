@@ -238,6 +238,7 @@ def _runner_args(
         "workers",
         "api_concurrency",
         "image_concurrency",
+        "audio_concurrency",
     ):
         value = args.get(key)
         if value is not None:

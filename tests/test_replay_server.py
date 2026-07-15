@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -37,6 +38,14 @@ IMAGE_URL = (
 MISSING_IMAGE_URL = (
     "https://img.nga.178.com/attachments/mon_202607/12/"
     "missing-image.png"
+)
+AUDIO_URL = (
+    "https://img.nga.178.com/attachments/mon_202607/12/"
+    "replay-audio.mp3"
+)
+MISSING_AUDIO_URL = (
+    "https://img.nga.178.com/attachments/mon_202607/12/"
+    "missing-audio.mp3"
 )
 
 
@@ -136,6 +145,52 @@ def _write_image_index(output_dir: Path, *, unsafe: bool = False) -> Path:
     return image_path
 
 
+def _write_audio_index(output_dir: Path) -> Path:
+    audio_dir = output_dir / "audio_unique"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    content = (b"\xff\xfb\x90\x64" + bytes(413)) * 10
+    content_hash = hashlib.sha256(content).hexdigest()
+    audio_path = audio_dir / f"{content_hash}.mp3"
+    audio_path.write_bytes(content)
+    with sqlite3.connect(output_dir / "audio_index.sqlite3") as connection:
+        connection.execute(
+            """
+            CREATE TABLE audio_mappings (
+                url TEXT PRIMARY KEY,
+                unique_rel_path TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                content_bytes INTEGER NOT NULL,
+                duration_seconds REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        rows = [
+            (
+                AUDIO_URL,
+                f"audio_unique/{content_hash}.mp3",
+                content_hash,
+                len(content),
+                0.25,
+            ),
+            (
+                MISSING_AUDIO_URL,
+                "audio_unique/missing.mp3",
+                "0" * 64,
+                len(content),
+                0.25,
+            ),
+        ]
+        connection.executemany(
+            """
+            INSERT INTO audio_mappings VALUES (?, ?, ?, ?, ?, '', '')
+            """,
+            rows,
+        )
+    return audio_path
+
+
 def _build_source(tmp_path: Path) -> tuple[Path, Path, Path]:
     output_dir = tmp_path / "output"
     thread_dir = output_dir / "123_456"
@@ -215,6 +270,7 @@ def _build_source(tmp_path: Path) -> tuple[Path, Path, Path]:
         encoding="utf-8",
     )
     image_path = _write_image_index(output_dir)
+    _write_audio_index(output_dir)
     return output_dir, thread_config, image_path
 
 
@@ -267,6 +323,7 @@ class ReplayCorpusTest:
             Path(f"{archive_path}-wal"),
             Path(f"{archive_path}-shm"),
             output_dir / "image_index.sqlite3",
+            output_dir / "audio_index.sqlite3",
         ]
         source_states_before = {
             path: (
@@ -337,6 +394,8 @@ class ReplayCorpusTest:
 
         assert corpus.image(IMAGE_URL) is not None
         assert corpus.image(MISSING_IMAGE_URL) is None
+        assert corpus.audio(AUDIO_URL) is not None
+        assert corpus.audio(MISSING_AUDIO_URL) is None
         assert corpus.manifest.archive_content_post_count == 3
         assert corpus.manifest.archive_content_page_count == 2
         assert corpus.manifest.floor_map_original_thread_count == 1
@@ -356,7 +415,10 @@ class ReplayCorpusTest:
         assert corpus.manifest.available_image_mapping_count == 1
         assert corpus.manifest.unavailable_image_mapping_count == 1
         manifest_data = corpus.manifest.as_dict()
-        assert manifest_data["corpus_format_version"] == 7
+        assert corpus.manifest.audio_mapping_count == 2
+        assert corpus.manifest.available_audio_mapping_count == 1
+        assert corpus.manifest.unavailable_audio_mapping_count == 1
+        assert manifest_data["corpus_format_version"] == 8
         assert {
             "exact_page_count",
             "exact_page_payload_bytes",
@@ -537,6 +599,18 @@ class ReplayServerTest:
         )
         assert missing_image_response.status_code == 404
 
+        audio_response = client.get(
+            "/__replay__/audio",
+            params={"url": AUDIO_URL},
+        )
+        assert audio_response.status_code == 200
+        assert audio_response.headers["content-type"].startswith("audio/mpeg")
+        missing_audio_response = client.get(
+            "/__replay__/audio",
+            params={"url": MISSING_AUDIO_URL},
+        )
+        assert missing_audio_response.status_code == 404
+
         manifest = client.get("/__replay__/manifest").json()
         assert manifest["corpus_id"] == corpus.manifest.corpus_id
         assert manifest["profile_id"] == _unlimited_profile().profile_id
@@ -552,12 +626,15 @@ class ReplayServerTest:
         }
         assert metrics["image"]["requests"] == 2
         assert metrics["image"]["statuses"] == {"200": 1, "404": 1}
+        assert metrics["audio"]["requests"] == 2
+        assert metrics["audio"]["statuses"] == {"200": 1, "404": 1}
 
         reset_response = client.post("/__replay__/reset")
         assert reset_response.status_code == 200
         reset_metrics = client.get("/__replay__/metrics").json()
         assert reset_metrics["api"]["requests"] == 0
         assert reset_metrics["image"]["requests"] == 0
+        assert reset_metrics["audio"]["requests"] == 0
 
 
 class ReplayProfileTest:
@@ -588,6 +665,7 @@ class ReplayProfileTest:
         assert first == second
         assert first.profile_id == second.profile_id
         assert first.api.latency_ms == 150
+        assert first.audio == first.image
 
     def test_rejects_unknown_or_invalid_profile_fields(self, tmp_path: Path) -> None:
         profile_path = tmp_path / "profile.json"

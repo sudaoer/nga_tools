@@ -11,10 +11,12 @@ from typing import Optional, Protocol, TypeAlias, cast
 
 from nga_tools.backup.archive_schema import require_current_archive_schema
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
-from nga_tools.core.hashing import hash_text
+from nga_tools.backup.audio_store import AUDIO_INDEX_FILENAME, AUDIO_UNIQUE_DIRNAME
+from nga_tools.core.hashing import hash_text, sha256
+from nga_tools.core.nga_audio import normalize_nga_audio_url
 from nga_tools.core.sqlite import configure_readonly_connection
 
-_CORPUS_FORMAT_VERSION = 7
+_CORPUS_FORMAT_VERSION = 8
 
 PageKey: TypeAlias = tuple[int, Optional[int], int]
 ProgressCallback: TypeAlias = Callable[[int, int, str], None]
@@ -58,6 +60,9 @@ class ImageReplayEntry:
             and stat_result.st_size == self.size
             and stat_result.st_mtime_ns == self.mtime_ns
         )
+
+
+AudioReplayEntry = ImageReplayEntry
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +189,11 @@ class ReplayManifest:
     unavailable_image_mapping_count: int
     unique_image_file_count: int
     unique_image_file_bytes: int
+    audio_mapping_count: int
+    available_audio_mapping_count: int
+    unavailable_audio_mapping_count: int
+    unique_audio_file_count: int
+    unique_audio_file_bytes: int
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -207,6 +217,13 @@ class ReplayManifest:
             "unavailable_image_mapping_count": self.unavailable_image_mapping_count,
             "unique_image_file_count": self.unique_image_file_count,
             "unique_image_file_bytes": self.unique_image_file_bytes,
+            "audio_mapping_count": self.audio_mapping_count,
+            "available_audio_mapping_count": self.available_audio_mapping_count,
+            "unavailable_audio_mapping_count": (
+                self.unavailable_audio_mapping_count
+            ),
+            "unique_audio_file_count": self.unique_audio_file_count,
+            "unique_audio_file_bytes": self.unique_audio_file_bytes,
         }
 
 
@@ -216,6 +233,7 @@ class ReplayCorpus:
     floor_map_original_threads: dict[int, _FloorMapOriginalThread]
     pid_targets: dict[int, ReplayPidTarget]
     images_by_url: dict[str, ImageReplayEntry]
+    audio_by_url: dict[str, AudioReplayEntry]
     manifest: ReplayManifest
 
     def page(self, tid: int, aid: Optional[int], page_number: int) -> ReplayPage | None:
@@ -231,6 +249,15 @@ class ReplayCorpus:
 
     def image(self, url: str) -> ImageReplayEntry | None:
         entry = self.images_by_url.get(_normalize_image_url(url))
+        if entry is None or not entry.is_current():
+            return None
+        return entry
+
+    def audio(self, url: str) -> AudioReplayEntry | None:
+        normalized_url = normalize_nga_audio_url(url)
+        if normalized_url is None:
+            return None
+        entry = self.audio_by_url.get(normalized_url)
         if entry is None or not entry.is_current():
             return None
         return entry
@@ -926,6 +953,120 @@ def _load_images(source_output: Path, hasher: _Hasher) -> _ImageLoadResult:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _AudioLoadResult:
+    audio_by_url: dict[str, AudioReplayEntry]
+    mapping_count: int
+    unavailable_mapping_count: int
+    unique_file_count: int
+    unique_file_bytes: int
+
+
+def _load_audio(source_output: Path, hasher: _Hasher) -> _AudioLoadResult:
+    index_path = source_output / AUDIO_INDEX_FILENAME
+    audio_root = (source_output / AUDIO_UNIQUE_DIRNAME).resolve()
+    if not index_path.is_file():
+        _hash_fields(hasher, "audio_index", "missing")
+        return _AudioLoadResult({}, 0, 0, 0, 0)
+    try:
+        connection, database_state = _connect_frozen(index_path)
+        with closing(connection):
+            rows = cast(
+                list[tuple[object, object, object, object]],
+                connection.execute(
+                    """
+                    SELECT url, unique_rel_path, content_sha256, content_bytes
+                    FROM audio_mappings
+                    ORDER BY url
+                    """
+                ).fetchall(),
+            )
+        _verify_frozen(index_path, database_state)
+    except sqlite3.Error as error:
+        raise ReplayCorpusError(
+            f"无法读取重放音频索引：{index_path}: {error}"
+        ) from error
+
+    audio_by_url: dict[str, AudioReplayEntry] = {}
+    entries_by_relative_path: dict[str, AudioReplayEntry | None] = {}
+    unavailable_mapping_count = 0
+    unique_file_bytes = 0
+    for raw_url, raw_relative_path, raw_hash, raw_size in rows:
+        if (
+            not isinstance(raw_url, str)
+            or not isinstance(raw_relative_path, str)
+            or not isinstance(raw_hash, str)
+            or type(raw_size) is not int
+            or raw_size <= 0
+        ):
+            raise ReplayCorpusError(f"重放音频索引行无效：{index_path}")
+        normalized_url = normalize_nga_audio_url(raw_url)
+        if normalized_url is None:
+            raise ReplayCorpusError(f"重放音频索引URL无效：{raw_url}")
+        relative_path = Path(raw_relative_path)
+        if (
+            relative_path.is_absolute()
+            or not relative_path.parts
+            or relative_path.parts[0] != AUDIO_UNIQUE_DIRNAME
+        ):
+            raise ReplayCorpusError(f"重放音频索引路径越界：{raw_relative_path}")
+        resolved_path = (source_output / relative_path).resolve()
+        if not resolved_path.is_relative_to(audio_root):
+            raise ReplayCorpusError(f"重放音频索引路径越界：{raw_relative_path}")
+
+        entry = entries_by_relative_path.get(raw_relative_path)
+        if raw_relative_path not in entries_by_relative_path:
+            try:
+                stat_result = resolved_path.stat()
+                content_hash = sha256(str(resolved_path))
+            except OSError:
+                entry = None
+            else:
+                entry = (
+                    AudioReplayEntry(
+                        path=resolved_path,
+                        size=stat_result.st_size,
+                        mtime_ns=stat_result.st_mtime_ns,
+                    )
+                    if (
+                        resolved_path.is_file()
+                        and stat_result.st_size == raw_size
+                        and content_hash == raw_hash
+                    )
+                    else None
+                )
+            entries_by_relative_path[raw_relative_path] = entry
+            if entry is not None:
+                unique_file_bytes += entry.size
+
+        existing_entry = audio_by_url.get(normalized_url)
+        if entry is None:
+            unavailable_mapping_count += 1
+        elif existing_entry is not None and existing_entry != entry:
+            raise ReplayCorpusError(f"规范化音频URL映射冲突：{normalized_url}")
+        else:
+            audio_by_url[normalized_url] = entry
+        _hash_fields(
+            hasher,
+            "audio",
+            normalized_url,
+            raw_relative_path,
+            raw_hash,
+            raw_size,
+            "missing" if entry is None else entry.mtime_ns,
+        )
+
+    return _AudioLoadResult(
+        audio_by_url=audio_by_url,
+        mapping_count=len(rows),
+        unavailable_mapping_count=unavailable_mapping_count,
+        unique_file_count=sum(
+            entry is not None for entry in entries_by_relative_path.values()
+        ),
+        unique_file_bytes=unique_file_bytes,
+    )
+
+
 def _archive_path(source_output: Path, tid: int, aid: Optional[int]) -> Path:
     aid_key = str(aid) if aid is not None else "all"
     return source_output / f"{tid}_{aid_key}" / "archive.sqlite3"
@@ -951,7 +1092,7 @@ def load_replay_corpus(
     archive_content_post_count = 0
     archive_content_page_payload_bytes = 0
     total_configs = len(configs)
-    total_work_items = total_configs + 1
+    total_work_items = total_configs + 2
 
     def register_content_pages(
         *,
@@ -1084,6 +1225,9 @@ def load_replay_corpus(
         on_progress(total_configs, total_work_items, "读取图片索引")
     image_result = _load_images(resolved_output, hasher)
     if on_progress is not None:
+        on_progress(total_configs + 1, total_work_items, "读取音频索引")
+    audio_result = _load_audio(resolved_output, hasher)
+    if on_progress is not None:
         on_progress(total_work_items, total_work_items, "重放语料读取完成")
     manifest = ReplayManifest(
         corpus_id=hasher.hexdigest(),
@@ -1103,11 +1247,17 @@ def load_replay_corpus(
         unavailable_image_mapping_count=image_result.unavailable_mapping_count,
         unique_image_file_count=image_result.unique_file_count,
         unique_image_file_bytes=image_result.unique_file_bytes,
+        audio_mapping_count=audio_result.mapping_count,
+        available_audio_mapping_count=len(audio_result.audio_by_url),
+        unavailable_audio_mapping_count=audio_result.unavailable_mapping_count,
+        unique_audio_file_count=audio_result.unique_file_count,
+        unique_audio_file_bytes=audio_result.unique_file_bytes,
     )
     return ReplayCorpus(
         content_pages=content_pages,
         floor_map_original_threads=floor_map_original_threads,
         pid_targets=pid_targets,
         images_by_url=image_result.images_by_url,
+        audio_by_url=audio_result.audio_by_url,
         manifest=manifest,
     )

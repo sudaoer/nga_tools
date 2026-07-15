@@ -14,6 +14,7 @@ from time import perf_counter
 from typing import Literal, cast
 
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
+from nga_tools.backup.audio_store import AUDIO_INDEX_FILENAME, AUDIO_UNIQUE_DIRNAME
 from nga_tools.backup.image_store import (
     IMAGE_CACHE_FILENAME,
     IMAGE_INDEX_FILENAME,
@@ -40,6 +41,7 @@ _THREAD_SQLITE_BACKUP_FILENAMES = (
 _GLOBAL_SQLITE_BACKUP_FILENAMES = (
     IMAGE_INDEX_FILENAME,
     IMAGE_CACHE_FILENAME,
+    AUDIO_INDEX_FILENAME,
 )
 _REPLAY_TARGET_MARKER_KIND = "nga-tools-replay-target"
 _REPLAY_TARGET_MARKER_VERSION = 1
@@ -54,6 +56,8 @@ class PreparationStats:
     selection_file_count: int = 0
     image_file_count: int = 0
     image_file_bytes: int = 0
+    audio_file_count: int = 0
+    audio_file_bytes: int = 0
     reflink_file_count: int = 0
     copied_file_count: int = 0
     validation_cache_path_updates: int = 0
@@ -271,6 +275,16 @@ def _iter_image_files(source_output: Path) -> list[Path]:
     )
 
 
+def _iter_audio_files(source_output: Path) -> list[Path]:
+    audio_root = source_output / AUDIO_UNIQUE_DIRNAME
+    if not audio_root.is_dir():
+        return []
+    return sorted(
+        (path for path in audio_root.rglob("*") if path.is_file()),
+        key=lambda path: path.relative_to(audio_root).as_posix(),
+    )
+
+
 def _iter_fingerprint_paths(source_output: Path) -> list[Path]:
     paths: list[Path] = []
     for relative_path in sorted(_source_database_states(source_output)):
@@ -280,6 +294,7 @@ def _iter_fingerprint_paths(source_output: Path) -> list[Path]:
         if wal_path.is_file() and wal_path.stat().st_size:
             paths.append(wal_path)
     paths.extend(_iter_image_files(source_output))
+    paths.extend(_iter_audio_files(source_output))
     return paths
 
 
@@ -440,6 +455,28 @@ def _prepare_warm(source_output: Path, target_output: Path) -> PreparationStats:
                 total=len(image_files),
             )
 
+    audio_files = _iter_audio_files(source)
+    audio_bytes = 0
+    for index, source_audio in enumerate(audio_files, start=1):
+        before = source_audio.stat()
+        relative = source_audio.relative_to(source)
+        was_reflink = _copy_preserving_file(source_audio, target / relative)
+        after = source_audio.stat()
+        if (
+            before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+        ):
+            raise RuntimeError(f"暖状态复制期间源音频发生变化：{source_audio}")
+        audio_bytes += before.st_size
+        reflink_count += int(was_reflink)
+        copied_count += int(not was_reflink)
+        if index == len(audio_files) or index % 250 == 0:
+            report_progress(
+                "正在复制暖状态音频",
+                completed=index,
+                total=len(audio_files),
+            )
+
     fingerprint_after = source_state_fingerprint(source)
     if fingerprint_after != fingerprint_before:
         raise RuntimeError("暖状态准备期间source-output发生变化，本次运行作废。")
@@ -452,6 +489,8 @@ def _prepare_warm(source_output: Path, target_output: Path) -> PreparationStats:
         selection_file_count=0,
         image_file_count=len(image_files),
         image_file_bytes=image_bytes,
+        audio_file_count=len(audio_files),
+        audio_file_bytes=audio_bytes,
         reflink_file_count=reflink_count,
         copied_file_count=copied_count,
         validation_cache_path_updates=0,

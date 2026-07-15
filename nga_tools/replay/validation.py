@@ -11,6 +11,7 @@ from nga_tools.backup.image_store import (
     IMAGE_CACHE_FILENAME,
     IMAGE_INDEX_FILENAME,
 )
+from nga_tools.backup.audio_store import AUDIO_INDEX_FILENAME
 from nga_tools.backup.thread_stores import (
     ARCHIVE_CACHE_DB_FILENAME,
     ARCHIVE_STATE_DB_FILENAME,
@@ -37,6 +38,8 @@ class ValidationStats:
     floor_map_entry_count: int
     target_image_mapping_count: int
     image_mapping_mismatch_count: int
+    target_audio_mapping_count: int = 0
+    audio_mapping_mismatch_count: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return cast(dict[str, object], asdict(self))
@@ -168,6 +171,25 @@ def _image_mappings(path: Path, *, immutable: bool) -> dict[str, str]:
     return mappings
 
 
+def _audio_mappings(path: Path, *, immutable: bool) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    with closing(_connect_readonly(path, immutable=immutable)) as connection:
+        try:
+            rows = connection.execute(
+                "SELECT url, unique_rel_path FROM audio_mappings"
+            ).fetchall()
+        except sqlite3.OperationalError as error:
+            if "no such table" in str(error).lower():
+                return {}
+            raise
+    mappings: dict[str, str] = {}
+    for raw_url, raw_path in rows:
+        if isinstance(raw_url, str) and isinstance(raw_path, str):
+            mappings[raw_url] = raw_path
+    return mappings
+
+
 def validate_replay_output(
     source_output: Path,
     target_output: Path,
@@ -253,6 +275,26 @@ def validate_replay_output(
             f"重放目标有{mismatch_count}条成功图片映射与源索引不一致。"
         )
 
+    target_audio_index = target_output / AUDIO_INDEX_FILENAME
+    if target_audio_index.is_file():
+        _quick_check(target_audio_index)
+    source_audio_mappings = _audio_mappings(
+        source_output / AUDIO_INDEX_FILENAME,
+        immutable=True,
+    )
+    target_audio_mappings = _audio_mappings(
+        target_audio_index,
+        immutable=False,
+    )
+    audio_mismatch_count = sum(
+        source_audio_mappings.get(url) != relative_path
+        for url, relative_path in target_audio_mappings.items()
+    )
+    if audio_mismatch_count:
+        raise RuntimeError(
+            f"重放目标有{audio_mismatch_count}条成功音频映射与源索引不一致。"
+        )
+
     return ValidationStats(
         elapsed_seconds=perf_counter() - started,
         checked_archive_count=checked,
@@ -261,4 +303,6 @@ def validate_replay_output(
         floor_map_entry_count=floor_count,
         target_image_mapping_count=len(target_mappings),
         image_mapping_mismatch_count=mismatch_count,
+        target_audio_mapping_count=len(target_audio_mappings),
+        audio_mapping_mismatch_count=audio_mismatch_count,
     )

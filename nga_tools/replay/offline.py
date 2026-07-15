@@ -11,6 +11,7 @@ from requests import _types as requests_types  # pyright: ignore[reportPrivateUs
 from requests.adapters import HTTPAdapter
 
 from nga_tools.core.nga_images import NGA_img_link_verify
+from nga_tools.core.nga_audio import normalize_nga_audio_url
 
 
 class ReplayOfflineError(RuntimeError):
@@ -72,6 +73,15 @@ class ReplayNetworkPolicy:
             raise ReplayOfflineError(f"重放图片逻辑URL不是NGA图片：{logical_url}")
         return f"{self.server_url}/__replay__/image?{urlencode({'url': logical_url})}"
 
+    def audio_request_url(self, logical_url: str) -> str:
+        normalized_url = normalize_nga_audio_url(logical_url)
+        if normalized_url is None:
+            raise ReplayOfflineError(f"重放音频逻辑URL不是NGA音频：{logical_url}")
+        return (
+            f"{self.server_url}/__replay__/audio?"
+            f"{urlencode({'url': normalized_url})}"
+        )
+
 
 def _origin_url_for_request(request_url: str) -> str:
     parsed = urlsplit(request_url)
@@ -118,6 +128,11 @@ def assert_replay_request_allowed(request_url: str) -> None:
 def image_request_url(logical_url: str) -> str:
     policy = current_replay_network_policy()
     return logical_url if policy is None else policy.image_request_url(logical_url)
+
+
+def audio_request_url(logical_url: str) -> str:
+    policy = current_replay_network_policy()
+    return logical_url if policy is None else policy.audio_request_url(logical_url)
 
 
 class ReplayGuardHTTPAdapter(HTTPAdapter):

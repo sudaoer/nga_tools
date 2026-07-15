@@ -9,5 +9,10 @@
     "bandwidth_bytes_per_second": 33554432,
     "max_inflight": 16
   },
+  "audio": {
+    "latency_ms": 150,
+    "bandwidth_bytes_per_second": 33554432,
+    "max_inflight": 8
+  },
   "chunk_bytes": 65536
 }

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, TypeAlias
 
-TrafficKind: TypeAlias = Literal["api", "image"]
+TrafficKind: TypeAlias = Literal["api", "image", "audio"]
 ReplayOperation: TypeAlias = Literal[
     "author_post_list",
     "original_post_list",
@@ -49,15 +49,18 @@ class ReplayMetrics:
         self._lock = threading.Lock()
         self._api = _TrafficState()
         self._image = _TrafficState()
+        self._audio = _TrafficState()
         self._reset_at = datetime.now().astimezone().isoformat()
 
     def _state(self, kind: TrafficKind) -> _TrafficState:
-        return self._api if kind == "api" else self._image
+        if kind == "api":
+            return self._api
+        return self._image if kind == "image" else self._audio
 
     @property
     def active_count(self) -> int:
         with self._lock:
-            return self._api.active + self._image.active
+            return self._api.active + self._image.active + self._audio.active
 
     def begin(
         self,
@@ -99,10 +102,11 @@ class ReplayMetrics:
 
     def reset(self) -> str:
         with self._lock:
-            if self._api.active or self._image.active:
+            if self._api.active or self._image.active or self._audio.active:
                 raise RuntimeError("仍有重放请求在途，不能重置指标。")
             self._api = _TrafficState()
             self._image = _TrafficState()
+            self._audio = _TrafficState()
             self._reset_at = datetime.now().astimezone().isoformat()
             return self._reset_at
 
@@ -112,4 +116,5 @@ class ReplayMetrics:
                 "reset_at": self._reset_at,
                 "api": self._api.as_dict(),
                 "image": self._image.as_dict(),
+                "audio": self._audio.as_dict(),
             }

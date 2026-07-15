@@ -112,6 +112,12 @@ ARG_DEFS: dict[str, ArgDef] = {
         "metavar": "N",
         "help": "图片下载的全局并发上限",
     },
+    "audio_concurrency": {
+        "flags": ("--audio-concurrency", "--audio_concurrency"),
+        "type": int,
+        "metavar": "N",
+        "help": "帖子音频下载的全局并发上限",
+    },
     "pages": {
         "flags": ("--pages",),
         "type": int,
@@ -170,7 +176,7 @@ ARG_DEFS: dict[str, ArgDef] = {
     "force_processing": {
         "flags": ("--force-processing", "--force_processing"),
         "action": "store_true",
-        "help": "忽略线程级处理状态并重新执行楼层映射和图片派生处理",
+        "help": "忽略线程级处理状态并重新执行楼层、图片和音频派生处理",
     },
     "host": {
         "flags": ("--host",),
@@ -304,7 +310,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "usage": (
                 f"{PROGRAM_USAGE} backup auto [--watch-config PATH] "
                 "[--workers N] [--api-concurrency N] "
-                "[--image-concurrency N] [--write-json]"
+                "[--image-concurrency N] [--audio-concurrency N] [--write-json]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} backup auto",
@@ -321,18 +327,25 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "workers",
                 "api_concurrency",
                 "image_concurrency",
+                "audio_concurrency",
                 "write_json",
             ],
-            "positive": ["workers", "api_concurrency", "image_concurrency"],
+            "positive": [
+                "workers",
+                "api_concurrency",
+                "image_concurrency",
+                "audio_concurrency",
+            ],
             "output_root_lock": True,
         },
         "all": {
             "handler": backup_all,
-            "summary": "抓取帖子内容并下载图片",
+            "summary": "抓取帖子内容并下载图片与音频",
             "usage": (
                 f"{PROGRAM_USAGE} backup all "
                 "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
                 "[--workers N] [--api-concurrency N] [--image-concurrency N] "
+                "[--audio-concurrency N] "
                 "[--write-json] [--force-processing]"
             ),
             "examples": [
@@ -348,11 +361,17 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "workers",
                 "api_concurrency",
                 "image_concurrency",
+                "audio_concurrency",
                 "write_json",
                 "force_processing",
             ],
             "required_any": ["name", "tid", "all_threads"],
-            "positive": ["workers", "api_concurrency", "image_concurrency"],
+            "positive": [
+                "workers",
+                "api_concurrency",
+                "image_concurrency",
+                "audio_concurrency",
+            ],
             "output_root_lock": True,
         },
         "sub": {
@@ -362,6 +381,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} backup sub "
                 "((--name NAME | --tid TID) [--aid AID] | --all-threads) "
                 "[--workers N] [--api-concurrency N] [--image-concurrency N] "
+                "[--audio-concurrency N] "
                 "[--write-json] [--force-processing]"
             ),
             "examples": [
@@ -372,7 +392,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "notes": [
                 "此命令会补抓缺失页，并刷新本地尾页到远端最后一页。",
                 "默认只写archive.sqlite3；加--write-json才输出debug_json/page_*.json。",
-                "随后会从archive全量解析正文并补齐缺失图片，不写入逐楼HTML。",
+                "随后会从archive解析正文并补齐缺失图片与历史版本音频，不写入逐楼HTML。",
                 "author-only备份会在archive.sqlite3中增量刷新楼层映射。",
                 "--all-threads会按thread_configs.json中的ThreadList批量执行增量备份。",
             ],
@@ -384,11 +404,17 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "workers",
                 "api_concurrency",
                 "image_concurrency",
+                "audio_concurrency",
                 "write_json",
                 "force_processing",
             ],
             "required_any": ["name", "tid", "all_threads"],
-            "positive": ["workers", "api_concurrency", "image_concurrency"],
+            "positive": [
+                "workers",
+                "api_concurrency",
+                "image_concurrency",
+                "audio_concurrency",
+            ],
             "output_root_lock": True,
         },
         "migrate-store": {
@@ -594,7 +620,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "--initial-state (empty|warm|existing) "
                 "((--name NAME | --tid TID [--aid AID]) | --all-threads) "
                 "[--thread-config PATH] [--workers N] "
-                "[--api-concurrency N] [--image-concurrency N]"
+                "[--api-concurrency N] [--image-concurrency N] "
+                "[--audio-concurrency N]"
             ),
             "examples": [
                 (
@@ -630,6 +657,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "workers",
                 "api_concurrency",
                 "image_concurrency",
+                "audio_concurrency",
             ],
             "required": [
                 "server_url",
@@ -638,7 +666,12 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "initial_state",
             ],
             "required_any": ["name", "tid", "all_threads"],
-            "positive": ["workers", "api_concurrency", "image_concurrency"],
+            "positive": [
+                "workers",
+                "api_concurrency",
+                "image_concurrency",
+                "audio_concurrency",
+            ],
         },
         "test": {
             "handler": replay_test,
@@ -650,7 +683,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "--initial-state (empty|warm|existing) "
                 "((--name NAME | --tid TID [--aid AID]) | --all-threads) "
                 "[--thread-config PATH] [--port PORT] [--workers N] "
-                "[--api-concurrency N] [--image-concurrency N]"
+                "[--api-concurrency N] [--image-concurrency N] "
+                "[--audio-concurrency N]"
             ),
             "examples": [
                 (
@@ -688,6 +722,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "workers",
                 "api_concurrency",
                 "image_concurrency",
+                "audio_concurrency",
             ],
             "required": [
                 "source_output",
@@ -701,6 +736,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "workers",
                 "api_concurrency",
                 "image_concurrency",
+                "audio_concurrency",
             ],
         },
     },

@@ -11,6 +11,11 @@ from nga_tools.backup.archive_store import (
     ArchivePagesUpsertResult,
     ThreadArchiveStore,
 )
+from nga_tools.backup.audio_pipeline import (
+    audio_state_is_current,
+    maintain_archived_audio,
+    pending_audio_retry_is_due,
+)
 from nga_tools.backup.floor_map import (
     AuthorPostRef,
     FloorMapBuildResult,
@@ -1339,6 +1344,18 @@ def backup_local_work_kind(
     )
     if not floor_current or not image_current:
         return "maintenance"
+    if not audio_state_is_current(
+        snapshot,
+        max_post_version_id=archive_store.max_post_version_id(),
+    ):
+        return "maintenance"
+    if snapshot.pending_audio_retries and pending_audio_retry_is_due(
+        tid,
+        aid,
+        snapshot.pending_audio_retries,
+        now=datetime.datetime.now(datetime.timezone.utc),
+    ):
+        return "maintenance"
     if snapshot.pending_image_retries:
         retry_selection = _select_pending_image_retries(
             tid,
@@ -1403,17 +1420,22 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
             0,
         ),
     )
-    if reuse_result.hit:
-        return
-
-    _run_full_processing(
-        client,
-        archive_store,
+    if not reuse_result.hit:
+        _run_full_processing(
+            client,
+            archive_store,
+            tid,
+            aid,
+            page_count=pagination.page_count,
+            author_total_lou_count=author_total_lou_count,
+            force_image_retries=False,
+        )
+    maintain_archived_audio(
         tid,
         aid,
-        page_count=pagination.page_count,
-        author_total_lou_count=author_total_lou_count,
-        force_image_retries=False,
+        archive_store,
+        force=False,
+        processing_snapshot=snapshot if reuse_result.hit else None,
     )
 
 
@@ -1496,17 +1518,21 @@ def backup_thread(
             int(bool(upsert_result.effective_changed_lous)),
         ),
     )
-    if reuse_result.hit:
-        return
-
-    _run_full_processing(
-        client,
-        archive_store,
+    if not reuse_result.hit:
+        _run_full_processing(
+            client,
+            archive_store,
+            tid,
+            aid,
+            page_count=page_count,
+            author_total_lou_count=author_total_lou_count,
+            force_image_retries=force_processing,
+        )
+    maintain_archived_audio(
         tid,
         aid,
-        page_count=page_count,
-        author_total_lou_count=author_total_lou_count,
-        force_image_retries=force_processing,
+        archive_store,
+        force=force_processing,
     )
 
 
@@ -1687,15 +1713,19 @@ def backup_thread_sub(
             int(bool(upsert_result.effective_changed_lous)),
         ),
     )
-    if reuse_result.hit:
-        return
-
-    _run_full_processing(
-        client,
-        archive_store,
+    if not reuse_result.hit:
+        _run_full_processing(
+            client,
+            archive_store,
+            tid,
+            aid,
+            page_count=page_count,
+            author_total_lou_count=author_total_lou_count,
+            force_image_retries=force_processing,
+        )
+    maintain_archived_audio(
         tid,
         aid,
-        page_count=page_count,
-        author_total_lou_count=author_total_lou_count,
-        force_image_retries=force_processing,
+        archive_store,
+        force=force_processing,
     )

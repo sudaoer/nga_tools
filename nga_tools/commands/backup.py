@@ -43,7 +43,10 @@ from nga_tools.forum.thread_configs import (
 )
 from nga_tools.ngaclient.session import ThreadLocalAPISessionPool, use_api_session
 from nga_tools.ngaclient.api_runtime import use_api_runtime
-from nga_tools.core.image_download_runtime import use_image_download_runtime
+from nga_tools.core.image_download_runtime import (
+    use_audio_download_runtime,
+    use_image_download_runtime,
+)
 from nga_tools.backup.image_index_writer import use_image_index_writer
 from nga_tools.backup.image_store_metrics import use_image_store_metrics
 from nga_tools.backup.image_store import use_image_download_coordination
@@ -135,6 +138,7 @@ def run_backup_fetch_batch(
         session_pool,
         use_api_runtime(app_config.api_concurrency),
         use_image_download_runtime(app_config.image_concurrency),
+        use_audio_download_runtime(app_config.audio_concurrency),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),
@@ -178,6 +182,7 @@ def backup_all(args: CommandArgs) -> None:
         use_api_runtime(app_config.api_concurrency),
         use_image_validation_cache(),
         use_image_download_runtime(app_config.image_concurrency),
+        use_audio_download_runtime(app_config.audio_concurrency),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),
@@ -217,6 +222,7 @@ def backup_sub(args: CommandArgs) -> None:
         use_api_runtime(app_config.api_concurrency),
         use_image_validation_cache(),
         use_image_download_runtime(app_config.image_concurrency),
+        use_audio_download_runtime(app_config.audio_concurrency),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),

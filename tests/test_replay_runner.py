@@ -33,6 +33,7 @@ from nga_tools.core.downloads import download_files
 from nga_tools.ngaclient.session import create_api_session
 from nga_tools.replay.offline import (
     ReplayOfflineError,
+    audio_request_url,
     assert_replay_request_allowed,
     image_request_url,
     use_replay_network_policy,
@@ -55,6 +56,10 @@ IMAGE_URL = (
     "https://img.nga.178.com/attachments/mon_202607/13/"
     "runner-test.png"
 )
+AUDIO_URL = (
+    "https://img.nga.178.com/attachments/mon_202607/13/"
+    "runner-test.mp3"
+)
 
 
 def _page() -> dict[str, object]:
@@ -67,7 +72,10 @@ def _page() -> dict[str, object]:
             {
                 "lou": 0,
                 "pid": 100,
-                "content": f"runner body [img]{IMAGE_URL}[/img]",
+                "content": (
+                    f"runner body [img]{IMAGE_URL}[/img]"
+                    f'<audio src="{AUDIO_URL}"></audio>'
+                ),
                 "author": {"uid": 456, "username": "author"},
             },
             {
@@ -183,6 +191,39 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
         )
         connection.commit()
 
+    audio_content = (b"\xff\xfb\x90\x64" + bytes(413)) * 10
+    audio_hash = hashlib.sha256(audio_content).hexdigest()
+    audio_dir = source / "audio_unique"
+    audio_dir.mkdir()
+    audio_path = audio_dir / f"{audio_hash}.mp3"
+    audio_path.write_bytes(audio_content)
+    with sqlite3.connect(source / "audio_index.sqlite3") as connection:
+        ensure_storage_metadata(connection, role="audio_index")
+        connection.execute(
+            """
+            CREATE TABLE audio_mappings (
+                url TEXT PRIMARY KEY,
+                unique_rel_path TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                content_bytes INTEGER NOT NULL,
+                duration_seconds REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO audio_mappings VALUES (?, ?, ?, ?, ?, '', '')",
+            (
+                AUDIO_URL,
+                f"audio_unique/{audio_path.name}",
+                audio_hash,
+                len(audio_content),
+                0.25,
+            ),
+        )
+        connection.commit()
+
     thread_config = tmp_path / "thread_configs.json"
     thread_config.write_text(
         json.dumps(
@@ -292,9 +333,10 @@ class ReplayStateTest:
 
         stats = prepare_target_state("warm", source, target)
 
-        assert stats.sqlite_database_count == 5
+        assert stats.sqlite_database_count == 6
         assert stats.selection_file_count == 0
         assert stats.image_file_count == 1
+        assert stats.audio_file_count == 1
         assert stats.validation_cache_path_updates == 0
         assert (target / REPLAY_TARGET_MARKER_FILENAME).is_file()
         assert source_state_fingerprint(source) == fingerprint_before
@@ -543,11 +585,16 @@ class ReplayStateTest:
 
 
 class ReplayOfflineTest:
-    def test_maps_images_and_rejects_non_server_origins(self) -> None:
+    def test_maps_assets_and_rejects_non_server_origins(self) -> None:
         with use_replay_network_policy("http://127.0.0.1:8765"):
             mapped = image_request_url(IMAGE_URL)
             assert mapped.startswith("http://127.0.0.1:8765/__replay__/image?")
             assert_replay_request_allowed(mapped)
+            mapped_audio = audio_request_url(AUDIO_URL)
+            assert mapped_audio.startswith(
+                "http://127.0.0.1:8765/__replay__/audio?"
+            )
+            assert_replay_request_allowed(mapped_audio)
             with pytest.raises(ReplayOfflineError, match="离线保护拒绝"):
                 assert_replay_request_allowed("https://bbs.nga.cn/app_api.php")
             session = create_api_session()
@@ -916,6 +963,8 @@ class ReplayRunnerTest:
             source / "image_index.sqlite3",
             source / IMAGE_CACHE_FILENAME,
             next((source / "images_unique").iterdir()),
+            source / "audio_index.sqlite3",
+            next((source / "audio_unique").iterdir()),
         ]
         source_states = {
             path: (path.read_bytes(), path.stat().st_mtime_ns)
@@ -950,7 +999,7 @@ class ReplayRunnerTest:
         assert len(list(warm_target.glob("replay_run-*.json"))) == 1
         first_existing = json.loads(empty_reports[-2].read_text(encoding="utf-8"))
         second_existing = json.loads(empty_reports[-1].read_text(encoding="utf-8"))
-        for traffic_kind in ("api", "image"):
+        for traffic_kind in ("api", "image", "audio"):
             first_traffic = first_existing["server_metrics"][traffic_kind]
             second_traffic = second_existing["server_metrics"][traffic_kind]
             for metric in (

@@ -27,6 +27,7 @@ from nga_tools.core.downloads import (
 )
 from nga_tools.replay.offline import (
     ReplayOfflineError,
+    audio_request_url,
     assert_replay_request_allowed,
     current_replay_network_policy,
     image_request_url,
@@ -632,7 +633,7 @@ class DownloadRuntime:
             elif self.resource_kind == "image":
                 request_url = image_request_url(logical_url)
             else:
-                raise ReplayOfflineError("重放服务尚未配置音频资源路由。")
+                request_url = audio_request_url(logical_url)
         target_path = Path(item["save_path"])
         temp_path: Path | None = None
         request_to_headers_seconds = 0.0

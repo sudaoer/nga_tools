@@ -39,6 +39,7 @@ from nga_tools.backup.post_version_selection import (
 from nga_tools.backup.processing_state import (
     IMAGE_REFERENCE_MANIFEST_VERSION,
     ArchiveChangeState,
+    AudioProcessingState,
     BackupProcessingSnapshot,
     FloorProcessingState,
     ImageReferenceManifestEntry,
@@ -46,6 +47,7 @@ from nga_tools.backup.processing_state import (
     ImageReferenceManifestSnapshot,
     ImageReferenceManifestState,
     ImageReferenceState,
+    PendingAudioRetry,
     PendingImageRetry,
 )
 from nga_tools.backup.thread_stores import (
@@ -924,6 +926,52 @@ class ThreadArchiveStore:
         with closing(self._connect_read()) as connection:
             return self._read_archive_change_state(connection)
 
+    def max_post_version_id(self) -> int:
+        self.require_exists()
+        with closing(self._connect_read()) as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM post_versions"
+            ).fetchone()
+        if row is None or len(row) != 1 or type(row[0]) is not int:
+            raise ValueError(f"archive帖子版本最大ID无效：{row!r}")
+        if row[0] < 0:
+            raise ValueError(f"archive帖子版本最大ID为负数：{row[0]}")
+        return row[0]
+
+    def read_post_version_contents(
+        self,
+        *,
+        after_id: int,
+        through_id: int,
+    ) -> list[tuple[int, str]]:
+        if after_id < 0 or through_id < after_id:
+            raise ValueError(
+                "archive帖子版本扫描范围无效："
+                f"after={after_id}, through={through_id}"
+            )
+        if after_id == through_id:
+            return []
+        with closing(self._connect_read()) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, content
+                FROM post_versions
+                WHERE id > ? AND id <= ?
+                ORDER BY id
+                """,
+                (after_id, through_id),
+            ).fetchall()
+        result: list[tuple[int, str]] = []
+        for row in rows:
+            if (
+                len(row) != 2
+                or type(row[0]) is not int
+                or not isinstance(row[1], str)
+            ):
+                raise ValueError(f"archive帖子版本正文行无效：{row!r}")
+            result.append((row[0], row[1]))
+        return result
+
     def read_backup_processing_snapshot(self) -> BackupProcessingSnapshot:
         self.require_exists()
         change_state = self._read_current_archive_change_state()
@@ -963,6 +1011,16 @@ class ThreadArchiveStore:
                     """
                 ).fetchall(),
             )
+            pending_audio_rows = cast(
+                list[tuple[object, object, object, object]],
+                connection.execute(
+                    """
+                    SELECT url, last_attempt_at, failure_kind, http_status
+                    FROM backup_pending_audio
+                    ORDER BY url
+                    """
+                ).fetchall(),
+            )
             floor_row = connection.execute(
                 """
                 SELECT format_version, processed_archive_revision,
@@ -980,6 +1038,13 @@ class ThreadArchiveStore:
                        post_version_selections_fingerprint,
                        image_reference_extractor_version, completed_at
                 FROM backup_image_reference_state WHERE singleton = 1
+                """
+            ).fetchone()
+            audio_row = connection.execute(
+                """
+                SELECT format_version, extractor_version,
+                       processed_max_post_version_id, completed_at
+                FROM backup_audio_processing_state WHERE singleton = 1
                 """
             ).fetchone()
         pending_image_retries: list[PendingImageRetry] = []
@@ -1054,11 +1119,88 @@ class ThreadArchiveStore:
             if any(not isinstance(value, str) or not value for value in (image_row[2], image_row[3], image_row[5])):
                 raise ValueError(f"backup图片引用状态文本列无效：{image_row!r}")
             image_state = ImageReferenceState(*image_row)
+
+        pending_audio_retries: list[PendingAudioRetry] = []
+        for url, last_attempt_at, failure_kind, http_status in pending_audio_rows:
+            if not isinstance(url, str) or not url:
+                raise ValueError(f"backup待重试音频URL无效：{url!r}")
+            if last_attempt_at is None:
+                if failure_kind is not None or http_status is not None:
+                    raise ValueError(
+                        "backup待重试音频旧状态无效："
+                        f"{(url, failure_kind, http_status)!r}"
+                    )
+                parsed_last_attempt_at = None
+                parsed_failure_kind = None
+            else:
+                if not isinstance(last_attempt_at, str):
+                    raise ValueError(
+                        f"backup待重试音频时间无效：{last_attempt_at!r}"
+                    )
+                try:
+                    parsed_last_attempt_at = datetime.datetime.fromisoformat(
+                        last_attempt_at
+                    )
+                except ValueError as error:
+                    raise ValueError(
+                        f"backup待重试音频时间无效：{last_attempt_at!r}"
+                    ) from error
+                if (
+                    parsed_last_attempt_at.tzinfo is None
+                    or parsed_last_attempt_at.utcoffset() is None
+                ):
+                    raise ValueError(
+                        "backup待重试音频时间缺少时区："
+                        f"{last_attempt_at!r}"
+                    )
+                if (
+                    not isinstance(failure_kind, str)
+                    or failure_kind not in DOWNLOAD_FAILURE_KINDS
+                ):
+                    raise ValueError(
+                        "backup待重试音频失败类别无效："
+                        f"{failure_kind!r}"
+                    )
+                parsed_failure_kind = failure_kind
+            if http_status is not None and (
+                type(http_status) is not int
+                or http_status < 100
+                or http_status > 599
+            ):
+                raise ValueError(
+                    f"backup待重试音频HTTP状态无效：{http_status!r}"
+                )
+            pending_audio_retries.append(
+                PendingAudioRetry(
+                    url=url,
+                    last_attempt_at=parsed_last_attempt_at,
+                    failure_kind=parsed_failure_kind,
+                    http_status=http_status,
+                )
+            )
+
+        audio_state: AudioProcessingState | None = None
+        if audio_row is not None:
+            if any(type(value) is not int for value in audio_row[:3]):
+                raise ValueError(
+                    f"backup音频处理状态整数列无效：{audio_row!r}"
+                )
+            if audio_row[2] < 0:
+                raise ValueError(
+                    f"backup音频处理水位无效：{audio_row!r}"
+                )
+            if not isinstance(audio_row[3], str) or not audio_row[3]:
+                raise ValueError(
+                    f"backup音频处理状态时间无效：{audio_row!r}"
+                )
+            audio_state = AudioProcessingState(*audio_row)
         return BackupProcessingSnapshot(
             change_state=change_state,
             pending_image_retries=tuple(pending_image_retries),
             floor_state=floor_state,
             image_state=image_state,
+            audio_state=audio_state,
+            pending_audio_retries=tuple(pending_audio_retries),
         )
 
     @staticmethod
@@ -1115,6 +1257,72 @@ class ThreadArchiveStore:
         connection.executemany(
             """
             INSERT INTO backup_pending_images (
+                url,
+                last_attempt_at,
+                failure_kind,
+                http_status
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+    @staticmethod
+    def _replace_pending_audio(
+        connection: sqlite3.Connection,
+        pending_audio_retries: tuple[PendingAudioRetry, ...],
+    ) -> None:
+        rows: list[tuple[str, str | None, str | None, int | None]] = []
+        seen_urls: set[str] = set()
+        for retry in sorted(pending_audio_retries, key=lambda item: item.url):
+            if not retry.url:
+                raise ValueError("backup待重试音频URL不能为空。")
+            if retry.url in seen_urls:
+                raise ValueError(f"backup待重试音频URL重复：{retry.url}")
+            seen_urls.add(retry.url)
+            if retry.last_attempt_at is None:
+                if retry.failure_kind is not None or retry.http_status is not None:
+                    raise ValueError(
+                        f"backup待重试音频旧状态无效：{retry.url}"
+                    )
+                last_attempt_text = None
+            else:
+                if (
+                    retry.last_attempt_at.tzinfo is None
+                    or retry.last_attempt_at.utcoffset() is None
+                ):
+                    raise ValueError(
+                        f"backup待重试音频时间缺少时区：{retry.url}"
+                    )
+                if retry.failure_kind not in DOWNLOAD_FAILURE_KINDS:
+                    raise ValueError(
+                        "backup待重试音频失败类别无效："
+                        f"{retry.failure_kind!r}"
+                    )
+                last_attempt_text = retry.last_attempt_at.astimezone(
+                    datetime.timezone.utc
+                ).isoformat(timespec="microseconds")
+            if retry.http_status is not None and (
+                type(retry.http_status) is not int
+                or retry.http_status < 100
+                or retry.http_status > 599
+            ):
+                raise ValueError(
+                    "backup待重试音频HTTP状态无效："
+                    f"{retry.http_status!r}"
+                )
+            rows.append(
+                (
+                    retry.url,
+                    last_attempt_text,
+                    retry.failure_kind,
+                    retry.http_status,
+                )
+            )
+        connection.execute("DELETE FROM backup_pending_audio")
+        connection.executemany(
+            """
+            INSERT INTO backup_pending_audio (
                 url,
                 last_attempt_at,
                 failure_kind,
@@ -1524,6 +1732,8 @@ class ThreadArchiveStore:
                 connection.execute("DELETE FROM backup_pending_images")
                 connection.execute("DELETE FROM backup_floor_processing_state")
                 connection.execute("DELETE FROM backup_image_reference_state")
+                connection.execute("DELETE FROM backup_pending_audio")
+                connection.execute("DELETE FROM backup_audio_processing_state")
                 self._clear_image_reference_manifest(connection)
 
     def replace_pending_image_retries(
@@ -1535,6 +1745,53 @@ class ThreadArchiveStore:
         with closing(self._connect_state_write()) as connection:
             with connection:
                 self._replace_pending_images(connection, pending_image_retries)
+
+    def commit_audio_processing_state(
+        self,
+        state: AudioProcessingState,
+        pending_audio_retries: tuple[PendingAudioRetry, ...],
+    ) -> bool:
+        self.require_exists()
+        if (
+            type(state.format_version) is not int
+            or state.format_version <= 0
+            or type(state.extractor_version) is not int
+            or state.extractor_version <= 0
+            or type(state.processed_max_post_version_id) is not int
+            or state.processed_max_post_version_id < 0
+            or not state.completed_at
+        ):
+            raise ValueError(f"backup音频处理状态无效：{state!r}")
+        expected_max_id = state.processed_max_post_version_id
+        if self.max_post_version_id() != expected_max_id:
+            return False
+        with closing(self._connect_state_write()) as connection:
+            with connection:
+                connection.execute(
+                    "DELETE FROM backup_audio_processing_state"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO backup_audio_processing_state (
+                        singleton,
+                        format_version,
+                        extractor_version,
+                        processed_max_post_version_id,
+                        completed_at
+                    ) VALUES (1, ?, ?, ?, ?)
+                    """,
+                    (
+                        state.format_version,
+                        state.extractor_version,
+                        state.processed_max_post_version_id,
+                        state.completed_at,
+                    ),
+                )
+                self._replace_pending_audio(
+                    connection,
+                    pending_audio_retries,
+                )
+        return self.max_post_version_id() == expected_max_id
 
     def commit_floor_processing_state(self, state: FloorProcessingState) -> bool:
         self.require_exists()

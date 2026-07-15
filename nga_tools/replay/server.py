@@ -15,7 +15,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from nga_tools.console import report_info, report_progress
 from nga_tools.core.nga_images import NGA_img_link_verify
-from nga_tools.replay.corpus import ImageReplayEntry, ReplayCorpus, load_replay_corpus
+from nga_tools.core.nga_audio import normalize_nga_audio_url
+from nga_tools.replay.corpus import (
+    AudioReplayEntry,
+    ImageReplayEntry,
+    ReplayCorpus,
+    load_replay_corpus,
+)
 from nga_tools.replay.metrics import ReplayMetrics, ReplayOperation, TrafficKind
 from nga_tools.replay.profile import ReplayProfile
 from nga_tools.replay.rate_limit import TrafficShaper
@@ -24,7 +30,7 @@ DEFAULT_REPLAY_HOST = "127.0.0.1"
 DEFAULT_REPLAY_PORT = 8765
 
 ByteSource: TypeAlias = AsyncIterator[bytes]
-ResponseKind: TypeAlias = Literal["api", "image"]
+ResponseKind: TypeAlias = Literal["api", "image", "audio"]
 
 
 def _json_bytes(value: object) -> bytes:
@@ -60,13 +66,20 @@ class ReplayService:
         self.metrics = ReplayMetrics()
         self.api_shaper = TrafficShaper(profile.api)
         self.image_shaper = TrafficShaper(profile.image)
+        self.audio_shaper = TrafficShaper(profile.effective_audio)
 
     def _shaper(self, kind: TrafficKind) -> TrafficShaper:
-        return self.api_shaper if kind == "api" else self.image_shaper
+        if kind == "api":
+            return self.api_shaper
+        return self.image_shaper if kind == "image" else self.audio_shaper
 
     @property
     def busy_count(self) -> int:
-        return self.api_shaper.busy_count + self.image_shaper.busy_count
+        return (
+            self.api_shaper.busy_count
+            + self.image_shaper.busy_count
+            + self.audio_shaper.busy_count
+        )
 
     async def shaped_stream(
         self,
@@ -116,6 +129,7 @@ class ReplayService:
             raise RuntimeError("仍有重放请求在途，不能重置。")
         self.api_shaper.reset()
         self.image_shaper.reset()
+        self.audio_shaper.reset()
         return self.metrics.reset()
 
 
@@ -217,6 +231,32 @@ def _missing_image_response(service: ReplayService) -> StreamingResponse:
     return _streaming_response(
         service,
         "image",
+        _bytes_source(payload, service.profile.chunk_bytes),
+        status=404,
+        content_type="text/plain",
+        content_length=len(payload),
+    )
+
+
+def _audio_response(
+    service: ReplayService,
+    entry: AudioReplayEntry,
+) -> StreamingResponse:
+    return _streaming_response(
+        service,
+        "audio",
+        _file_source(entry.path, service.profile.chunk_bytes),
+        status=200,
+        content_type="audio/mpeg",
+        content_length=entry.size,
+    )
+
+
+def _missing_audio_response(service: ReplayService) -> StreamingResponse:
+    payload = b"audio not found\n"
+    return _streaming_response(
+        service,
+        "audio",
         _bytes_source(payload, service.profile.chunk_bytes),
         status=404,
         content_type="text/plain",
@@ -353,6 +393,18 @@ def create_replay_app(corpus: ReplayCorpus, profile: ReplayProfile) -> FastAPI:
             return _missing_image_response(service)
         return _image_response(service, entry)
 
+    async def replay_audio(request: Request) -> StreamingResponse:
+        raw_url = request.query_params.get("url")
+        if raw_url is None:
+            return _missing_audio_response(service)
+        normalized_url = normalize_nga_audio_url(raw_url)
+        if normalized_url is None:
+            return _missing_audio_response(service)
+        entry = corpus.audio(normalized_url)
+        if entry is None:
+            return _missing_audio_response(service)
+        return _audio_response(service, entry)
+
     app.add_api_route("/__replay__/health", health, methods=["GET"])
     app.add_api_route("/__replay__/manifest", manifest, methods=["GET"])
     app.add_api_route("/__replay__/metrics", metrics, methods=["GET"])
@@ -360,6 +412,7 @@ def create_replay_app(corpus: ReplayCorpus, profile: ReplayProfile) -> FastAPI:
     app.add_api_route("/app_api.php", nga_post_list, methods=["POST"])
     app.add_api_route("/read.php", nga_pid_redirect, methods=["GET"])
     app.add_api_route("/__replay__/image", replay_image, methods=["GET"])
+    app.add_api_route("/__replay__/audio", replay_audio, methods=["GET"])
     return app
 
 
@@ -387,6 +440,7 @@ def load_replay_app(
         f"楼层映射原帖{manifest.floor_map_original_thread_count}个/"
         f"{manifest.floor_map_original_page_count}页，"
         f"可用图片映射{manifest.available_image_mapping_count}条。"
+        f"可用音频映射{manifest.available_audio_mapping_count}条。"
     )
     report_info(f"Corpus ID：{manifest.corpus_id}")
     return create_replay_app(corpus, profile)

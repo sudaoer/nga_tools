@@ -205,6 +205,28 @@ class ThreadArchiveStateStore:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backup_audio_processing_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                format_version INTEGER NOT NULL,
+                extractor_version INTEGER NOT NULL,
+                processed_max_post_version_id INTEGER NOT NULL
+                    CHECK(processed_max_post_version_id >= 0),
+                completed_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backup_pending_audio (
+                url TEXT PRIMARY KEY,
+                last_attempt_at TEXT,
+                failure_kind TEXT,
+                http_status INTEGER
+            )
+            """
+        )
         connection.commit()
 
 

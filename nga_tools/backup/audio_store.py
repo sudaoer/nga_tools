@@ -499,6 +499,7 @@ def download_audio_tasks(
     *,
     output_root: Path | None = None,
     on_progress: utils.DownloadProgressCallback | None = None,
+    on_download_progress: utils.DownloadProgressCallback | None = None,
 ) -> utils.DownloadSummary:
     root = configured_output_root() if output_root is None else output_root
     normalized_tasks: list[AudioDownloadTask] = []
@@ -551,7 +552,11 @@ def download_audio_tasks(
         }
 
     try:
-        with tempfile.TemporaryDirectory(prefix="nga_audio_download_") as temp_dir:
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".nga_audio_download_",
+            dir=root,
+        ) as temp_dir:
             temp_root = Path(temp_dir)
             download_tasks: list[utils.DownloadTask] = []
             temp_by_url: dict[str, Path] = {}
@@ -565,10 +570,17 @@ def download_audio_tasks(
                     }
                 )
 
-            downloaded = utils.download_files(
-                download_tasks,
-                resource_kind="audio",
-            )
+            if on_download_progress is None:
+                downloaded = utils.download_files(
+                    download_tasks,
+                    resource_kind="audio",
+                )
+            else:
+                downloaded = utils.download_files(
+                    download_tasks,
+                    resource_kind="audio",
+                    on_progress=on_download_progress,
+                )
             mappings_to_write: list[AudioMapping] = []
             stored_by_url: dict[str, StoredAudio] = {}
             for download_result in downloaded["succeeded"]:

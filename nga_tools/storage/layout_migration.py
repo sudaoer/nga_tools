@@ -32,6 +32,7 @@ from nga_tools.backup.image_reference_cache import (
     deserialize_image_references,
 )
 from nga_tools.backup.image_store import IMAGE_CACHE_FILENAME, IMAGE_INDEX_FILENAME
+from nga_tools.backup.audio_store import AUDIO_INDEX_FILENAME
 from nga_tools.backup.processing_state import (
     FLOOR_PROCESSING_STATE_VERSION,
     IMAGE_REFERENCE_MANIFEST_VERSION,
@@ -73,6 +74,7 @@ _GLOBAL_DATABASE_FILENAMES = (
     BACKUP_STATE_DB_FILENAME,
     IMAGE_INDEX_FILENAME,
     IMAGE_CACHE_FILENAME,
+    AUDIO_INDEX_FILENAME,
 )
 _LEGACY_ARCHIVE_TABLES = (
     "backup_processing_state",
@@ -462,6 +464,7 @@ def _global_layout_is_complete(output_root: Path) -> bool:
     backup_state_path = output_root / BACKUP_STATE_DB_FILENAME
     image_index_path = output_root / IMAGE_INDEX_FILENAME
     image_cache_path = output_root / IMAGE_CACHE_FILENAME
+    audio_index_path = output_root / AUDIO_INDEX_FILENAME
     forum_complete = not forum_path.exists() or (
         _database_has_role(
             forum_path,
@@ -488,7 +491,11 @@ def _global_layout_is_complete(output_root: Path) -> bool:
         "image_cache",
     ):
         image_complete = False
-    return forum_complete and image_complete
+    audio_complete = not audio_index_path.exists() or _database_has_role(
+        audio_index_path,
+        "audio_index",
+    )
+    return forum_complete and image_complete and audio_complete
 
 
 def _dynamic_table_fingerprints(
@@ -1330,6 +1337,19 @@ def _migrate_global_databases(
                 staging / IMAGE_CACHE_FILENAME,
             )
 
+        if originals[AUDIO_INDEX_FILENAME]:
+            staged_audio_index = staging / AUDIO_INDEX_FILENAME
+            _snapshot_sqlite(
+                run_root
+                / "files"
+                / _GLOBAL_TARGET_NAME
+                / AUDIO_INDEX_FILENAME,
+                staged_audio_index,
+            )
+            with closing(sqlite3.connect(staged_audio_index)) as connection:
+                with connection:
+                    ensure_storage_metadata(connection, role="audio_index")
+
         staged_filenames = [
             filename
             for filename in _GLOBAL_DATABASE_FILENAMES
@@ -1346,6 +1366,7 @@ def _migrate_global_databases(
             IMAGE_CACHE_FILENAME,
             FORUM_THREAD_DB_FILENAME,
             IMAGE_INDEX_FILENAME,
+            AUDIO_INDEX_FILENAME,
         ):
             staged_path = staging / filename
             if staged_path.is_file():
@@ -1582,6 +1603,7 @@ def rollback_layout(output_root: Path, run_id: str) -> LayoutRollbackResult:
                 IMAGE_CACHE_FILENAME,
                 FORUM_THREAD_DB_FILENAME,
                 IMAGE_INDEX_FILENAME,
+                AUDIO_INDEX_FILENAME,
             ):
                 target = resolved_output_root / filename
                 existed = original_values.get(filename) is True

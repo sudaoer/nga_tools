@@ -216,6 +216,7 @@ def _write_run_report(
     worker_count: int,
     api_concurrency: int,
     image_concurrency: int,
+    audio_concurrency: int,
     selected_configs: list[ThreadConfig],
     result: ThreadBatchResult,
     metrics_baseline: JsonObject,
@@ -245,6 +246,7 @@ def _write_run_report(
             "workers": worker_count,
             "api_concurrency": api_concurrency,
             "image_concurrency": image_concurrency,
+            "audio_concurrency": audio_concurrency,
         },
         "preparation": preparation.as_dict(),
         "backup_wall_seconds": backup_wall_seconds,
@@ -303,6 +305,9 @@ def run_replay_backup(args: CommandArgs) -> None:
     image_concurrency = (
         optional_int(args, "image_concurrency") or default_config.image_concurrency
     )
+    audio_concurrency = (
+        optional_int(args, "audio_concurrency") or default_config.audio_concurrency
+    )
     replay_config = replace(
         default_config,
         base_url=server_url,
@@ -312,6 +317,7 @@ def run_replay_backup(args: CommandArgs) -> None:
         nga_passport_cid="",
         api_concurrency=api_concurrency,
         image_concurrency=image_concurrency,
+        audio_concurrency=audio_concurrency,
         backup_configs_workers=worker_count,
     )
 
@@ -342,6 +348,7 @@ def run_replay_backup(args: CommandArgs) -> None:
 
         previous_api_concurrency = network_limits.get_api_concurrency()
         previous_image_concurrency = network_limits.get_image_concurrency()
+        previous_audio_concurrency = network_limits.get_audio_concurrency()
         try:
             with (
                 use_config_override(replay_config),
@@ -356,6 +363,7 @@ def run_replay_backup(args: CommandArgs) -> None:
                         "workers": worker_count,
                         "api_concurrency": api_concurrency,
                         "image_concurrency": image_concurrency,
+                        "audio_concurrency": audio_concurrency,
                     },
                     backup_func=backup_thread,
                     progress_text="正在执行离线完整备份",
@@ -406,6 +414,7 @@ def run_replay_backup(args: CommandArgs) -> None:
                     worker_count=worker_count,
                     api_concurrency=api_concurrency,
                     image_concurrency=image_concurrency,
+                    audio_concurrency=audio_concurrency,
                     selected_configs=selected_configs,
                     result=result,
                     metrics_baseline=metrics_baseline,
@@ -417,6 +426,7 @@ def run_replay_backup(args: CommandArgs) -> None:
             network_limits.configure_network_limits(
                 api_concurrency=previous_api_concurrency,
                 image_concurrency=previous_image_concurrency,
+                audio_concurrency=previous_audio_concurrency,
             )
 
     if result.failures or validation_error is not None:
