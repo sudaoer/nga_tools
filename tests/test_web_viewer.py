@@ -10,6 +10,10 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.thread_stores import (
+    ARCHIVE_CACHE_DB_FILENAME,
+    ARCHIVE_STATE_DB_FILENAME,
+)
 from nga_tools.backup.floor_models import (
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,
@@ -17,6 +21,9 @@ from nga_tools.backup.floor_models import (
     StoredFloorMap,
 )
 from nga_tools.cli.parser import args_parse
+from nga_tools.core.output_lock import use_output_root_lock
+from nga_tools.forum.ankebak_state import AnkebakStateStore
+from nga_tools.storage import ensure_storage_metadata
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web import data as web_data
 from nga_tools.web import database as web_database
@@ -90,6 +97,33 @@ def _write_image_mapping(output_dir: Path, url: str, unique_rel_path: str) -> No
         connection.commit()
     finally:
         connection.close()
+
+
+def _write_image_validation_cache(
+    output_dir: Path,
+    relative_path: str,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with closing(
+        sqlite3.connect(output_dir / "image_cache.sqlite3")
+    ) as connection:
+        ensure_storage_metadata(connection, role="image_cache")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS image_validation_cache (
+                relative_path TEXT PRIMARY KEY,
+                size INTEGER NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                valid INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO image_validation_cache VALUES (?, 1, 1, 1, '')",
+            (relative_path,),
+        )
+        connection.commit()
 
 
 def _write_forum_thread_db(output_dir: Path) -> None:
@@ -932,6 +966,31 @@ class WebServerTest:
         assert raw_html_response.status_code == 400
         assert "只支持[img]" in raw_html_response.json()["error"]
 
+    def test_admin_writes_wait_for_output_layout_operations(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        _write_archive(output_dir / "101_201", [_post(1, "original")])
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        with use_output_root_lock(output_dir):
+            blocked = client.put(
+                "/api/admin/threads/101/201/overlays/1",
+                json={"bbcode": "blocked"},
+            )
+
+        saved = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": "saved"},
+        )
+
+        assert blocked.status_code == 409
+        assert "输出目录正在被另一个任务使用" in blocked.json()["error"]
+        assert saved.status_code == 200
+
 
 class WebDatabaseViewerTest:
     def test_databases_route_lists_project_sqlite_sources(self, tmp_path: Path) -> None:
@@ -942,7 +1001,11 @@ class WebDatabaseViewerTest:
             "https://img.nga.178.com/attachments/mon_202607/08/abc.png",
             "images_unique/abc.png",
         )
-        _write_archive(output_dir / "101_201", [_post(1, "hello")])
+        _write_image_validation_cache(output_dir, "images_unique/abc.png")
+        AnkebakStateStore(output_dir / "backup_state.sqlite3").load_states()
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "hello")])
+        ThreadArchiveStore(thread_dir).ensure_backup_processing_schema()
         client = TestClient(
             create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
         )
@@ -952,10 +1015,34 @@ class WebDatabaseViewerTest:
         assert response.status_code == 200
         payload = response.json()
         ids = {item["id"] for item in payload["items"]}
-        assert {"forum_threads", "image_index", "archive:101_201"} <= ids
+        assert {
+            "forum_threads",
+            "backup_state",
+            "image_index",
+            "image_cache",
+            "archive:101_201",
+            "archive_state:101_201",
+            "archive_cache:101_201",
+        } <= ids
         by_id = {item["id"]: item for item in payload["items"]}
         assert by_id["forum_threads"]["relativePath"] == "forum_threads.sqlite3"
+        assert by_id["backup_state"]["kind"] == "backup_state"
+        assert by_id["image_cache"]["relativePath"] == "image_cache.sqlite3"
+        assert by_id["archive_state:101_201"]["relativePath"] == (
+            f"101_201/{ARCHIVE_STATE_DB_FILENAME}"
+        )
+        assert by_id["archive_cache:101_201"]["relativePath"] == (
+            f"101_201/{ARCHIVE_CACHE_DB_FILENAME}"
+        )
         assert by_id["archive:101_201"]["tableCount"] == 10
+
+        state_schema = client.get(
+            "/api/databases/archive_state%3A101_201/schema"
+        )
+        assert state_schema.status_code == 200
+        assert "backup_pending_images" in {
+            table["name"] for table in state_schema.json()["tables"]
+        }
 
     def test_databases_route_uses_cache_until_refresh(
         self,

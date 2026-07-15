@@ -22,8 +22,8 @@ from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.backup.post_version_selection import (
     POST_VERSION_SELECTIONS_FILENAME,
 )
+from nga_tools.core.output_lock import ThreadOutputLockError, use_output_root_lock
 from nga_tools.forum.thread_configs import ThreadConfig
-from nga_tools.forum.thread_store import FORUM_THREAD_DB_FILENAME
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web.data import (
     PostOverlayDetail,
@@ -63,10 +63,12 @@ from nga_tools.web.database import (
     TableNotFoundError,
     TableRowDetail,
     TableRows,
+    list_database_refs,
     list_database_summaries,
     read_database_schema,
     read_table_row_detail,
     read_table_rows,
+    resolve_database,
 )
 from nga_tools.web.image_usage import (
     ImageIndexUnavailableError,
@@ -90,9 +92,6 @@ ThreadListFingerprint = tuple[str, ...]
 DatabaseListFingerprint = tuple[str, ...]
 DatabaseSchemaFingerprint = str
 ImageUsageFingerprint = tuple[str, ...]
-_DATABASE_ID_FORUM_THREADS = "forum_threads"
-_DATABASE_ID_IMAGE_INDEX = "image_index"
-_ARCHIVE_DATABASE_PREFIX = "archive:"
 
 
 def _new_lock() -> LockType:
@@ -188,38 +187,19 @@ def _copy_database_schema(schema: DatabaseSchema) -> DatabaseSchema:
 
 
 def _database_list_fingerprint(output_dir: Path) -> DatabaseListFingerprint:
-    entries = [
-        f"output:{_file_fingerprint(output_dir)}",
-        f"forum:{_file_fingerprint(output_dir / FORUM_THREAD_DB_FILENAME)}",
-        f"image:{_file_fingerprint(output_dir / image_store.IMAGE_INDEX_FILENAME)}",
-    ]
-    if not output_dir.is_dir():
-        return tuple(entries)
-
-    for thread_folder in sorted(output_dir.iterdir(), key=lambda path: path.name):
-        if not thread_folder.is_dir():
-            continue
-        if parse_thread_dir_name(thread_folder.name) is None:
-            continue
-        archive_db_path = thread_folder / ARCHIVE_DB_FILENAME
-        if archive_db_path.is_file():
-            entries.append(
-                f"{thread_folder.name}:{_sqlite_fingerprint(archive_db_path)}"
-            )
+    entries = [f"output:{_file_fingerprint(output_dir)}"]
+    entries.extend(
+        f"{ref.id}:{_sqlite_fingerprint(ref.path)}"
+        for ref in list_database_refs(output_dir)
+    )
     return tuple(entries)
 
 
 def _database_file_for_id(output_dir: Path, database_id: str) -> Optional[Path]:
-    if database_id == _DATABASE_ID_FORUM_THREADS:
-        return output_dir / FORUM_THREAD_DB_FILENAME
-    if database_id == _DATABASE_ID_IMAGE_INDEX:
-        return output_dir / image_store.IMAGE_INDEX_FILENAME
-    if database_id.startswith(_ARCHIVE_DATABASE_PREFIX):
-        thread_dir_name = database_id.removeprefix(_ARCHIVE_DATABASE_PREFIX)
-        if parse_thread_dir_name(thread_dir_name) is None:
-            return None
-        return output_dir / thread_dir_name / ARCHIVE_DB_FILENAME
-    return None
+    try:
+        return resolve_database(output_dir, database_id).path
+    except DatabaseNotFoundError:
+        return None
 
 
 def _database_schema_fingerprint(
@@ -521,8 +501,9 @@ def _select_post_version_locked(
     lou: int,
     version_id: int,
 ) -> PostVersionSelectionResult:
-    with lock:
-        return select_post_version(output_dir, tid, aid_key, lou, version_id)
+    with use_output_root_lock(output_dir):
+        with lock:
+            return select_post_version(output_dir, tid, aid_key, lou, version_id)
 
 
 def _clear_post_version_selection_locked(
@@ -532,8 +513,9 @@ def _clear_post_version_selection_locked(
     aid_key: str,
     lou: int,
 ) -> PostVersionSelectionResult:
-    with lock:
-        return clear_post_version_selection(output_dir, tid, aid_key, lou)
+    with use_output_root_lock(output_dir):
+        with lock:
+            return clear_post_version_selection(output_dir, tid, aid_key, lou)
 
 
 def _save_post_overlay_locked(
@@ -544,8 +526,9 @@ def _save_post_overlay_locked(
     lou: int,
     bbcode: str,
 ) -> PostOverlayDetail:
-    with lock:
-        return save_thread_post_overlay(output_dir, tid, aid_key, lou, bbcode)
+    with use_output_root_lock(output_dir):
+        with lock:
+            return save_thread_post_overlay(output_dir, tid, aid_key, lou, bbcode)
 
 
 def _clear_post_overlay_locked(
@@ -555,8 +538,9 @@ def _clear_post_overlay_locked(
     aid_key: str,
     lou: int,
 ) -> PostOverlayDetail:
-    with lock:
-        return clear_thread_post_overlay(output_dir, tid, aid_key, lou)
+    with use_output_root_lock(output_dir):
+        with lock:
+            return clear_thread_post_overlay(output_dir, tid, aid_key, lou)
 
 
 async def _http_exception_handler(
@@ -737,6 +721,8 @@ async def put_post_version_selection(
             lou,
             raw_version_id,
         )
+    except ThreadOutputLockError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ThreadNotFoundError as error:
@@ -764,6 +750,8 @@ async def delete_post_version_selection(
             aid_key,
             lou,
         )
+    except ThreadOutputLockError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ThreadNotFoundError as error:
@@ -847,6 +835,8 @@ async def put_post_overlay(
             lou,
             raw_bbcode,
         )
+    except ThreadOutputLockError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ThreadNotFoundError as error:
@@ -874,6 +864,8 @@ async def delete_post_overlay(
             aid_key,
             lou,
         )
+    except ThreadOutputLockError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ThreadNotFoundError as error:

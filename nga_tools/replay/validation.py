@@ -7,7 +7,14 @@ from pathlib import Path
 from time import perf_counter
 from typing import cast
 
-from nga_tools.backup.image_store import IMAGE_INDEX_FILENAME
+from nga_tools.backup.image_store import (
+    IMAGE_CACHE_FILENAME,
+    IMAGE_INDEX_FILENAME,
+)
+from nga_tools.backup.thread_stores import (
+    ARCHIVE_CACHE_DB_FILENAME,
+    ARCHIVE_STATE_DB_FILENAME,
+)
 from nga_tools.core.hashing import hash_object
 from nga_tools.core.sqlite import (
     SQLITE_BUSY_TIMEOUT_SECONDS,
@@ -171,6 +178,13 @@ def validate_replay_output(
         if not target_archive.is_file():
             raise RuntimeError(f"重放运行后缺少目标归档：{target_archive}")
         _quick_check(target_archive)
+        for auxiliary_filename in (
+            ARCHIVE_STATE_DB_FILENAME,
+            ARCHIVE_CACHE_DB_FILENAME,
+        ):
+            auxiliary_path = target_dir / auxiliary_filename
+            if auxiliary_path.is_file():
+                _quick_check(auxiliary_path)
         checked += 1
         target_signature = _latest_post_signature(
             target_archive,
@@ -213,6 +227,9 @@ def validate_replay_output(
     target_image_index = target_output / IMAGE_INDEX_FILENAME
     if target_image_index.is_file():
         _quick_check(target_image_index)
+    target_image_cache = target_output / IMAGE_CACHE_FILENAME
+    if target_image_cache.is_file():
+        _quick_check(target_image_cache)
     source_mappings = _image_mappings(
         source_output / IMAGE_INDEX_FILENAME,
         immutable=True,

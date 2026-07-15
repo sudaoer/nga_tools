@@ -20,6 +20,7 @@ import uvicorn
 from PIL import Image
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.image_store import IMAGE_CACHE_FILENAME
 from nga_tools.backup.floor_models import (
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,
@@ -49,6 +50,7 @@ from nga_tools.replay.state import (
     source_state_fingerprint,
 )
 from nga_tools.replay.validation import ValidationStats, validate_replay_output
+from nga_tools.storage import ensure_storage_metadata
 
 IMAGE_URL = (
     "https://img.nga.178.com/attachments/mon_202607/13/"
@@ -104,6 +106,7 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
             ],
         )
     )
+    store.ensure_backup_processing_schema()
     with sqlite3.connect(thread_dir / "archive.sqlite3") as connection:
         version_id, source_hash = connection.execute(
             "SELECT id, source_hash FROM post_versions"
@@ -125,6 +128,7 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
     image_path = images_dir / f"{hashlib.sha256(image_bytes).hexdigest()}.png"
     image_path.write_bytes(image_bytes)
     with sqlite3.connect(source / "image_index.sqlite3") as connection:
+        ensure_storage_metadata(connection, role="image_index")
         connection.executescript(
             """
             CREATE TABLE image_mappings (
@@ -133,8 +137,19 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            """
+        )
+        connection.execute(
+            "INSERT INTO image_mappings VALUES (?, ?, '', '')",
+            (IMAGE_URL, f"images_unique/{image_path.name}"),
+        )
+        connection.commit()
+    with sqlite3.connect(source / IMAGE_CACHE_FILENAME) as connection:
+        ensure_storage_metadata(connection, role="image_cache")
+        connection.executescript(
+            """
             CREATE TABLE image_validation_cache (
-                canonical_path TEXT PRIMARY KEY,
+                relative_path TEXT PRIMARY KEY,
                 size INTEGER NOT NULL,
                 mtime_ns INTEGER NOT NULL,
                 valid INTEGER NOT NULL,
@@ -144,12 +159,12 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
         )
         stat_result = image_path.stat()
         connection.execute(
-            "INSERT INTO image_mappings VALUES (?, ?, '', '')",
-            (IMAGE_URL, f"images_unique/{image_path.name}"),
-        )
-        connection.execute(
             "INSERT INTO image_validation_cache VALUES (?, ?, ?, 1, '')",
-            (str(image_path.resolve()), stat_result.st_size, stat_result.st_mtime_ns),
+            (
+                f"images_unique/{image_path.name}",
+                stat_result.st_size,
+                stat_result.st_mtime_ns,
+            ),
         )
         connection.commit()
 
@@ -262,16 +277,18 @@ class ReplayStateTest:
 
         stats = prepare_target_state("warm", source, target)
 
-        assert stats.sqlite_database_count == 2
+        assert stats.sqlite_database_count == 5
         assert stats.selection_file_count == 1
         assert stats.image_file_count == 1
-        assert stats.validation_cache_path_updates == 1
+        assert stats.validation_cache_path_updates == 0
         assert (target / REPLAY_TARGET_MARKER_FILENAME).is_file()
         assert source_state_fingerprint(source) == fingerprint_before
         assert {
             path: path.stat().st_mtime_ns for path in source_mtimes
         } == source_mtimes
         assert (target / "123_456" / "archive.sqlite3").is_file()
+        assert (target / "123_456" / "archive_state.sqlite3").is_file()
+        assert (target / "123_456" / "archive_cache.sqlite3").is_file()
         assert (target / "123_456" / "post_version_overrides.json").is_file()
         assert not (target / "123_456" / "warnings.log").exists()
         assert not (target / "123_456" / "pdf").exists()
@@ -279,11 +296,11 @@ class ReplayStateTest:
         source_image = next((source / "images_unique").iterdir())
         target_image = target / "images_unique" / source_image.name
         assert target_image.read_bytes() == source_image.read_bytes()
-        with sqlite3.connect(target / "image_index.sqlite3") as connection:
+        with sqlite3.connect(target / IMAGE_CACHE_FILENAME) as connection:
             cached_path = connection.execute(
-                "SELECT canonical_path FROM image_validation_cache"
+                "SELECT relative_path FROM image_validation_cache"
             ).fetchone()[0]
-        assert cached_path == str(target_image.resolve())
+        assert cached_path == f"images_unique/{target_image.name}"
 
         validation = validate_replay_output(
             source,
@@ -380,6 +397,7 @@ class ReplayStateTest:
         [
             Path("123_456/archive.sqlite3"),
             Path("image_index.sqlite3"),
+            Path(IMAGE_CACHE_FILENAME),
             Path("images_unique") / "linked-image.png",
         ],
     )
@@ -826,6 +844,7 @@ class ReplayRunnerTest:
             source / "123_456" / "archive.sqlite3",
             source / "123_456" / "post_version_overrides.json",
             source / "image_index.sqlite3",
+            source / IMAGE_CACHE_FILENAME,
             next((source / "images_unique").iterdir()),
         ]
         source_states = {

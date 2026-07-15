@@ -13,9 +13,17 @@ from pathlib import Path
 from time import perf_counter
 from typing import Literal, cast
 
-from nga_tools.backup.image_store import IMAGE_INDEX_FILENAME
+from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
+from nga_tools.backup.image_store import (
+    IMAGE_CACHE_FILENAME,
+    IMAGE_INDEX_FILENAME,
+)
 from nga_tools.backup.post_version_selection import (
     POST_VERSION_SELECTIONS_FILENAME,
+)
+from nga_tools.backup.thread_stores import (
+    ARCHIVE_CACHE_DB_FILENAME,
+    ARCHIVE_STATE_DB_FILENAME,
 )
 from nga_tools.console import report_progress
 from nga_tools.core.atomic import (
@@ -27,7 +35,15 @@ from nga_tools.core.sqlite import SQLITE_BUSY_TIMEOUT_SECONDS
 
 InitialState = Literal["empty", "warm", "existing"]
 REPLAY_TARGET_MARKER_FILENAME = ".nga-replay-target.json"
-_SQLITE_BACKUP_FILENAME = "archive.sqlite3"
+_THREAD_SQLITE_BACKUP_FILENAMES = (
+    ARCHIVE_DB_FILENAME,
+    ARCHIVE_STATE_DB_FILENAME,
+    ARCHIVE_CACHE_DB_FILENAME,
+)
+_GLOBAL_SQLITE_BACKUP_FILENAMES = (
+    IMAGE_INDEX_FILENAME,
+    IMAGE_CACHE_FILENAME,
+)
 _REPLAY_TARGET_MARKER_KIND = "nga-tools-replay-target"
 _REPLAY_TARGET_MARKER_VERSION = 1
 _FICLONE = 0x40049409
@@ -208,7 +224,7 @@ def _iter_archive_directories(source_output: Path) -> list[Path]:
         (
             child
             for child in source_output.iterdir()
-            if child.is_dir() and (child / _SQLITE_BACKUP_FILENAME).is_file()
+            if child.is_dir() and (child / ARCHIVE_DB_FILENAME).is_file()
         ),
         key=lambda path: path.name,
     )
@@ -233,10 +249,13 @@ def _database_state(path: Path) -> _DatabaseState:
 
 
 def _source_database_states(source_output: Path) -> dict[str, _DatabaseState]:
-    database_paths = [source_output / IMAGE_INDEX_FILENAME]
+    database_paths = [
+        source_output / filename for filename in _GLOBAL_SQLITE_BACKUP_FILENAMES
+    ]
     database_paths.extend(
-        archive_dir / _SQLITE_BACKUP_FILENAME
+        archive_dir / filename
         for archive_dir in _iter_archive_directories(source_output)
+        for filename in _THREAD_SQLITE_BACKUP_FILENAMES
     )
     return {
         path.relative_to(source_output).as_posix(): _database_state(path)
@@ -257,18 +276,13 @@ def _iter_image_files(source_output: Path) -> list[Path]:
 
 def _iter_fingerprint_paths(source_output: Path) -> list[Path]:
     paths: list[Path] = []
-    image_index = source_output / IMAGE_INDEX_FILENAME
-    if image_index.is_file():
-        paths.append(image_index)
-    image_index_wal = Path(f"{image_index}-wal")
-    if image_index_wal.is_file() and image_index_wal.stat().st_size:
-        paths.append(image_index_wal)
+    for relative_path in sorted(_source_database_states(source_output)):
+        database_path = source_output / relative_path
+        paths.append(database_path)
+        wal_path = Path(f"{database_path}-wal")
+        if wal_path.is_file() and wal_path.stat().st_size:
+            paths.append(wal_path)
     for archive_dir in _iter_archive_directories(source_output):
-        archive = archive_dir / _SQLITE_BACKUP_FILENAME
-        paths.append(archive)
-        archive_wal = Path(f"{archive}-wal")
-        if archive_wal.is_file() and archive_wal.stat().st_size:
-            paths.append(archive_wal)
         selection = archive_dir / POST_VERSION_SELECTIONS_FILENAME
         if selection.is_file():
             paths.append(selection)
@@ -371,48 +385,6 @@ def _copy_preserving_file(source_path: Path, target_path: Path) -> bool:
     return False
 
 
-def _rewrite_validation_cache_paths(
-    image_index: Path,
-    source_output: Path,
-    target_output: Path,
-) -> int:
-    source = source_output.resolve()
-    target = target_output.resolve()
-    with closing(
-        sqlite3.connect(image_index, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
-    ) as connection:
-        try:
-            rows = connection.execute(
-                "SELECT canonical_path FROM image_validation_cache"
-            ).fetchall()
-        except sqlite3.OperationalError as error:
-            if "no such table" in str(error).lower():
-                return 0
-            raise
-        updates: list[tuple[str, str]] = []
-        for row in rows:
-            raw_path = row[0]
-            if not isinstance(raw_path, str):
-                continue
-            old_path = Path(raw_path)
-            try:
-                relative = old_path.relative_to(source)
-            except ValueError:
-                continue
-            updates.append((str(target / relative), raw_path))
-        if updates:
-            with connection:
-                connection.executemany(
-                    """
-                    UPDATE image_validation_cache
-                    SET canonical_path = ?
-                    WHERE canonical_path = ?
-                    """,
-                    updates,
-                )
-        return len(updates)
-
-
 def _prepare_warm(source_output: Path, target_output: Path) -> PreparationStats:
     started = perf_counter()
     source = source_output.resolve()
@@ -429,11 +401,15 @@ def _prepare_warm(source_output: Path, target_output: Path) -> PreparationStats:
     archive_dirs = _iter_archive_directories(source)
     for index, archive_dir in enumerate(archive_dirs, start=1):
         target_dir = target / archive_dir.name
-        _sqlite_online_backup(
-            archive_dir / _SQLITE_BACKUP_FILENAME,
-            target_dir / _SQLITE_BACKUP_FILENAME,
-        )
-        database_count += 1
+        for filename in _THREAD_SQLITE_BACKUP_FILENAMES:
+            source_database = archive_dir / filename
+            if not source_database.is_file():
+                continue
+            _sqlite_online_backup(
+                source_database,
+                target_dir / filename,
+            )
+            database_count += 1
         selection_path = archive_dir / POST_VERSION_SELECTIONS_FILENAME
         if selection_path.is_file():
             was_reflink = _copy_preserving_file(
@@ -450,17 +426,14 @@ def _prepare_warm(source_output: Path, target_output: Path) -> PreparationStats:
                 total=len(archive_dirs),
             )
 
-    source_image_index = source / IMAGE_INDEX_FILENAME
-    if not source_image_index.is_file():
-        raise ValueError(f"暖状态缺少图片索引：{source_image_index}")
-    target_image_index = target / IMAGE_INDEX_FILENAME
-    _sqlite_online_backup(source_image_index, target_image_index)
-    database_count += 1
-    rewritten_paths = _rewrite_validation_cache_paths(
-        target_image_index,
-        source,
-        target,
-    )
+    for filename in _GLOBAL_SQLITE_BACKUP_FILENAMES:
+        source_database = source / filename
+        if filename == IMAGE_INDEX_FILENAME and not source_database.is_file():
+            raise ValueError(f"暖状态缺少图片索引：{source_database}")
+        if not source_database.is_file():
+            continue
+        _sqlite_online_backup(source_database, target / filename)
+        database_count += 1
 
     image_files = _iter_image_files(source)
     image_bytes = 0
@@ -498,7 +471,7 @@ def _prepare_warm(source_output: Path, target_output: Path) -> PreparationStats:
         image_file_bytes=image_bytes,
         reflink_file_count=reflink_count,
         copied_file_count=copied_count,
-        validation_cache_path_updates=rewritten_paths,
+        validation_cache_path_updates=0,
         source_fingerprint_before=fingerprint_before,
         source_fingerprint_after=fingerprint_after,
     )

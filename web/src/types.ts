@@ -170,7 +170,14 @@ export interface ImageUsageRepliesResult {
   limit: number
 }
 
-export type DatabaseKind = 'forum_threads' | 'image_index' | 'archive'
+export type DatabaseKind =
+  | 'forum_threads'
+  | 'backup_state'
+  | 'image_index'
+  | 'image_cache'
+  | 'archive'
+  | 'archive_state'
+  | 'archive_cache'
 export type DatabaseStatus = 'ready' | 'invalid'
 export type TableKind = 'table' | 'view'
 export type SortDirection = 'asc' | 'desc'

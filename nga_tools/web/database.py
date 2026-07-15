@@ -10,11 +10,24 @@ from urllib.parse import quote
 
 from nga_tools.backup import image_store
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
+from nga_tools.backup.thread_stores import (
+    ARCHIVE_CACHE_DB_FILENAME,
+    ARCHIVE_STATE_DB_FILENAME,
+)
 from nga_tools.core.sqlite import configure_readonly_connection
+from nga_tools.forum.ankebak_state import BACKUP_STATE_DB_FILENAME
 from nga_tools.forum.thread_store import FORUM_THREAD_DB_FILENAME
 from nga_tools.web.data import parse_thread_dir_name
 
-DatabaseKind: TypeAlias = Literal["forum_threads", "image_index", "archive"]
+DatabaseKind: TypeAlias = Literal[
+    "forum_threads",
+    "backup_state",
+    "image_index",
+    "image_cache",
+    "archive",
+    "archive_state",
+    "archive_cache",
+]
 DatabaseStatus: TypeAlias = Literal["ready", "invalid"]
 TableKind: TypeAlias = Literal["table", "view"]
 SortDirection: TypeAlias = Literal["asc", "desc"]
@@ -22,8 +35,12 @@ DbCellKind: TypeAlias = Literal["null", "integer", "real", "text", "blob", "othe
 DbCellValue: TypeAlias = str | int | float | None
 
 _DATABASE_ID_FORUM_THREADS = "forum_threads"
+_DATABASE_ID_BACKUP_STATE = "backup_state"
 _DATABASE_ID_IMAGE_INDEX = "image_index"
+_DATABASE_ID_IMAGE_CACHE = "image_cache"
 _ARCHIVE_DATABASE_PREFIX = "archive:"
+_ARCHIVE_STATE_DATABASE_PREFIX = "archive_state:"
+_ARCHIVE_CACHE_DATABASE_PREFIX = "archive_cache:"
 _ROW_PREVIEW_TEXT_LIMIT = 240
 _ROW_PREVIEW_BLOB_BYTES = 64
 
@@ -189,73 +206,156 @@ def _database_summary_for_ref(output_dir: Path, ref: DatabaseRef) -> DatabaseSum
     }
 
 
-def _archive_ref(thread_dir: Path) -> DatabaseRef:
+def _thread_database_ref(
+    thread_dir: Path,
+    *,
+    database_kind: DatabaseKind,
+    database_prefix: str,
+    filename: str,
+) -> DatabaseRef:
     return DatabaseRef(
-        id=f"{_ARCHIVE_DATABASE_PREFIX}{thread_dir.name}",
-        kind="archive",
-        label=f"{thread_dir.name} / archive.sqlite3",
-        path=thread_dir / ARCHIVE_DB_FILENAME,
+        id=f"{database_prefix}{thread_dir.name}",
+        kind=database_kind,
+        label=f"{thread_dir.name} / {filename}",
+        path=thread_dir / filename,
     )
 
 
-def list_database_summaries(output_dir: Path) -> list[DatabaseSummary]:
-    refs: list[DatabaseRef] = []
-    forum_db_path = output_dir / FORUM_THREAD_DB_FILENAME
-    if forum_db_path.is_file():
-        refs.append(
-            DatabaseRef(
-                id=_DATABASE_ID_FORUM_THREADS,
-                kind="forum_threads",
-                label=FORUM_THREAD_DB_FILENAME,
-                path=forum_db_path,
-            )
-        )
+def _archive_refs(thread_dir: Path) -> tuple[DatabaseRef, ...]:
+    return (
+        _thread_database_ref(
+            thread_dir,
+            database_kind="archive",
+            database_prefix=_ARCHIVE_DATABASE_PREFIX,
+            filename=ARCHIVE_DB_FILENAME,
+        ),
+        _thread_database_ref(
+            thread_dir,
+            database_kind="archive_state",
+            database_prefix=_ARCHIVE_STATE_DATABASE_PREFIX,
+            filename=ARCHIVE_STATE_DB_FILENAME,
+        ),
+        _thread_database_ref(
+            thread_dir,
+            database_kind="archive_cache",
+            database_prefix=_ARCHIVE_CACHE_DATABASE_PREFIX,
+            filename=ARCHIVE_CACHE_DB_FILENAME,
+        ),
+    )
 
-    image_index_path = output_dir / image_store.IMAGE_INDEX_FILENAME
-    if image_index_path.is_file():
-        refs.append(
-            DatabaseRef(
-                id=_DATABASE_ID_IMAGE_INDEX,
-                kind="image_index",
-                label=image_store.IMAGE_INDEX_FILENAME,
-                path=image_index_path,
-            )
-        )
+
+def list_database_refs(output_dir: Path) -> list[DatabaseRef]:
+    refs: list[DatabaseRef] = []
+    global_refs = (
+        DatabaseRef(
+            id=_DATABASE_ID_FORUM_THREADS,
+            kind="forum_threads",
+            label=FORUM_THREAD_DB_FILENAME,
+            path=output_dir / FORUM_THREAD_DB_FILENAME,
+        ),
+        DatabaseRef(
+            id=_DATABASE_ID_BACKUP_STATE,
+            kind="backup_state",
+            label=BACKUP_STATE_DB_FILENAME,
+            path=output_dir / BACKUP_STATE_DB_FILENAME,
+        ),
+        DatabaseRef(
+            id=_DATABASE_ID_IMAGE_INDEX,
+            kind="image_index",
+            label=image_store.IMAGE_INDEX_FILENAME,
+            path=output_dir / image_store.IMAGE_INDEX_FILENAME,
+        ),
+        DatabaseRef(
+            id=_DATABASE_ID_IMAGE_CACHE,
+            kind="image_cache",
+            label=image_store.IMAGE_CACHE_FILENAME,
+            path=output_dir / image_store.IMAGE_CACHE_FILENAME,
+        ),
+    )
+    for ref in global_refs:
+        if ref.path.is_file():
+            refs.append(ref)
 
     if output_dir.is_dir():
         for thread_dir in sorted(output_dir.iterdir(), key=lambda item: item.name):
             if (
-                thread_dir.is_dir()
-                and parse_thread_dir_name(thread_dir.name) is not None
-                and (thread_dir / ARCHIVE_DB_FILENAME).is_file()
+                not thread_dir.is_dir()
+                or parse_thread_dir_name(thread_dir.name) is None
             ):
-                refs.append(_archive_ref(thread_dir))
+                continue
+            refs.extend(
+                ref for ref in _archive_refs(thread_dir) if ref.path.is_file()
+            )
+    return refs
 
-    return [_database_summary_for_ref(output_dir, ref) for ref in refs]
+
+def list_database_summaries(output_dir: Path) -> list[DatabaseSummary]:
+    return [
+        _database_summary_for_ref(output_dir, ref)
+        for ref in list_database_refs(output_dir)
+    ]
 
 
-def resolve_database(output_dir: Path, database_id: str) -> DatabaseRef:
+def _ref_for_database_id(output_dir: Path, database_id: str) -> DatabaseRef:
     if database_id == _DATABASE_ID_FORUM_THREADS:
-        ref = DatabaseRef(
+        return DatabaseRef(
             id=database_id,
             kind="forum_threads",
             label=FORUM_THREAD_DB_FILENAME,
             path=output_dir / FORUM_THREAD_DB_FILENAME,
         )
-    elif database_id == _DATABASE_ID_IMAGE_INDEX:
-        ref = DatabaseRef(
+    if database_id == _DATABASE_ID_BACKUP_STATE:
+        return DatabaseRef(
+            id=database_id,
+            kind="backup_state",
+            label=BACKUP_STATE_DB_FILENAME,
+            path=output_dir / BACKUP_STATE_DB_FILENAME,
+        )
+    if database_id == _DATABASE_ID_IMAGE_INDEX:
+        return DatabaseRef(
             id=database_id,
             kind="image_index",
             label=image_store.IMAGE_INDEX_FILENAME,
             path=output_dir / image_store.IMAGE_INDEX_FILENAME,
         )
-    elif database_id.startswith(_ARCHIVE_DATABASE_PREFIX):
-        thread_dir_name = database_id.removeprefix(_ARCHIVE_DATABASE_PREFIX)
+    if database_id == _DATABASE_ID_IMAGE_CACHE:
+        return DatabaseRef(
+            id=database_id,
+            kind="image_cache",
+            label=image_store.IMAGE_CACHE_FILENAME,
+            path=output_dir / image_store.IMAGE_CACHE_FILENAME,
+        )
+
+    thread_database_specs: tuple[tuple[str, DatabaseKind, str], ...] = (
+        (_ARCHIVE_DATABASE_PREFIX, "archive", ARCHIVE_DB_FILENAME),
+        (
+            _ARCHIVE_STATE_DATABASE_PREFIX,
+            "archive_state",
+            ARCHIVE_STATE_DB_FILENAME,
+        ),
+        (
+            _ARCHIVE_CACHE_DATABASE_PREFIX,
+            "archive_cache",
+            ARCHIVE_CACHE_DB_FILENAME,
+        ),
+    )
+    for prefix, kind, filename in thread_database_specs:
+        if not database_id.startswith(prefix):
+            continue
+        thread_dir_name = database_id.removeprefix(prefix)
         if parse_thread_dir_name(thread_dir_name) is None:
-            raise DatabaseNotFoundError("未知数据库。")
-        ref = _archive_ref(output_dir / thread_dir_name)
-    else:
-        raise DatabaseNotFoundError("未知数据库。")
+            break
+        return _thread_database_ref(
+            output_dir / thread_dir_name,
+            database_kind=kind,
+            database_prefix=prefix,
+            filename=filename,
+        )
+    raise DatabaseNotFoundError("未知数据库。")
+
+
+def resolve_database(output_dir: Path, database_id: str) -> DatabaseRef:
+    ref = _ref_for_database_id(output_dir, database_id)
 
     output_root = output_dir.resolve()
     resolved_path = ref.path.resolve()
