@@ -31,6 +31,11 @@ def _normalized_src(value: str) -> str:
     return image_store.normalize_nga_image_url(value.strip())
 
 
+def valid_nga_image_src(value: str) -> Optional[str]:
+    normalized_src = _normalized_src(value)
+    return normalized_src if utils.NGA_img_link_verify(normalized_src) else None
+
+
 def _is_windows_drive_path(value: str) -> bool:
     return len(value) >= 2 and value[1] == ":" and value[0].isalpha()
 

@@ -85,7 +85,7 @@ def test_unchanged_records_reuse_cached_references_without_parsing(
     assert parser_mock.call_count == 1
 
 
-def test_attachment_change_invalidates_cache_even_when_content_is_same(
+def test_attachment_change_reuses_cache_when_content_is_same(
     tmp_path: Path,
 ) -> None:
     store = ThreadArchiveStore(tmp_path / "thread")
@@ -117,12 +117,14 @@ def test_attachment_change_invalidates_cache_even_when_content_is_same(
         FloorLabels.plain(),
     )
 
-    assert image_reference_cache_key(first_record) != image_reference_cache_key(
+    assert image_reference_cache_key(first_record) == image_reference_cache_key(
         second_record
     )
-    assert first.tasks == [{"url": first_url}]
-    assert second.tasks == [{"url": second_url}]
-    assert second.cache_miss_count == 1
+    assert first.tasks == []
+    assert first.cache_miss_count == 1
+    assert second.tasks == []
+    assert second.cache_hit_count == 1
+    assert second.cache_miss_count == 0
 
 
 def test_cached_invalid_reference_reemits_same_warning(tmp_path: Path) -> None:

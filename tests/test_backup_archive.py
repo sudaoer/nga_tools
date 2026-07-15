@@ -322,7 +322,7 @@ class ImageReferenceCollectionTest:
         assert tasks == [{"url": lazy_url}]
         assert "第1楼的第3张图片链接无效" in output.getvalue()
 
-    def test_attachment_metadata_repairs_relative_image_during_temporary_render(self) -> None:
+    def test_attachment_metadata_does_not_repair_relative_image(self) -> None:
         page_data = {
             "result": [
                 {
@@ -341,10 +341,7 @@ class ImageReferenceCollectionTest:
 
         html = build_post_htmls({1: page_data})[0]["html"]
 
-        assert (
-            'src="https://img.nga.178.com/attachments/'
-            'mon_202506/06/example.png"'
-        ) in html
+        assert html == "[img]./mon_202506/06/example.png[/img]"
 
 
 class MissingFloorTest:
@@ -840,7 +837,41 @@ class BackupRawArchiveTest:
             in timing_log.path.read_text(encoding="utf-8")
         )
 
-    @pytest.mark.parametrize("changed_input", ["attachments", "page_count", "vrows"])
+    def test_attachment_change_persists_without_reprocessing_images(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        full_processing_calls: list[str] = []
+        parsed_lous: list[list[int]] = []
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+            parsed_lous=parsed_lous,
+        )
+        client.posts[0]["attches"] = [
+            {
+                "type": "img",
+                "attachurl": "mon_202607/11/new.png",
+            }
+        ]
+
+        _run_backup(
+            thread_dir,
+            client,
+            full_processing_calls=full_processing_calls,
+            parsed_lous=parsed_lous,
+        )
+
+        row = ThreadArchiveStore(thread_dir).read_effective_post_rows({1})[0]
+        assert row.image_attachments_json is not None
+        assert "mon_202607/11/new.png" in row.image_attachments_json
+        assert full_processing_calls == ["full"]
+        assert parsed_lous == [[1, 2]]
+
+    @pytest.mark.parametrize("changed_input", ["page_count", "vrows"])
     def test_remote_derived_input_changes_invalidate_fast_path(
         self,
         tmp_path: Path,
@@ -857,14 +888,7 @@ class BackupRawArchiveTest:
             parsed_lous=parsed_lous,
         )
 
-        if changed_input == "attachments":
-            client.posts[0]["attches"] = [
-                {
-                    "type": "img",
-                    "attachurl": "mon_202607/11/new.png",
-                }
-            ]
-        elif changed_input == "page_count":
+        if changed_input == "page_count":
             client.total_page = 2
         else:
             client.vrows = 4
@@ -877,10 +901,7 @@ class BackupRawArchiveTest:
         )
 
         assert full_processing_calls == ["full"]
-        if changed_input == "attachments":
-            assert parsed_lous == [[1, 2], [1]]
-        else:
-            assert parsed_lous == [[1, 2]]
+        assert parsed_lous == [[1, 2]]
 
     @pytest.mark.parametrize(
         "changed_input",

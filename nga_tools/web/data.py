@@ -14,10 +14,7 @@ from bs4 import BeautifulSoup, Tag
 
 from nga_tools import utils
 from nga_tools.backup import image_store
-from nga_tools.backup.archive_posts import (
-    image_attachments_from_json,
-    postdate_from_json,
-)
+from nga_tools.backup.archive_posts import postdate_from_json
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
 from nga_tools.backup.archive_store import ArchivePostVersionRow
 from nga_tools.backup.floor_map import load_floor_labels_from_archive
@@ -26,10 +23,7 @@ from nga_tools.backup.floor_models import (
     ORIGINAL_POSTS_PER_PAGE,
     FloorLabels,
 )
-from nga_tools.backup.post_data import (
-    attachment_url_from_value,
-    make_image_src_resolver,
-)
+from nga_tools.backup.html_images import valid_nga_image_src
 from nga_tools.backup.post_overlay import (
     PostOverlay,
     make_post_overlay,
@@ -764,45 +758,23 @@ def _render_overlay_for_web(
     )
 
 
-def _attachment_urls(
-    content: str,
-    image_attachments_json: Optional[str],
-) -> set[str]:
+def _content_image_urls(content: str) -> set[str]:
     urls: set[str] = set()
     for match in _IMG_BBCODE_RE.finditer(content):
-        url = attachment_url_from_value(match.group(1))
+        url = valid_nga_image_src(match.group(1))
         if url is not None:
             urls.add(url)
-
-    urls.update(
-        attachment["url"]
-        for attachment in image_attachments_from_json(image_attachments_json)
-    )
     return urls
 
 
-def _unresolved_image_src(_image_src: str) -> str | None:
-    return None
-
-
 def _image_src_resolver(
-    image_attachments_json: Optional[str],
     output_dir: Path,
     image_mappings: dict[str, str],
 ) -> ImageSrcResolver:
-    attachment_resolver: ImageSrcResolver
-    attachments = image_attachments_from_json(image_attachments_json)
-    if attachments:
-        attachment_resolver = make_image_src_resolver(attachments)
-    else:
-        attachment_resolver = _unresolved_image_src
-
     def resolve_image_src(image_src: str) -> str | None:
-        resolved_src = attachment_resolver(image_src)
-        candidate_src = image_src.strip() if resolved_src is None else resolved_src
-        normalized_src = image_store.normalize_nga_image_url(candidate_src)
-        if not utils.NGA_img_link_verify(normalized_src):
-            return resolved_src
+        normalized_src = valid_nga_image_src(image_src)
+        if normalized_src is None:
+            return None
 
         output_url = _output_image_url(output_dir, image_mappings, normalized_src)
         return normalized_src if output_url is None else output_url
@@ -870,7 +842,6 @@ def _post_item_from_row(
         html = render_web_bbcode(
             row.content,
             image_src_resolver=_image_src_resolver(
-                row.image_attachments_json,
                 output_dir,
                 image_mappings,
             ),
@@ -1007,7 +978,7 @@ def read_posts(
     for row in rows:
         if row.lou in overlays:
             continue
-        image_urls.update(_attachment_urls(row.content, row.image_attachments_json))
+        image_urls.update(_content_image_urls(row.content))
     image_mappings = _read_image_mappings_for_urls(output_dir, image_urls)
 
     floor_labels = _load_floor_labels(archive_store, aid)
@@ -1302,7 +1273,7 @@ def read_post_version_preview(
     if row is None:
         raise ValueError("未知帖子正文版本。")
 
-    image_urls = _attachment_urls(row.content, row.image_attachments_json)
+    image_urls = _content_image_urls(row.content)
     image_mappings = _read_image_mappings_for_urls(output_dir, image_urls)
     return {
         "item": _post_item_from_row(

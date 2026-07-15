@@ -8,11 +8,8 @@ from nga_tools.backup.floor_models import (
     FloorLabels,
 )
 from nga_tools.backup.models import PostData, PostHtml, PostRecord
-from nga_tools.backup.post_data import (
-    make_image_src_resolver,
-    page_posts,
-    post_source_hash,
-)
+from nga_tools.backup.html_images import valid_nga_image_src
+from nga_tools.backup.post_data import page_posts, post_source_hash
 from nga_tools.bbcode_convert import bbcode_to_html
 from nga_tools.console import WarningCategory, report_warning
 from nga_tools.core.hashing import hash_object
@@ -22,7 +19,7 @@ from nga_tools.ngaclient.client import PageData
 def post_html_from_content(post: PostData) -> str:
     return bbcode_to_html(
         post["content"],
-        image_src_resolver=make_image_src_resolver(post["image_attachments"]),
+        image_src_resolver=valid_nga_image_src,
     )
 
 

@@ -8,6 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.image_reference_cache import (
+    IMAGE_REFERENCE_EXTRACTOR_VERSION,
+)
 from nga_tools.backup.image_store import image_mappings_by_url
 from nga_tools.backup.post_version_selection import selections_fingerprint
 from nga_tools.forum.ankebak_state import AnkebakStateStore
@@ -124,12 +127,13 @@ def _make_legacy_thread(output_root: Path, name: str = "123_456") -> Path:
         connection.execute(
             """
             INSERT INTO backup_image_reference_state VALUES
-            (1, 1, ?, ?, ?, 1, ?)
+            (1, 1, ?, ?, ?, ?, ?)
             """,
             (
                 archive_revision,
                 overlays_hash,
                 selections_hash,
+                IMAGE_REFERENCE_EXTRACTOR_VERSION,
                 "2026-07-15T00:00:00+00:00",
             ),
         )
@@ -155,9 +159,10 @@ def _make_legacy_thread(output_root: Path, name: str = "123_456") -> Path:
         connection.execute(
             """
             INSERT INTO post_image_reference_cache VALUES
-            ('cache', 'source', 1, '[]', ?, ?)
+            ('cache', 'source', ?, '[]', ?, ?)
             """,
             (
+                IMAGE_REFERENCE_EXTRACTOR_VERSION,
                 "2026-07-15T00:00:00+00:00",
                 "2026-07-15T00:00:00+00:00",
             ),

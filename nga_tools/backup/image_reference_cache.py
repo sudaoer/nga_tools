@@ -29,7 +29,7 @@ from nga_tools.core.hashing import hash_object, hash_text
 from nga_tools.timing import record_timing_metric, time_section
 
 
-IMAGE_REFERENCE_EXTRACTOR_VERSION = 1
+IMAGE_REFERENCE_EXTRACTOR_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,6 @@ def image_reference_cache_key(record: PostRecord) -> str:
     post = record["post"]
     if post is not None:
         identity["render_kind"] = "post"
-        identity["image_attachments"] = post["image_attachments"]
     else:
         rendered_html = record["html"]
         if rendered_html is None:

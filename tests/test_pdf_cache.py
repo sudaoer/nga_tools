@@ -487,6 +487,44 @@ class PdfImageSourceTest:
         assert "before edit" in html_content_by_lou[1]
         assert "after edit" not in html_content_by_lou[1]
 
+    def test_read_pdf_html_does_not_recover_attachment_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir) / "output"
+            thread_dir = output_dir / "101_all"
+            relative_src = "./mon_202607/11/attachment.png"
+            ThreadArchiveStore(thread_dir).upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {
+                            "lou": 1,
+                            "pid": 1001,
+                            "content": f"[img]{relative_src}[/img]",
+                            "attches": [
+                                {
+                                    "type": "img",
+                                    "attachurl": "mon_202607/11/attachment.png",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                observed_at="2026-07-11T00:00:00+00:00",
+            )
+
+            with patch(
+                "nga_tools.core.paths.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                html_content_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
+                    101,
+                    None,
+                )
+
+        assert f"[img]{relative_src}[/img]" in html_content_by_lou[1]
+        assert "<img" not in html_content_by_lou[1]
+
     def test_read_pdf_html_converts_avif_image_for_pdf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir) / "output"

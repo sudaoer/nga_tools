@@ -30,6 +30,7 @@ from nga_tools.web import database as web_database
 from nga_tools.backup.post_version_selection import POST_VERSION_SELECTIONS_FILENAME
 from nga_tools.web.data import (
     ThreadConfig,
+    read_post_version_preview,
     read_posts,
     safe_output_file,
     scan_thread_summaries,
@@ -413,6 +414,58 @@ class WebViewerDataTest:
         assert 'src="/api/files/images_unique/abc.png"' in result["items"][0]["html"]
         assert result["slots"][2]["emptyReason"] == "filtered"
         assert legacy_floor_map.read_text(encoding="utf-8") == "{bad"
+
+    def test_current_and_historical_posts_do_not_recover_attachment_urls(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        relative_src = "./mon_202607/08/attachment.png"
+        image_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/08/attachment.png"
+        )
+        old_post = _post(1, f"old [img]{relative_src}[/img]")
+        old_post["attches"] = [
+            {"type": "img", "attachurl": "mon_202607/08/attachment.png"}
+        ]
+        new_post = _post(1, f"new [img]{relative_src}[/img]")
+        new_post["attches"] = [
+            {"type": "img", "attachurl": "mon_202607/08/attachment.png"}
+        ]
+        _write_archive(thread_dir, [old_post])
+        _write_archive(thread_dir, [new_post])
+        image_path = output_dir / "images_unique" / "attachment.png"
+        image_path.parent.mkdir(parents=True)
+        Image.new("RGB", (2, 2), color="white").save(image_path)
+        _write_image_mapping(
+            output_dir,
+            image_url,
+            "images_unique/attachment.png",
+        )
+        with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
+            old_version_id = connection.execute(
+                "SELECT id FROM post_versions WHERE content LIKE 'old %'"
+            ).fetchone()[0]
+
+        current_html = read_posts(
+            output_dir,
+            101,
+            "201",
+            page=1,
+        )["items"][0]["html"]
+        historical_html = read_post_version_preview(
+            output_dir,
+            101,
+            "201",
+            old_version_id,
+        )["item"]["html"]
+
+        assert f"[img]{relative_src}[/img]" in current_html
+        assert f"[img]{relative_src}[/img]" in historical_html
+        assert "<img" not in current_html
+        assert "<img" not in historical_html
 
     def test_reads_posts_sanitizes_untrusted_html(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"

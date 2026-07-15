@@ -1712,16 +1712,16 @@ class ThreadArchiveStoreTest:
         assert not repeated.effective_processing_inputs_changed
         assert repeated.effective_changed_lous == frozenset()
         assert repeated.effective_added_lous == frozenset()
-        assert changed_attachments.effective_processing_inputs_changed
-        assert changed_attachments.effective_changed_lous == frozenset({1})
+        assert not changed_attachments.effective_processing_inputs_changed
+        assert changed_attachments.effective_changed_lous == frozenset()
         assert changed_attachments.effective_added_lous == frozenset()
         assert changed_author.effective_processing_inputs_changed
         assert changed_author.effective_changed_lous == frozenset({1})
         assert changed_author.effective_added_lous == frozenset()
         assert after_first.archive_revision == 1
         assert after_repeated.archive_revision == 1
-        assert after_attachments.archive_revision == 2
-        assert after_author.archive_revision == 3
+        assert after_attachments.archive_revision == 1
+        assert after_author.archive_revision == 2
 
     def test_historical_version_becoming_latest_bumps_archive_revision(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

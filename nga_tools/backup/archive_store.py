@@ -2805,25 +2805,24 @@ class ThreadArchiveStore:
         self,
         connection: sqlite3.Connection,
         lous: set[int],
-    ) -> dict[int, tuple[int, int, str, Optional[int], Optional[str]]]:
+    ) -> dict[int, tuple[int, int, str, Optional[int]]]:
         inputs_by_lou: dict[
             int,
-            tuple[int, int, str, Optional[int], Optional[str]],
+            tuple[int, int, str, Optional[int]],
         ] = {}
         sorted_lous = sorted(lous)
         for start in range(0, len(sorted_lous), 900):
             chunk = sorted_lous[start : start + 900]
             placeholders = ",".join("?" for _ in chunk)
             rows = cast(
-                list[tuple[object, object, object, object, object]],
+                list[tuple[object, object, object, object]],
                 connection.execute(
                     f"""
                     SELECT
                         latest.lou,
                         latest.pid,
                         latest.source_hash,
-                        metadata.author_uid,
-                        metadata.image_attachments_json
+                        metadata.author_uid
                     FROM (
                         SELECT
                             lou,
@@ -2844,16 +2843,12 @@ class ThreadArchiveStore:
                     chunk,
                 ).fetchall(),
             )
-            for lou, pid, source_hash, author_uid, image_attachments_json in rows:
+            for lou, pid, source_hash, author_uid in rows:
                 if (
                     type(lou) is not int
                     or type(pid) is not int
                     or not isinstance(source_hash, str)
                     or (author_uid is not None and type(author_uid) is not int)
-                    or (
-                        image_attachments_json is not None
-                        and not isinstance(image_attachments_json, str)
-                    )
                 ):
                     raise ValueError(f"archive有效处理输入无效：{rows!r}")
                 inputs_by_lou[lou] = (
@@ -2861,7 +2856,6 @@ class ThreadArchiveStore:
                     pid,
                     source_hash,
                     author_uid,
-                    image_attachments_json,
                 )
         return inputs_by_lou
 
@@ -2923,7 +2917,6 @@ class ThreadArchiveStore:
                 item.post["pid"],
                 item.source_hash,
                 item.metadata["author_uid"],
-                item.metadata["image_attachments_json"],
             )
             for item in prepared_page.posts
         }
