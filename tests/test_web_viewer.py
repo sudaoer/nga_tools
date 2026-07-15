@@ -1087,7 +1087,7 @@ class WebDatabaseViewerTest:
         assert by_id["archive_cache:101_201"]["relativePath"] == (
             f"101_201/{ARCHIVE_CACHE_DB_FILENAME}"
         )
-        assert by_id["archive:101_201"]["tableCount"] == 10
+        assert by_id["archive:101_201"]["tableCount"] == 9
 
         state_schema = client.get(
             "/api/databases/archive_state%3A101_201/schema"
@@ -1158,8 +1158,8 @@ class WebDatabaseViewerTest:
         after_items = {
             item["id"]: item for item in after_response.json()["items"]
         }
-        assert before_items["archive:101_201"]["tableCount"] == 9
-        assert after_items["archive:101_201"]["tableCount"] == 10
+        assert before_items["archive:101_201"]["tableCount"] == 8
+        assert after_items["archive:101_201"]["tableCount"] == 9
 
     def test_database_schema_and_rows_support_search_sort_and_detail(
         self,

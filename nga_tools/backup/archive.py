@@ -1267,7 +1267,6 @@ def _record_archive_upsert_metrics(result: ArchivePagesUpsertResult) -> None:
     record_timing_metric("归档批量写入页数", result.pages_processed)
     record_timing_metric("归档新增页快照数", result.page_snapshots_inserted)
     record_timing_metric("归档新增帖子版本数", result.post_versions_inserted)
-    record_timing_metric("归档写入楼层观测数", result.post_observations)
     record_timing_metric("归档有效变更页数", result.effective_changed_pages)
     record_timing_metric(
         "归档有效变更楼层数",

@@ -395,14 +395,10 @@ class ThreadArchiveStoreTest:
                 metadata_seen_counts = connection.execute(
                     "SELECT seen_count FROM post_latest_metadata ORDER BY lou"
                 ).fetchall()
-                observation_count = connection.execute(
-                    "SELECT COUNT(*) FROM post_observations"
-                ).fetchone()
 
         assert first.pages_processed == 2
         assert first.page_snapshots_inserted == 2
         assert first.post_versions_inserted == 2
-        assert first.post_observations == 2
         assert first.effective_changed_pages == 2
         assert first.effective_changed_lous == frozenset({1, 2})
         assert first.effective_added_lous == frozenset({1, 2})
@@ -417,7 +413,6 @@ class ThreadArchiveStoreTest:
         assert page_seen_counts == [(2,), (2,)]
         assert post_seen_counts == [(2,), (2,)]
         assert metadata_seen_counts == [(2,), (2,)]
-        assert observation_count == (2,)
 
     def test_page_change_preflight_is_read_only_and_matches_effective_inputs(
         self,
@@ -968,30 +963,6 @@ class ThreadArchiveStoreTest:
                             1,
                         ),
                     )
-                connection.execute(
-                    """
-                    CREATE TABLE post_observations (
-                        page_snapshot_id INTEGER NOT NULL,
-                        position INTEGER NOT NULL,
-                        pid INTEGER NOT NULL,
-                        lou INTEGER NOT NULL,
-                        post_version_id INTEGER NOT NULL,
-                        PRIMARY KEY(page_snapshot_id, position)
-                    )
-                    """
-                )
-                connection.execute(
-                    """
-                    INSERT INTO post_observations (
-                        page_snapshot_id,
-                        position,
-                        pid,
-                        lou,
-                        post_version_id
-                    )
-                    VALUES (1, 0, 1001, 1, 1), (2, 0, 1001, 1, 2)
-                    """
-                )
                 connection.commit()
 
             store.ensure_schema()
@@ -1008,10 +979,10 @@ class ThreadArchiveStoreTest:
                     FROM post_versions
                     """
                 ).fetchone()
-                observation_row = connection.execute(
+                observation_table = connection.execute(
                     """
-                    SELECT COUNT(*), COUNT(DISTINCT post_version_id)
-                    FROM post_observations
+                    SELECT 1 FROM sqlite_schema
+                    WHERE type = 'table' AND name = 'post_observations'
                     """
                 ).fetchone()
                 metadata_row = connection.execute(
@@ -1029,7 +1000,7 @@ class ThreadArchiveStoreTest:
         assert "post_hash" not in columns
         assert "post_json" not in columns
         assert version_row == (1, hash_text("same body"), 2)
-        assert observation_row == (2, 1)
+        assert observation_table is None
         assert metadata_row == ("author", 2001, "[]", 2)
 
     def test_read_latest_post_record_summaries_skip_post_json(self) -> None:

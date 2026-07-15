@@ -163,7 +163,6 @@ _LATEST_AUTHOR_POST_REFS_QUERY = """
 class ArchivePageUpsertResult:
     page_snapshot_inserted: bool
     post_versions_inserted: int
-    post_observations: int
     effective_processing_inputs_changed: bool
     effective_changed_lous: frozenset[int]
     effective_added_lous: frozenset[int]
@@ -174,7 +173,6 @@ class ArchivePagesUpsertResult:
     pages_processed: int
     page_snapshots_inserted: int
     post_versions_inserted: int
-    post_observations: int
     effective_processing_inputs_changed: bool
     effective_changed_pages: int
     effective_changed_lous: frozenset[int]
@@ -199,7 +197,6 @@ class ArchiveMigrationResult:
     page_files: int
     page_snapshots_inserted: int
     post_versions_inserted: int
-    post_observations: int
 
 
 @dataclass(frozen=True)
@@ -504,26 +501,6 @@ class ThreadArchiveStore:
             """
         )
 
-    def _create_post_observations_table(
-        self,
-        connection: sqlite3.Connection,
-        table_name: str = "post_observations",
-    ) -> None:
-        connection.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {table_name} (
-                page_snapshot_id INTEGER NOT NULL,
-                position INTEGER NOT NULL,
-                pid INTEGER NOT NULL,
-                lou INTEGER NOT NULL,
-                post_version_id INTEGER NOT NULL,
-                PRIMARY KEY(page_snapshot_id, position),
-                FOREIGN KEY(page_snapshot_id) REFERENCES page_snapshots(id),
-                FOREIGN KEY(post_version_id) REFERENCES post_versions(id)
-            )
-            """
-        )
-
     def _create_floor_map_tables(self, connection: sqlite3.Connection) -> None:
         connection.execute(
             """
@@ -701,7 +678,6 @@ class ThreadArchiveStore:
             else:
                 self._ensure_post_version_word_count_columns(connection)
         self._create_post_latest_metadata_table(connection)
-        self._create_post_observations_table(connection)
         self._create_floor_map_tables(connection)
         self._ensure_post_overlays_table(connection)
         self._create_archive_change_state_table(connection)
@@ -712,12 +688,6 @@ class ThreadArchiveStore:
             """
         )
         connection.execute(f"DROP INDEX IF EXISTS {_LEGACY_LATEST_POST_INDEX}")
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_post_observations_version
-            ON post_observations(post_version_id)
-            """
-        )
         connection.commit()
 
     @staticmethod
@@ -2293,44 +2263,6 @@ class ThreadArchiveStore:
             )
         return old_rows
 
-    def _read_old_post_observation_rows(
-        self,
-        connection: sqlite3.Connection,
-    ) -> list[tuple[int, int, int, int, int]]:
-        if not _table_exists(connection, "post_observations"):
-            return []
-        columns = _table_columns(connection, "post_observations")
-        required_columns = {
-            "page_snapshot_id",
-            "position",
-            "pid",
-            "lou",
-            "post_version_id",
-        }
-        if not required_columns <= columns:
-            return []
-        rows = connection.execute(
-            """
-            SELECT page_snapshot_id, position, pid, lou, post_version_id
-            FROM post_observations
-            ORDER BY page_snapshot_id, position
-            """
-        ).fetchall()
-        observation_rows: list[tuple[int, int, int, int, int]] = []
-        for row in rows:
-            page_snapshot_id, position, pid, lou, post_version_id = row
-            if (
-                type(page_snapshot_id) is int
-                and type(position) is int
-                and type(pid) is int
-                and type(lou) is int
-                and type(post_version_id) is int
-            ):
-                observation_rows.append(
-                    (page_snapshot_id, position, pid, lou, post_version_id)
-                )
-        return observation_rows
-
     def _merge_old_post_version_row(
         self,
         merged_versions: dict[tuple[int, int, str], _MergedPostVersion],
@@ -2423,7 +2355,6 @@ class ThreadArchiveStore:
         columns: set[str],
     ) -> None:
         old_rows = self._read_old_post_version_rows(connection, columns)
-        old_observation_rows = self._read_old_post_observation_rows(connection)
 
         merged_versions: dict[tuple[int, int, str], _MergedPostVersion] = {}
         metadata_by_post: dict[tuple[int, int], _LatestPostMetadata] = {}
@@ -2455,7 +2386,6 @@ class ThreadArchiveStore:
         self._create_post_versions_table(connection)
         self._create_post_latest_metadata_table(connection)
 
-        old_version_id_to_new_id: dict[int, int] = {}
         for merged in sorted(
             merged_versions.values(),
             key=lambda item: min(item.old_ids),
@@ -2493,8 +2423,6 @@ class ThreadArchiveStore:
             new_id = cursor.lastrowid
             if type(new_id) is not int:
                 raise RuntimeError("迁移post_versions后无法读取新version id。")
-            for old_id in merged.old_ids:
-                old_version_id_to_new_id[old_id] = new_id
 
         for metadata in metadata_by_post.values():
             connection.execute(
@@ -2525,25 +2453,6 @@ class ThreadArchiveStore:
                 ),
             )
 
-        self._create_post_observations_table(connection)
-        for page_snapshot_id, position, pid, lou, old_post_version_id in old_observation_rows:
-            new_post_version_id = old_version_id_to_new_id.get(old_post_version_id)
-            if new_post_version_id is None:
-                continue
-            connection.execute(
-                """
-                INSERT OR REPLACE INTO post_observations (
-                    page_snapshot_id,
-                    position,
-                    pid,
-                    lou,
-                    post_version_id
-                )
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (page_snapshot_id, position, pid, lou, new_post_version_id),
-            )
-
     def _page_snapshot_id(
         self,
         connection: sqlite3.Connection,
@@ -2569,7 +2478,7 @@ class ThreadArchiveStore:
         self,
         connection: sqlite3.Connection,
         page: _PreparedArchivePage,
-    ) -> tuple[int, bool]:
+    ) -> bool:
         inserted = self._page_snapshot_id(
             connection,
             page.page_number,
@@ -2623,14 +2532,7 @@ class ThreadArchiveStore:
                 seen_increment,
             ),
         )
-        snapshot_id = self._page_snapshot_id(
-            connection,
-            page.page_number,
-            page.response_hash,
-        )
-        if snapshot_id is None:
-            raise RuntimeError("写入page_snapshots后无法读取snapshot id。")
-        return snapshot_id, inserted
+        return inserted
 
     def _post_version_id(
         self,
@@ -2939,7 +2841,6 @@ class ThreadArchiveStore:
                 pages_processed=0,
                 page_snapshots_inserted=0,
                 post_versions_inserted=0,
-                post_observations=0,
                 effective_processing_inputs_changed=False,
                 effective_changed_pages=0,
                 effective_changed_lous=frozenset(),
@@ -2957,7 +2858,6 @@ class ThreadArchiveStore:
         }
         page_snapshots_inserted = 0
         post_versions_inserted = 0
-        post_observations = 0
         changed_lous: set[int] = set()
 
         with closing(self._connect_write()) as connection:
@@ -2967,19 +2867,12 @@ class ThreadArchiveStore:
                     affected_lous,
                 )
                 for page in prepared_pages:
-                    snapshot_id, snapshot_inserted = self._upsert_page_snapshot(
-                        connection,
-                        page,
-                    )
+                    snapshot_inserted = self._upsert_page_snapshot(connection, page)
                     if snapshot_inserted:
                         page_snapshots_inserted += 1
-                    connection.execute(
-                        "DELETE FROM post_observations WHERE page_snapshot_id = ?",
-                        (snapshot_id,),
-                    )
-                    for position, prepared_post in enumerate(page.posts):
+                    for prepared_post in page.posts:
                         post = prepared_post.post
-                        version_id, version_inserted = self._upsert_post_version(
+                        _version_id, version_inserted = self._upsert_post_version(
                             connection,
                             post,
                             page.observed_at,
@@ -2997,26 +2890,6 @@ class ThreadArchiveStore:
                         )
                         if version_inserted:
                             post_versions_inserted += 1
-                        connection.execute(
-                            """
-                            INSERT INTO post_observations (
-                                page_snapshot_id,
-                                position,
-                                pid,
-                                lou,
-                                post_version_id
-                            )
-                            VALUES (?, ?, ?, ?, ?)
-                            """,
-                            (
-                                snapshot_id,
-                                position,
-                                post["pid"],
-                                post["lou"],
-                                version_id,
-                            ),
-                        )
-                        post_observations += 1
 
                 inputs_after = self._read_effective_processing_inputs(
                     connection,
@@ -3034,7 +2907,6 @@ class ThreadArchiveStore:
             pages_processed=len(prepared_pages),
             page_snapshots_inserted=page_snapshots_inserted,
             post_versions_inserted=post_versions_inserted,
-            post_observations=post_observations,
             effective_processing_inputs_changed=bool(changed_lous),
             effective_changed_pages=sum(
                 bool(page_lous & changed_lous)
@@ -3063,7 +2935,6 @@ class ThreadArchiveStore:
         return ArchivePageUpsertResult(
             page_snapshot_inserted=result.page_snapshots_inserted == 1,
             post_versions_inserted=result.post_versions_inserted,
-            post_observations=result.post_observations,
             effective_processing_inputs_changed=(
                 result.effective_processing_inputs_changed
             ),
@@ -3689,7 +3560,6 @@ class ThreadArchiveStore:
 
         page_snapshots_inserted = 0
         post_versions_inserted = 0
-        post_observations = 0
         for path in page_paths:
             page_data = cast(PageData, _read_json_object(path))
             result = self.upsert_page(
@@ -3701,12 +3571,10 @@ class ThreadArchiveStore:
             if result.page_snapshot_inserted:
                 page_snapshots_inserted += 1
             post_versions_inserted += result.post_versions_inserted
-            post_observations += result.post_observations
 
         self.refresh_stored_word_counts()
         return ArchiveMigrationResult(
             page_files=len(page_paths),
             page_snapshots_inserted=page_snapshots_inserted,
             post_versions_inserted=post_versions_inserted,
-            post_observations=post_observations,
         )

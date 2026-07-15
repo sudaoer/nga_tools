@@ -373,7 +373,6 @@ class ReplayCorpusTest:
         output_dir, thread_config, _image_path = _build_source(tmp_path)
         archive_path = output_dir / "123_456" / "archive.sqlite3"
         with sqlite3.connect(archive_path) as connection:
-            connection.execute("DROP TABLE post_observations")
             connection.execute("DROP TABLE page_snapshots")
             connection.commit()
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -407,7 +406,6 @@ class ReplayCorpusTest:
         )
         original_archive = output_dir / "123_all" / "archive.sqlite3"
         with sqlite3.connect(original_archive) as connection:
-            connection.execute("DROP TABLE post_observations")
             connection.execute("DROP TABLE page_snapshots")
             connection.commit()
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
