@@ -29,6 +29,8 @@ class WarningCategory(StrEnum):
     DOWNLOAD_RETRY = "下载重试"
     IMAGE_DOWNLOAD = "图片下载"
     IMAGE_PROCESSING = "图片处理"
+    AUDIO_DOWNLOAD = "音频下载"
+    AUDIO_PROCESSING = "音频处理"
     FLOOR_MAP = "楼层映射"
     POST_CONTENT = "帖子内容"
     PROCESSING_STATE = "处理状态"

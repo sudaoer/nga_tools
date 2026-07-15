@@ -15,6 +15,7 @@ StorageRole = Literal[
     "backup_state",
     "image_index",
     "image_cache",
+    "audio_index",
 ]
 
 
@@ -38,6 +39,7 @@ def _metadata_from_row(row: tuple[object, ...]) -> StorageMetadata:
         "backup_state",
         "image_index",
         "image_cache",
+        "audio_index",
     )
     if role not in valid_roles:
         raise ValueError(f"storage_metadata角色无效：{role!r}")
