@@ -393,7 +393,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
         },
         "migrate-store": {
             "handler": backup_migrate_store,
-            "summary": "把旧分页JSON迁移到每帖SQLite存储",
+            "summary": "把旧分页JSON迁移到当前每帖SQLite存储",
             "usage": (
                 f"{PROGRAM_USAGE} backup migrate-store "
                 "((--name NAME | --tid TID [--aid AID]) | --all)"
@@ -404,7 +404,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} backup migrate-store --all",
             ],
             "notes": [
-                "每个帖子目录会生成或更新自己的archive.sqlite3。",
+                "每个帖子目录会生成或更新当前schema的archive.sqlite3。",
+                "SQLite只保存紧凑分页状态和归一化帖子数据，不复制原始分页响应。",
                 "迁移只读取旧json/page_*.json，不删除或改写旧JSON。",
                 "--all会扫描output_dir下已有备份目录。",
             ],
@@ -414,7 +415,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
         },
         "migrate-layout": {
             "handler": backup_migrate_layout,
-            "summary": "把现有SQLite备份迁移为数据、状态和缓存分库",
+            "summary": "迁移SQLite分库布局和archive分页存储schema",
             "usage": (
                 f"{PROGRAM_USAGE} backup migrate-layout "
                 "((--name NAME | --tid TID [--aid AID]) | --all | "
@@ -430,7 +431,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "notes": [
                 "迁移会保留可回滚SQLite快照，并在中断后按同一清单续跑。",
-                "archive.sqlite3最后发布；旧缓存表不会保留在活动数据文件中。",
+                "每页只保留最新紧凑状态；原始页快照和逐帖页内观察记录会被移除。",
+                "archive.sqlite3最后发布；旧分页、状态和缓存表不会留在活动数据文件中。",
                 "只迁移与当前修订和格式匹配的状态及可解析缓存。",
             ],
             "args": ["name", "tid", "aid", "all", "rollback"],

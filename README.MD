@@ -113,7 +113,7 @@ pixi run python main.py backup all --name 帖子名
 ```
 
 图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在持久数据文件 `output/image_index.sqlite3`，文件校验结果另存于可重建的 `output/image_cache.sqlite3`。下载失败的图片不写入 SQLite 映射；PDF 按需渲染时会使用 `images_unique/download_failed_placeholder.png` 占位图，后续增量备份仍会继续重试原图。
-帖子内容会写入每个备份目录自己的 `archive.sqlite3`，派生处理状态和可重建缓存分别写入 `archive_state.sqlite3` 与 `archive_cache.sqlite3`。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write-json` 会额外写入 `json/page_*.json`。Web 和 PDF 均从 `archive.sqlite3` 按需生成各自的目标 HTML，不保存逐楼中间 HTML。
+帖子内容会写入每个备份目录自己的 `archive.sqlite3`，派生处理状态和可重建缓存分别写入 `archive_state.sqlite3` 与 `archive_cache.sqlite3`。归档只为每个页码保存最新的 `totalPage`、`vrows` 和观察时间等紧凑状态，不保存 NGA 原始分页响应。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write-json` 会额外写入 `json/page_*.json`。Web 和 PDF 均从 `archive.sqlite3` 按需生成各自的目标 HTML，不保存逐楼中间 HTML。
 
 补充本地缺失内容和远端新增内容：
 
@@ -307,8 +307,8 @@ PDF 或启动 `replay serve`；首次需要派生处理时会新建 state/cache 
 `config.json` 并让接收方修改 `output_dir`；不要把 `secrets.json`、Cookie 或其他
 凭据交给不应获得 NGA 账号权限的人。
 
-旧版单体 SQLite 布局必须显式迁移。全量命令同时处理所有帖子以及根目录的
-forum、ankebak 和图片数据库：
+旧版单体 SQLite 布局或旧分页存储 schema 必须显式迁移。全量命令同时处理所有
+帖子以及根目录的 forum、ankebak 和图片数据库：
 
 ```powershell
 pixi run python main.py backup migrate-layout --all
@@ -319,9 +319,10 @@ pixi run python main.py backup migrate-layout --all
 `output/.migration-backups/<run_id>/` 保存原库的 SQLite Online Backup、清单和
 持久数据指纹；中断或部分失败后再次运行同一命令会从该清单续跑。迁移只接收与
 当前数据修订及格式匹配的状态、可解析缓存和仍对应现有图片文件的校验项；无效
-缓存直接丢弃。活动 `archive.sqlite3`、`forum_threads.sqlite3` 和
-`image_index.sqlite3` 发布后不再包含旧状态/缓存表，正常程序也不会回读旧格式
-库里的缓存。
+缓存直接丢弃。对于旧分页存储，每个页码只迁移最后观察到的 `totalPage`、`vrows`
+和时间，原始响应 `page_snapshots` 及已停用的 `post_observations` 不进入活动库。
+活动 `archive.sqlite3`、`forum_threads.sqlite3` 和 `image_index.sqlite3` 发布后不再
+包含旧分页、状态或缓存表，正常程序也不会回读旧格式库。
 
 验收失败时可用命令输出的 `run_id` 恢复迁移前布局：
 
@@ -447,9 +448,9 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 默认输出到 `output/<tid>_<aid|all>/`：
 
 - `json/`：加 `--write-json` 时输出的接口最近响应分页数据
-- `archive.sqlite3`：每帖持久数据。保存完整分页响应快照、正文版本、最新展示
-  元数据、楼层映射与候选原楼层、归档修订和管理页 BBCode overlay；Web、PDF
-  和 replay 的正文来源都在此库
+- `archive.sqlite3`：每帖持久数据。保存每页最新的紧凑分页状态、正文版本、最新
+  展示元数据、楼层映射与候选原楼层、归档修订和管理页 BBCode overlay；不保存
+  NGA 原始分页响应，Web、PDF 和 replay 的正文来源都在此库
 - `archive_state.sqlite3`：每帖运行状态。保存楼层/图片引用处理水位、逐楼引用
   清单、URL 引用计数以及失败图片待重试队列；删除后可从 `archive.sqlite3`
   重建，但会丢失尚未完成工作的历史状态
@@ -470,8 +471,9 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 
 旧版本生成的 `html_modified/`、`backup_state.json`、`floor_map.json`、
 `post_overlays.json` 和 `overlay/post_*.html` 不再读取，
-程序也不会自动删除或改写这些历史产物。旧版单体 SQLite 中的处理状态表和缓存表
-同样不会被正常运行路径读取；只能由显式 `backup migrate-layout` 检查后迁移。
+程序也不会自动删除或改写这些历史产物。旧版 SQLite 中的原始分页快照、处理状态表
+和缓存表同样不会被正常运行路径读取；只能由显式 `backup migrate-layout` 检查后
+迁移。
 
 ## 协议
 
