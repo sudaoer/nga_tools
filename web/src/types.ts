@@ -175,6 +175,7 @@ export type DatabaseKind =
   | 'backup_state'
   | 'image_index'
   | 'image_cache'
+  | 'audio_index'
   | 'archive'
   | 'archive_state'
   | 'archive_cache'

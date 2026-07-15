@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import closing
@@ -9,6 +10,7 @@ from typing import Optional
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from nga_tools.backup import audio_store
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.thread_stores import (
     ARCHIVE_CACHE_DB_FILENAME,
@@ -124,6 +126,50 @@ def _write_image_validation_cache(
             (relative_path,),
         )
         connection.commit()
+
+
+def _write_audio_mapping(
+    output_dir: Path,
+    url: str,
+    *,
+    content: bytes | None = None,
+) -> Path:
+    audio_content = (
+        (b"\xff\xfb\x90\x64" + bytes(413)) * 10
+        if content is None
+        else content
+    )
+    content_hash = hashlib.sha256(audio_content).hexdigest()
+    relative_path = f"audio_unique/{content_hash}.mp3"
+    audio_path = output_dir / relative_path
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
+    audio_path.write_bytes(audio_content)
+    index_path = audio_store.ensure_audio_index(output_dir)
+    with closing(sqlite3.connect(index_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO audio_mappings (
+                url,
+                unique_rel_path,
+                content_sha256,
+                content_bytes,
+                duration_seconds,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                url,
+                relative_path,
+                content_hash,
+                len(audio_content),
+                1.0,
+                "2026-07-15T00:00:00+00:00",
+                "2026-07-15T00:00:00+00:00",
+            ),
+        )
+        connection.commit()
+    return audio_path
 
 
 def _write_forum_thread_db(output_dir: Path) -> None:
@@ -521,6 +567,106 @@ class WebViewerDataTest:
         assert "javascript:" not in lowered_html
         assert "position" not in lowered_html
 
+    def test_reads_posts_rewrites_downloaded_audio_as_safe_local_player(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        audio_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/15/thread-bgm.mp3"
+        )
+        _write_archive(
+            thread_dir,
+            [
+                _post(
+                    1,
+                    (
+                        f'<audio src="{audio_url}" autoplay loop '
+                        'onplay="alert(1)"><source src="https://example.com/evil.mp3">'
+                        "fallback</audio>"
+                    ),
+                )
+            ],
+        )
+        audio_path = _write_audio_mapping(output_dir, audio_url)
+
+        result = read_posts(output_dir, 101, "201", page=1)
+        html = result["items"][0]["html"]
+
+        expected_src = f'/api/files/audio_unique/{audio_path.name}'
+        assert "<audio " in html
+        assert 'class="nga-audio-player"' in html
+        assert f'src="{expected_src}"' in html
+        assert 'preload="none"' in html
+        assert "controls" in html
+        assert audio_url not in html
+        assert "autoplay" not in html
+        assert "onplay" not in html
+        assert "<source" not in html
+
+    def test_reads_posts_never_falls_back_to_missing_or_corrupt_remote_audio(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        missing_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/15/missing-bgm.mp3"
+        )
+        corrupt_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/15/corrupt-bgm.mp3"
+        )
+        _write_archive(
+            thread_dir,
+            [
+                _post(1, f'<audio src="{missing_url}"></audio>'),
+                _post(2, f'<audio src="{corrupt_url}"></audio>'),
+            ],
+        )
+        corrupt_path = _write_audio_mapping(output_dir, corrupt_url)
+        corrupt_path.write_bytes(b"x" * corrupt_path.stat().st_size)
+
+        result = read_posts(output_dir, 101, "201", page=1)
+        html_by_lou = {item["lou"]: item["html"] for item in result["items"]}
+
+        for lou, remote_url in ((1, missing_url), (2, corrupt_url)):
+            assert "音频未下载或不可用" in html_by_lou[lou]
+            assert "<audio" not in html_by_lou[lou]
+            assert remote_url not in html_by_lou[lou]
+
+    def test_historical_post_version_uses_downloaded_audio_mapping(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        audio_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/15/historical-bgm.mp3"
+        )
+        _write_archive(thread_dir, [_post(1, f'<audio src="{audio_url}"></audio>')])
+        _write_archive(thread_dir, [_post(1, "current version")])
+        audio_path = _write_audio_mapping(output_dir, audio_url)
+        with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
+            historical_version_id = connection.execute(
+                "SELECT id FROM post_versions WHERE content LIKE '<audio%'"
+            ).fetchone()[0]
+
+        result = read_post_version_preview(
+            output_dir,
+            101,
+            "201",
+            historical_version_id,
+        )
+        html = result["item"]["html"]
+
+        assert f'src="/api/files/audio_unique/{audio_path.name}"' in html
+        assert audio_url not in html
+
     def test_renders_web_only_bbcode_collapse_and_quote(
         self,
         tmp_path: Path,
@@ -568,6 +714,29 @@ class WebViewerDataTest:
 
 
 class WebServerTest:
+    def test_output_file_serves_audio_byte_ranges(self, tmp_path: Path) -> None:
+        output_dir = tmp_path / "output"
+        audio_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/15/range-bgm.mp3"
+        )
+        audio_path = _write_audio_mapping(output_dir, audio_url)
+        content = audio_path.read_bytes()
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get(
+            f"/api/files/audio_unique/{audio_path.name}",
+            headers={"Range": "bytes=4-15"},
+        )
+
+        assert response.status_code == 206
+        assert response.content == content[4:16]
+        assert response.headers["content-range"] == f"bytes 4-15/{len(content)}"
+        assert response.headers["accept-ranges"] == "bytes"
+        assert response.headers["content-type"] == "audio/mpeg"
+
     def test_posts_route_returns_fixed_floor_slots(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
         thread_dir = output_dir / "101_201"
@@ -1080,6 +1249,13 @@ class WebDatabaseViewerTest:
             "images_unique/abc.png",
         )
         _write_image_validation_cache(output_dir, "images_unique/abc.png")
+        _write_audio_mapping(
+            output_dir,
+            (
+                "https://img.nga.178.com/attachments/"
+                "mon_202607/15/database-bgm.mp3"
+            ),
+        )
         AnkebakStateStore(output_dir / "backup_state.sqlite3").load_states()
         thread_dir = output_dir / "101_201"
         _write_archive(thread_dir, [_post(1, "hello")])
@@ -1098,6 +1274,7 @@ class WebDatabaseViewerTest:
             "backup_state",
             "image_index",
             "image_cache",
+            "audio_index",
             "archive:101_201",
             "archive_state:101_201",
             "archive_cache:101_201",
@@ -1106,6 +1283,8 @@ class WebDatabaseViewerTest:
         assert by_id["forum_threads"]["relativePath"] == "forum_threads.sqlite3"
         assert by_id["backup_state"]["kind"] == "backup_state"
         assert by_id["image_cache"]["relativePath"] == "image_cache.sqlite3"
+        assert by_id["audio_index"]["kind"] == "audio_index"
+        assert by_id["audio_index"]["relativePath"] == "audio_index.sqlite3"
         assert by_id["archive_state:101_201"]["relativePath"] == (
             f"101_201/{ARCHIVE_STATE_DB_FILENAME}"
         )

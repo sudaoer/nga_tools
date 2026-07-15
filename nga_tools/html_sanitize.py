@@ -6,6 +6,7 @@ import nh3
 
 _ALLOWED_TAGS = {
     "a",
+    "audio",
     "b",
     "blockquote",
     "br",
@@ -30,6 +31,7 @@ _ALLOWED_TAGS = {
 }
 _ALLOWED_ATTRIBUTES = {
     "a": {"class", "href", "target", "title"},
+    "audio": {"aria-label", "class", "controls", "preload", "src"},
     "blockquote": {"class", "style"},
     "code": {"class"},
     "del": {"class"},

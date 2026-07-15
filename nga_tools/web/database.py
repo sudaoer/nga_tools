@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal, Optional, TypeAlias, TypedDict, cast
 from urllib.parse import quote
 
-from nga_tools.backup import image_store
+from nga_tools.backup import audio_store, image_store
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
 from nga_tools.backup.thread_stores import (
     ARCHIVE_CACHE_DB_FILENAME,
@@ -24,6 +24,7 @@ DatabaseKind: TypeAlias = Literal[
     "backup_state",
     "image_index",
     "image_cache",
+    "audio_index",
     "archive",
     "archive_state",
     "archive_cache",
@@ -38,6 +39,7 @@ _DATABASE_ID_FORUM_THREADS = "forum_threads"
 _DATABASE_ID_BACKUP_STATE = "backup_state"
 _DATABASE_ID_IMAGE_INDEX = "image_index"
 _DATABASE_ID_IMAGE_CACHE = "image_cache"
+_DATABASE_ID_AUDIO_INDEX = "audio_index"
 _ARCHIVE_DATABASE_PREFIX = "archive:"
 _ARCHIVE_STATE_DATABASE_PREFIX = "archive_state:"
 _ARCHIVE_CACHE_DATABASE_PREFIX = "archive_cache:"
@@ -271,6 +273,12 @@ def list_database_refs(output_dir: Path) -> list[DatabaseRef]:
             label=image_store.IMAGE_CACHE_FILENAME,
             path=output_dir / image_store.IMAGE_CACHE_FILENAME,
         ),
+        DatabaseRef(
+            id=_DATABASE_ID_AUDIO_INDEX,
+            kind="audio_index",
+            label=audio_store.AUDIO_INDEX_FILENAME,
+            path=output_dir / audio_store.AUDIO_INDEX_FILENAME,
+        ),
     )
     for ref in global_refs:
         if ref.path.is_file():
@@ -324,6 +332,13 @@ def _ref_for_database_id(output_dir: Path, database_id: str) -> DatabaseRef:
             kind="image_cache",
             label=image_store.IMAGE_CACHE_FILENAME,
             path=output_dir / image_store.IMAGE_CACHE_FILENAME,
+        )
+    if database_id == _DATABASE_ID_AUDIO_INDEX:
+        return DatabaseRef(
+            id=database_id,
+            kind="audio_index",
+            label=audio_store.AUDIO_INDEX_FILENAME,
+            path=output_dir / audio_store.AUDIO_INDEX_FILENAME,
         )
 
     thread_database_specs: tuple[tuple[str, DatabaseKind, str], ...] = (

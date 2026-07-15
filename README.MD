@@ -36,7 +36,7 @@ Copy-Item secrets.example.json secrets.json
 }
 ```
 
-批量备份默认并行 4 个帖子；NGA API 请求和图片下载分别限流。需要调整时可在
+批量备份默认并行 4 个帖子；NGA API 请求、图片下载和 BGM 音频下载分别限流。需要调整时可在
 `config.json` 中设置：
 
 ```json
@@ -44,8 +44,10 @@ Copy-Item secrets.example.json secrets.json
   "backup_configs_workers": 4,
   "api_concurrency": 4,
   "image_concurrency": 50,
+  "audio_concurrency": 8,
   "ankebak_full_backup_interval_hours": 168,
-  "backup_image_retry_max_interval_hours": 168
+  "backup_image_retry_max_interval_hours": 168,
+  "backup_audio_retry_max_interval_hours": 168
 }
 ```
 
@@ -53,6 +55,8 @@ Copy-Item secrets.example.json secrets.json
 最长等待时间，单位为小时，默认 168 小时（7 天），必须大于 0。
 `backup_image_retry_max_interval_hours` 控制长期失败图片的最长重试等待时间，
 单位为小时，默认 168 小时（7 天），必须大于 0。
+`backup_audio_retry_max_interval_hours` 对 BGM 音频采用相同的重试上限，
+默认也是 168 小时（7 天）。
 
 ## 使用
 
@@ -106,13 +110,19 @@ pixi run python main.py forum sync --full-postdate --refresh --fid 784
 此模式不修改 `thread_configs.json`，也不会额外请求单贴 API；默认每页请求后
 等待 3 秒，可用 `--page-delay-seconds` 调大以减少限流。
 
-抓取整帖并下载图片：
+抓取整帖并下载图片和 BGM 音频：
 
 ```powershell
 pixi run python main.py backup all --name 帖子名
 ```
 
 图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在持久数据文件 `output/image_index.sqlite3`，文件校验结果另存于可重建的 `output/image_cache.sqlite3`。下载失败的图片不写入 SQLite 映射；PDF 按需渲染时会使用 `images_unique/download_failed_placeholder.png` 占位图，后续增量备份仍会继续重试原图。
+正文 `<audio src="...">` 中完整、规范的 NGA MP3 URL 会按 SHA-256 内容 hash
+保存到全局 `output/audio_unique/`，URL、文件路径、内容 hash、大小和时长保存在
+持久数据文件 `output/audio_index.sqlite3`。首次启用时会扫描每帖
+`archive.sqlite3` 中的全部正文历史版本，之后只扫描新增版本；因此已经不在最新版
+正文中的历史 BGM 也能补存。无效或下载失败的音频不写入成功映射，并保存在每帖
+`archive_state.sqlite3` 的待重试队列中。
 帖子内容会写入每个备份目录自己的 `archive.sqlite3`，派生处理状态和可重建缓存分别写入 `archive_state.sqlite3` 与 `archive_cache.sqlite3`。归档只为每个页码保存最新的 `totalPage`、`vrows` 和观察时间等紧凑状态，不保存 NGA 原始分页响应。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write-json` 会额外写入 `json/page_*.json`。Web 和 PDF 均从 `archive.sqlite3` 按需生成各自的目标 HTML，不保存逐楼中间 HTML。
 
 补充本地缺失内容和远端新增内容：
@@ -125,7 +135,7 @@ pixi run python main.py backup sub --name 帖子名
 
 完整或增量备份会复用 `archive_state.sqlite3` 中的楼层处理状态和图片引用集合状态。页数、`vrows` 或楼层映射输入变化时只刷新楼层派生状态；归档正文、overlay、手动版本选择和图片引用解析版本未变化时，不再读取完整归档或批量展开全部帖子图片引用，只重试上次未完成的图片 URL。该状态同时适用于只看作者和没有 `aid` 的原帖备份；`backup all` 的状态复用判定发生在完整网络抓取及归档写入之后，不会跳过远端刷新。
 
-正文来源实际变化后才会重建图片引用集合，并复用 `archive_cache.sqlite3` 中的帖子级图片引用派生缓存，只重新解析新增或正文、overlay、手动版本选择发生变化的楼层。下载失败的图片待重试队列保存在 `archive_state.sqlite3`：新 URL、HTTP 429、5xx、网络、payload 和本地存储失败会在下一次相关备份继续尝试；已知 HTTP 3xx 和除 429 外的 4xx 会根据距上次尝试的时间概率重试。累计触发概率为 `x^3`（`x` 是已等待时间占最大间隔的比例），同一 URL 在一个重试周期内使用稳定票据，不会因为频繁运行而反复抽签；达到 `backup_image_retry_max_interval_hours` 后必定重试。概率延后的 URL 不会单独触发 `backup auto` 本地维护，新 URL 始终立即尝试，不再被正文引用的 URL 会移出队列。状态复用不会重新校验已成功的历史图片，本地文件后续被删除或损坏时请运行 `image verify` 检测。只看作者备份还会重试恢复缺失楼内容；恢复出的匿名正文会提升归档修订并使图片集合按需更新。旧版单体 SQLite 不会在正常备份时自动升级或读取其中的旧缓存，必须先显式运行 `backup migrate-layout`。需要忽略所有派生状态并强制重新处理时，可给 `backup all` 或 `backup sub` 加 `--force-processing`（兼容 `--force_processing`）；此选项会立即重试全部仍被引用的失败图片，但不会禁用帖子级图片引用缓存。
+正文来源实际变化后才会重建图片引用集合，并复用 `archive_cache.sqlite3` 中的帖子级图片引用派生缓存，只重新解析新增或正文、overlay、手动版本选择发生变化的楼层。下载失败的图片待重试队列保存在 `archive_state.sqlite3`：新 URL、HTTP 429、5xx、网络、payload 和本地存储失败会在下一次相关备份继续尝试；已知 HTTP 3xx 和除 429 外的 4xx 会根据距上次尝试的时间概率重试。累计触发概率为 `x^3`（`x` 是已等待时间占最大间隔的比例），同一 URL 在一个重试周期内使用稳定票据，不会因为频繁运行而反复抽签；达到 `backup_image_retry_max_interval_hours` 后必定重试。音频失败使用同样的稳定概率规则，并以 `backup_audio_retry_max_interval_hours` 为最长间隔。概率延后的 URL 不会单独触发 `backup auto` 本地维护，新 URL 始终立即尝试，不再被正文引用的图片 URL 会移出图片队列；音频队列覆盖所有历史正文版本，因此历史引用仍会保留。状态复用不会重新校验已成功的历史图片，本地文件后续被删除或损坏时请运行 `image verify` 检测。只看作者备份还会重试恢复缺失楼内容；恢复出的匿名正文会提升归档修订并使图片集合按需更新。旧版单体 SQLite 不会在正常备份时自动升级或读取其中的旧缓存，必须先显式运行 `backup migrate-layout`。需要忽略所有派生状态并强制重新处理时，可给 `backup all` 或 `backup sub` 加 `--force-processing`（兼容 `--force_processing`）；此选项会立即重试全部仍被引用的失败图片并重扫、重试全部历史 BGM，但不会禁用帖子级图片引用缓存。
 增量刷新到的新页会合并进历史楼层库；同一页新响应中消失的旧楼不会从库中删除。尚未迁移的旧备份目录如果含有 `json/page_*.json` 但 `archive.sqlite3` 不完整，正常备份会报错提示先运行 `backup migrate-store`，不会自动读取旧 JSON。
 
 也可以不使用保存的名称，直接指定 `tid` 和可选的 `aid`：
@@ -142,7 +152,7 @@ pixi run python main.py backup all --tid 12345678 --force-processing
 
 ```powershell
 pixi run python main.py backup sub --all-threads
-pixi run python main.py backup sub --all-threads --workers 4 --api-concurrency 4 --image-concurrency 50
+pixi run python main.py backup sub --all-threads --workers 4 --api-concurrency 4 --image-concurrency 50 --audio-concurrency 8
 pixi run python main.py backup sub --all-threads --write-json
 pixi run python main.py backup all --all-threads --force-processing
 ```
@@ -159,7 +169,7 @@ pixi run ankebak
 `forum sync`，再用本轮实际抓到的主题列表与上次成功备份水位比较。
 `replies` 和 `lastpost` 均未变化且没有本地待重试工作的帖子会跳过；发生变化
 时执行增量备份。只看作者帖若 `vrows` 和分页数也未变化，只校验第一页并处理
-本轮应重试的图片、缺失楼或本地派生输入，不再刷新尾页。周期完整备份依据距
+本轮应重试的图片、音频、缺失楼或本地派生输入，不再刷新尾页。周期完整备份依据距
 上次成功 `backup all` 的时间使用稳定的 `x^3` 累计概率选择，频繁运行不会重复
 抽签；达到 `ankebak_full_backup_interval_hours` 后必定执行，以发现日常增量路径
 无法覆盖的旧页编辑。首次启用时所有尚无 ankebak 成功水位的帖子会立即完整
@@ -189,12 +199,12 @@ pixi run python main.py replay serve --source-output output `
 ```
 
 服务启动时以 SQLite `immutable` 只读模式打开各帖 `archive.sqlite3` 和全局
-`image_index.sqlite3`，从最新归一化正文、作者、时间和图片附件元数据合成 API
-分页并预载入内存；不会读取归档中的 NGA 原始分页响应。图片仍从
-`images_unique/` 流式读取。源数据库必须已经完成 WAL 检查点；如果 WAL 仍有
+`image_index.sqlite3`、`audio_index.sqlite3`，从最新归一化正文、作者、时间和
+附件元数据合成 API 分页并预载入内存；不会读取归档中的 NGA 原始分页响应。
+图片和音频分别从 `images_unique/`、`audio_unique/` 流式读取。源数据库必须已经完成 WAL 检查点；如果 WAL 仍有
 内容，说明快照尚未静止，服务会拒绝启动。启动后源目录应保持不变，图片若被
-删除、替换或修改，该 URL 会按缺失处理。服务不会访问 NGA，也不会修改源数据
-库或图片内容。
+删除、替换或修改，该 URL 会按缺失处理；音频还会校验索引记录的 SHA-256，
+内容不符同样按缺失处理。服务不会访问 NGA，也不会修改源数据库或媒体内容。
 
 当 `thread_configs.json` 中的帖子只有 `tid_aid` 归档而没有 `tid_all` 归档时，
 服务会根据楼层映射生成可供完整抓取流程消费的原帖分页。已知作者楼和已恢复的
@@ -203,22 +213,24 @@ pixi run python main.py replay serve --source-output output `
 图片负载。如果存在 `tid_all/archive.sqlite3`，其原帖分页同样从最新归一化内容
 合成，不依赖记录的 NGA 原始响应。
 
-限速配置分为 `api` 和 `image` 两组：`latency_ms` 是每个请求的固定首包延迟，
+限速配置分为 `api`、`image` 和 `audio` 三组：`latency_ms` 是每个请求的固定首包延迟，
 `bandwidth_bytes_per_second` 是该组所有并发请求共享的全局带宽，设为 `0` 表示
 不限带宽；`max_inflight` 是该组最大在途请求数，`chunk_bytes` 是流式发送块
-大小。限速不加入随机抖动，因此同一语料和配置适合做稳定的 A/B 对比。
+大小。省略 `audio` 时会复用 `image` 配置。限速不加入随机抖动，因此同一语料
+和配置适合做稳定的 A/B 对比。
 
 重放端点如下：
 
 - `POST /app_api.php?__lib=post&__act=list`：按 `tid`、`page` 和可选
   `authorid` 返回帖子分页。
 - `GET /__replay__/image?url=<原始图片URL>`：按全局图片索引返回图片。
+- `GET /__replay__/audio?url=<原始音频URL>`：按全局音频索引返回 MP3。
 - `GET /__replay__/health`：健康状态、语料 ID、限速配置 ID 和在途请求数。
-- `GET /__replay__/manifest`：语料范围、分页与图片统计以及完整限速配置。
-- `GET /__replay__/metrics`：API/图片请求数、字节数、状态码和等待耗时。
+- `GET /__replay__/manifest`：语料范围、分页与图片/音频统计以及完整限速配置。
+- `GET /__replay__/metrics`：API/图片/音频请求数、字节数、状态码和等待耗时。
 - `POST /__replay__/reset`：无在途请求时清空指标并重置带宽时间线。
 
-`corpus_id` 标识本次冻结的归一化内容合成分页、楼层映射和图片索引状态，
+`corpus_id` 标识本次冻结的归一化内容合成分页、楼层映射及图片/音频索引状态，
 `profile_id` 标识规范化后的限速配置。启动服务后可在另一个终端运行共享
 `backup all` 路径：
 
@@ -227,7 +239,7 @@ pixi run python main.py replay run `
   --server-url http://127.0.0.1:8765 `
   --source-output output --target-output replay-output/run-a `
   --initial-state warm --all-threads --workers 8 `
-  --api-concurrency 4 --image-concurrency 50
+  --api-concurrency 4 --image-concurrency 50 --audio-concurrency 8
 ```
 
 也可以使用一次性测试入口自动启动重放服务进程，等待服务就绪后再启动独立的
@@ -238,7 +250,7 @@ pixi run python main.py replay test `
   --source-output output --profile replay_profile.json `
   --target-output replay-output/run-a `
   --initial-state warm --all-threads --workers 8 `
-  --api-concurrency 4 --image-concurrency 50
+  --api-concurrency 4 --image-concurrency 50 --audio-concurrency 8
 ```
 
 `replay test` 默认仅在 `127.0.0.1` 上自动选择空闲端口，也可以通过
@@ -248,7 +260,7 @@ pixi run python main.py replay test `
 `replay_run-*.json` 报告均复用 `replay run` 的实现。
 
 `empty` 要求目标不存在或为空，从零创建归档；`warm` 通过 SQLite Online Backup
-分别复制现有 data/state/cache 数据库，并复制或 reflink 图片；正文版本选择随
+分别复制现有 data/state/cache 数据库，并复制或 reflink 图片与音频；正文版本选择随
 每帖 `archive.sqlite3` 一起复制。
 缓存键使用 `images_unique/...` 相对路径，不再从旧版 `image_index.sqlite3` 读取或
 改写绝对路径缓存。两者都会写入 replay 目标归属
@@ -258,7 +270,7 @@ inode 时会拒绝运行；`empty` 和 `warm` 不会覆盖非空目标。Windows
 `target-output` 是目录并校验归属标记，暂不检查符号链接、directory junction 或
 共享文件 ID；在 Windows 上使用 `existing` 时必须由用户保证目标是独立的物理目录。
 
-重放运行不会读取环境代理或发送 NGA Cookie，API 与图片的实际请求 origin 必须
+重放运行不会读取环境代理或发送 NGA Cookie，API、图片与音频的实际请求 origin 必须
 等于 `server-url`。准备耗时不计入备份墙钟；结束后会在目标根目录原子写入
 `replay_run-<timestamp>.json`，记录 Git commit、语料与 profile ID、并发参数、
 服务端指标、处理状态复用、失败分类、批量计时日志和数据库/内容验收结果。
@@ -296,9 +308,9 @@ pixi run python main.py backup sub --all-threads --force-processing
 
 | 分类 | 文件 | 交付要求 |
 | --- | --- | --- |
-| 持久数据 | `forum_threads.sqlite3`、各帖 `archive.sqlite3`、`image_index.sqlite3`、`images_unique/` | 必须保留；它们包含离线时无法重新从本机推导的版面数据、正文历史、图片 URL 映射和图片内容 |
+| 持久数据 | `forum_threads.sqlite3`、各帖 `archive.sqlite3`、`image_index.sqlite3`、`images_unique/`、`audio_index.sqlite3`、`audio_unique/` | 必须保留；它们包含离线时无法重新从本机推导的版面数据、正文历史、图片/音频 URL 映射和媒体内容 |
 | 用户选择 | `thread_configs.json`；各帖正文版本选择位于 `archive.sqlite3` 的 `post_version_selections` 表 | 必须保留；正文版本选择已包含在持久数据库中 |
-| 运行状态 | `backup_state.sqlite3`、各帖 `archive_state.sqlite3` | 建议随完整工作副本保留；只读交付可省略，之后会从持久数据重建派生状态，但智能备份水位和失败图片重试历史会丢失 |
+| 运行状态 | `backup_state.sqlite3`、各帖 `archive_state.sqlite3` | 建议随完整工作副本保留；只读交付可省略，之后会从持久数据重建派生状态，但智能备份水位和失败图片/音频重试历史会丢失 |
 | 可重建缓存 | `image_cache.sqlite3`、各帖 `archive_cache.sqlite3` | 可以不交付或删除；程序不会把它们当作持久数据，缺失或损坏时会重新创建 |
 | 可选产物 | `json/`、`pdf/`、日志、`replay_run-*.json` | 按用途保留；当前 SQLite 数据完整时不属于恢复 Web/PDF/replay 读取能力的必要输入 |
 
@@ -393,7 +405,7 @@ Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页�
 管理界面；旧 `/databases` 会跳转到 `/admin/databases`。管理界面中的数据库
 查看器只浏览项目输出目录中的
 `forum_threads.sqlite3`、`backup_state.sqlite3`、`image_index.sqlite3`、
-`image_cache.sqlite3` 和各帖子目录下的 `archive.sqlite3`、
+`image_cache.sqlite3`、`audio_index.sqlite3` 和各帖子目录下的 `archive.sqlite3`、
 `archive_state.sqlite3`、`archive_cache.sqlite3`，支持查看表结构、分页浏览、
 排序和关键字筛选，不执行用户输入的 SQL。
 
@@ -413,6 +425,12 @@ overlay 可以保存空内容；空内容仍是有效覆盖，清除 overlay 后
 正文渲染只识别正文中明确写出的完整NGA图片URL，不会再根据 NGA 响应中的附件
 列表猜测或补全损坏链接。无效的 `[img]...[/img]` 会原样显示，便于用户核对后
 通过 overlay 修正；附件元数据仍保留在归档中。
+
+正文中的 NGA BGM 会渲染为浏览器原生音频控件，使用 `preload=none` 且不会
+自动播放；开始播放一个 BGM 时会暂停页面中的其他 BGM。播放器只使用经过索引、
+文件存在且 SHA-256 校验正确的 `audio_unique` 本地文件，并支持浏览器 Range
+请求。缺失或损坏时显示“音频未下载或不可用”，不会回退请求 NGA 或其他远端地址。
+PDF 不嵌入音频。
 
 ## 生成 PDF
 
@@ -453,13 +471,13 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
   展示元数据、用户正文版本选择、楼层映射与候选原楼层、归档修订和管理页
   BBCode overlay；不保存 NGA 原始分页响应，Web、PDF 和 replay 的正文来源都在此库
 - `archive_state.sqlite3`：每帖运行状态。保存楼层/图片引用处理水位、逐楼引用
-  清单、URL 引用计数以及失败图片待重试队列；删除后可从 `archive.sqlite3`
+  清单、URL 引用计数、音频历史版本扫描水位以及失败图片/音频待重试队列；删除后可从 `archive.sqlite3`
   重建，但会丢失尚未完成工作的历史状态
 - `archive_cache.sqlite3`：每帖可重建缓存。当前保存帖子级图片引用解析结果；
   缺失、损坏或与 `archive.sqlite3` 的存储 ID 不匹配时按空缓存处理并重建
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 
-全局数据库与图片产物位于 `output/` 根目录：
+全局数据库与媒体产物位于 `output/` 根目录：
 
 - `forum_threads.sqlite3`：持久的版面主题列表数据
 - `backup_state.sqlite3`：`backup auto` 的成功水位和完整备份调度状态
@@ -467,6 +485,8 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `images_unique/download_failed_placeholder.png`：下载失败图片的占位图，按需生成
 - `image_index.sqlite3`：持久的原始 NGA 图片 URL 到 `images_unique` 文件映射
 - `image_cache.sqlite3`：以 `images_unique/...` 相对路径为键的文件校验缓存；可删除重建
+- `audio_unique/`：按 SHA-256 内容 hash 保存的实际 MP3 文件
+- `audio_index.sqlite3`：持久的原始 NGA 音频 URL 到 `audio_unique` 文件映射及内容元数据
 - `.migration-backups/<run_id>/`：布局迁移的原库快照、恢复清单和验收指纹
 
 旧版本生成的 `html_modified/`、`backup_state.json`、`floor_map.json`、

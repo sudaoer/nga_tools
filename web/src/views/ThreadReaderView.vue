@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Pane, Splitpanes } from 'splitpanes'
 import {
   clearPostOverlay,
@@ -82,6 +82,7 @@ const loadingThreadStats = ref(false)
 const loadingPosts = ref(false)
 const requestedThread = ref<{ tid: number; aidKey: string } | null>(null)
 const pageJumpInput = ref('')
+const readerPaneRef = ref<HTMLElement | null>(null)
 let threadListRequestId = 0
 let threadStatsRequestId = 0
 let postRequestId = 0
@@ -725,9 +726,28 @@ watch(
   },
 )
 
+function pauseOtherAudioPlayers(event: Event): void {
+  const currentPlayer = event.target
+  if (!(currentPlayer instanceof HTMLAudioElement)) {
+    return
+  }
+  readerPaneRef.value
+    ?.querySelectorAll<HTMLAudioElement>('audio.nga-audio-player')
+    .forEach((player) => {
+      if (player !== currentPlayer && !player.paused) {
+        player.pause()
+      }
+    })
+}
+
 onMounted(() => {
+  readerPaneRef.value?.addEventListener('play', pauseOtherAudioPlayers, true)
   hydrateStateFromUrl()
   void loadThreads()
+})
+
+onBeforeUnmount(() => {
+  readerPaneRef.value?.removeEventListener('play', pauseOtherAudioPlayers, true)
 })
 </script>
 
@@ -820,7 +840,7 @@ onMounted(() => {
         </Pane>
 
         <Pane :size="readerPaneSize" :min-size="readerPaneMinSize" :max-size="100">
-          <section class="reader-pane">
+          <section ref="readerPaneRef" class="reader-pane">
       <div v-if="selectedThread" class="reader-header">
         <div>
           <h2>{{ titleFor(selectedThread) }}</h2>

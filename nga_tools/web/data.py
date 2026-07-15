@@ -13,7 +13,8 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from bs4 import BeautifulSoup, Tag
 
 from nga_tools import utils
-from nga_tools.backup import image_store
+from nga_tools.backup import audio_store, image_store
+from nga_tools.backup.audio_store import AudioMapping
 from nga_tools.backup.archive_posts import postdate_from_json
 from nga_tools.backup.archive_schema import require_current_archive_schema
 from nga_tools.backup.archive_store import (
@@ -35,6 +36,7 @@ from nga_tools.backup.post_overlay import (
     render_overlay_html,
 )
 from nga_tools.core.sqlite import configure_readonly_connection
+from nga_tools.core.nga_audio import extract_nga_audio_urls, normalize_nga_audio_url
 from nga_tools.forum.thread_configs import (
     NGAThreadConfigs,
     ThreadConfig,
@@ -734,6 +736,59 @@ def _output_image_url(
     return _safe_output_url(output_dir / unique_rel_path, output_dir)
 
 
+def _read_audio_mappings_for_urls(
+    output_dir: Path,
+    urls: set[str],
+) -> dict[str, AudioMapping]:
+    return audio_store.audio_mappings_for_urls(output_dir, urls)
+
+
+def _output_audio_url(
+    output_dir: Path,
+    audio_mappings: dict[str, AudioMapping],
+    audio_url: str,
+) -> Optional[str]:
+    normalized_url = normalize_nga_audio_url(audio_url)
+    if normalized_url is None:
+        return None
+    mapping = audio_mappings.get(normalized_url)
+    if mapping is None:
+        return None
+    return _safe_output_url(mapping.path(output_dir), output_dir)
+
+
+def _normalize_audio_elements(
+    html: str,
+    output_dir: Path,
+    audio_mappings: dict[str, AudioMapping],
+) -> str:
+    if "<audio" not in html.lower():
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    for raw_audio in cast(list[Tag], soup.find_all("audio")):
+        raw_src = raw_audio.get("src")
+        local_src = (
+            _output_audio_url(output_dir, audio_mappings, raw_src)
+            if isinstance(raw_src, str)
+            else None
+        )
+        if local_src is None:
+            unavailable = soup.new_tag("span")
+            unavailable["class"] = "nga-audio-unavailable"
+            unavailable.string = "音频未下载或不可用"
+            raw_audio.replace_with(unavailable)
+            continue
+
+        player = soup.new_tag("audio")
+        player["class"] = "nga-audio-player"
+        player["controls"] = ""
+        player["preload"] = "none"
+        player["src"] = local_src
+        player["aria-label"] = "BGM音频"
+        raw_audio.replace_with(player)
+    return str(soup)
+
+
 def _render_overlay_for_web(
     bbcode: str,
     output_dir: Path,
@@ -749,9 +804,15 @@ def _render_overlay_for_web(
         ),
         require_all=require_all_images,
     )
-    return render_overlay_html(
+    html = render_overlay_html(
         bbcode,
         image_src_resolver=image_src_resolver,
+    )
+    audio_urls = set(extract_nga_audio_urls(bbcode))
+    return _normalize_audio_elements(
+        html,
+        output_dir,
+        _read_audio_mappings_for_urls(output_dir, audio_urls),
     )
 
 
@@ -833,6 +894,7 @@ def _post_item_from_row(
     output_dir: Path,
     floor_labels: FloorLabels,
     image_mappings: dict[str, str],
+    audio_mappings: dict[str, AudioMapping],
     overlay: Optional[PostOverlay] = None,
 ) -> PostSlot:
     if overlay is None:
@@ -842,6 +904,11 @@ def _post_item_from_row(
                 output_dir,
                 image_mappings,
             ),
+        )
+        html = _normalize_audio_elements(
+            html,
+            output_dir,
+            audio_mappings,
         )
     else:
         html = _render_overlay_for_web(overlay["bbcode"], output_dir)
@@ -977,6 +1044,12 @@ def read_posts(
             continue
         image_urls.update(_content_image_urls(row.content))
     image_mappings = _read_image_mappings_for_urls(output_dir, image_urls)
+    audio_urls: set[str] = set()
+    for row in rows:
+        if row.lou in overlays:
+            continue
+        audio_urls.update(extract_nga_audio_urls(row.content))
+    audio_mappings = _read_audio_mappings_for_urls(output_dir, audio_urls)
 
     floor_labels = _load_floor_labels(archive_store, aid)
     row_by_lou = {row.lou: row for row in rows}
@@ -992,6 +1065,7 @@ def read_posts(
                 output_dir,
                 floor_labels,
                 image_mappings,
+                audio_mappings,
                 overlays.get(lou),
             )
             slot["html"] = "<p><em>此楼层不匹配当前筛选。</em></p>"
@@ -1004,6 +1078,7 @@ def read_posts(
                 output_dir,
                 floor_labels,
                 image_mappings,
+                audio_mappings,
                 overlays.get(lou),
             )
         )
@@ -1272,12 +1347,17 @@ def read_post_version_preview(
 
     image_urls = _content_image_urls(row.content)
     image_mappings = _read_image_mappings_for_urls(output_dir, image_urls)
+    audio_mappings = _read_audio_mappings_for_urls(
+        output_dir,
+        set(extract_nga_audio_urls(row.content)),
+    )
     return {
         "item": _post_item_from_row(
             row,
             output_dir,
             _load_floor_labels(archive_store, aid),
             image_mappings,
+            audio_mappings,
         )
     }
 
