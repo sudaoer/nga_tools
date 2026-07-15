@@ -11,7 +11,7 @@ from nga_tools.commands.backup import (
 )
 from nga_tools.commands.ankebak import backup_auto
 from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
-from nga_tools.commands.image import image_verify
+from nga_tools.commands.image import image_add, image_verify
 from nga_tools.commands.replay import replay_run, replay_serve, replay_test
 from nga_tools.commands.types import CommandHandler
 from nga_tools.commands.web import web_serve
@@ -75,6 +75,12 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": str,
         "metavar": "TEXT",
         "help": "帖子描述（可选）",
+    },
+    "url": {
+        "flags": ("--url",),
+        "type": str,
+        "metavar": "URL",
+        "help": "完整NGA图片URL",
     },
     "lou_per_pdf": {
         "flags": ("--lou-per-pdf", "--lou_per_pdf"),
@@ -471,6 +477,25 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
         },
     },
     "image": {
+        "add": {
+            "handler": image_add,
+            "summary": "下载一张NGA图片并写入全局图片索引",
+            "usage": f"{PROGRAM_USAGE} image add --url URL",
+            "examples": [
+                (
+                    f"{PROGRAM_USAGE} image add --url "
+                    "https://img.nga.178.com/attachments/mon_202506/06/example.png"
+                ),
+            ],
+            "notes": [
+                "只接受完整的NGA图片URL，不接受相对路径或外站图片。",
+                "已有有效映射时直接成功；否则下载到images_unique并更新image_index.sqlite3。",
+                "可先运行此命令，再把同一URL写入Web管理页的BBCode overlay。",
+            ],
+            "args": ["url"],
+            "required": ["url"],
+            "output_root_lock": True,
+        },
         "verify": {
             "handler": image_verify,
             "summary": "校验已下载图片，删除损坏文件",

@@ -341,6 +341,16 @@ pixi run python main.py backup migrate-store --all
 旧目录中的 `floor_map.json` 不参与迁移，也不会被读取；只看作者备份迁移分页数据后，
 请运行 `backup sub --name 帖子名 --force-processing` 在 `archive.sqlite3` 中重新生成楼层映射。
 
+手动下载一张完整NGA图片URL并写入全局图片索引：
+
+```powershell
+pixi run python main.py image add --url https://img.nga.178.com/attachments/mon_202506/06/example.png
+```
+
+已有有效映射时该命令不会重复下载；缺失或损坏时会下载到
+`output/images_unique/` 并更新 `output/image_index.sqlite3`。命令只接受完整的
+NGA图片URL，可用于先准备图片，再把同一URL保存到Web管理页的BBCode overlay。
+
 并行校验所有本地备份中的已下载图片，损坏或无法打开的图片会被删除：
 
 ```powershell
@@ -394,7 +404,8 @@ Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页�
 `archive.sqlite3` 的 `post_overlays` 表；网页查看和后续 PDF 导出都会从该 BBCode 按需生成目标 HTML。
 overlay 可以保存空内容；空内容仍是有效覆盖，清除 overlay 后才恢复原正文。图片仅支持
 `[img]完整NGA图片URL[/img]`，并且该 URL 必须已存在于 `image_index.sqlite3`、对应
-`images_unique` 文件有效。overlay 不会下载新图片，也不允许 `[flash]`、外站图片或直接写入 `<img>` HTML。
+`images_unique` 文件有效。新URL可先通过 `image add --url URL` 下载；overlay 本身
+不会下载图片，也不允许 `[flash]`、外站图片或直接写入 `<img>` HTML。
 
 ## 生成 PDF
 

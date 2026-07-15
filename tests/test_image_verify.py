@@ -30,7 +30,7 @@ from nga_tools.console import (
     report_warning,
     use_reporter,
 )
-from nga_tools.commands.image import image_verify
+from nga_tools.commands.image import image_add, image_verify
 
 
 def _write_avif_image(path: Path) -> None:
@@ -40,6 +40,41 @@ def _write_avif_image(path: Path) -> None:
 
 
 class ImageVerifyCliTest:
+    def test_image_add_requires_single_url_option(self) -> None:
+        image_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202506/06/example.png"
+        )
+
+        args = args_parse(["image", "add", "--url", image_url])
+
+        assert args["command"] == "image"
+        assert args["action"] == "add"
+        assert args["url"] == image_url
+
+    def test_image_add_rejects_missing_url(self) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(["image", "add"])
+
+        assert context.value.code == 2
+
+    def test_image_add_rejects_thread_target_options(self) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(
+                    [
+                        "image",
+                        "add",
+                        "--url",
+                        "https://img.nga.178.com/attachments/mon_202506/06/example.png",
+                        "--tid",
+                        "123",
+                    ]
+                )
+
+        assert context.value.code == 2
+
     def test_image_verify_parses_without_thread_target(self) -> None:
         args = args_parse(["image", "verify"])
 
@@ -209,6 +244,130 @@ class ImageVerifyHandlerTest:
                 image_verify({"name": None, "tid": None, "aid": 201})
 
         all_mock.assert_not_called()
+
+
+class ImageAddHandlerTest:
+    image_url = (
+        "https://img.nga.178.com/attachments/"
+        "mon_202506/06/example.png"
+    )
+
+    def test_rejects_relative_or_external_url_before_download(self) -> None:
+        for invalid_url in (
+            "./mon_202506/06/example.png",
+            "https://example.com/example.png",
+        ):
+            with (
+                patch("nga_tools.commands.image.image_store.download_image_tasks")
+                as download_mock,
+                pytest.raises(ValueError, match="NGA图片链接无效"),
+            ):
+                image_add({"url": invalid_url})
+
+            download_mock.assert_not_called()
+
+    def test_existing_valid_mapping_is_idempotent(self, tmp_path: Path) -> None:
+        image_path = tmp_path / "existing.png"
+        with (
+            patch(
+                "nga_tools.commands.image.image_store.mapped_image_path_for_url",
+                return_value=image_path,
+            ) as lookup_mock,
+            patch(
+                "nga_tools.commands.image.image_store.download_image_tasks"
+            ) as download_mock,
+            patch("nga_tools.commands.image.report_info") as report_mock,
+        ):
+            image_add({"url": self.image_url})
+
+        lookup_mock.assert_called_once_with(self.image_url)
+        download_mock.assert_not_called()
+        assert report_mock.call_args_list == [
+            call(f"图片已存在：{self.image_url}"),
+            call(f"本地文件：{image_path}"),
+        ]
+
+    def test_downloads_normalized_url_and_reports_mapping(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        raw_url = self.image_url.replace("example.png", "exam,ple.png")
+        normalized_url = raw_url.replace(",", "")
+        image_path = tmp_path / "downloaded.png"
+        with (
+            patch(
+                "nga_tools.commands.image.image_store.mapped_image_path_for_url",
+                side_effect=[None, image_path],
+            ) as lookup_mock,
+            patch(
+                "nga_tools.commands.image.image_store.download_image_tasks",
+                return_value={
+                    "succeeded": [
+                        {
+                            "url": normalized_url,
+                            "save_path": str(image_path),
+                            "success": True,
+                        }
+                    ],
+                    "failed": [],
+                },
+            ) as download_mock,
+            patch("nga_tools.commands.image.report_info") as report_mock,
+        ):
+            image_add({"url": f"  {raw_url}  "})
+
+        assert lookup_mock.call_args_list == [
+            call(normalized_url),
+            call(normalized_url),
+        ]
+        download_mock.assert_called_once_with([{"url": normalized_url}])
+        assert report_mock.call_args_list == [
+            call(f"图片添加完成：{normalized_url}"),
+            call(f"本地文件：{image_path}"),
+        ]
+
+    def test_download_failure_is_nonzero_and_keeps_details(self) -> None:
+        with (
+            patch(
+                "nga_tools.commands.image.image_store.mapped_image_path_for_url",
+                return_value=None,
+            ),
+            patch(
+                "nga_tools.commands.image.image_store.download_image_tasks",
+                return_value={
+                    "succeeded": [],
+                    "failed": [
+                        {
+                            "url": self.image_url,
+                            "save_path": "unused",
+                            "success": False,
+                            "error": "HTTP 404",
+                            "failure_kind": "http_4xx",
+                            "http_status": 404,
+                        }
+                    ],
+                },
+            ),
+            pytest.raises(
+                RuntimeError,
+                match=r"类别：http_4xx，HTTP 404，详情：HTTP 404",
+            ),
+        ):
+            image_add({"url": self.image_url})
+
+    def test_success_without_valid_mapping_fails(self) -> None:
+        with (
+            patch(
+                "nga_tools.commands.image.image_store.mapped_image_path_for_url",
+                return_value=None,
+            ),
+            patch(
+                "nga_tools.commands.image.image_store.download_image_tasks",
+                return_value={"succeeded": [], "failed": []},
+            ),
+            pytest.raises(RuntimeError, match="未写入有效映射"),
+        ):
+            image_add({"url": self.image_url})
 
 
 class ImageVerifyAllTest:
