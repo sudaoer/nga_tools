@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { Pane, Splitpanes } from 'splitpanes'
 import {
   clearPostOverlay,
   fetchPostOverlay,
@@ -10,6 +11,8 @@ import {
   savePostOverlay,
   type PostQuery,
 } from '../api'
+import PaneRestoreRail from '../components/PaneRestoreRail.vue'
+import { usePersistentPaneLayout } from '../composables/usePersistentPaneLayout'
 import type { PostItem, PostsResult, ThreadStatus, ThreadSummary } from '../types'
 
 type SortKey =
@@ -26,6 +29,37 @@ type SortDirection = 'asc' | 'desc'
 type PageToken =
   | { type: 'page'; page: number; key: string }
   | { type: 'ellipsis'; key: string }
+
+const THREAD_LIST_PANE_ID = 'thread-list'
+const {
+  collapsedPanes: collapsedSidebarPanes,
+  collapsePane: collapseSidebarPane,
+  containerRef: paneContainerRef,
+  isCollapsed: isSidebarCollapsed,
+  isNarrow: isNarrowPaneLayout,
+  mainMinSize: readerPaneMinSize,
+  mainSize: readerPaneSize,
+  onResized: onPaneResized,
+  paneMaxSize: sidebarPaneMaxSize,
+  paneMinSize: sidebarPaneMinSize,
+  paneSize: sidebarPaneSize,
+  restorePane: restoreSidebarPane,
+} = usePersistentPaneLayout({
+  storageKey: 'nga-tools:web-pane-layout:v1:threads',
+  mainMinPixels: 360,
+  mainMobileSize: 58,
+  panes: [
+    {
+      id: THREAD_LIST_PANE_ID,
+      label: '备份',
+      controlsId: 'thread-list-pane',
+      defaultSize: 30,
+      minPixels: 240,
+      maxSize: 55,
+      mobileSize: 42,
+    },
+  ],
+})
 
 const SORT_KEYS: SortKey[] = [
   'backupUpdated',
@@ -698,59 +732,95 @@ onMounted(() => {
 </script>
 
 <template>
-  <main class="app-shell">
-    <aside class="thread-pane">
-      <div class="pane-header">
-        <h1>NGA 备份查看器</h1>
-        <button type="button" class="icon-button" title="刷新列表" @click="refreshThreads">
-          ↻
-        </button>
-      </div>
-
-      <div class="filters">
-        <input v-model="listFilter.q" type="search" placeholder="搜索标题、名称、作者或tid" />
-        <select v-model="listFilter.sortBy" aria-label="排序字段">
-          <option v-for="key in SORT_KEYS" :key="key" :value="key">
-            按{{ sortLabels[key] }}
-          </option>
-        </select>
-        <select v-model="listFilter.sortDirection" aria-label="排序方向">
-          <option value="desc">降序</option>
-          <option value="asc">升序</option>
-        </select>
-      </div>
-
-      <div v-if="threadError" class="error-box">{{ threadError }}</div>
-      <div v-else-if="loadingThreads" class="empty-state">正在读取备份列表...</div>
-      <div v-else-if="visibleThreads.length === 0" class="empty-state">没有匹配的备份。</div>
-
-      <div class="thread-list">
-        <button
-          v-for="thread in visibleThreads"
-          :key="thread.dirName"
-          type="button"
-          class="thread-item"
-          :class="{ selected: selectedThread?.dirName === thread.dirName }"
-          @click="selectThread(thread)"
+  <main class="app-shell pane-layout-shell">
+    <PaneRestoreRail :items="collapsedSidebarPanes" @restore="restoreSidebarPane" />
+    <div ref="paneContainerRef" class="pane-split-area">
+      <Splitpanes
+        class="nga-splitpanes"
+        :horizontal="isNarrowPaneLayout"
+        :maximize-panes="false"
+        :keyboard-step="isNarrowPaneLayout ? 0 : 2"
+        @resized="onPaneResized"
+      >
+        <Pane
+          v-if="!isSidebarCollapsed(THREAD_LIST_PANE_ID)"
+          :size="sidebarPaneSize(THREAD_LIST_PANE_ID)"
+          :min-size="sidebarPaneMinSize(THREAD_LIST_PANE_ID)"
+          :max-size="sidebarPaneMaxSize(THREAD_LIST_PANE_ID)"
         >
-          <span class="thread-title">{{ titleFor(thread) }}</span>
-          <span class="thread-meta">
-            <span class="status" :class="thread.status">{{ statusLabel(thread.status) }}</span>
-            <span>{{ formatNumber(thread.postCount) }} 楼</span>
-            <span v-if="thread.bodyWordCount !== null">
-              {{ formatNumber(thread.bodyWordCount) }} 字
-            </span>
-            <span>{{ thread.author || thread.threadName || thread.dirName }}</span>
-            <span>备份 {{ formatTime(thread.updatedAt) }}</span>
-            <span v-if="thread.authorUpdatedAt !== null">
-              作者最后发言 {{ formatTime(thread.authorUpdatedAt) }}
-            </span>
-          </span>
-        </button>
-      </div>
-    </aside>
+          <aside id="thread-list-pane" class="thread-pane">
+            <div class="pane-header">
+              <h1>NGA 备份查看器</h1>
+              <div class="pane-header-actions">
+                <button
+                  type="button"
+                  class="icon-button"
+                  title="刷新列表"
+                  aria-label="刷新列表"
+                  @click="refreshThreads"
+                >
+                  ↻
+                </button>
+                <button
+                  type="button"
+                  class="icon-button pane-collapse-button"
+                  title="隐藏备份侧栏"
+                  aria-label="隐藏备份侧栏"
+                  aria-controls="thread-list-pane"
+                  :aria-expanded="true"
+                  @click="collapseSidebarPane(THREAD_LIST_PANE_ID)"
+                >
+                  «
+                </button>
+              </div>
+            </div>
 
-    <section class="reader-pane">
+            <div class="filters">
+              <input v-model="listFilter.q" type="search" placeholder="搜索标题、名称、作者或tid" />
+              <select v-model="listFilter.sortBy" aria-label="排序字段">
+                <option v-for="key in SORT_KEYS" :key="key" :value="key">
+                  按{{ sortLabels[key] }}
+                </option>
+              </select>
+              <select v-model="listFilter.sortDirection" aria-label="排序方向">
+                <option value="desc">降序</option>
+                <option value="asc">升序</option>
+              </select>
+            </div>
+
+            <div v-if="threadError" class="error-box">{{ threadError }}</div>
+            <div v-else-if="loadingThreads" class="empty-state">正在读取备份列表...</div>
+            <div v-else-if="visibleThreads.length === 0" class="empty-state">没有匹配的备份。</div>
+
+            <div class="thread-list">
+              <button
+                v-for="thread in visibleThreads"
+                :key="thread.dirName"
+                type="button"
+                class="thread-item"
+                :class="{ selected: selectedThread?.dirName === thread.dirName }"
+                @click="selectThread(thread)"
+              >
+                <span class="thread-title">{{ titleFor(thread) }}</span>
+                <span class="thread-meta">
+                  <span class="status" :class="thread.status">{{ statusLabel(thread.status) }}</span>
+                  <span>{{ formatNumber(thread.postCount) }} 楼</span>
+                  <span v-if="thread.bodyWordCount !== null">
+                    {{ formatNumber(thread.bodyWordCount) }} 字
+                  </span>
+                  <span>{{ thread.author || thread.threadName || thread.dirName }}</span>
+                  <span>备份 {{ formatTime(thread.updatedAt) }}</span>
+                  <span v-if="thread.authorUpdatedAt !== null">
+                    作者最后发言 {{ formatTime(thread.authorUpdatedAt) }}
+                  </span>
+                </span>
+              </button>
+            </div>
+          </aside>
+        </Pane>
+
+        <Pane :size="readerPaneSize" :min-size="readerPaneMinSize" :max-size="100">
+          <section class="reader-pane">
       <div v-if="selectedThread" class="reader-header">
         <div>
           <h2>{{ titleFor(selectedThread) }}</h2>
@@ -960,6 +1030,9 @@ onMounted(() => {
           </form>
         </div>
       </template>
-    </section>
+          </section>
+        </Pane>
+      </Splitpanes>
+    </div>
   </main>
 </template>

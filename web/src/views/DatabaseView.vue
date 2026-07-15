@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { Pane, Splitpanes } from 'splitpanes'
 import PaginationControls from '../components/PaginationControls.vue'
+import PaneRestoreRail from '../components/PaneRestoreRail.vue'
 import {
   fetchDatabaseSchema,
   fetchDatabases,
   fetchTableRowDetail,
   fetchTableRows,
 } from '../api'
+import { usePersistentPaneLayout } from '../composables/usePersistentPaneLayout'
 import type {
   ColumnInfo,
   DatabaseSchema,
@@ -18,6 +21,47 @@ import type {
   TableRows,
   TableSummary,
 } from '../types'
+
+const DATABASE_LIST_PANE_ID = 'database-list'
+const TABLE_LIST_PANE_ID = 'table-list'
+const {
+  collapsedPanes: collapsedSidebarPanes,
+  collapsePane: collapseSidebarPane,
+  containerRef: paneContainerRef,
+  isCollapsed: isSidebarCollapsed,
+  isNarrow: isNarrowPaneLayout,
+  mainMinSize: contentPaneMinSize,
+  mainSize: contentPaneSize,
+  onResized: onPaneResized,
+  paneMaxSize: sidebarPaneMaxSize,
+  paneMinSize: sidebarPaneMinSize,
+  paneSize: sidebarPaneSize,
+  restorePane: restoreSidebarPane,
+} = usePersistentPaneLayout({
+  storageKey: 'nga-tools:web-pane-layout:v1:databases',
+  mainMinPixels: 340,
+  mainMobileSize: 48,
+  panes: [
+    {
+      id: DATABASE_LIST_PANE_ID,
+      label: '数据库',
+      controlsId: 'database-list-pane',
+      defaultSize: 25,
+      minPixels: 220,
+      maxSize: 42,
+      mobileSize: 28,
+    },
+    {
+      id: TABLE_LIST_PANE_ID,
+      label: '表',
+      controlsId: 'table-list-pane',
+      defaultSize: 20,
+      minPixels: 170,
+      maxSize: 34,
+      mobileSize: 24,
+    },
+  ],
+})
 
 const databases = ref<DatabaseSummary[]>([])
 const schema = ref<DatabaseSchema | null>(null)
@@ -482,20 +526,54 @@ onMounted(() => {
 </script>
 
 <template>
-  <main class="database-shell">
-    <aside class="database-sidebar">
-      <div class="pane-header">
-        <h1>数据库查看器</h1>
-        <button type="button" class="icon-button" title="刷新数据库列表" @click="refreshDatabases">
-          ↻
-        </button>
-      </div>
+  <main class="database-shell pane-layout-shell">
+    <PaneRestoreRail :items="collapsedSidebarPanes" @restore="restoreSidebarPane" />
+    <div ref="paneContainerRef" class="pane-split-area">
+      <Splitpanes
+        class="nga-splitpanes"
+        :horizontal="isNarrowPaneLayout"
+        :maximize-panes="false"
+        :keyboard-step="isNarrowPaneLayout ? 0 : 2"
+        @resized="onPaneResized"
+      >
+        <Pane
+          v-if="!isSidebarCollapsed(DATABASE_LIST_PANE_ID)"
+          :size="sidebarPaneSize(DATABASE_LIST_PANE_ID)"
+          :min-size="sidebarPaneMinSize(DATABASE_LIST_PANE_ID)"
+          :max-size="sidebarPaneMaxSize(DATABASE_LIST_PANE_ID)"
+        >
+          <aside id="database-list-pane" class="database-sidebar">
+            <div class="pane-header">
+              <h1>数据库查看器</h1>
+              <div class="pane-header-actions">
+                <button
+                  type="button"
+                  class="icon-button"
+                  title="刷新数据库列表"
+                  aria-label="刷新数据库列表"
+                  @click="refreshDatabases"
+                >
+                  ↻
+                </button>
+                <button
+                  type="button"
+                  class="icon-button pane-collapse-button"
+                  title="隐藏数据库侧栏"
+                  aria-label="隐藏数据库侧栏"
+                  aria-controls="database-list-pane"
+                  :aria-expanded="true"
+                  @click="collapseSidebarPane(DATABASE_LIST_PANE_ID)"
+                >
+                  «
+                </button>
+              </div>
+            </div>
 
-      <div v-if="databaseError" class="error-box">{{ databaseError }}</div>
-      <div v-else-if="loadingDatabases" class="empty-state">正在读取数据库列表...</div>
-      <div v-else-if="databases.length === 0" class="empty-state">未找到项目内 SQLite 数据库。</div>
+            <div v-if="databaseError" class="error-box">{{ databaseError }}</div>
+            <div v-else-if="loadingDatabases" class="empty-state">正在读取数据库列表...</div>
+            <div v-else-if="databases.length === 0" class="empty-state">未找到项目内 SQLite 数据库。</div>
 
-      <div class="database-list">
+            <div class="database-list">
         <button
           v-for="database in databases"
           :key="database.id"
@@ -512,22 +590,40 @@ onMounted(() => {
           </span>
           <span class="database-path">{{ database.relativePath }}</span>
         </button>
-      </div>
-    </aside>
+            </div>
+          </aside>
+        </Pane>
 
-    <aside class="table-pane">
-      <div class="pane-header table-header">
-        <h1>表</h1>
-      </div>
+        <Pane
+          v-if="!isSidebarCollapsed(TABLE_LIST_PANE_ID)"
+          :size="sidebarPaneSize(TABLE_LIST_PANE_ID)"
+          :min-size="sidebarPaneMinSize(TABLE_LIST_PANE_ID)"
+          :max-size="sidebarPaneMaxSize(TABLE_LIST_PANE_ID)"
+        >
+          <aside id="table-list-pane" class="table-pane">
+            <div class="pane-header table-header">
+              <h1>表</h1>
+              <button
+                type="button"
+                class="icon-button pane-collapse-button"
+                title="隐藏表侧栏"
+                aria-label="隐藏表侧栏"
+                aria-controls="table-list-pane"
+                :aria-expanded="true"
+                @click="collapseSidebarPane(TABLE_LIST_PANE_ID)"
+              >
+                «
+              </button>
+            </div>
 
-      <div v-if="selectedDatabase?.status === 'invalid'" class="error-box">
-        {{ selectedDatabase.message || '数据库无法读取。' }}
-      </div>
-      <div v-else-if="schemaError" class="error-box">{{ schemaError }}</div>
-      <div v-else-if="loadingSchema" class="empty-state">正在读取表结构...</div>
-      <div v-else-if="schema && schema.tables.length === 0" class="empty-state">没有可浏览的表。</div>
+            <div v-if="selectedDatabase?.status === 'invalid'" class="error-box">
+              {{ selectedDatabase.message || '数据库无法读取。' }}
+            </div>
+            <div v-else-if="schemaError" class="error-box">{{ schemaError }}</div>
+            <div v-else-if="loadingSchema" class="empty-state">正在读取表结构...</div>
+            <div v-else-if="schema && schema.tables.length === 0" class="empty-state">没有可浏览的表。</div>
 
-      <div v-if="schema" class="table-list">
+            <div v-if="schema" class="table-list">
         <button
           v-for="table in schema.tables"
           :key="table.name"
@@ -543,10 +639,12 @@ onMounted(() => {
             <span>{{ table.columns.length }} 列</span>
           </span>
         </button>
-      </div>
-    </aside>
+            </div>
+          </aside>
+        </Pane>
 
-    <section class="database-content">
+        <Pane :size="contentPaneSize" :min-size="contentPaneMinSize" :max-size="100">
+          <section class="database-content">
       <div v-if="selectedDatabase" class="reader-header">
         <div>
           <h2>{{ selectedDatabase.label }}</h2>
@@ -666,6 +764,9 @@ onMounted(() => {
           </dl>
         </section>
       </template>
-    </section>
+          </section>
+        </Pane>
+      </Splitpanes>
+    </div>
   </main>
 </template>

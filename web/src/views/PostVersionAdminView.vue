@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { diffChars } from 'diff'
 import { computed, onMounted, ref, watch } from 'vue'
+import { Pane, Splitpanes } from 'splitpanes'
 import {
   clearPostVersionSelection,
   fetchPostVersionGroups,
@@ -8,6 +9,8 @@ import {
   fetchPostVersionThreads,
   selectPostVersion,
 } from '../api'
+import PaneRestoreRail from '../components/PaneRestoreRail.vue'
+import { usePersistentPaneLayout } from '../composables/usePersistentPaneLayout'
 import type {
   PostItem,
   PostVersionGroup,
@@ -22,6 +25,47 @@ interface VersionDiffPart {
   kind: VersionDiffPartKind
   value: string
 }
+
+const VERSION_BACKUP_PANE_ID = 'version-backups'
+const VERSION_LIST_PANE_ID = 'version-list'
+const {
+  collapsedPanes: collapsedSidebarPanes,
+  collapsePane: collapseSidebarPane,
+  containerRef: paneContainerRef,
+  isCollapsed: isSidebarCollapsed,
+  isNarrow: isNarrowPaneLayout,
+  mainMinSize: detailPaneMinSize,
+  mainSize: detailPaneSize,
+  onResized: onPaneResized,
+  paneMaxSize: sidebarPaneMaxSize,
+  paneMinSize: sidebarPaneMinSize,
+  paneSize: sidebarPaneSize,
+  restorePane: restoreSidebarPane,
+} = usePersistentPaneLayout({
+  storageKey: 'nga-tools:web-pane-layout:v1:post-versions',
+  mainMinPixels: 340,
+  mainMobileSize: 50,
+  panes: [
+    {
+      id: VERSION_BACKUP_PANE_ID,
+      label: '备份',
+      controlsId: 'version-backup-pane',
+      defaultSize: 25,
+      minPixels: 220,
+      maxSize: 42,
+      mobileSize: 28,
+    },
+    {
+      id: VERSION_LIST_PANE_ID,
+      label: '正文版本',
+      controlsId: 'version-list-pane',
+      defaultSize: 23,
+      minPixels: 190,
+      maxSize: 36,
+      mobileSize: 22,
+    },
+  ],
+})
 
 const threads = ref<PostVersionThreadSummary[]>([])
 const selectedThread = ref<PostVersionThreadSummary | null>(null)
@@ -465,27 +509,61 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="version-admin-shell">
-    <aside class="thread-pane">
-      <div class="pane-header">
-        <h1>备份</h1>
-        <button type="button" class="icon-button" title="刷新列表" @click="refreshThreads">
-          ↻
-        </button>
-      </div>
+  <section class="version-admin-shell pane-layout-shell">
+    <PaneRestoreRail :items="collapsedSidebarPanes" @restore="restoreSidebarPane" />
+    <div ref="paneContainerRef" class="pane-split-area">
+      <Splitpanes
+        class="nga-splitpanes"
+        :horizontal="isNarrowPaneLayout"
+        :maximize-panes="false"
+        :keyboard-step="isNarrowPaneLayout ? 0 : 2"
+        @resized="onPaneResized"
+      >
+        <Pane
+          v-if="!isSidebarCollapsed(VERSION_BACKUP_PANE_ID)"
+          :size="sidebarPaneSize(VERSION_BACKUP_PANE_ID)"
+          :min-size="sidebarPaneMinSize(VERSION_BACKUP_PANE_ID)"
+          :max-size="sidebarPaneMaxSize(VERSION_BACKUP_PANE_ID)"
+        >
+          <aside id="version-backup-pane" class="thread-pane">
+            <div class="pane-header">
+              <h1>备份</h1>
+              <div class="pane-header-actions">
+                <button
+                  type="button"
+                  class="icon-button"
+                  title="刷新列表"
+                  aria-label="刷新列表"
+                  @click="refreshThreads"
+                >
+                  ↻
+                </button>
+                <button
+                  type="button"
+                  class="icon-button pane-collapse-button"
+                  title="隐藏备份侧栏"
+                  aria-label="隐藏备份侧栏"
+                  aria-controls="version-backup-pane"
+                  :aria-expanded="true"
+                  @click="collapseSidebarPane(VERSION_BACKUP_PANE_ID)"
+                >
+                  «
+                </button>
+              </div>
+            </div>
 
-      <label class="version-thread-filter">
+            <label class="version-thread-filter">
         <input v-model="showOnlyMultiVersionThreads" type="checkbox" />
         <span>只看多版本楼层</span>
-      </label>
+            </label>
 
-      <div v-if="threadError" class="error-box">{{ threadError }}</div>
-      <div v-else-if="loadingThreads" class="empty-state">正在读取备份列表...</div>
-      <div v-else-if="visibleThreads.length === 0" class="empty-state">
-        {{ showOnlyMultiVersionThreads ? '没有多版本楼层的备份。' : '没有可管理的备份。' }}
-      </div>
+            <div v-if="threadError" class="error-box">{{ threadError }}</div>
+            <div v-else-if="loadingThreads" class="empty-state">正在读取备份列表...</div>
+            <div v-else-if="visibleThreads.length === 0" class="empty-state">
+              {{ showOnlyMultiVersionThreads ? '没有多版本楼层的备份。' : '没有可管理的备份。' }}
+            </div>
 
-      <div class="thread-list">
+            <div class="thread-list">
         <button
           v-for="thread in visibleThreads"
           :key="thread.dirName"
@@ -502,19 +580,37 @@ onMounted(() => {
             <span>备份 {{ formatTime(thread.updatedAt) }}</span>
           </span>
         </button>
-      </div>
-    </aside>
+            </div>
+          </aside>
+        </Pane>
 
-    <aside class="version-list-pane">
-      <div class="pane-header">
-        <h1>正文版本</h1>
-      </div>
+        <Pane
+          v-if="!isSidebarCollapsed(VERSION_LIST_PANE_ID)"
+          :size="sidebarPaneSize(VERSION_LIST_PANE_ID)"
+          :min-size="sidebarPaneMinSize(VERSION_LIST_PANE_ID)"
+          :max-size="sidebarPaneMaxSize(VERSION_LIST_PANE_ID)"
+        >
+          <aside id="version-list-pane" class="version-list-pane">
+            <div class="pane-header">
+              <h1>正文版本</h1>
+              <button
+                type="button"
+                class="icon-button pane-collapse-button"
+                title="隐藏正文版本侧栏"
+                aria-label="隐藏正文版本侧栏"
+                aria-controls="version-list-pane"
+                :aria-expanded="true"
+                @click="collapseSidebarPane(VERSION_LIST_PANE_ID)"
+              >
+                «
+              </button>
+            </div>
 
-      <div v-if="versionError" class="error-box">{{ versionError }}</div>
-      <div v-else-if="loadingGroups" class="empty-state">正在读取版本...</div>
-      <div v-else-if="groups.length === 0" class="empty-state">没有多版本楼层。</div>
+            <div v-if="versionError" class="error-box">{{ versionError }}</div>
+            <div v-else-if="loadingGroups" class="empty-state">正在读取版本...</div>
+            <div v-else-if="groups.length === 0" class="empty-state">没有多版本楼层。</div>
 
-      <div class="version-floor-list">
+            <div class="version-floor-list">
         <button
           v-for="group in groups"
           :key="group.lou"
@@ -530,10 +626,12 @@ onMounted(() => {
             <span v-else>自动最新</span>
           </span>
         </button>
-      </div>
-    </aside>
+            </div>
+          </aside>
+        </Pane>
 
-    <section class="version-detail-pane">
+        <Pane :size="detailPaneSize" :min-size="detailPaneMinSize" :max-size="100">
+          <section class="version-detail-pane">
       <div v-if="selectedGroup" class="reader-header">
         <div>
           <h2>{{ selectedGroup.floorLabel }}</h2>
@@ -628,6 +726,9 @@ onMounted(() => {
           <div class="post-body" v-html="preview.html"></div>
         </article>
       </template>
-    </section>
+          </section>
+        </Pane>
+      </Splitpanes>
+    </div>
   </section>
 </template>

@@ -11,6 +11,9 @@ importers:
       diff:
         specifier: ^9.0.0
         version: 9.0.0
+      splitpanes:
+        specifier: ^4.1.2
+        version: 4.1.2(vue@3.5.39(typescript@5.9.3))
       vue:
         specifier: ^3.5.0
         version: 3.5.39(typescript@5.9.3)
@@ -480,6 +483,11 @@ packages:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
     engines: {node: '>=0.10.0'}
 
+  splitpanes@4.1.2:
+    resolution: {integrity: sha512-frNchoCv7w0nMQEuaDGgMGMU6jv3NhN6bBGQVfCNgwJdVcYaRmi1dwYDjp7SifAoUFdiQjBRB254LJNidzo15Q==}
+    peerDependencies:
+      vue: ^3.2.0
+
   tinyglobby@0.2.17:
     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
@@ -914,6 +922,10 @@ snapshots:
       fsevents: 2.3.3
 
   source-map-js@1.2.1: {}
+
+  splitpanes@4.1.2(vue@3.5.39(typescript@5.9.3)):
+    dependencies:
+      vue: 3.5.39(typescript@5.9.3)
 
   tinyglobby@0.2.17:
     dependencies:
