@@ -112,8 +112,8 @@ pixi run python main.py forum sync --full-postdate --refresh --fid 784
 pixi run python main.py backup all --name 帖子名
 ```
 
-图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在 `output/image_index.sqlite3`。下载失败的图片不写入 SQLite 映射；PDF 按需渲染时会使用 `images_unique/download_failed_placeholder.png` 占位图，后续增量备份仍会继续重试原图。
-帖子内容会写入每个备份目录自己的 `archive.sqlite3`。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write-json` 会额外写入 `json/page_*.json`。Web 和 PDF 均从 `archive.sqlite3` 按需生成各自的目标 HTML，不保存逐楼中间 HTML。
+图片会按内容 hash 保存到全局 `output/images_unique/`，原始 NGA 图片链接到本地文件的映射保存在持久数据文件 `output/image_index.sqlite3`，文件校验结果另存于可重建的 `output/image_cache.sqlite3`。下载失败的图片不写入 SQLite 映射；PDF 按需渲染时会使用 `images_unique/download_failed_placeholder.png` 占位图，后续增量备份仍会继续重试原图。
+帖子内容会写入每个备份目录自己的 `archive.sqlite3`，派生处理状态和可重建缓存分别写入 `archive_state.sqlite3` 与 `archive_cache.sqlite3`。默认不输出分页 JSON；需要最近响应缓存和回滚参考时，加 `--write-json` 会额外写入 `json/page_*.json`。Web 和 PDF 均从 `archive.sqlite3` 按需生成各自的目标 HTML，不保存逐楼中间 HTML。
 
 补充本地缺失内容和远端新增内容：
 
@@ -123,9 +123,9 @@ pixi run python main.py backup sub --name 帖子名
 
 `backup sub` 会补抓缺失的页，并刷新本地尾页到远端最后一页。`backup all` 仍会完整抓取远端所有页面；抓取完成后，同一主题的本批页面会使用一个归档连接和一个事务写入，任一页面写入失败都会回滚本批全部页面。
 
-完整或增量备份会分别复用 `archive.sqlite3` 中的楼层处理状态和图片引用集合状态。页数、`vrows` 或楼层映射输入变化时只刷新楼层派生状态；归档正文、附件、overlay、手动版本选择和图片引用解析版本未变化时，不再读取完整归档或批量展开全部帖子图片引用，只重试上次未完成的图片 URL。该状态同时适用于只看作者和没有 `aid` 的原帖备份；`backup all` 的状态复用判定发生在完整网络抓取及归档写入之后，不会跳过远端刷新。
+完整或增量备份会复用 `archive_state.sqlite3` 中的楼层处理状态和图片引用集合状态。页数、`vrows` 或楼层映射输入变化时只刷新楼层派生状态；归档正文、附件、overlay、手动版本选择和图片引用解析版本未变化时，不再读取完整归档或批量展开全部帖子图片引用，只重试上次未完成的图片 URL。该状态同时适用于只看作者和没有 `aid` 的原帖备份；`backup all` 的状态复用判定发生在完整网络抓取及归档写入之后，不会跳过远端刷新。
 
-正文来源实际变化后才会重建图片引用集合，并复用帖子级图片引用派生缓存，只重新解析新增或正文、附件、overlay、手动版本选择发生变化的楼层。下载失败的图片独立保存在数据库待重试队列中：新 URL、HTTP 429、5xx、网络、payload 和本地存储失败会在下一次相关备份继续尝试；已知 HTTP 3xx 和除 429 外的 4xx 会根据距上次尝试的时间概率重试。累计触发概率为 `x^3`（`x` 是已等待时间占最大间隔的比例），同一 URL 在一个重试周期内使用稳定票据，不会因为频繁运行而反复抽签；达到 `backup_image_retry_max_interval_hours` 后必定重试。概率延后的 URL 不会单独触发 `backup auto` 本地维护，新 URL 始终立即尝试，不再被正文引用的 URL 会移出队列。状态复用不会重新校验已成功的历史图片，本地文件后续被删除或损坏时请运行 `image verify` 检测。只看作者备份还会重试恢复缺失楼内容；恢复出的匿名正文会提升归档修订并使图片集合按需更新。旧版单体处理状态会在打开归档时迁移楼层字段并删除，旧版纯 URL 图片队列会在升级后的首次重试补齐失败类别和时间。图片引用集合安全地重建一次。需要忽略所有派生状态并强制重新处理时，可给 `backup all` 或 `backup sub` 加 `--force-processing`（兼容 `--force_processing`）；此选项会立即重试全部仍被引用的失败图片，但不会禁用帖子级图片引用缓存。
+正文来源实际变化后才会重建图片引用集合，并复用 `archive_cache.sqlite3` 中的帖子级图片引用派生缓存，只重新解析新增或正文、附件、overlay、手动版本选择发生变化的楼层。下载失败的图片待重试队列保存在 `archive_state.sqlite3`：新 URL、HTTP 429、5xx、网络、payload 和本地存储失败会在下一次相关备份继续尝试；已知 HTTP 3xx 和除 429 外的 4xx 会根据距上次尝试的时间概率重试。累计触发概率为 `x^3`（`x` 是已等待时间占最大间隔的比例），同一 URL 在一个重试周期内使用稳定票据，不会因为频繁运行而反复抽签；达到 `backup_image_retry_max_interval_hours` 后必定重试。概率延后的 URL 不会单独触发 `backup auto` 本地维护，新 URL 始终立即尝试，不再被正文引用的 URL 会移出队列。状态复用不会重新校验已成功的历史图片，本地文件后续被删除或损坏时请运行 `image verify` 检测。只看作者备份还会重试恢复缺失楼内容；恢复出的匿名正文会提升归档修订并使图片集合按需更新。旧版单体 SQLite 不会在正常备份时自动升级或读取其中的旧缓存，必须先显式运行 `backup migrate-layout`。需要忽略所有派生状态并强制重新处理时，可给 `backup all` 或 `backup sub` 加 `--force-processing`（兼容 `--force_processing`）；此选项会立即重试全部仍被引用的失败图片，但不会禁用帖子级图片引用缓存。
 增量刷新到的新页会合并进历史楼层库；同一页新响应中消失的旧楼不会从库中删除。尚未迁移的旧备份目录如果含有 `json/page_*.json` 但 `archive.sqlite3` 不完整，正常备份会报错提示先运行 `backup migrate-store`，不会自动读取旧 JSON。
 
 也可以不使用保存的名称，直接指定 `tid` 和可选的 `aid`：
@@ -163,8 +163,9 @@ pixi run ankebak
 上次成功 `backup all` 的时间使用稳定的 `x^3` 累计概率选择，频繁运行不会重复
 抽签；达到 `ankebak_full_backup_interval_hours` 后必定执行，以发现日常增量路径
 无法覆盖的旧页编辑。首次启用时所有尚无 ankebak 成功水位的帖子会立即完整
-备份。成功水位保存在 `output/forum_threads.sqlite3` 的
-`ankebak_thread_state` 表中，单帖失败不会推进水位。
+备份。成功水位保存在 `output/backup_state.sqlite3` 的
+`ankebak_thread_state` 表中；`forum_threads.sqlite3` 只保存版面主题数据，
+单帖失败不会推进水位。
 
 批量备份遇到 NGA 返回“帖子被设为隐藏”时会记录警告并计为隐藏跳过；如果本批
 只有这类跳过，命令仍以 0 退出。其他异常仍会使批量命令最终以非 0 退出。
@@ -245,7 +246,9 @@ pixi run python main.py replay test `
 `replay_run-*.json` 报告均复用 `replay run` 的实现。
 
 `empty` 要求目标不存在或为空，从零创建归档；`warm` 通过 SQLite Online Backup
-复制数据库，并复制或 reflink 图片及版本选择文件。两者都会写入 replay 目标归属
+分别复制现有 data/state/cache 数据库，并复制或 reflink 图片及版本选择文件。
+缓存键使用 `images_unique/...` 相对路径，不再从旧版 `image_index.sqlite3` 读取或
+改写绝对路径缓存。两者都会写入 replay 目标归属
 标记；`existing` 只接受带有同一 `source-output` 归属标记的目标，可继续一次中断的
 重放运行。源与目标相同或互相嵌套、目标使用符号链接，或目标文件与源文件共享
 inode 时会拒绝运行；`empty` 和 `warm` 不会覆盖非空目标。Windows 当前只检查
@@ -282,7 +285,53 @@ pixi run python main.py backup sub --all-threads --force-processing
 
 楼层映射会增量刷新并保存在同一备份的 `archive.sqlite3` 中。缺失楼无法唯一确定原帖楼层时，数据库会保存候选原楼层；若能从匿名原帖恢复正文，正文也会直接写入该数据库。
 
-旧备份目录可以显式迁移到每帖 SQLite 存储。迁移不会删除或改写旧 `json/page_*.json`：
+## 数据库布局、交付与迁移
+
+当前布局给每个 SQLite 文件写入 `storage_metadata`，其中包含角色、布局版本和
+存储 ID；每帖状态库与缓存库还会绑定对应 `archive.sqlite3` 的存储 ID，避免把
+不同备份的派生文件混用。交付完整备份时按以下边界处理：
+
+| 分类 | 文件 | 交付要求 |
+| --- | --- | --- |
+| 持久数据 | `forum_threads.sqlite3`、各帖 `archive.sqlite3`、`image_index.sqlite3`、`images_unique/` | 必须保留；它们包含离线时无法重新从本机推导的版面数据、正文历史、图片 URL 映射和图片内容 |
+| 用户选择 | `thread_configs.json`、各帖 `post_version_overrides.json` | 必须保留；后者仅在管理页保存过历史正文选择时存在 |
+| 运行状态 | `backup_state.sqlite3`、各帖 `archive_state.sqlite3` | 建议随完整工作副本保留；只读交付可省略，之后会从持久数据重建派生状态，但智能备份水位和失败图片重试历史会丢失 |
+| 可重建缓存 | `image_cache.sqlite3`、各帖 `archive_cache.sqlite3` | 可以不交付或删除；程序不会把它们当作持久数据，缺失或损坏时会重新创建 |
+| 可选产物 | `json/`、`pdf/`、日志、`replay_run-*.json` | 按用途保留；当前 SQLite 数据完整时不属于恢复 Web/PDF/replay 读取能力的必要输入 |
+
+只复制持久数据和用户选择后，接收方仍可在不访问 NGA 的情况下使用 Web、生成
+PDF 或启动 `replay serve`；首次需要派生处理时会新建 state/cache 文件。若要保留
+现成 PDF，也应额外复制各帖 `pdf/`。交付时可同时提供不含 Cookie 的
+`config.json` 并让接收方修改 `output_dir`；不要把 `secrets.json`、Cookie 或其他
+凭据交给不应获得 NGA 账号权限的人。
+
+旧版单体 SQLite 布局必须显式迁移。全量命令同时处理所有帖子以及根目录的
+forum、ankebak 和图片数据库：
+
+```powershell
+pixi run python main.py backup migrate-layout --all
+```
+
+迁移持有 output 根锁，Web 管理写入和其他会修改 output 的命令不会与换库发布
+交叉执行。每次迁移会输出 `run_id`，在
+`output/.migration-backups/<run_id>/` 保存原库的 SQLite Online Backup、清单和
+持久数据指纹；中断或部分失败后再次运行同一命令会从该清单续跑。迁移只接收与
+当前数据修订及格式匹配的状态、可解析缓存和仍对应现有图片文件的校验项；无效
+缓存直接丢弃。活动 `archive.sqlite3`、`forum_threads.sqlite3` 和
+`image_index.sqlite3` 发布后不再包含旧状态/缓存表，正常程序也不会回读旧格式
+库里的缓存。
+
+验收失败时可用命令输出的 `run_id` 恢复迁移前布局：
+
+```powershell
+pixi run python main.py backup migrate-layout --rollback <run_id>
+```
+
+回滚后的旧布局仅用于撤销和排障；当前程序会拒绝把它当作正常运行库，重新使用前
+仍需完成迁移。确认新布局及交付副本可读前，不要删除 `.migration-backups/`。
+
+更早期只有 `json/page_*.json` 的备份目录可先显式迁移到每帖 SQLite 存储。
+该迁移不会删除或改写旧 JSON：
 
 ```powershell
 pixi run python main.py backup migrate-store --name 帖子名
@@ -329,9 +378,10 @@ Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页�
 前端使用 Vue Router 管理页面：`/threads` 是普通帖子阅读器，`/admin` 是
 管理界面；旧 `/databases` 会跳转到 `/admin/databases`。管理界面中的数据库
 查看器只浏览项目输出目录中的
-`forum_threads.sqlite3`、`image_index.sqlite3` 和各帖子目录下的
-`archive.sqlite3`，支持查看表结构、分页浏览、排序和关键字筛选，不执行用户
-输入的 SQL。
+`forum_threads.sqlite3`、`backup_state.sqlite3`、`image_index.sqlite3`、
+`image_cache.sqlite3` 和各帖子目录下的 `archive.sqlite3`、
+`archive_state.sqlite3`、`archive_cache.sqlite3`，支持查看表结构、分页浏览、
+排序和关键字筛选，不执行用户输入的 SQL。
 
 管理界面的“正文版本”会列出同一楼层中正文内容有多个历史版本的楼，左侧备份列表
 默认只显示存在多版本楼层的备份，并可切换为显示全部可管理备份。用户只能选择
@@ -381,24 +431,31 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 默认输出到 `output/<tid>_<aid|all>/`：
 
 - `json/`：加 `--write-json` 时输出的接口最近响应分页数据
-- `archive.sqlite3`：每帖独立的楼层历史存储，保存页响应快照、正文版本和最新展示元数据；
-  完整原始分页响应保存在 `page_snapshots.page_json`，`post_versions` 只按正文内容做版本控制；
-  只看作者备份的楼层映射、候选原楼层及可重建的图片引用解析缓存也保存在此数据库；
-  网页保存的单楼 BBCode overlay 存在 `post_overlays` 表，Web 和 PDF 按需渲染；
-  `archive_change_state`、`backup_floor_processing_state`、`backup_image_reference_state` 和 `backup_pending_images` 分别保存归档修订、楼层派生状态、图片引用集合版本状态，以及未完成图片的 URL、最后尝试时间、失败类别和 HTTP 状态；`backup_image_reference_manifest_*` 四张伴生表保存逐楼引用清单及 URL 引用计数，普通处理状态命中不扫描它们；旧版本创建的 `backup_image_references` 表仅作为历史数据保留，备份热路径不再读取或改写它
-  - 当归档变更可精确归因到本轮楼层写入且 overlay、版本选择和提取器版本未变时，备份只更新变更楼层的图片引用；旧归档缺少伴生清单时仅在首次真实变更时懒初始化，无变更命中不会为此扫描完整归档
+- `archive.sqlite3`：每帖持久数据。保存完整分页响应快照、正文版本、最新展示
+  元数据、楼层映射与候选原楼层、归档修订和管理页 BBCode overlay；Web、PDF
+  和 replay 的正文来源都在此库
+- `archive_state.sqlite3`：每帖运行状态。保存楼层/图片引用处理水位、逐楼引用
+  清单、URL 引用计数以及失败图片待重试队列；删除后可从 `archive.sqlite3`
+  重建，但会丢失尚未完成工作的历史状态
+- `archive_cache.sqlite3`：每帖可重建缓存。当前保存帖子级图片引用解析结果；
+  缺失、损坏或与 `archive.sqlite3` 的存储 ID 不匹配时按空缓存处理并重建
 - `post_version_overrides.json`：管理界面保存的正文历史版本选择；没有选择时可为空
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 
-全局图片产物位于 `output/` 根目录：
+全局数据库与图片产物位于 `output/` 根目录：
 
+- `forum_threads.sqlite3`：持久的版面主题列表数据
+- `backup_state.sqlite3`：`backup auto` 的成功水位和完整备份调度状态
 - `images_unique/`：按内容 hash 保存的实际图片文件
 - `images_unique/download_failed_placeholder.png`：下载失败图片的占位图，按需生成
-- `image_index.sqlite3`：原始 NGA 图片 URL 到 `images_unique` 文件的映射
+- `image_index.sqlite3`：持久的原始 NGA 图片 URL 到 `images_unique` 文件映射
+- `image_cache.sqlite3`：以 `images_unique/...` 相对路径为键的文件校验缓存；可删除重建
+- `.migration-backups/<run_id>/`：布局迁移的原库快照、恢复清单和验收指纹
 
 旧版本生成的 `html_modified/`、`backup_state.json`、`floor_map.json`、
 `post_overlays.json` 和 `overlay/post_*.html` 不再读取，
-程序也不会自动删除或改写这些历史产物。
+程序也不会自动删除或改写这些历史产物。旧版单体 SQLite 中的处理状态表和缓存表
+同样不会被正常运行路径读取；只能由显式 `backup migrate-layout` 检查后迁移。
 
 ## 协议
 

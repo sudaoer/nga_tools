@@ -490,7 +490,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
     "web": {
         "serve": {
             "handler": web_serve,
-            "summary": "启动本地只读Web查看器",
+            "summary": "启动本地Web查看器和管理页",
             "usage": (
                 f"{PROGRAM_USAGE} web serve "
                 "[--host HOST] [--port PORT] [--static-dir PATH]"
@@ -501,7 +501,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} web serve --host 0.0.0.0",
             ],
             "notes": [
-                "此命令只读取本地备份，不联网、不修改备份内容。",
+                "普通阅读和数据库浏览只读取本地备份，管理页可写入正文版本选择和overlay。",
+                "此命令不访问NGA；管理写入会与布局迁移和其他output写任务互斥。",
                 "默认只监听本机地址，避免把本地备份暴露到局域网。",
                 "线程列表会显示已存盘的正文字数，并支持按正文字数排序。",
                 "只支持当前archive.sqlite3备份；旧JSON请先迁移。",

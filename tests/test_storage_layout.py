@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from nga_tools.backup import image_store
 from nga_tools.backup.archive_store import (
     PostImageReferenceCacheEntry,
     ThreadArchiveStore,
 )
 from nga_tools.backup.processing_state import ArchiveChangeState, ImageReferenceState
-from nga_tools.storage import STORAGE_LAYOUT_VERSION, read_storage_metadata
+from nga_tools.storage import (
+    STORAGE_LAYOUT_VERSION,
+    ensure_storage_metadata,
+    read_storage_metadata,
+)
 
 
 def _table_names(path: Path) -> set[str]:
@@ -134,3 +141,81 @@ def test_state_commit_double_checks_archive_revision(tmp_path: Path) -> None:
     reread = store.read_backup_processing_snapshot()
     assert reread.image_state == state
     assert reread.image_state.processed_archive_revision != changed.archive_revision
+
+
+def test_data_only_handoff_reads_without_state_or_cache_databases(
+    tmp_path: Path,
+) -> None:
+    source_output = tmp_path / "source"
+    source_thread = source_output / "123_456"
+    source_store = ThreadArchiveStore(source_thread)
+    source_store.upsert_page(
+        1,
+        {
+            "currentPage": 1,
+            "totalPage": 1,
+            "result": [{"lou": 1, "pid": 1001, "content": "portable body"}],
+        },
+        observed_at="2026-07-15T00:00:00+00:00",
+    )
+    source_store.ensure_backup_processing_schema()
+    source_store.upsert_post_image_reference_cache(
+        [
+            PostImageReferenceCacheEntry(
+                cache_key="drop-me",
+                source_hash="source",
+                extractor_version=1,
+                references_json="[]",
+            )
+        ]
+    )
+    with closing(
+        sqlite3.connect(source_output / image_store.IMAGE_INDEX_FILENAME)
+    ) as connection:
+        ensure_storage_metadata(connection, role="image_index")
+        connection.execute(
+            """
+            CREATE TABLE image_mappings (
+                url TEXT PRIMARY KEY,
+                unique_rel_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO image_mappings VALUES (?, ?, '', '')",
+            ("https://img.nga.178.com/portable.png", "images_unique/image.png"),
+        )
+        connection.commit()
+    with closing(
+        sqlite3.connect(source_output / image_store.IMAGE_CACHE_FILENAME)
+    ) as connection:
+        ensure_storage_metadata(connection, role="image_cache")
+        connection.commit()
+
+    target_output = tmp_path / "handoff"
+    target_thread = target_output / "123_456"
+    target_thread.mkdir(parents=True)
+    shutil.copy2(source_store.db_path, target_thread / source_store.db_path.name)
+    shutil.copy2(
+        source_output / image_store.IMAGE_INDEX_FILENAME,
+        target_output / image_store.IMAGE_INDEX_FILENAME,
+    )
+
+    target_store = ThreadArchiveStore(target_thread)
+    target_post = target_store.read_effective_post_records()[0]["post"]
+    assert target_post is not None
+    assert target_post["content"] == "portable body"
+    assert not target_store.state_store.db_path.exists()
+    assert not target_store.cache_store.db_path.exists()
+    assert target_store.read_post_image_reference_cache({"drop-me"}) == {}
+    with patch(
+        "nga_tools.backup.image_store.get_config",
+        return_value=SimpleNamespace(output_dir=str(target_output)),
+    ):
+        mappings = image_store.image_mappings_by_url()
+    assert mappings["https://img.nga.178.com/portable.png"].unique_rel_path == (
+        "images_unique/image.png"
+    )
+    assert not (target_output / image_store.IMAGE_CACHE_FILENAME).exists()
