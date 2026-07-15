@@ -19,9 +19,6 @@ from nga_tools.console import report_info
 from nga_tools.backup import image_store
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
-from nga_tools.backup.post_version_selection import (
-    POST_VERSION_SELECTIONS_FILENAME,
-)
 from nga_tools.core.output_lock import ThreadOutputLockError, use_output_root_lock
 from nga_tools.forum.thread_configs import ThreadConfig
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
@@ -158,9 +155,6 @@ def _thread_list_fingerprint(output_dir: Path) -> ThreadListFingerprint:
                     _file_fingerprint(thread_folder),
                     _sqlite_fingerprint(archive_path),
                     _file_fingerprint(thread_folder / "warnings.log"),
-                    _file_fingerprint(
-                        thread_folder / POST_VERSION_SELECTIONS_FILENAME
-                    ),
                     _file_fingerprint(thread_folder / "json"),
                 ]
             )
@@ -237,9 +231,6 @@ def _image_usage_fingerprint(output_dir: Path) -> ImageUsageFingerprint:
                     thread_folder.name,
                     _file_fingerprint(archive_path),
                     _file_fingerprint(Path(str(archive_path) + "-wal")),
-                    _file_fingerprint(
-                        thread_folder / POST_VERSION_SELECTIONS_FILENAME
-                    ),
                 ]
             )
         )

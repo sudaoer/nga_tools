@@ -34,12 +34,6 @@ from nga_tools.backup.post_overlay import (
     make_existing_overlay_image_src_resolver,
     render_overlay_html,
 )
-from nga_tools.backup.post_version_selection import (
-    POST_VERSION_SELECTIONS_FILENAME,
-    load_selections,
-    make_selection,
-    write_selections,
-)
 from nga_tools.core.sqlite import configure_readonly_connection
 from nga_tools.forum.thread_configs import (
     NGAThreadConfigs,
@@ -532,8 +526,8 @@ def _thread_summary_for_folder(
     updated_at = _latest_mtime(
         [
             db_path,
+            Path(str(db_path) + "-wal"),
             warnings_path,
-            thread_folder / POST_VERSION_SELECTIONS_FILENAME,
         ]
     )
 
@@ -1288,25 +1282,6 @@ def read_post_version_preview(
     }
 
 
-def _latest_version_id_for_lou(connection: sqlite3.Connection, lou: int) -> Optional[int]:
-    latest_row = cast(
-        Optional[tuple[int]],
-        connection.execute(
-            """
-            SELECT id
-            FROM post_versions
-            WHERE lou = ?
-            ORDER BY last_seen_at DESC, id DESC
-            LIMIT 1
-            """,
-            (lou,),
-        ).fetchone(),
-    )
-    if latest_row is None:
-        return None
-    return latest_row[0]
-
-
 def select_post_version(
     output_dir: Path,
     tid: int,
@@ -1314,37 +1289,12 @@ def select_post_version(
     lou: int,
     version_id: int,
 ) -> PostVersionSelectionResult:
-    archive_store, thread_folder, _aid = _archive_store_for_thread(
+    archive_store, _thread_folder, _aid = _archive_store_for_thread(
         output_dir,
         tid,
         raw_aid_key,
     )
-    with closing(_connect_readonly(archive_store.db_path)) as connection:
-        version_row = cast(
-            Optional[tuple[int, str]],
-            connection.execute(
-                """
-                SELECT lou, source_hash
-                FROM post_versions
-                WHERE id = ?
-                """,
-                (version_id,),
-            ).fetchone(),
-        )
-        if version_row is None:
-            raise ValueError("未知帖子正文版本。")
-        version_lou, source_hash = version_row
-        if version_lou != lou:
-            raise ValueError("帖子正文版本不属于指定楼层。")
-        latest_version_id = _latest_version_id_for_lou(connection, lou)
-        if latest_version_id is None:
-            raise ValueError("未知楼层。")
-        if latest_version_id == version_id:
-            raise ValueError("不能手动选择当前最新版。")
-
-    selections = load_selections(thread_folder)
-    selections[lou] = make_selection(version_id, source_hash)
-    write_selections(thread_folder, selections)
+    archive_store.upsert_post_version_selection(lou, version_id)
     return {
         "lou": lou,
         "selectedVersionId": version_id,
@@ -1358,19 +1308,12 @@ def clear_post_version_selection(
     raw_aid_key: str,
     lou: int,
 ) -> PostVersionSelectionResult:
-    archive_store, thread_folder, _aid = _archive_store_for_thread(
+    archive_store, _thread_folder, _aid = _archive_store_for_thread(
         output_dir,
         tid,
         raw_aid_key,
     )
-    with closing(_connect_readonly(archive_store.db_path)) as connection:
-        latest_version_id = _latest_version_id_for_lou(connection, lou)
-        if latest_version_id is None:
-            raise ValueError("未知楼层。")
-
-    selections = load_selections(thread_folder)
-    selections.pop(lou, None)
-    write_selections(thread_folder, selections)
+    latest_version_id = archive_store.delete_post_version_selection(lou)
     return {
         "lou": lou,
         "selectedVersionId": None,

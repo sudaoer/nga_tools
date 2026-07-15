@@ -18,9 +18,6 @@ from nga_tools.backup.image_store import (
     IMAGE_CACHE_FILENAME,
     IMAGE_INDEX_FILENAME,
 )
-from nga_tools.backup.post_version_selection import (
-    POST_VERSION_SELECTIONS_FILENAME,
-)
 from nga_tools.backup.thread_stores import (
     ARCHIVE_CACHE_DB_FILENAME,
     ARCHIVE_STATE_DB_FILENAME,
@@ -282,10 +279,6 @@ def _iter_fingerprint_paths(source_output: Path) -> list[Path]:
         wal_path = Path(f"{database_path}-wal")
         if wal_path.is_file() and wal_path.stat().st_size:
             paths.append(wal_path)
-    for archive_dir in _iter_archive_directories(source_output):
-        selection = archive_dir / POST_VERSION_SELECTIONS_FILENAME
-        if selection.is_file():
-            paths.append(selection)
     paths.extend(_iter_image_files(source_output))
     return paths
 
@@ -395,7 +388,6 @@ def _prepare_warm(source_output: Path, target_output: Path) -> PreparationStats:
     _write_replay_target_marker(target, source, "warm")
 
     database_count = 0
-    selection_count = 0
     reflink_count = 0
     copied_count = 0
     archive_dirs = _iter_archive_directories(source)
@@ -410,15 +402,6 @@ def _prepare_warm(source_output: Path, target_output: Path) -> PreparationStats:
                 target_dir / filename,
             )
             database_count += 1
-        selection_path = archive_dir / POST_VERSION_SELECTIONS_FILENAME
-        if selection_path.is_file():
-            was_reflink = _copy_preserving_file(
-                selection_path,
-                target_dir / POST_VERSION_SELECTIONS_FILENAME,
-            )
-            reflink_count += int(was_reflink)
-            copied_count += int(not was_reflink)
-            selection_count += 1
         if index == len(archive_dirs) or index % 25 == 0:
             report_progress(
                 "正在复制暖状态归档",
@@ -466,7 +449,7 @@ def _prepare_warm(source_output: Path, target_output: Path) -> PreparationStats:
         initial_state="warm",
         elapsed_seconds=perf_counter() - started,
         sqlite_database_count=database_count,
-        selection_file_count=selection_count,
+        selection_file_count=0,
         image_file_count=len(image_files),
         image_file_bytes=image_bytes,
         reflink_file_count=reflink_count,

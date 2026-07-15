@@ -58,7 +58,6 @@ from nga_tools.backup.post_html import (
 from nga_tools.backup.post_overlay import (
     apply_post_overlays_to_records as _apply_post_overlays_to_records,
 )
-from nga_tools.backup.post_version_selection import selections_fingerprint
 from nga_tools.backup.processing_state import (
     FLOOR_PROCESSING_STATE_VERSION,
     IMAGE_REFERENCE_STATE_VERSION,
@@ -561,7 +560,6 @@ def _refresh_author_floor_state(
 def _rebuild_image_reference_state(
     tid: int,
     aid: Optional[int],
-    thread_folder: Path,
     archive_store: ThreadArchiveStore,
     *,
     post_overlays_hash: str,
@@ -592,7 +590,7 @@ def _rebuild_image_reference_state(
         )
     fingerprints_after = (
         archive_store.post_overlays_fingerprint(),
-        selections_fingerprint(thread_folder),
+        archive_store.post_version_selections_fingerprint(),
     )
     if fingerprints_after != (
         post_overlays_hash,
@@ -701,7 +699,6 @@ def _incremental_image_reference_prerequisites_hold(
 def _try_incremental_image_reference_update(
     tid: int,
     aid: Optional[int],
-    thread_folder: Path,
     archive_store: ThreadArchiveStore,
     *,
     snapshot: BackupProcessingSnapshot,
@@ -781,7 +778,7 @@ def _try_incremental_image_reference_update(
                 )
             fingerprints_after = (
                 archive_store.post_overlays_fingerprint(),
-                selections_fingerprint(thread_folder),
+                archive_store.post_version_selections_fingerprint(),
             )
             latest_snapshot = archive_store.read_backup_processing_snapshot()
             if (
@@ -933,7 +930,7 @@ def _try_incremental_image_reference_update(
 
         fingerprints_after = (
             archive_store.post_overlays_fingerprint(),
-            selections_fingerprint(thread_folder),
+            archive_store.post_version_selections_fingerprint(),
         )
         latest_snapshot = archive_store.read_backup_processing_snapshot()
         if (
@@ -967,7 +964,6 @@ def _try_processing_state_reuse(
     client: NGAClient,
     tid: int,
     aid: Optional[int],
-    thread_folder: Path,
     archive_store: ThreadArchiveStore,
     *,
     page_count: int,
@@ -993,7 +989,9 @@ def _try_processing_state_reuse(
         archive_store.clear_backup_processing_state()
         return ProcessingStateReuseResult(False, "state_invalid")
     post_overlays_hash = archive_store.post_overlays_fingerprint()
-    post_version_selections_hash = selections_fingerprint(thread_folder)
+    post_version_selections_hash = (
+        archive_store.post_version_selections_fingerprint()
+    )
     changes = (
         _ArchiveIncrementalChanges(None, frozenset(), frozenset(), 0)
         if incremental_changes is None
@@ -1070,7 +1068,6 @@ def _try_processing_state_reuse(
         incremental_mode = _try_incremental_image_reference_update(
             tid,
             aid,
-            thread_folder,
             archive_store,
             snapshot=snapshot,
             changes=changes,
@@ -1092,7 +1089,6 @@ def _try_processing_state_reuse(
         if not _rebuild_image_reference_state(
             tid,
             aid,
-            thread_folder,
             archive_store,
             post_overlays_hash=post_overlays_hash,
             post_version_selections_hash=post_version_selections_hash,
@@ -1133,7 +1129,6 @@ def _try_processing_state_reuse(
 
 def _commit_completed_processing_state(
     archive_store: ThreadArchiveStore,
-    thread_folder: Path,
     *,
     aid: Optional[int],
     page_count: int,
@@ -1149,7 +1144,7 @@ def _commit_completed_processing_state(
         return
     fingerprints_after = (
         archive_store.post_overlays_fingerprint(),
-        selections_fingerprint(thread_folder),
+        archive_store.post_version_selections_fingerprint(),
     )
     if fingerprints_after != fingerprints_before:
         report_warning(
@@ -1193,7 +1188,6 @@ def _commit_completed_processing_state(
 def _run_full_processing(
     client: NGAClient,
     archive_store: ThreadArchiveStore,
-    thread_folder: Path,
     tid: int,
     aid: Optional[int],
     *,
@@ -1204,7 +1198,7 @@ def _run_full_processing(
     record_timing_label("图片引用处理模式", "full")
     fingerprints_before = (
         archive_store.post_overlays_fingerprint(),
-        selections_fingerprint(thread_folder),
+        archive_store.post_version_selections_fingerprint(),
     )
 
     report_info("开始处理")
@@ -1251,7 +1245,6 @@ def _run_full_processing(
 
     _commit_completed_processing_state(
         archive_store,
-        thread_folder,
         aid=aid,
         page_count=page_count,
         author_total_lou_count=author_total_lou_count,
@@ -1277,7 +1270,6 @@ def _reuse_processing_state_after_page_refresh(
     client: NGAClient,
     tid: int,
     aid: Optional[int],
-    thread_folder: Path,
     archive_store: ThreadArchiveStore,
     *,
     page_count: int,
@@ -1296,7 +1288,6 @@ def _reuse_processing_state_after_page_refresh(
                 client,
                 tid,
                 aid,
-                thread_folder,
                 archive_store,
                 page_count=page_count,
                 author_total_lou_count=author_total_lou_count,
@@ -1342,7 +1333,9 @@ def backup_local_work_kind(
     image_current = _image_state_is_current(
         snapshot,
         post_overlays_hash=archive_store.post_overlays_fingerprint(),
-        post_version_selections_hash=selections_fingerprint(thread_folder),
+        post_version_selections_hash=(
+            archive_store.post_version_selections_fingerprint()
+        ),
     )
     if not floor_current or not image_current:
         return "maintenance"
@@ -1397,7 +1390,6 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
         client,
         tid,
         aid,
-        thread_folder,
         archive_store,
         page_count=pagination.page_count,
         author_total_lou_count=author_total_lou_count,
@@ -1417,7 +1409,6 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
     _run_full_processing(
         client,
         archive_store,
-        thread_folder,
         tid,
         aid,
         page_count=pagination.page_count,
@@ -1493,7 +1484,6 @@ def backup_thread(
         client,
         tid,
         aid,
-        thread_folder,
         archive_store,
         page_count=page_count,
         author_total_lou_count=author_total_lou_count,
@@ -1512,7 +1502,6 @@ def backup_thread(
     _run_full_processing(
         client,
         archive_store,
-        thread_folder,
         tid,
         aid,
         page_count=page_count,
@@ -1684,7 +1673,6 @@ def backup_thread_sub(
         client,
         tid,
         aid,
-        thread_folder,
         archive_store,
         page_count=page_count,
         author_total_lou_count=author_total_lou_count,
@@ -1705,7 +1693,6 @@ def backup_thread_sub(
     _run_full_processing(
         client,
         archive_store,
-        thread_folder,
         tid,
         aid,
         page_count=page_count,

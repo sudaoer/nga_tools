@@ -20,7 +20,6 @@ from nga_tools.backup.image_reference_cache import (
     IMAGE_REFERENCE_EXTRACTOR_VERSION,
 )
 from nga_tools.backup.image_store import image_mappings_by_url
-from nga_tools.backup.post_version_selection import selections_fingerprint
 from nga_tools.backup.processing_state import FloorProcessingState
 from nga_tools.forum.ankebak_state import AnkebakStateStore
 from nga_tools.storage import layout_migration, read_storage_metadata
@@ -51,7 +50,7 @@ def _make_legacy_thread(output_root: Path, name: str = "123_456") -> Path:
         observed_at="2026-07-15T00:00:00+00:00",
     )
     overlays_hash = store.post_overlays_fingerprint()
-    selections_hash = selections_fingerprint(thread_folder)
+    selections_hash = store.post_version_selections_fingerprint()
     with closing(sqlite3.connect(store.db_path)) as connection:
         revision_row = connection.execute(
             """

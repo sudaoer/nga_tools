@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -27,7 +27,6 @@ from nga_tools.backup.floor_models import (
     FLOOR_MAP_VERSION,
     StoredFloorMap,
 )
-from nga_tools.backup.post_version_selection import make_selection, write_selections
 from nga_tools.cli import args_parse, dispatch_command
 from nga_tools.commands.thread_batch import ThreadBatchResult
 from nga_tools.core.downloads import download_files
@@ -85,6 +84,17 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
     source = tmp_path / "source-output"
     thread_dir = source / "123_456"
     store = ThreadArchiveStore(thread_dir)
+    historical_page = _page()
+    historical_result = historical_page["result"]
+    assert isinstance(historical_result, list)
+    historical_first = historical_result[0]
+    assert isinstance(historical_first, dict)
+    historical_first["content"] = "runner historical body"
+    store.upsert_page(
+        1,
+        historical_page,
+        observed_at="2026-07-12T00:00:00+00:00",
+    )
     store.upsert_page(1, _page(), observed_at="2026-07-13T00:00:00+00:00")
     store.replace_floor_map(
         StoredFloorMap(
@@ -107,11 +117,16 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
         )
     )
     store.ensure_backup_processing_schema()
-    with sqlite3.connect(thread_dir / "archive.sqlite3") as connection:
-        version_id, source_hash = connection.execute(
-            "SELECT id, source_hash FROM post_versions"
+    with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
+        version_id = connection.execute(
+            """
+            SELECT id
+            FROM post_versions
+            WHERE content = 'runner historical body'
+            """
         ).fetchone()
-    write_selections(thread_dir, {0: make_selection(version_id, source_hash)})
+    assert version_id is not None
+    store.upsert_post_version_selection(0, version_id[0])
     (thread_dir / "warnings.log").write_text("do not copy", encoding="utf-8")
     (thread_dir / "pdf").mkdir()
     (thread_dir / "pdf" / "old.pdf").write_bytes(b"pdf")
@@ -278,7 +293,7 @@ class ReplayStateTest:
         stats = prepare_target_state("warm", source, target)
 
         assert stats.sqlite_database_count == 5
-        assert stats.selection_file_count == 1
+        assert stats.selection_file_count == 0
         assert stats.image_file_count == 1
         assert stats.validation_cache_path_updates == 0
         assert (target / REPLAY_TARGET_MARKER_FILENAME).is_file()
@@ -289,7 +304,21 @@ class ReplayStateTest:
         assert (target / "123_456" / "archive.sqlite3").is_file()
         assert (target / "123_456" / "archive_state.sqlite3").is_file()
         assert (target / "123_456" / "archive_cache.sqlite3").is_file()
-        assert (target / "123_456" / "post_version_overrides.json").is_file()
+        with sqlite3.connect(
+            target / "123_456" / "archive.sqlite3"
+        ) as connection:
+            selection_rows = connection.execute(
+                """
+                SELECT selections.lou, versions.content
+                FROM post_version_selections AS selections
+                JOIN post_versions AS versions
+                    ON versions.id = selections.version_id
+                """
+            ).fetchall()
+        assert selection_rows == [(0, "runner historical body")]
+        assert not (
+            target / "123_456" / "post_version_overrides.json"
+        ).exists()
         assert not (target / "123_456" / "warnings.log").exists()
         assert not (target / "123_456" / "pdf").exists()
         assert not (target / "123_456" / "debug_json").exists()
@@ -884,7 +913,6 @@ class ReplayRunnerTest:
         source, thread_config = _build_warm_source(tmp_path)
         tracked_source_paths = [
             source / "123_456" / "archive.sqlite3",
-            source / "123_456" / "post_version_overrides.json",
             source / "image_index.sqlite3",
             source / IMAGE_CACHE_FILENAME,
             next((source / "images_unique").iterdir()),

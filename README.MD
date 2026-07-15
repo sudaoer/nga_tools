@@ -248,7 +248,8 @@ pixi run python main.py replay test `
 `replay_run-*.json` 报告均复用 `replay run` 的实现。
 
 `empty` 要求目标不存在或为空，从零创建归档；`warm` 通过 SQLite Online Backup
-分别复制现有 data/state/cache 数据库，并复制或 reflink 图片及版本选择文件。
+分别复制现有 data/state/cache 数据库，并复制或 reflink 图片；正文版本选择随
+每帖 `archive.sqlite3` 一起复制。
 缓存键使用 `images_unique/...` 相对路径，不再从旧版 `image_index.sqlite3` 读取或
 改写绝对路径缓存。两者都会写入 replay 目标归属
 标记；`existing` 只接受带有同一 `source-output` 归属标记的目标，可继续一次中断的
@@ -296,7 +297,7 @@ pixi run python main.py backup sub --all-threads --force-processing
 | 分类 | 文件 | 交付要求 |
 | --- | --- | --- |
 | 持久数据 | `forum_threads.sqlite3`、各帖 `archive.sqlite3`、`image_index.sqlite3`、`images_unique/` | 必须保留；它们包含离线时无法重新从本机推导的版面数据、正文历史、图片 URL 映射和图片内容 |
-| 用户选择 | `thread_configs.json`、各帖 `post_version_overrides.json` | 必须保留；后者仅在管理页保存过历史正文选择时存在 |
+| 用户选择 | `thread_configs.json`；各帖正文版本选择位于 `archive.sqlite3` 的 `post_version_selections` 表 | 必须保留；正文版本选择已包含在持久数据库中 |
 | 运行状态 | `backup_state.sqlite3`、各帖 `archive_state.sqlite3` | 建议随完整工作副本保留；只读交付可省略，之后会从持久数据重建派生状态，但智能备份水位和失败图片重试历史会丢失 |
 | 可重建缓存 | `image_cache.sqlite3`、各帖 `archive_cache.sqlite3` | 可以不交付或删除；程序不会把它们当作持久数据，缺失或损坏时会重新创建 |
 | 可选产物 | `json/`、`pdf/`、日志、`replay_run-*.json` | 按用途保留；当前 SQLite 数据完整时不属于恢复 Web/PDF/replay 读取能力的必要输入 |
@@ -399,9 +400,9 @@ Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页�
 管理界面的“正文版本”会列出同一楼层中正文内容有多个历史版本的楼，左侧备份列表
 默认只显示存在多版本楼层的备份，并可切换为显示全部可管理备份。用户只能选择
 非最新版历史版本；当前最新版不能被手动固定，以免后续增量备份无法自动更新。选择
-会写入备份目录的 `post_version_overrides.json`，普通网页查看和后续 PDF 目标 HTML
-都会按需使用这套有效版本；清除选择后回到自动最新版。预览历史版本时，管理页会显示
-该版本与最新版正文的差异，便于判断实际变化。选择文件写入使用原子替换。
+会写入每帖 `archive.sqlite3` 的 `post_version_selections` 表，普通网页查看和后续
+PDF 目标 HTML 都会按需使用这套有效版本；清除选择后回到自动最新版。预览历史
+版本时，管理页会显示该版本与最新版正文的差异，便于判断实际变化。
 
 普通帖子阅读页支持为单楼添加 BBCode overlay。overlay 是整楼替换，写入每帖
 `archive.sqlite3` 的 `post_overlays` 表；网页查看和后续 PDF 导出都会从该 BBCode 按需生成目标 HTML。
@@ -449,14 +450,13 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 
 - `json/`：加 `--write-json` 时输出的接口最近响应分页数据
 - `archive.sqlite3`：每帖持久数据。保存每页最新的紧凑分页状态、正文版本、最新
-  展示元数据、楼层映射与候选原楼层、归档修订和管理页 BBCode overlay；不保存
-  NGA 原始分页响应，Web、PDF 和 replay 的正文来源都在此库
+  展示元数据、用户正文版本选择、楼层映射与候选原楼层、归档修订和管理页
+  BBCode overlay；不保存 NGA 原始分页响应，Web、PDF 和 replay 的正文来源都在此库
 - `archive_state.sqlite3`：每帖运行状态。保存楼层/图片引用处理水位、逐楼引用
   清单、URL 引用计数以及失败图片待重试队列；删除后可从 `archive.sqlite3`
   重建，但会丢失尚未完成工作的历史状态
 - `archive_cache.sqlite3`：每帖可重建缓存。当前保存帖子级图片引用解析结果；
   缺失、损坏或与 `archive.sqlite3` 的存储 ID 不匹配时按空缓存处理并重建
-- `post_version_overrides.json`：管理界面保存的正文历史版本选择；没有选择时可为空
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 
 全局数据库与图片产物位于 `output/` 根目录：

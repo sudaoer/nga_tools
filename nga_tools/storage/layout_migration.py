@@ -42,7 +42,6 @@ from nga_tools.backup.processing_state import (
     ImageReferenceState,
     PendingImageRetry,
 )
-from nga_tools.backup.post_version_selection import selections_fingerprint
 from nga_tools.backup.thread_stores import (
     ARCHIVE_CACHE_DB_FILENAME,
     ARCHIVE_STATE_DB_FILENAME,
@@ -92,6 +91,7 @@ _DURABLE_ARCHIVE_TABLES = (
     "archive_pages",
     "post_versions",
     "post_latest_metadata",
+    "post_version_selections",
     "post_overlays",
     "floor_map_state",
     "floor_map_entries",
@@ -1029,7 +1029,6 @@ def _read_post_reference_cache(
 def _copy_legacy_auxiliary_data(
     legacy_archive_path: Path,
     staged_store: ThreadArchiveStore,
-    original_thread_folder: Path,
 ) -> ThreadLayoutMigrationStats:
     with closing(sqlite3.connect(legacy_archive_path)) as source:
         change_row = source.execute(
@@ -1054,7 +1053,9 @@ def _copy_legacy_auxiliary_data(
             source,
             archive_revision=archive_revision,
             overlays_fingerprint=staged_store.post_overlays_fingerprint(),
-            selections_hash=selections_fingerprint(original_thread_folder),
+            selections_hash=(
+                staged_store.post_version_selections_fingerprint()
+            ),
         )
         manifest_posts = (
             None
@@ -1394,7 +1395,6 @@ def _migrate_thread(
         auxiliary_stats = _copy_legacy_auxiliary_data(
             legacy_archive,
             staged_store,
-            thread_folder,
         )
         _drop_legacy_archive_tables(staged_archive)
         fingerprints_after = _durable_fingerprints(staged_archive)

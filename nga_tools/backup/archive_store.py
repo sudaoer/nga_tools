@@ -34,7 +34,7 @@ from nga_tools.backup.post_overlay import (
 )
 from nga_tools.backup.post_version_selection import (
     PostVersionSelection,
-    load_selections,
+    post_version_selections_fingerprint,
 )
 from nga_tools.backup.processing_state import (
     IMAGE_REFERENCE_MANIFEST_VERSION,
@@ -593,6 +593,21 @@ class ThreadArchiveStore:
             """
         )
 
+    def _create_post_version_selections_table(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS post_version_selections (
+                lou INTEGER PRIMARY KEY CHECK(lou >= 0),
+                version_id INTEGER NOT NULL UNIQUE,
+                selected_at TEXT NOT NULL CHECK(selected_at != ''),
+                FOREIGN KEY(version_id) REFERENCES post_versions(id)
+            )
+            """
+        )
+
     def _create_floor_map_tables(self, connection: sqlite3.Connection) -> None:
         connection.execute(
             """
@@ -765,6 +780,7 @@ class ThreadArchiveStore:
             else:
                 self._ensure_post_version_word_count_columns(connection)
         self._create_post_latest_metadata_table(connection)
+        self._create_post_version_selections_table(connection)
         self._create_floor_map_tables(connection)
         self._ensure_post_overlays_table(connection)
         self._create_archive_change_state_table(connection)
@@ -3105,33 +3121,49 @@ class ThreadArchiveStore:
         connection: sqlite3.Connection,
         lous: set[int] | None = None,
     ) -> dict[int, PostVersionSelection]:
-        selections = load_selections(self.thread_folder)
-        if lous is not None:
-            selections = {
-                lou: selection
-                for lou, selection in selections.items()
-                if lou in lous
-            }
-        if not selections:
+        if not _table_exists(connection, "post_version_selections"):
             return {}
 
+        rows = cast(
+            list[tuple[object, object, object]],
+            connection.execute(
+                """
+                SELECT lou, version_id, selected_at
+                FROM post_version_selections
+                ORDER BY lou
+                """
+            ).fetchall(),
+        )
+
         valid_selections: dict[int, PostVersionSelection] = {}
-        for lou, selection in selections.items():
+        for raw_lou, raw_version_id, raw_selected_at in rows:
+            if (
+                type(raw_lou) is not int
+                or raw_lou < 0
+                or type(raw_version_id) is not int
+                or not isinstance(raw_selected_at, str)
+                or not raw_selected_at
+            ):
+                continue
+            lou = raw_lou
+            version_id = raw_version_id
+            if lous is not None and lou not in lous:
+                continue
             version_row = cast(
-                Optional[tuple[int, str]],
+                Optional[tuple[object, object]],
                 connection.execute(
                     """
                     SELECT lou, source_hash
                     FROM post_versions
                     WHERE id = ?
                     """,
-                    (selection["version_id"],),
+                    (version_id,),
                 ).fetchone(),
             )
             if version_row is None:
                 continue
             version_lou, source_hash = version_row
-            if version_lou != lou or source_hash != selection["source_hash"]:
+            if version_lou != lou or not isinstance(source_hash, str):
                 continue
 
             latest_row = cast(
@@ -3147,15 +3179,121 @@ class ThreadArchiveStore:
                     (lou,),
                 ).fetchone(),
             )
-            if latest_row is None or latest_row[0] == selection["version_id"]:
+            if latest_row is None or latest_row[0] == version_id:
                 continue
-            valid_selections[lou] = selection
+            valid_selections[lou] = {
+                "version_id": version_id,
+                "source_hash": source_hash,
+                "selected_at": raw_selected_at,
+            }
         return valid_selections
 
     def read_valid_post_version_selections(self) -> dict[int, PostVersionSelection]:
         self.require_exists()
         with closing(self._connect_read()) as connection:
             return self._validated_post_version_selections(connection)
+
+    def post_version_selections_fingerprint(self) -> str:
+        return post_version_selections_fingerprint(
+            self.read_valid_post_version_selections()
+        )
+
+    def upsert_post_version_selection(
+        self,
+        lou: int,
+        version_id: int,
+    ) -> PostVersionSelection:
+        if type(lou) is not int or lou < 0:
+            raise ValueError(f"正文版本选择楼层必须是非负整数：{lou!r}")
+        if type(version_id) is not int or version_id < 1:
+            raise ValueError(f"正文版本ID必须是正整数：{version_id!r}")
+
+        selected_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with closing(self._connect_write()) as connection:
+            with connection:
+                version_row = cast(
+                    Optional[tuple[object, object]],
+                    connection.execute(
+                        """
+                        SELECT lou, source_hash
+                        FROM post_versions
+                        WHERE id = ?
+                        """,
+                        (version_id,),
+                    ).fetchone(),
+                )
+                if version_row is None:
+                    raise ValueError("未知帖子正文版本。")
+                version_lou, source_hash = version_row
+                if version_lou != lou:
+                    raise ValueError("帖子正文版本不属于指定楼层。")
+                if not isinstance(source_hash, str):
+                    raise ValueError("帖子正文版本哈希无效。")
+
+                latest_row = cast(
+                    Optional[tuple[object]],
+                    connection.execute(
+                        """
+                        SELECT id
+                        FROM post_versions
+                        WHERE lou = ?
+                        ORDER BY last_seen_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (lou,),
+                    ).fetchone(),
+                )
+                if latest_row is None or type(latest_row[0]) is not int:
+                    raise ValueError("未知楼层。")
+                if latest_row[0] == version_id:
+                    raise ValueError("不能手动选择当前最新版。")
+
+                connection.execute(
+                    """
+                    INSERT INTO post_version_selections (
+                        lou,
+                        version_id,
+                        selected_at
+                    )
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(lou) DO UPDATE SET
+                        version_id = excluded.version_id,
+                        selected_at = excluded.selected_at
+                    """,
+                    (lou, version_id, selected_at),
+                )
+
+        return {
+            "version_id": version_id,
+            "source_hash": source_hash,
+            "selected_at": selected_at,
+        }
+
+    def delete_post_version_selection(self, lou: int) -> int:
+        if type(lou) is not int or lou < 0:
+            raise ValueError(f"正文版本选择楼层必须是非负整数：{lou!r}")
+        with closing(self._connect_write()) as connection:
+            with connection:
+                latest_row = cast(
+                    Optional[tuple[object]],
+                    connection.execute(
+                        """
+                        SELECT id
+                        FROM post_versions
+                        WHERE lou = ?
+                        ORDER BY last_seen_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (lou,),
+                    ).fetchone(),
+                )
+                if latest_row is None or type(latest_row[0]) is not int:
+                    raise ValueError("未知楼层。")
+                connection.execute(
+                    "DELETE FROM post_version_selections WHERE lou = ?",
+                    (lou,),
+                )
+        return latest_row[0]
 
     def read_effective_post_stats(self) -> ArchiveEffectivePostStats:
         self.require_exists()

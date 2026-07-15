@@ -36,7 +36,6 @@ from nga_tools.backup.post_html import (
     merge_missing_lou,
 )
 from nga_tools.backup.post_overlay import make_post_overlay
-from nga_tools.backup.post_version_selection import write_selections
 from nga_tools.backup.processing_state import BackupProcessingSnapshot
 from nga_tools.core.downloads import DownloadFailureKind, DownloadFileResult
 from nga_tools.ngaclient.client import NGAPageError
@@ -948,16 +947,32 @@ class BackupRawArchiveTest:
                 full_processing_calls=full_processing_calls,
             )
         elif changed_input == "selection":
-            write_selections(
-                thread_dir,
+            store = ThreadArchiveStore(thread_dir)
+            store.upsert_page(
+                1,
                 {
-                    1: {
-                        "version_id": 999,
-                        "source_hash": "not-a-real-version",
-                        "selected_at": "2026-07-11T00:00:00+00:00",
-                    }
+                    "currentPage": 1,
+                    "totalPage": 1,
+                    "vrows": 3,
+                    "result": [
+                        {
+                            "lou": 1,
+                            "pid": 1001,
+                            "content": "historical first",
+                        }
+                    ],
                 },
+                observed_at="2000-01-01T00:00:00+00:00",
             )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                historical_version_id = connection.execute(
+                    """
+                    SELECT id
+                    FROM post_versions
+                    WHERE lou = 1 AND content = 'historical first'
+                    """
+                ).fetchone()[0]
+            store.upsert_post_version_selection(1, historical_version_id)
             _run_backup(
                 thread_dir,
                 client,

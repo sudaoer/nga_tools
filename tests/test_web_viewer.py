@@ -27,7 +27,6 @@ from nga_tools.storage import ensure_storage_metadata
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web import data as web_data
 from nga_tools.web import database as web_database
-from nga_tools.backup.post_version_selection import POST_VERSION_SELECTIONS_FILENAME
 from nga_tools.web.data import (
     ThreadConfig,
     read_post_version_preview,
@@ -871,7 +870,15 @@ class WebServerTest:
         assert "before edit" in payload["items"][0]["html"]
         assert payload["items"][0]["versionId"] == old_version_id
         assert payload["items"][0]["manualVersion"] is True
-        assert (thread_dir / POST_VERSION_SELECTIONS_FILENAME).is_file()
+        with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
+            stored_selection = connection.execute(
+                """
+                SELECT lou, version_id
+                FROM post_version_selections
+                """
+            ).fetchone()
+        assert stored_selection == (1, old_version_id)
+        assert not (thread_dir / "post_version_overrides.json").exists()
         assert not (thread_dir / "html_modified").exists()
 
         clear_response = client.delete(
@@ -1105,7 +1112,7 @@ class WebDatabaseViewerTest:
         assert by_id["archive_cache:101_201"]["relativePath"] == (
             f"101_201/{ARCHIVE_CACHE_DB_FILENAME}"
         )
-        assert by_id["archive:101_201"]["tableCount"] == 9
+        assert by_id["archive:101_201"]["tableCount"] == 10
 
         state_schema = client.get(
             "/api/databases/archive_state%3A101_201/schema"
@@ -1176,8 +1183,8 @@ class WebDatabaseViewerTest:
         after_items = {
             item["id"]: item for item in after_response.json()["items"]
         }
-        assert before_items["archive:101_201"]["tableCount"] == 8
-        assert after_items["archive:101_201"]["tableCount"] == 9
+        assert before_items["archive:101_201"]["tableCount"] == 9
+        assert after_items["archive:101_201"]["tableCount"] == 10
 
     def test_database_schema_and_rows_support_search_sort_and_detail(
         self,
@@ -1202,6 +1209,7 @@ class WebDatabaseViewerTest:
         assert {
             "archive_pages",
             "post_versions",
+            "post_version_selections",
             "archive_change_state",
             "post_overlays",
         } <= table_names

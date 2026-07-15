@@ -58,6 +58,7 @@ def test_thread_databases_have_disjoint_roles_and_source_binding(
     cache_tables = _table_names(store.cache_store.db_path)
     assert "archive_change_state" in data_tables
     assert "archive_pages" in data_tables
+    assert "post_version_selections" in data_tables
     assert "page_snapshots" not in data_tables
     assert "post_observations" not in data_tables
     assert "backup_floor_processing_state" not in data_tables

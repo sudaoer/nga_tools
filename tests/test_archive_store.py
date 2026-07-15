@@ -22,7 +22,6 @@ from nga_tools.backup.floor_models import (
     RecoveredMissingPost,
     StoredFloorMap,
 )
-from nga_tools.backup.post_version_selection import write_selections
 from nga_tools.backup.processing_state import (
     IMAGE_REFERENCE_MANIFEST_VERSION,
     FloorProcessingState,
@@ -805,16 +804,7 @@ class ThreadArchiveStoreTest:
                     WHERE content = 'before edit'
                     """
                 ).fetchone()
-            write_selections(
-                thread_folder,
-                {
-                    1: {
-                        "version_id": old_version_id,
-                        "source_hash": old_source_hash,
-                        "selected_at": "2026-07-08T00:00:00+00:00",
-                    }
-                },
-            )
+            store.upsert_post_version_selection(1, old_version_id)
 
             latest_records = store.read_latest_post_records()
             effective_records = store.read_effective_post_records()
@@ -850,27 +840,151 @@ class ThreadArchiveStoreTest:
                 observed_at="2026-07-07T02:00:00+00:00",
             )
             with closing(sqlite3.connect(store.db_path)) as connection:
-                latest_version_id, latest_source_hash = connection.execute(
+                latest_version_id = connection.execute(
                     """
-                    SELECT id, source_hash
+                    SELECT id
                     FROM post_versions
                     WHERE content = 'after edit'
                     """
-                ).fetchone()
-            write_selections(
-                thread_folder,
-                {
-                    1: {
-                        "version_id": latest_version_id,
-                        "source_hash": latest_source_hash,
-                        "selected_at": "2026-07-08T00:00:00+00:00",
-                    }
-                },
-            )
+                ).fetchone()[0]
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                connection.execute(
+                    """
+                    INSERT INTO post_version_selections (
+                        lou,
+                        version_id,
+                        selected_at
+                    )
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        1,
+                        latest_version_id,
+                        "2026-07-08T00:00:00+00:00",
+                    ),
+                )
+                connection.commit()
 
             records = store.read_effective_post_records()
 
         assert records[0]["post"]["content"] == "after edit"
+
+    def test_post_version_selection_crud_and_fingerprint(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "before edit"},
+                    ],
+                },
+                observed_at="2026-07-07T01:00:00+00:00",
+            )
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "after edit"},
+                    ],
+                },
+                observed_at="2026-07-07T02:00:00+00:00",
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                version_ids = {
+                    content: version_id
+                    for version_id, content in connection.execute(
+                        "SELECT id, content FROM post_versions"
+                    )
+                }
+
+            empty_fingerprint = store.post_version_selections_fingerprint()
+            with pytest.raises(
+                ValueError,
+                match="不能手动选择当前最新版",
+            ):
+                store.upsert_post_version_selection(
+                    1,
+                    version_ids["after edit"],
+                )
+
+            selection = store.upsert_post_version_selection(
+                1,
+                version_ids["before edit"],
+            )
+            selected_fingerprint = store.post_version_selections_fingerprint()
+            repeated = store.upsert_post_version_selection(
+                1,
+                version_ids["before edit"],
+            )
+            repeated_fingerprint = store.post_version_selections_fingerprint()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                stored_row = connection.execute(
+                    """
+                    SELECT lou, version_id, selected_at
+                    FROM post_version_selections
+                    """
+                ).fetchone()
+
+            latest_version_id = store.delete_post_version_selection(1)
+            cleared_selections = store.read_valid_post_version_selections()
+            cleared_fingerprint = store.post_version_selections_fingerprint()
+
+        assert selection["source_hash"]
+        assert repeated["version_id"] == version_ids["before edit"]
+        assert stored_row == (
+            1,
+            version_ids["before edit"],
+            repeated["selected_at"],
+        )
+        assert selected_fingerprint != empty_fingerprint
+        assert repeated_fingerprint == selected_fingerprint
+        assert latest_version_id == version_ids["after edit"]
+        assert cleared_selections == {}
+        assert cleared_fingerprint == empty_fingerprint
+
+    def test_missing_selection_table_is_empty_until_next_write(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            thread_folder = Path(temp_dir_name)
+            store = ThreadArchiveStore(thread_folder)
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "before edit"},
+                    ],
+                },
+                observed_at="2026-07-07T01:00:00+00:00",
+            )
+            store.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "after edit"},
+                    ],
+                },
+                observed_at="2026-07-07T02:00:00+00:00",
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                old_version_id = connection.execute(
+                    """
+                    SELECT id FROM post_versions WHERE content = 'before edit'
+                    """
+                ).fetchone()[0]
+                connection.execute("DROP TABLE post_version_selections")
+                connection.commit()
+
+            reopened = ThreadArchiveStore(thread_folder)
+            selections_before = reopened.read_valid_post_version_selections()
+            reopened.upsert_post_version_selection(1, old_version_id)
+            selections_after = reopened.read_valid_post_version_selections()
+
+        assert selections_before == {}
+        assert selections_after[1]["version_id"] == old_version_id
 
     def test_metadata_only_change_does_not_create_post_version(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

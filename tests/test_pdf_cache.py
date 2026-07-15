@@ -38,7 +38,6 @@ from nga_tools.backup.pdf_plan import (
     write_pdf_hashes,
 )
 from nga_tools.backup.post_overlay import make_post_overlay
-from nga_tools.backup.post_version_selection import write_selections
 from nga_tools.console import ConsoleReporter, use_reporter, use_warning_log
 
 
@@ -457,23 +456,14 @@ class PdfImageSourceTest:
                 observed_at="2026-07-11T01:00:00+00:00",
             )
             with closing(sqlite3.connect(store.db_path)) as connection:
-                version_id, source_hash = connection.execute(
+                version_id = connection.execute(
                     """
-                    SELECT id, source_hash
+                    SELECT id
                     FROM post_versions
                     WHERE content = 'before edit'
                     """
-                ).fetchone()
-            write_selections(
-                thread_dir,
-                {
-                    1: {
-                        "version_id": version_id,
-                        "source_hash": source_hash,
-                        "selected_at": "2026-07-11T02:00:00+00:00",
-                    }
-                },
-            )
+                ).fetchone()[0]
+            store.upsert_post_version_selection(1, version_id)
 
             with patch(
                 "nga_tools.core.paths.get_config",
