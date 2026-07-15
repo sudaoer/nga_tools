@@ -21,6 +21,7 @@ from nga_tools.core.downloads import (
     DownloadFailureKind,
     DownloadFileResult,
     DownloadProgressCallback,
+    DownloadResourceKind,
     DownloadSummary,
     DownloadTask,
 )
@@ -33,7 +34,7 @@ from nga_tools.replay.offline import (
 
 
 @dataclass(frozen=True)
-class ImageDownloadRuntimeMetrics:
+class DownloadRuntimeMetrics:
     capacity: int
     batches_submitted: int
     items_submitted: int
@@ -162,18 +163,25 @@ class _DownloadBatch:
         )
 
 
-class ImageDownloadRuntime:
-    """One background event loop with fair, fixed-worker image downloads."""
+class DownloadRuntime:
+    """One background event loop with fair, fixed-worker file downloads."""
 
-    def __init__(self, capacity: int) -> None:
+    def __init__(
+        self,
+        capacity: int,
+        *,
+        resource_kind: DownloadResourceKind = "image",
+    ) -> None:
         if capacity <= 0:
-            raise ValueError("图片下载运行时并发数必须大于0。")
+            raise ValueError("文件下载运行时并发数必须大于0。")
         self.capacity = capacity
+        self.resource_kind = resource_kind
+        self.resource_label = "音频" if resource_kind == "audio" else "图片"
         self._state_lock = threading.RLock()
         self._ready = threading.Event()
         self._thread = threading.Thread(
             target=self._thread_main,
-            name="nga-image-runtime",
+            name=f"nga-{resource_kind}-runtime",
             daemon=True,
         )
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -210,9 +218,11 @@ class ImageDownloadRuntime:
         self._downloaded_bytes = 0
         self._thread.start()
         if not self._ready.wait(timeout=30):
-            raise RuntimeError("图片下载运行时启动超时。")
+            raise RuntimeError(f"{self.resource_label}下载运行时启动超时。")
         if self._startup_error is not None:
-            raise RuntimeError("图片下载运行时启动失败。") from self._startup_error
+            raise RuntimeError(
+                f"{self.resource_label}下载运行时启动失败。"
+            ) from self._startup_error
 
     def _thread_main(self) -> None:
         try:
@@ -249,7 +259,7 @@ class ImageDownloadRuntime:
     def _loop_or_raise(self) -> asyncio.AbstractEventLoop:
         loop = self._loop
         if loop is None or self._closed:
-            raise RuntimeError("图片下载运行时已经关闭。")
+            raise RuntimeError(f"{self.resource_label}下载运行时已经关闭。")
         return loop
 
     def _run_in_loop(
@@ -288,7 +298,7 @@ class ImageDownloadRuntime:
         batch_limit: int,
     ) -> _DownloadBatch:
         if self._closing or self._closed:
-            raise RuntimeError("图片下载运行时已经关闭。")
+            raise RuntimeError(f"{self.resource_label}下载运行时已经关闭。")
         batch = _DownloadBatch(
             batch_id=self._next_batch_id,
             items=items,
@@ -418,7 +428,7 @@ class ImageDownloadRuntime:
         if not items:
             return {"succeeded": [], "failed": []}
         if batch_limit <= 0 or batch_limit > self.capacity:
-            raise ValueError("图片下载批次并发数无效。")
+            raise ValueError(f"{self.resource_label}下载批次并发数无效。")
         registered = self._run_in_loop(
             self._register_batch(
                 tuple(items),
@@ -502,7 +512,9 @@ class ImageDownloadRuntime:
                 if self._closing:
                     return
                 if self._work_available is None:
-                    raise RuntimeError("图片下载工作事件未初始化。")
+                    raise RuntimeError(
+                        f"{self.resource_label}下载工作事件未初始化。"
+                    )
                 await self._work_available.wait()
                 work = self._take_work()
             batch, index = work
@@ -547,7 +559,7 @@ class ImageDownloadRuntime:
                 self._ready_batch_ids.discard(batch.batch_id)
                 continue
             if attempt_result is None:
-                raise RuntimeError("图片下载尝试未产生结果。")
+                raise RuntimeError(f"{self.resource_label}下载尝试未产生结果。")
             if isinstance(attempt_result, _AttemptFailure):
                 attempt = batch.attempts[index]
                 if attempt < batch.retries and attempt_result.retryable:
@@ -615,11 +627,12 @@ class ImageDownloadRuntime:
         logical_url = item["url"]
         request_url = item.get("request_url")
         if request_url is None:
-            request_url = (
-                image_request_url(logical_url)
-                if current_replay_network_policy() is not None
-                else logical_url
-            )
+            if current_replay_network_policy() is None:
+                request_url = logical_url
+            elif self.resource_kind == "image":
+                request_url = image_request_url(logical_url)
+            else:
+                raise ReplayOfflineError("重放服务尚未配置音频资源路由。")
         target_path = Path(item["save_path"])
         temp_path: Path | None = None
         request_to_headers_seconds = 0.0
@@ -773,9 +786,9 @@ class ImageDownloadRuntime:
             result["http_status"] = failure.http_status
         return result
 
-    def snapshot(self) -> ImageDownloadRuntimeMetrics:
+    def snapshot(self) -> DownloadRuntimeMetrics:
         with self._state_lock:
-            return ImageDownloadRuntimeMetrics(
+            return DownloadRuntimeMetrics(
                 capacity=self.capacity,
                 batches_submitted=self._batches_submitted,
                 items_submitted=self._items_submitted,
@@ -810,20 +823,39 @@ class ImageDownloadRuntime:
         loop = self._loop_or_raise()
         shutdown = self._shutdown_requested
         if shutdown is None:
-            raise RuntimeError("图片下载关闭事件未初始化。")
+            raise RuntimeError(f"{self.resource_label}下载关闭事件未初始化。")
         loop.call_soon_threadsafe(shutdown.set)
         self._thread.join()
 
 
+ImageDownloadRuntime = DownloadRuntime
+ImageDownloadRuntimeMetrics = DownloadRuntimeMetrics
+
 _runtime_lock = threading.RLock()
-_active_runtime: ImageDownloadRuntime | None = None
-_runtime_scope_depth = 0
-_last_metrics: ImageDownloadRuntimeMetrics | None = None
+_active_runtimes: dict[DownloadResourceKind, DownloadRuntime] = {}
+_runtime_scope_depths: dict[DownloadResourceKind, int] = {
+    "image": 0,
+    "audio": 0,
+}
+_last_metrics: dict[DownloadResourceKind, DownloadRuntimeMetrics | None] = {
+    "image": None,
+    "audio": None,
+}
+
+
+def current_download_runtime(
+    resource_kind: DownloadResourceKind,
+) -> DownloadRuntime | None:
+    with _runtime_lock:
+        return _active_runtimes.get(resource_kind)
 
 
 def current_image_download_runtime() -> ImageDownloadRuntime | None:
-    with _runtime_lock:
-        return _active_runtime
+    return current_download_runtime("image")
+
+
+def current_audio_download_runtime() -> DownloadRuntime | None:
+    return current_download_runtime("audio")
 
 
 def active_image_download_runtime_capacity() -> int | None:
@@ -831,39 +863,72 @@ def active_image_download_runtime_capacity() -> int | None:
     return None if runtime is None else runtime.capacity
 
 
+def active_audio_download_runtime_capacity() -> int | None:
+    runtime = current_audio_download_runtime()
+    return None if runtime is None else runtime.capacity
+
+
 def image_download_runtime_metrics() -> ImageDownloadRuntimeMetrics | None:
     with _runtime_lock:
-        if _active_runtime is not None:
-            return _active_runtime.snapshot()
-        return _last_metrics
+        runtime = _active_runtimes.get("image")
+        if runtime is not None:
+            return runtime.snapshot()
+        return _last_metrics["image"]
+
+
+def audio_download_runtime_metrics() -> DownloadRuntimeMetrics | None:
+    with _runtime_lock:
+        runtime = _active_runtimes.get("audio")
+        if runtime is not None:
+            return runtime.snapshot()
+        return _last_metrics["audio"]
+
+
+@contextmanager
+def use_download_runtime(
+    resource_kind: DownloadResourceKind,
+    capacity: int,
+) -> Generator[DownloadRuntime]:
+    with _runtime_lock:
+        active_runtime = _active_runtimes.get(resource_kind)
+        if active_runtime is None:
+            active_runtime = DownloadRuntime(
+                capacity,
+                resource_kind=resource_kind,
+            )
+            _active_runtimes[resource_kind] = active_runtime
+        elif active_runtime.capacity != capacity:
+            raise RuntimeError(
+                f"{active_runtime.resource_label}下载运行时活动期间不能修改并发数："
+                f"active={active_runtime.capacity}, requested={capacity}"
+            )
+        _runtime_scope_depths[resource_kind] += 1
+    try:
+        yield active_runtime
+    finally:
+        close_runtime: DownloadRuntime | None = None
+        with _runtime_lock:
+            _runtime_scope_depths[resource_kind] -= 1
+            if _runtime_scope_depths[resource_kind] == 0:
+                close_runtime = _active_runtimes.pop(resource_kind, None)
+        if close_runtime is not None:
+            close_runtime.close()
+            with _runtime_lock:
+                _last_metrics[resource_kind] = close_runtime.snapshot()
 
 
 @contextmanager
 def use_image_download_runtime(
     capacity: int,
 ) -> Generator[ImageDownloadRuntime]:
-    global _active_runtime, _runtime_scope_depth, _last_metrics
-    with _runtime_lock:
-        if _active_runtime is None:
-            _active_runtime = ImageDownloadRuntime(capacity)
-        elif _active_runtime.capacity != capacity:
-            raise RuntimeError(
-                "图片下载运行时活动期间不能修改并发数："
-                f"active={_active_runtime.capacity}, requested={capacity}"
-            )
-        runtime = _active_runtime
-        _runtime_scope_depth += 1
-    try:
+    with use_download_runtime("image", capacity) as runtime:
         yield runtime
-    finally:
-        close_runtime: ImageDownloadRuntime | None = None
-        with _runtime_lock:
-            _runtime_scope_depth -= 1
-            if _runtime_scope_depth == 0:
-                close_runtime = _active_runtime
-                _active_runtime = None
-        if close_runtime is not None:
-            close_runtime.close()
-            with _runtime_lock:
-                _last_metrics = close_runtime.snapshot()
+
+
+@contextmanager
+def use_audio_download_runtime(
+    capacity: int,
+) -> Generator[DownloadRuntime]:
+    with use_download_runtime("audio", capacity) as runtime:
+        yield runtime
 _LoopResultT = TypeVar("_LoopResultT")

@@ -11,6 +11,7 @@ from nga_tools import utils
 from nga_tools.network_limits import (
     configure_network_limits,
     get_api_concurrency,
+    get_audio_concurrency,
     get_image_concurrency,
 )
 from nga_tools.ngaclient import NGAClient
@@ -93,10 +94,15 @@ class _FailedClientSession(_ClientSession):
 
 class NetworkLimitsTest:
     def test_configure_network_limits_sets_separate_limits(self) -> None:
-        configure_network_limits(api_concurrency=2, image_concurrency=7)
+        configure_network_limits(
+            api_concurrency=2,
+            image_concurrency=7,
+            audio_concurrency=3,
+        )
 
         assert get_api_concurrency() == 2
         assert get_image_concurrency() == 7
+        assert get_audio_concurrency() == 3
 
     def test_cannot_reconfigure_api_limit_while_runtime_is_active(self) -> None:
         configure_network_limits(api_concurrency=2, image_concurrency=7)

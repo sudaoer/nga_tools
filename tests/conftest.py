@@ -35,6 +35,7 @@ def isolate_default_output_dir(
         nga_passport_cid="cid",
         api_concurrency=config.DEFAULT_API_CONCURRENCY,
         image_concurrency=config.DEFAULT_IMAGE_CONCURRENCY,
+        audio_concurrency=config.DEFAULT_AUDIO_CONCURRENCY,
         backup_configs_workers=config.DEFAULT_BACKUP_CONFIGS_WORKERS,
         timing_log_enabled=config.DEFAULT_TIMING_LOG_ENABLED,
         ankebak_full_backup_interval_hours=(
@@ -42,6 +43,9 @@ def isolate_default_output_dir(
         ),
         backup_image_retry_max_interval_hours=(
             config.DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS
+        ),
+        backup_audio_retry_max_interval_hours=(
+            config.DEFAULT_BACKUP_AUDIO_RETRY_MAX_INTERVAL_HOURS
         ),
     )
 

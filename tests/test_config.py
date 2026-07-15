@@ -7,9 +7,11 @@ from pathlib import Path
 
 from nga_tools.config import (
     DEFAULT_API_CONCURRENCY,
+    DEFAULT_AUDIO_CONCURRENCY,
     DEFAULT_BACKUP_CONFIGS_WORKERS,
     DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS,
     DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS,
+    DEFAULT_BACKUP_AUDIO_RETRY_MAX_INTERVAL_HOURS,
     DEFAULT_IMAGE_CONCURRENCY,
     DEFAULT_TIMING_LOG_ENABLED,
     load_config,
@@ -69,6 +71,7 @@ class ConfigConcurrencyTest:
 
         assert app_config.api_concurrency == DEFAULT_API_CONCURRENCY
         assert app_config.image_concurrency == DEFAULT_IMAGE_CONCURRENCY
+        assert app_config.audio_concurrency == DEFAULT_AUDIO_CONCURRENCY
         assert app_config.backup_configs_workers == DEFAULT_BACKUP_CONFIGS_WORKERS
         assert app_config.timing_log_enabled is DEFAULT_TIMING_LOG_ENABLED
         assert (
@@ -79,6 +82,10 @@ class ConfigConcurrencyTest:
             app_config.backup_image_retry_max_interval_hours
             == DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS
         )
+        assert (
+            app_config.backup_audio_retry_max_interval_hours
+            == DEFAULT_BACKUP_AUDIO_RETRY_MAX_INTERVAL_HOURS
+        )
 
     def test_load_config_accepts_custom_optional_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -87,10 +94,12 @@ class ConfigConcurrencyTest:
                 {
                     "api_concurrency": 2,
                     "image_concurrency": 20,
+                    "audio_concurrency": 6,
                     "backup_configs_workers": 3,
                     "timing_log_enabled": False,
                     "ankebak_full_backup_interval_hours": 36,
                     "backup_image_retry_max_interval_hours": 72,
+                    "backup_audio_retry_max_interval_hours": 48,
                 },
             )
 
@@ -98,20 +107,24 @@ class ConfigConcurrencyTest:
 
         assert app_config.api_concurrency == 2
         assert app_config.image_concurrency == 20
+        assert app_config.audio_concurrency == 6
         assert app_config.backup_configs_workers == 3
         assert app_config.timing_log_enabled is False
         assert app_config.ankebak_full_backup_interval_hours == 36
         assert app_config.backup_image_retry_max_interval_hours == 72
+        assert app_config.backup_audio_retry_max_interval_hours == 48
 
     @pytest.mark.parametrize(
         "config_overrides",
         [
             {"api_concurrency": 0},
             {"image_concurrency": 0},
+            {"audio_concurrency": 0},
             {"backup_configs_workers": 0},
             {"timing_log_enabled": "yes"},
             {"ankebak_full_backup_interval_hours": 0},
             {"backup_image_retry_max_interval_hours": 0},
+            {"backup_audio_retry_max_interval_hours": 0},
         ],
     )
     def test_load_config_rejects_invalid_optional_values(

@@ -17,10 +17,12 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.json"
 DEFAULT_SECRETS_PATH = PROJECT_ROOT / "secrets.json"
 DEFAULT_API_CONCURRENCY = 4
 DEFAULT_IMAGE_CONCURRENCY = 50
+DEFAULT_AUDIO_CONCURRENCY = 8
 DEFAULT_BACKUP_CONFIGS_WORKERS = 4
 DEFAULT_TIMING_LOG_ENABLED = True
 DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS = 168
 DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS = 168
+DEFAULT_BACKUP_AUDIO_RETRY_MAX_INTERVAL_HOURS = 168
 
 
 @dataclass(frozen=True)
@@ -44,10 +46,12 @@ class AppConfig:
     nga_passport_cid: str
     api_concurrency: int
     image_concurrency: int
+    audio_concurrency: int
     backup_configs_workers: int
     timing_log_enabled: bool
     ankebak_full_backup_interval_hours: int
     backup_image_retry_max_interval_hours: int
+    backup_audio_retry_max_interval_hours: int
 
     @property
     def html_style(self) -> str:
@@ -310,6 +314,12 @@ def load_config(
             resolved_config_path,
             DEFAULT_IMAGE_CONCURRENCY,
         ),
+        audio_concurrency=_optional_positive_int(
+            config_data,
+            "audio_concurrency",
+            resolved_config_path,
+            DEFAULT_AUDIO_CONCURRENCY,
+        ),
         backup_configs_workers=_optional_positive_int(
             config_data,
             "backup_configs_workers",
@@ -333,6 +343,12 @@ def load_config(
             "backup_image_retry_max_interval_hours",
             resolved_config_path,
             DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS,
+        ),
+        backup_audio_retry_max_interval_hours=_optional_positive_int(
+            config_data,
+            "backup_audio_retry_max_interval_hours",
+            resolved_config_path,
+            DEFAULT_BACKUP_AUDIO_RETRY_MAX_INTERVAL_HOURS,
         ),
     )
 
