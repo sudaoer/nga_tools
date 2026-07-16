@@ -64,7 +64,7 @@ function goToPage(page: number): void {
 }
 
 function applyPageJump(): void {
-  const value = pageJumpInput.value.trim()
+  const value = String(pageJumpInput.value).trim()
   const page = Number(value)
   if (!value || !Number.isInteger(page)) {
     pageJumpInput.value = String(props.currentPage)
@@ -125,7 +125,7 @@ watch(
     >
       末页
     </button>
-    <form class="page-jump" @submit.prevent="applyPageJump">
+    <form class="page-jump" novalidate @submit.prevent="applyPageJump">
       <input
         v-model="pageJumpInput"
         type="number"

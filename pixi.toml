@@ -13,6 +13,7 @@ ankebak = "python main.py backup auto"
 web-install = "pnpm --dir web install --frozen-lockfile"
 web-build = { depends-on = ["web-install"], cmd = "pnpm --dir web build" }
 web-typecheck = { depends-on = ["web-install"], cmd = "pnpm --dir web typecheck" }
+web-test = { depends-on = ["web-install"], cmd = "pnpm --dir web test" }
 web-serve = "python main.py web serve"
 
 [dependencies]

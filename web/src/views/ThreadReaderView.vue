@@ -11,6 +11,7 @@ import {
   savePostOverlay,
   type PostQuery,
 } from '../api'
+import PaginationControls from '../components/PaginationControls.vue'
 import PaneRestoreRail from '../components/PaneRestoreRail.vue'
 import { usePersistentPaneLayout } from '../composables/usePersistentPaneLayout'
 import type { PostItem, PostsResult, ThreadStatus, ThreadSummary } from '../types'
@@ -26,9 +27,6 @@ type SortKey =
   | 'title'
   | 'author'
 type SortDirection = 'asc' | 'desc'
-type PageToken =
-  | { type: 'page'; page: number; key: string }
-  | { type: 'ellipsis'; key: string }
 
 const THREAD_LIST_PANE_ID = 'thread-list'
 const {
@@ -82,7 +80,6 @@ const loadingThreadStats = ref(false)
 const loadingPosts = ref(false)
 const requestedThread = ref<{ tid: number; aidKey: string } | null>(null)
 const requestedOverlayLou = ref<number | null>(null)
-const pageJumpInput = ref('')
 const readerPaneRef = ref<HTMLElement | null>(null)
 let threadListRequestId = 0
 let threadStatsRequestId = 0
@@ -145,38 +142,6 @@ const pageEnd = computed(() => (posts.value ? posts.value.pageEndLou : 0))
 const displayedPostSlots = computed<PostItem[]>(() =>
   (posts.value?.slots || []).filter((post) => post.emptyReason !== 'filtered'),
 )
-const pagerTokens = computed<PageToken[]>(() => {
-  if (!posts.value || posts.value.totalPages <= 1) {
-    return []
-  }
-  const totalPages = posts.value.totalPages
-  const currentPage = posts.value.page
-  if (totalPages <= 9) {
-    return Array.from({ length: totalPages }, (_item, index) => ({
-      type: 'page',
-      page: index + 1,
-      key: `page-${index + 1}`,
-    }))
-  }
-
-  const pages = new Set<number>([1, totalPages])
-  for (let page = currentPage - 2; page <= currentPage + 2; page += 1) {
-    if (page > 1 && page < totalPages) {
-      pages.add(page)
-    }
-  }
-
-  const tokens: PageToken[] = []
-  let previousPage: number | null = null
-  for (const page of [...pages].sort((left, right) => left - right)) {
-    if (previousPage !== null && page > previousPage + 1) {
-      tokens.push({ type: 'ellipsis', key: `ellipsis-${previousPage}-${page}` })
-    }
-    tokens.push({ type: 'page', page, key: `page-${page}` })
-    previousPage = page
-  }
-  return tokens
-})
 
 function titleFor(thread: ThreadSummary): string {
   return thread.subject || thread.threadName || thread.dirName
@@ -710,45 +675,17 @@ function applyPostFilter(): void {
   void loadPosts()
 }
 
-function nextPage(): void {
-  if (!posts.value || posts.value.page >= posts.value.totalPages) {
-    return
-  }
-  closeOverlayEditor()
-  postQuery.page = posts.value.page + 1
-  void loadPosts()
-}
-
-function previousPage(): void {
-  if (!posts.value || posts.value.page <= 1) {
-    return
-  }
-  closeOverlayEditor()
-  postQuery.page = posts.value.page - 1
-  void loadPosts()
-}
-
 function goToPage(page: number): void {
-  if (!posts.value) {
+  if (!posts.value || loadingPosts.value) {
     return
   }
   const nextPage = Math.min(Math.max(Math.floor(page), 1), posts.value.totalPages)
   if (nextPage === posts.value.page) {
-    pageJumpInput.value = String(posts.value.page)
     return
   }
   closeOverlayEditor()
   postQuery.page = nextPage
   void loadPosts()
-}
-
-function applyPageJump(): void {
-  const page = integerFromParam(pageJumpInput.value)
-  if (page === null) {
-    pageJumpInput.value = posts.value ? String(posts.value.page) : ''
-    return
-  }
-  goToPage(page)
 }
 
 watch(
@@ -766,13 +703,6 @@ watch(
     requestedOverlayLou.value,
   ],
   syncUrl,
-)
-
-watch(
-  () => posts.value?.page,
-  (page) => {
-    pageJumpInput.value = page === undefined ? '' : String(page)
-  },
 )
 
 function pauseOtherAudioPlayers(event: Event): void {
@@ -936,47 +866,14 @@ onBeforeUnmount(() => {
           <span>{{ posts.matchingPostCount }} / {{ posts.postCount }} 楼</span>
         </div>
 
-        <div v-if="posts && posts.totalPages > 1" class="pager top-pager">
-          <button type="button" :disabled="posts.page <= 1" @click="goToPage(1)">首页</button>
-          <button type="button" :disabled="posts.page <= 1" @click="previousPage">上一页</button>
-          <template v-for="token in pagerTokens" :key="token.key">
-            <span v-if="token.type === 'ellipsis'" class="pager-ellipsis">...</span>
-            <button
-              v-else
-              type="button"
-              class="page-number"
-              :class="{ active: token.page === posts.page }"
-              :disabled="token.page === posts.page"
-              @click="goToPage(token.page)"
-            >
-              {{ token.page }}
-            </button>
-          </template>
-          <button
-            type="button"
-            :disabled="posts.page >= posts.totalPages"
-            @click="nextPage"
-          >
-            下一页
-          </button>
-          <button
-            type="button"
-            :disabled="posts.page >= posts.totalPages"
-            @click="goToPage(posts.totalPages)"
-          >
-            末页
-          </button>
-          <form class="page-jump" @submit.prevent="applyPageJump">
-            <input
-              v-model="pageJumpInput"
-              type="number"
-              min="1"
-              :max="posts.totalPages"
-              aria-label="跳转页码"
-            />
-            <button type="submit">跳转</button>
-          </form>
-        </div>
+        <PaginationControls
+          v-if="posts"
+          :current-page="posts.page"
+          :total-pages="posts.totalPages"
+          :disabled="loadingPosts"
+          top
+          @change="goToPage"
+        />
 
         <div
           v-if="posts && displayedPostSlots.length === 0"
@@ -1064,47 +961,13 @@ onBeforeUnmount(() => {
           </div>
         </article>
 
-        <div v-if="posts && posts.totalPages > 1" class="pager">
-          <button type="button" :disabled="posts.page <= 1" @click="goToPage(1)">首页</button>
-          <button type="button" :disabled="posts.page <= 1" @click="previousPage">上一页</button>
-          <template v-for="token in pagerTokens" :key="token.key">
-            <span v-if="token.type === 'ellipsis'" class="pager-ellipsis">...</span>
-            <button
-              v-else
-              type="button"
-              class="page-number"
-              :class="{ active: token.page === posts.page }"
-              :disabled="token.page === posts.page"
-              @click="goToPage(token.page)"
-            >
-              {{ token.page }}
-            </button>
-          </template>
-          <button
-            type="button"
-            :disabled="posts.page >= posts.totalPages"
-            @click="nextPage"
-          >
-            下一页
-          </button>
-          <button
-            type="button"
-            :disabled="posts.page >= posts.totalPages"
-            @click="goToPage(posts.totalPages)"
-          >
-            末页
-          </button>
-          <form class="page-jump" @submit.prevent="applyPageJump">
-            <input
-              v-model="pageJumpInput"
-              type="number"
-              min="1"
-              :max="posts.totalPages"
-              aria-label="跳转页码"
-            />
-            <button type="submit">跳转</button>
-          </form>
-        </div>
+        <PaginationControls
+          v-if="posts"
+          :current-page="posts.page"
+          :total-pages="posts.totalPages"
+          :disabled="loadingPosts"
+          @change="goToPage"
+        />
       </template>
           </section>
         </Pane>
