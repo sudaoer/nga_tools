@@ -996,47 +996,47 @@ def read_posts(
     page_size = ORIGINAL_POSTS_PER_PAGE
     stripped_query = query.strip()
     has_filter = bool(stripped_query) or lou_from is not None or lou_to is not None
-    effective_rows: list[ArchivePostVersionRow] = []
+    slot_end_lou = 0
     if has_filter:
         effective_rows = archive_store.read_effective_post_rows()
         post_count = len(effective_rows)
         max_lou = max((row.lou for row in effective_rows), default=None)
+        matching_rows = [
+            row
+            for row in effective_rows
+            if _post_row_matches(row, stripped_query, lou_from, lou_to, overlays)
+        ]
+        matching_post_count = len(matching_rows)
+        total = matching_post_count
+        total_pages = max(1, math.ceil(total / page_size))
+        resolved_page = min(page, total_pages)
+        result_offset = (resolved_page - 1) * page_size
+        rows = matching_rows[result_offset : result_offset + page_size]
+        page_start_lou = rows[0].lou if rows else 0
+        page_end_lou = rows[-1].lou if rows else 0
     else:
         stats = archive_store.read_effective_post_stats()
         post_count = stats.post_count
         max_lou = stats.max_lou
-    slot_total = max_lou + 1 if max_lou is not None and max_lou >= 0 else 0
-    total_pages = max(1, math.ceil(slot_total / page_size))
-    resolved_page = min(page, total_pages)
-    page_start_lou = (resolved_page - 1) * page_size
-    page_end_lou = page_start_lou + page_size - 1
-    slot_end_lou = (
-        min(page_end_lou, max_lou)
-        if max_lou is not None and max_lou >= page_start_lou
-        else page_start_lou - 1
-    )
-    page_lous: set[int] = (
-        set(range(page_start_lou, slot_end_lou + 1))
-        if slot_end_lou >= page_start_lou
-        else set[int]()
-    )
-    if has_filter:
-        matching_lous = {
-            row.lou
-            for row in effective_rows
-            if _post_row_matches(row, stripped_query, lou_from, lou_to, overlays)
-        }
-        matching_post_count = len(matching_lous)
-        rows = [row for row in effective_rows if row.lou in page_lous]
-    else:
+        total = max_lou + 1 if max_lou is not None and max_lou >= 0 else 0
+        total_pages = max(1, math.ceil(total / page_size))
+        resolved_page = min(page, total_pages)
+        page_start_lou = (resolved_page - 1) * page_size
+        page_end_lou = page_start_lou + page_size - 1
+        slot_end_lou = (
+            min(page_end_lou, max_lou)
+            if max_lou is not None and max_lou >= page_start_lou
+            else page_start_lou - 1
+        )
+        page_lous: set[int] = (
+            set(range(page_start_lou, slot_end_lou + 1))
+            if slot_end_lou >= page_start_lou
+            else set[int]()
+        )
         rows = archive_store.read_effective_post_rows(page_lous)
-        matching_lous = {row.lou for row in rows}
         matching_post_count = post_count
-    matching_page_lous = {
-        lou
-        for lou in matching_lous
-        if page_start_lou <= lou <= page_end_lou
-    }
+        result_offset = page_start_lou
+        page_end_lou = max(page_start_lou, slot_end_lou)
 
     image_urls: set[str] = set()
     for row in rows:
@@ -1052,49 +1052,50 @@ def read_posts(
     audio_mappings = _read_audio_mappings_for_urls(output_dir, audio_urls)
 
     floor_labels = _load_floor_labels(archive_store, aid)
-    row_by_lou = {row.lou: row for row in rows}
-    slots: list[PostSlot] = []
-    for lou in range(page_start_lou, slot_end_lou + 1):
-        row = row_by_lou.get(lou)
-        if row is None:
-            slots.append(_empty_post_slot(lou, floor_labels, "missing"))
-            continue
-        if lou not in matching_page_lous:
-            slot = _post_item_from_row(
-                row,
-                output_dir,
-                floor_labels,
-                image_mappings,
-                audio_mappings,
-                overlays.get(lou),
-            )
-            slot["html"] = "<p><em>此楼层不匹配当前筛选。</em></p>"
-            slot["emptyReason"] = "filtered"
-            slots.append(slot)
-            continue
-        slots.append(
+    slots: list[PostSlot]
+    if has_filter:
+        slots = [
             _post_item_from_row(
                 row,
                 output_dir,
                 floor_labels,
                 image_mappings,
                 audio_mappings,
-                overlays.get(lou),
+                overlays.get(row.lou),
             )
-        )
+            for row in rows
+        ]
+    else:
+        row_by_lou = {row.lou: row for row in rows}
+        slots = []
+        for lou in range(page_start_lou, slot_end_lou + 1):
+            row = row_by_lou.get(lou)
+            if row is None:
+                slots.append(_empty_post_slot(lou, floor_labels, "missing"))
+                continue
+            slots.append(
+                _post_item_from_row(
+                    row,
+                    output_dir,
+                    floor_labels,
+                    image_mappings,
+                    audio_mappings,
+                    overlays.get(lou),
+                )
+            )
 
     items = [slot for slot in slots if slot["emptyReason"] is None]
 
     return {
         "slots": slots,
         "items": items,
-        "total": slot_total,
-        "offset": page_start_lou,
+        "total": total,
+        "offset": result_offset if has_filter else page_start_lou,
         "limit": page_size,
         "page": resolved_page,
         "pageSize": page_size,
         "pageStartLou": page_start_lou,
-        "pageEndLou": max(page_start_lou, slot_end_lou),
+        "pageEndLou": page_end_lou,
         "totalPages": total_pages,
         "postCount": post_count,
         "matchingPostCount": matching_post_count,

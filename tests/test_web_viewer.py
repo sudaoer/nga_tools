@@ -405,7 +405,7 @@ class WebViewerDataTest:
         assert result["matchingPostCount"] == 2
         assert [item["lou"] for item in result["items"]] == [25]
 
-    def test_reads_filtered_page_with_full_thread_match_count(
+    def test_reads_filtered_page_by_matching_floor(
         self,
         tmp_path: Path,
         monkeypatch,
@@ -432,11 +432,84 @@ class WebViewerDataTest:
             wrapped_read_effective_post_rows,
         )
 
-        result = read_posts(output_dir, 101, "201", page=2, query="needle")
+        result = read_posts(output_dir, 101, "201", page=1, query="needle")
 
         assert calls == [None]
         assert result["matchingPostCount"] == 2
-        assert [item["lou"] for item in result["items"]] == [25]
+        assert result["total"] == 2
+        assert result["totalPages"] == 1
+        assert result["pageStartLou"] == 1
+        assert result["pageEndLou"] == 25
+        assert [slot["lou"] for slot in result["slots"]] == [1, 25]
+        assert [item["lou"] for item in result["items"]] == [1, 25]
+
+    def test_reads_filtered_pages_by_matching_floor_order(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(
+            thread_dir,
+            [_post(lou, "needle") for lou in range(1, 22)],
+        )
+
+        result = read_posts(output_dir, 101, "201", page=2, query="needle")
+
+        assert result["page"] == 2
+        assert result["total"] == 21
+        assert result["totalPages"] == 2
+        assert result["offset"] == 20
+        assert result["pageStartLou"] == 21
+        assert result["pageEndLou"] == 21
+        assert [item["lou"] for item in result["items"]] == [21]
+        assert all(slot["emptyReason"] is None for slot in result["slots"])
+
+    def test_reads_filtered_page_with_floor_range(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(
+            thread_dir,
+            [
+                _post(1, "needle"),
+                _post(2, "needle"),
+                _post(3, "other"),
+                _post(4, "needle"),
+            ],
+        )
+
+        result = read_posts(
+            output_dir,
+            101,
+            "201",
+            page=1,
+            query="needle",
+            lou_from=2,
+            lou_to=4,
+        )
+
+        assert result["matchingPostCount"] == 2
+        assert [item["lou"] for item in result["items"]] == [2, 4]
+
+    def test_reads_filtered_page_without_matches(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "other")])
+
+        result = read_posts(output_dir, 101, "201", page=1, query="needle")
+
+        assert result["total"] == 0
+        assert result["totalPages"] == 1
+        assert result["pageStartLou"] == 0
+        assert result["pageEndLou"] == 0
+        assert result["slots"] == []
+        assert result["items"] == []
 
     def test_reads_posts_and_rewrites_local_image_sources(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
@@ -479,7 +552,8 @@ class WebViewerDataTest:
         assert result["items"][0]["authorName"] == "author-1"
         assert result["items"][0]["floorLabel"] == "第1楼（原5楼）"
         assert 'src="/api/files/images_unique/abc.png"' in result["items"][0]["html"]
-        assert result["slots"][2]["emptyReason"] == "filtered"
+        assert [slot["lou"] for slot in result["slots"]] == [1]
+        assert all(slot["emptyReason"] is None for slot in result["slots"])
         assert legacy_floor_map.read_text(encoding="utf-8") == "{bad"
 
     def test_current_and_historical_posts_do_not_recover_attachment_urls(
@@ -1154,7 +1228,10 @@ class WebServerTest:
         )
         assert "original" not in post_payload["items"][0]["html"]
         assert filtered_response.status_code == 200
-        assert filtered_response.json()["matchingPostCount"] == 0
+        filtered_payload = filtered_response.json()
+        assert filtered_payload["matchingPostCount"] == 0
+        assert filtered_payload["slots"] == []
+        assert filtered_payload["items"] == []
         assert rejected_response.status_code == 400
         assert "完整的NGA图片URL" in rejected_response.json()["error"]
 

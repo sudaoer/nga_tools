@@ -139,6 +139,12 @@ const visibleThreads = computed(() => {
 
 const pageStart = computed(() => (posts.value ? posts.value.pageStartLou : 0))
 const pageEnd = computed(() => (posts.value ? posts.value.pageEndLou : 0))
+const hasPostFilter = computed(
+  () =>
+    Boolean(
+      postQuery.q.trim() || postQuery.louFrom.trim() || postQuery.louTo.trim(),
+    ),
+)
 const displayedPostSlots = computed<PostItem[]>(() =>
   (posts.value?.slots || []).filter((post) => post.emptyReason !== 'filtered'),
 )
@@ -879,7 +885,7 @@ onBeforeUnmount(() => {
           v-if="posts && displayedPostSlots.length === 0"
           class="empty-state"
         >
-          当前页没有匹配的楼层。
+          {{ hasPostFilter ? '当前条件没有匹配的楼层。' : '当前页没有可显示的楼层。' }}
         </div>
 
         <article
