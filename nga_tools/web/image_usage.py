@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import Literal, Optional, TypedDict, cast
 from urllib.parse import quote
 
+from nga_tools import utils
 from nga_tools.backup import image_store
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
 from nga_tools.backup.image_reference_cache import (
     scan_image_references_for_records_readonly,
 )
 from nga_tools.backup.image_pipeline import PostImageReference
+from nga_tools.backup.models import PostRecord
 from nga_tools.backup.post_overlay import apply_post_overlays_to_records
 from nga_tools.core.sqlite import configure_readonly_connection
 from nga_tools.forum.thread_configs import (
@@ -41,6 +43,9 @@ _IMAGE_PROBLEM_KINDS: tuple[ImageProblemKind, ...] = (
     "unmapped",
     "missing_file",
 )
+_IMAGE_BBCODE_OPEN_RE = re.compile(r"\[img\]", re.IGNORECASE)
+_IMAGE_BBCODE_CLOSE_RE = re.compile(r"\[/img\]", re.IGNORECASE)
+_IMAGE_SOURCE_TOKEN_END_RE = re.compile(r"[\s\[<]")
 
 
 class ImageUsageItem(TypedDict):
@@ -111,6 +116,7 @@ class ImageProblemIssueItem(TypedDict):
     url: str
     occurrenceCount: int
     imageIndexes: list[int]
+    sourceIndexes: list[int]
     relativePath: Optional[str]
 
 
@@ -147,6 +153,7 @@ class ImageProblemsResult(TypedDict):
     offset: int
     limit: int
     kind: ImageProblemFilter
+    query: str
     computedAt: str
     archiveCount: int
     scannedPostCount: int
@@ -173,7 +180,14 @@ class ImageProblemIssue:
     url: str
     occurrence_count: int
     image_indexes: tuple[int, ...]
+    source_indexes: tuple[int, ...]
     relative_path: Optional[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _InvalidImageSource:
+    source_index: int
+    url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +198,7 @@ class ImageProblemPostReference:
     pid: int
     lou: int
     issues: tuple[ImageProblemIssue, ...]
+    search_text: str
 
 
 @dataclass(frozen=True)
@@ -354,13 +369,68 @@ def _mapped_image_file_exists(
     return available
 
 
+def _image_source_token(value: str) -> str:
+    stripped = value.strip()
+    token_end = _IMAGE_SOURCE_TOKEN_END_RE.search(stripped)
+    if token_end is None:
+        return stripped
+    return stripped[: token_end.start()]
+
+
+def _invalid_image_sources(content: str) -> tuple[_InvalidImageSource, ...]:
+    """Return invalid or structurally broken ``[img]`` sources in order."""
+
+    invalid_sources: list[_InvalidImageSource] = []
+    cursor = 0
+    source_index = 0
+    while opening := _IMAGE_BBCODE_OPEN_RE.search(content, cursor):
+        source_index += 1
+        value_start = opening.end()
+        closing = _IMAGE_BBCODE_CLOSE_RE.search(content, value_start)
+        next_opening = _IMAGE_BBCODE_OPEN_RE.search(content, value_start)
+        well_formed = closing is not None and (
+            next_opening is None or closing.start() < next_opening.start()
+        )
+
+        if well_formed:
+            assert closing is not None
+            raw_source = content[value_start : closing.start()].strip()
+            cursor = closing.end()
+        else:
+            raw_tail = content[value_start:]
+            token_end = _IMAGE_SOURCE_TOKEN_END_RE.search(raw_tail.lstrip())
+            stripped_tail = raw_tail.lstrip()
+            raw_source = (
+                stripped_tail
+                if token_end is None
+                else stripped_tail[: token_end.start()]
+            )
+            cursor = value_start
+
+        normalized_source = image_store.normalize_nga_image_url(raw_source)
+        if not well_formed or not utils.NGA_img_link_verify(normalized_source):
+            invalid_sources.append(
+                _InvalidImageSource(
+                    source_index=source_index,
+                    url=_image_source_token(raw_source),
+                )
+            )
+
+    return tuple(invalid_sources)
+
+
 def _problem_issues_for_references(
     images_root: Optional[Path],
     references: tuple[PostImageReference, ...],
+    invalid_sources: tuple[_InvalidImageSource, ...],
     image_paths: dict[str, str],
     availability_cache: dict[str, bool],
 ) -> tuple[ImageProblemIssue, ...]:
     image_indexes_by_issue: dict[
+        tuple[ImageProblemKind, str, Optional[str]],
+        list[int],
+    ] = defaultdict(list)
+    source_indexes_by_issue: dict[
         tuple[ImageProblemKind, str, Optional[str]],
         list[int],
     ] = defaultdict(list)
@@ -386,29 +456,85 @@ def _problem_issues_for_references(
                 ("missing_file", reference.url, relative_path)
             ].append(reference.image_index)
 
+    for invalid_source in invalid_sources:
+        source_indexes_by_issue[
+            ("invalid_url", invalid_source.url, None)
+        ].append(invalid_source.source_index)
+
     kind_order = {kind: index for index, kind in enumerate(_IMAGE_PROBLEM_KINDS)}
+    issue_keys = set(image_indexes_by_issue) | set(source_indexes_by_issue)
     return tuple(
         ImageProblemIssue(
             kind=kind,
             url=url,
-            occurrence_count=len(image_indexes),
-            image_indexes=tuple(sorted(image_indexes)),
+            occurrence_count=(
+                len(image_indexes_by_issue[(kind, url, relative_path)])
+                + len(source_indexes_by_issue[(kind, url, relative_path)])
+            ),
+            image_indexes=tuple(
+                sorted(image_indexes_by_issue[(kind, url, relative_path)])
+            ),
+            source_indexes=tuple(
+                sorted(source_indexes_by_issue[(kind, url, relative_path)])
+            ),
             relative_path=relative_path,
         )
-        for (kind, url, relative_path), image_indexes in sorted(
-            image_indexes_by_issue.items(),
-            key=lambda item: (
-                kind_order[item[0][0]],
-                item[0][1],
-                item[0][2] or "",
+        for kind, url, relative_path in sorted(
+            issue_keys,
+            key=lambda key: (
+                kind_order[key[0]],
+                key[1],
+                key[2] or "",
             ),
         )
     )
 
 
+def _image_problem_search_text(
+    *,
+    tid: int,
+    aid_key: str,
+    dir_name: str,
+    title: str,
+    pid: int,
+    lou: int,
+    author_name: Optional[str],
+    content: str,
+    issues: tuple[ImageProblemIssue, ...],
+) -> str:
+    values = [
+        title,
+        author_name or "",
+        content,
+        dir_name,
+        str(tid),
+        f"tid {tid}",
+        f"tid={tid}",
+        aid_key,
+        f"aid {aid_key}",
+        f"aid={aid_key}",
+        str(pid),
+        f"pid {pid}",
+        f"pid={pid}",
+        str(lou),
+        f"lou {lou}",
+        f"lou={lou}",
+        f"{lou}楼",
+        f"第{lou}楼",
+    ]
+    if lou == 0:
+        values.append("主楼")
+    for issue in issues:
+        values.append(issue.url)
+        if issue.relative_path is not None:
+            values.append(issue.relative_path)
+    return "\n".join(values).casefold()
+
+
 def _scan_references(
     connection: sqlite3.Connection,
     thread_groups: dict[int, list[Path]],
+    thread_titles: dict[int, str],
     output_dir: Path,
 ) -> _ReferenceScanResult:
     usage_counts: Counter[str] = Counter()
@@ -437,9 +563,24 @@ def _scan_references(
             aid_key = parsed[1]
             try:
                 archive_store = ThreadArchiveStore(thread_folder)
-                records = archive_store.read_effective_post_records()
+                rows = archive_store.read_effective_post_rows()
+                records: list[PostRecord] = [
+                    {
+                        "lou": row.lou,
+                        "pid": row.pid,
+                        "post": {
+                            "lou": row.lou,
+                            "pid": row.pid,
+                            "content": row.content,
+                        },
+                        "html": None,
+                        "source_hash": row.source_hash,
+                    }
+                    for row in rows
+                ]
+                overlays = archive_store.read_post_overlays()
                 records = apply_post_overlays_to_records(
-                    archive_store.read_post_overlays(),
+                    overlays,
                     records,
                     output_dir=thread_folder.parent,
                 )
@@ -454,12 +595,12 @@ def _scan_references(
                     if reference.valid
                 }
                 image_paths = _image_paths_for_urls(connection, valid_urls)
-                records_by_lou = {record["lou"]: record for record in records}
+                rows_by_lou = {row.lou: row for row in rows}
                 for scan in scan_result.scans:
-                    record = records_by_lou.get(scan.lou)
-                    if record is None or record["pid"] is None:
+                    row = rows_by_lou.get(scan.lou)
+                    if row is None:
                         continue
-                    pid = record["pid"]
+                    pid = row.pid
                     if pid in seen_pids:
                         continue
                     seen_pids.add(pid)
@@ -488,9 +629,14 @@ def _scan_references(
                                 occurrence_count=occurrence_count,
                             )
                         )
+                    overlay = overlays.get(scan.lou)
+                    searchable_content = (
+                        overlay["bbcode"] if overlay is not None else row.content
+                    )
                     problem_issues = _problem_issues_for_references(
                         images_root,
                         scan.references,
+                        _invalid_image_sources(searchable_content),
                         image_paths,
                         availability_cache,
                     )
@@ -503,6 +649,17 @@ def _scan_references(
                                 pid=pid,
                                 lou=scan.lou,
                                 issues=problem_issues,
+                                search_text=_image_problem_search_text(
+                                    tid=tid,
+                                    aid_key=aid_key,
+                                    dir_name=thread_folder.name,
+                                    title=thread_titles.get(tid, f"tid {tid}"),
+                                    pid=pid,
+                                    lou=scan.lou,
+                                    author_name=row.author_name,
+                                    content=searchable_content,
+                                    issues=problem_issues,
+                                ),
                             )
                         )
                 archive_count += 1
@@ -564,8 +721,9 @@ def _inventory_items(
     return items
 
 
-def _problem_kind_counts(
-    references: list[ImageProblemPostReference],
+def image_problem_kind_counts(
+    references: list[ImageProblemPostReference]
+    | tuple[ImageProblemPostReference, ...],
 ) -> ImageProblemKindCounts:
     post_counts: Counter[ImageProblemKind] = Counter()
     occurrence_counts: Counter[ImageProblemKind] = Counter()
@@ -603,7 +761,12 @@ def build_image_usage_snapshot(output_dir: Path) -> ImageUsageSnapshot:
             connection.execute(
                 "SELECT url, unique_rel_path FROM image_mappings LIMIT 0"
             ).fetchall()
-            scan_result = _scan_references(connection, thread_groups, output_dir)
+            scan_result = _scan_references(
+                connection,
+                thread_groups,
+                thread_titles,
+                output_dir,
+            )
             items = _inventory_items(connection, scan_result)
     except (sqlite3.Error, OSError) as error:
         raise ImageIndexUnavailableError(
@@ -636,7 +799,7 @@ def build_image_usage_snapshot(output_dir: Path) -> ImageUsageSnapshot:
             for relative_path, references in scan_result.references_by_path.items()
         },
         problem_references=tuple(problem_references),
-        problem_kind_counts=_problem_kind_counts(problem_references),
+        problem_kind_counts=image_problem_kind_counts(problem_references),
         thread_titles=thread_titles,
         computed_at=_now_utc_iso(),
         archive_count=scan_result.archive_count,
@@ -730,12 +893,23 @@ def image_reply_references(
 def image_problem_references(
     snapshot: ImageUsageSnapshot,
     kind: ImageProblemFilter,
+    query: str = "",
 ) -> tuple[ImageProblemPostReference, ...]:
+    normalized_query = query.strip().casefold()
+    references = (
+        snapshot.problem_references
+        if not normalized_query
+        else tuple(
+            reference
+            for reference in snapshot.problem_references
+            if normalized_query in reference.search_text
+        )
+    )
     if kind == "all":
-        return snapshot.problem_references
+        return references
     return tuple(
         reference
-        for reference in snapshot.problem_references
+        for reference in references
         if any(issue.kind == kind for issue in reference.issues)
     )
 

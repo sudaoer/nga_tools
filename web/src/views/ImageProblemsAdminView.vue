@@ -8,6 +8,7 @@ import PaneRestoreRail from '../components/PaneRestoreRail.vue'
 import { usePersistentPaneLayout } from '../composables/usePersistentPaneLayout'
 import type {
   ImageProblemFilter,
+  ImageProblemIssueItem,
   ImageProblemKind,
   ImageProblemPostItem,
   ImageProblemsResult,
@@ -57,6 +58,8 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const offset = ref(0)
 const kind = ref<ImageProblemFilter>('all')
+const searchInput = ref('')
+const appliedQuery = ref('')
 const selectedTid = ref<number | null>(null)
 const selectedAidKey = ref<string | null>(null)
 const selectedLou = ref<number | null>(null)
@@ -132,6 +135,8 @@ function hydrateStateFromUrl(): void {
   offset.value = requestedOffset === null ? 0 : requestedOffset
   const requestedKind = params.get('kind')
   kind.value = isProblemFilter(requestedKind) ? requestedKind : 'all'
+  appliedQuery.value = params.get('q')?.trim() || ''
+  searchInput.value = appliedQuery.value
 
   const requestedTid = integerFromParam(params.get('tid'))
   const requestedAidKey = params.get('aid')?.trim() || null
@@ -158,6 +163,11 @@ function syncUrl(): void {
     url.searchParams.delete('kind')
   } else {
     url.searchParams.set('kind', kind.value)
+  }
+  if (appliedQuery.value) {
+    url.searchParams.set('q', appliedQuery.value)
+  } else {
+    url.searchParams.delete('q')
   }
   if (
     selectedTid.value !== null &&
@@ -191,8 +201,15 @@ function formatTime(value: string | number | null): string {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString()
 }
 
-function formatImageIndexes(imageIndexes: number[]): string {
-  return `第 ${imageIndexes.join('、')} 张图片`
+function formatIssueLocations(issue: ImageProblemIssueItem): string {
+  const locations: string[] = []
+  if (issue.imageIndexes.length > 0) {
+    locations.push(`第 ${issue.imageIndexes.join('、')} 张图片`)
+  }
+  if (issue.sourceIndexes.length > 0) {
+    locations.push(`第 ${issue.sourceIndexes.join('、')} 个 [img]`)
+  }
+  return locations.join('；') || '位置未能确定'
 }
 
 function filterLabel(filter: ImageProblemFilter): string {
@@ -239,6 +256,7 @@ async function load(refresh = false): Promise<void> {
       offset: offset.value,
       limit: PAGE_SIZE,
       kind: kind.value,
+      q: appliedQuery.value,
       refresh,
     })
     if (payload.total > 0 && payload.items.length === 0 && offset.value > 0) {
@@ -259,6 +277,27 @@ async function load(refresh = false): Promise<void> {
 async function refresh(): Promise<void> {
   offset.value = 0
   await load(true)
+}
+
+async function applySearch(): Promise<void> {
+  const nextQuery = searchInput.value.trim()
+  searchInput.value = nextQuery
+  if (appliedQuery.value === nextQuery && offset.value === 0) {
+    return
+  }
+  appliedQuery.value = nextQuery
+  offset.value = 0
+  await load(false)
+}
+
+async function clearSearch(): Promise<void> {
+  const needsReload = Boolean(appliedQuery.value) || offset.value > 0
+  searchInput.value = ''
+  appliedQuery.value = ''
+  offset.value = 0
+  if (needsReload) {
+    await load(false)
+  }
 }
 
 async function setKind(nextKind: ImageProblemFilter): Promise<void> {
@@ -343,6 +382,25 @@ onMounted(async () => {
               检查当前生效正文，定位无法由本地图片存储完整支持的帖子。
             </p>
 
+            <form class="image-problem-search" role="search" @submit.prevent="applySearch">
+              <input
+                v-model="searchInput"
+                type="search"
+                aria-label="搜索图片问题帖子"
+                placeholder="搜索标题、作者、正文、ID 或图片链接"
+              />
+              <div class="image-problem-search-actions">
+                <button type="submit" :disabled="loading">搜索</button>
+                <button
+                  type="button"
+                  :disabled="loading || (!searchInput && !appliedQuery)"
+                  @click="clearSearch"
+                >
+                  清除
+                </button>
+              </div>
+            </form>
+
             <div class="image-problem-filters" aria-label="图片问题类型">
               <button
                 v-for="filter in FILTERS"
@@ -375,6 +433,9 @@ onMounted(async () => {
                 <span>{{ formatNumber(result.problemOccurrenceCount) }} 次问题引用</span>
                 <span>{{ formatNumber(result.archiveCount) }} 个归档</span>
                 <span>{{ formatNumber(result.scannedPostCount) }} 条正文</span>
+                <span v-if="result.query" class="image-problem-search-summary">
+                  搜索“{{ result.query }}”
+                </span>
                 <span>统计于 {{ formatTime(result.computedAt) }}</span>
               </section>
 
@@ -401,7 +462,7 @@ onMounted(async () => {
               />
 
               <div v-if="result.items.length === 0" class="empty-state">
-                当前筛选下没有图片问题帖子。
+                {{ result.query ? '当前搜索与筛选下没有图片问题帖子。' : '当前筛选下没有图片问题帖子。' }}
               </div>
               <div v-else class="image-problem-post-list">
                 <button
@@ -462,7 +523,7 @@ onMounted(async () => {
               正在读取图片问题帖子...
             </div>
             <div v-else-if="selectedPost === null" class="empty-state reader-empty">
-              当前筛选下没有可查看的问题帖子。
+              {{ result?.query ? '当前搜索与筛选下没有可查看的问题帖子。' : '当前筛选下没有可查看的问题帖子。' }}
             </div>
 
             <article v-else class="image-problem-post image-problem-selected-post">
@@ -490,7 +551,7 @@ onMounted(async () => {
                   <span class="image-problem-kind" :class="`kind-${issue.kind}`">
                     {{ kindLabels[issue.kind] }}
                   </span>
-                  <strong>{{ formatImageIndexes(issue.imageIndexes) }}</strong>
+                  <strong>{{ formatIssueLocations(issue) }}</strong>
                   <code>{{ issue.url }}</code>
                   <span>出现 {{ formatNumber(issue.occurrenceCount) }} 次</span>
                   <span v-if="issue.relativePath">映射：{{ issue.relativePath }}</span>

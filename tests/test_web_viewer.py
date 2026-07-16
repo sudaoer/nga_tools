@@ -30,6 +30,7 @@ from nga_tools.storage import ensure_storage_metadata
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web import data as web_data
 from nga_tools.web import database as web_database
+from nga_tools.web import image_usage as web_image_usage
 from nga_tools.web.data import (
     ThreadConfig,
     read_post_version_preview,
@@ -1598,6 +1599,7 @@ class WebImageUsageTest:
             "unmapped": {"postCount": 1, "occurrenceCount": 1},
             "missing_file": {"postCount": 1, "occurrenceCount": 1},
         }
+        assert payload["query"] == ""
         assert payload["total"] == 2
         first = payload["items"][0]
         assert first["pid"] == 1000
@@ -1612,6 +1614,7 @@ class WebImageUsageTest:
                 "url": "./broken.png",
                 "occurrenceCount": 2,
                 "imageIndexes": [1, 2],
+                "sourceIndexes": [],
                 "relativePath": None,
             },
             {
@@ -1619,6 +1622,7 @@ class WebImageUsageTest:
                 "url": unmapped_url,
                 "occurrenceCount": 1,
                 "imageIndexes": [3],
+                "sourceIndexes": [],
                 "relativePath": None,
             },
             {
@@ -1626,6 +1630,7 @@ class WebImageUsageTest:
                 "url": missing_url,
                 "occurrenceCount": 1,
                 "imageIndexes": [4],
+                "sourceIndexes": [],
                 "relativePath": "images_unique/missing.png",
             },
         ]
@@ -1655,12 +1660,330 @@ class WebImageUsageTest:
         assert second_page.status_code == 200
         assert second_page.json()["items"][0]["pid"] == 1001
 
+    def test_lists_invalid_bbcode_sources_without_attachment_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        healthy_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/16/healthy-source.png"
+        )
+        relative_source = "./mon_202607/16/relative-source.png"
+        relative_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/16/relative-source.png"
+        )
+        malformed_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/16/malformed-source.png"
+        )
+        unclosed_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202607/16/unclosed-source.png"
+        )
+        for url, filename in (
+            (healthy_url, "healthy-source.png"),
+            (relative_url, "relative-source.png"),
+            (malformed_url, "malformed-source.png"),
+            (unclosed_url, "unclosed-source.png"),
+        ):
+            relative_path = f"images_unique/{filename}"
+            _write_image_mapping(output_dir, url, relative_path)
+            image_path = output_dir / relative_path
+            image_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (2, 2), color="white").save(image_path)
+
+        hbrgo_like_post = _post(
+            1,
+            f"[img]{healthy_url}[/img]<br/>"
+            f"[img]{relative_source}[/img</span></div>]",
+            pid=4101,
+        )
+        hbrgo_like_post["attches"] = [
+            {
+                "type": "img",
+                "attachurl": "mon_202607/16/relative-source.png",
+            }
+        ]
+        _write_archive(
+            output_dir / "101_201",
+            [
+                hbrgo_like_post,
+                _post(2, f"[img]{relative_source}[/img]", pid=4102),
+                _post(
+                    3,
+                    f"[img]{malformed_url}[/img</span></div>]",
+                    pid=4103,
+                ),
+                _post(4, f"[img]{unclosed_url}", pid=4104),
+            ],
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/api/admin/image-problems")
+        search = client.get(
+            "/api/admin/image-problems",
+            params={"q": "relative-source.png"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["problemPostCount"] == 4
+        assert payload["problemOccurrenceCount"] == 4
+        assert payload["kindCounts"] == {
+            "invalid_url": {"postCount": 4, "occurrenceCount": 4},
+            "unmapped": {"postCount": 0, "occurrenceCount": 0},
+            "missing_file": {"postCount": 0, "occurrenceCount": 0},
+        }
+
+        items_by_pid = {item["pid"]: item for item in payload["items"]}
+        relative_issue = items_by_pid[4101]["issues"][0]
+        assert relative_issue == {
+            "kind": "invalid_url",
+            "url": relative_source,
+            "occurrenceCount": 1,
+            "imageIndexes": [],
+            "sourceIndexes": [2],
+            "relativePath": None,
+        }
+        assert items_by_pid[4102]["issues"][0]["sourceIndexes"] == [1]
+        assert items_by_pid[4103]["issues"][0] == {
+            "kind": "invalid_url",
+            "url": malformed_url,
+            "occurrenceCount": 1,
+            "imageIndexes": [],
+            "sourceIndexes": [1],
+            "relativePath": None,
+        }
+        assert items_by_pid[4104]["issues"][0] == {
+            "kind": "invalid_url",
+            "url": unclosed_url,
+            "occurrenceCount": 1,
+            "imageIndexes": [],
+            "sourceIndexes": [1],
+            "relativePath": None,
+        }
+        unclosed_rendered = BeautifulSoup(items_by_pid[4104]["html"], "html.parser")
+        assert unclosed_rendered.select_one(".image-problem-unlocated") is not None
+        assert "第1个 [img] · 链接无效" in unclosed_rendered.get_text(
+            " ", strip=True
+        )
+
+        rendered = BeautifulSoup(items_by_pid[4101]["html"], "html.parser")
+        source_marker = rendered.select_one(".image-problem-inline-source")
+        assert source_marker is not None
+        assert source_marker.get_text() == f"[img]{relative_source}"
+        assert "第2个 [img] · 链接无效" in rendered.get_text(" ", strip=True)
+        assert rendered.select_one(".image-problem-unlocated") is None
+        assert search.status_code == 200
+        assert {item["pid"] for item in search.json()["items"]} == {4101, 4102}
+
+        saved = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": "已通过 overlay 删除无效图片写法"},
+        )
+        after_overlay = client.get("/api/admin/image-problems")
+
+        assert saved.status_code == 200
+        assert after_overlay.status_code == 200
+        assert after_overlay.json()["problemPostCount"] == 3
+        assert {item["pid"] for item in after_overlay.json()["items"]} == {
+            4102,
+            4103,
+            4104,
+        }
+
+    def test_searches_image_problem_posts_across_cached_snapshot(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        missing_url = (
+            "https://img.nga.178.com/attachments/mon_202607/16/MissingSearch.png"
+        )
+        unmapped_url = (
+            "https://img.nga.178.com/attachments/mon_202607/16/UnmappedSearch.png"
+        )
+        missing_path = "images_unique/MissingSearch.png"
+        _write_image_mapping(output_dir, missing_url, missing_path)
+        _write_archive(
+            output_dir / "101_201",
+            [
+                _post(
+                    0,
+                    f"UniqueBodyNeedle [img]{missing_url}[/img]",
+                    pid=1100,
+                ),
+                _post(7, '<img src="./InvalidSearch.png">', pid=2207),
+                _post(12, f"[img]{unmapped_url}[/img]", pid=3312),
+            ],
+        )
+
+        def fake_thread_title(
+            tid: int,
+            _paths: list[Path],
+            _metadata: object,
+        ) -> str:
+            return "Alpha Search Subject" if tid == 101 else f"tid {tid}"
+
+        monkeypatch.setattr(web_image_usage, "_thread_title", fake_thread_title)
+        calls: list[Path] = []
+        original_build = web_server.build_image_usage_snapshot
+
+        def wrapped_build(path: Path):
+            calls.append(path)
+            return original_build(path)
+
+        monkeypatch.setattr(web_server, "build_image_usage_snapshot", wrapped_build)
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        title_match = client.get(
+            "/api/admin/image-problems",
+            params={"q": "alpha search subject"},
+        )
+        author_match = client.get(
+            "/api/admin/image-problems",
+            params={"q": "  AUTHOR-7  "},
+        )
+        body_match = client.get(
+            "/api/admin/image-problems",
+            params={"q": "uniquebodyneedle"},
+        )
+        tid_match = client.get(
+            "/api/admin/image-problems",
+            params={"q": "tid=101"},
+        )
+        pid_match = client.get(
+            "/api/admin/image-problems",
+            params={"q": "pid 2207"},
+        )
+        floor_match = client.get(
+            "/api/admin/image-problems",
+            params={"q": "第7楼"},
+        )
+        url_match = client.get(
+            "/api/admin/image-problems",
+            params={"q": "unmappedsearch.PNG"},
+        )
+        path_match = client.get(
+            "/api/admin/image-problems",
+            params={"q": "IMAGES_UNIQUE/missingsearch.PNG"},
+        )
+        kind_match = client.get(
+            "/api/admin/image-problems",
+            params={"q": "Alpha Search Subject", "kind": "missing_file"},
+        )
+        second_match = client.get(
+            "/api/admin/image-problems",
+            params={
+                "q": "Alpha Search Subject",
+                "offset": 1,
+                "limit": 1,
+            },
+        )
+        no_match = client.get(
+            "/api/admin/image-problems",
+            params={"q": "does-not-exist"},
+        )
+
+        assert title_match.status_code == 200
+        title_payload = title_match.json()
+        assert title_payload["query"] == "alpha search subject"
+        assert title_payload["total"] == 3
+        assert title_payload["problemPostCount"] == 3
+        assert title_payload["problemThreadCount"] == 1
+        assert title_payload["problemOccurrenceCount"] == 3
+        assert title_payload["kindCounts"] == {
+            "invalid_url": {"postCount": 1, "occurrenceCount": 1},
+            "unmapped": {"postCount": 1, "occurrenceCount": 1},
+            "missing_file": {"postCount": 1, "occurrenceCount": 1},
+        }
+        assert author_match.json()["query"] == "AUTHOR-7"
+        assert [item["pid"] for item in author_match.json()["items"]] == [2207]
+        assert [item["pid"] for item in body_match.json()["items"]] == [1100]
+        assert tid_match.json()["total"] == 3
+        assert [item["pid"] for item in pid_match.json()["items"]] == [2207]
+        assert [item["pid"] for item in floor_match.json()["items"]] == [2207]
+        assert [item["pid"] for item in url_match.json()["items"]] == [3312]
+        assert [item["pid"] for item in path_match.json()["items"]] == [1100]
+
+        kind_payload = kind_match.json()
+        assert kind_payload["total"] == 1
+        assert kind_payload["problemPostCount"] == 3
+        assert kind_payload["kindCounts"] == title_payload["kindCounts"]
+        assert kind_payload["items"][0]["pid"] == 1100
+        assert second_match.json()["total"] == 3
+        assert second_match.json()["items"][0]["pid"] == 2207
+        assert no_match.json()["total"] == 0
+        assert no_match.json()["problemPostCount"] == 0
+        assert no_match.json()["problemThreadCount"] == 0
+        assert no_match.json()["problemOccurrenceCount"] == 0
+        assert no_match.json()["kindCounts"] == {
+            "invalid_url": {"postCount": 0, "occurrenceCount": 0},
+            "unmapped": {"postCount": 0, "occurrenceCount": 0},
+            "missing_file": {"postCount": 0, "occurrenceCount": 0},
+        }
+        assert calls == [output_dir]
+
+    def test_image_problem_search_tracks_current_overlay_content(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        problem_url = (
+            "https://img.nga.178.com/attachments/mon_202607/16/overlay-search.png"
+        )
+        _write_image_mapping(
+            output_dir,
+            problem_url,
+            "images_unique/overlay-search.png",
+        )
+        _write_archive(
+            output_dir / "101_201",
+            [_post(1, f"OriginalSearchNeedle [img]{problem_url}[/img]")],
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        before = client.get(
+            "/api/admin/image-problems",
+            params={"q": "OriginalSearchNeedle"},
+        )
+        saved = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": "OverlaySearchNeedle 已修复图片问题"},
+        )
+        old_content = client.get(
+            "/api/admin/image-problems",
+            params={"q": "OriginalSearchNeedle"},
+        )
+        overlay_content = client.get(
+            "/api/admin/image-problems",
+            params={"q": "overlaysearchneedle"},
+        )
+
+        assert before.status_code == 200
+        assert before.json()["total"] == 1
+        assert saved.status_code == 200
+        assert old_content.status_code == 200
+        assert old_content.json()["total"] == 0
+        assert overlay_content.status_code == 200
+        assert overlay_content.json()["total"] == 0
+
     def test_image_problem_markup_reports_unlocated_images(self) -> None:
         issue = ImageProblemIssue(
             kind="invalid_url",
             url="./not-rendered.png",
             occurrence_count=1,
             image_indexes=(2,),
+            source_indexes=(),
             relative_path=None,
         )
 

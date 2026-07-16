@@ -84,6 +84,7 @@ from nga_tools.web.image_usage import (
     build_image_usage_snapshot,
     copy_image_problem_kind_counts,
     image_problem_references,
+    image_problem_kind_counts,
     image_reply_references,
     image_usage_detail,
     image_usage_result,
@@ -940,6 +941,7 @@ def _image_problem_post_item(
             "url": issue.url,
             "occurrenceCount": issue.occurrence_count,
             "imageIndexes": list(issue.image_indexes),
+            "sourceIndexes": list(issue.source_indexes),
             "relativePath": issue.relative_path,
         }
         for issue in reference.issues
@@ -980,8 +982,23 @@ def _read_image_problems_sync(
     offset: int,
     limit: int,
     kind: ImageProblemFilter,
+    query: str,
 ) -> ImageProblemsResult:
-    references = image_problem_references(snapshot, kind)
+    normalized_query = query.strip()
+    matching_references = image_problem_references(
+        snapshot,
+        "all",
+        normalized_query,
+    )
+    references = (
+        matching_references
+        if kind == "all"
+        else tuple(
+            reference
+            for reference in matching_references
+            if any(issue.kind == kind for issue in reference.issues)
+        )
+    )
     selected_references = references[offset : offset + limit]
     page_cache: dict[tuple[int, str, int], PostsResult] = {}
     items: list[ImageProblemPostItem] = []
@@ -995,19 +1012,24 @@ def _read_image_problems_sync(
         if item is not None:
             items.append(item)
 
-    kind_counts = copy_image_problem_kind_counts(snapshot.problem_kind_counts)
+    kind_counts = (
+        copy_image_problem_kind_counts(snapshot.problem_kind_counts)
+        if not normalized_query
+        else image_problem_kind_counts(matching_references)
+    )
     return {
         "items": items,
         "total": len(references),
         "offset": offset,
         "limit": limit,
         "kind": kind,
+        "query": normalized_query,
         "computedAt": snapshot.computed_at,
         "archiveCount": snapshot.archive_count,
         "scannedPostCount": snapshot.post_count,
-        "problemPostCount": len(snapshot.problem_references),
+        "problemPostCount": len(matching_references),
         "problemThreadCount": len(
-            {reference.tid for reference in snapshot.problem_references}
+            {reference.tid for reference in matching_references}
         ),
         "problemOccurrenceCount": (
             kind_counts["invalid_url"]["occurrenceCount"]
@@ -1024,6 +1046,7 @@ async def list_image_problems(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(gt=0, le=_MAX_POST_LIMIT)] = 20,
     kind: ImageProblemFilter = "all",
+    q: str = "",
     refresh: bool = False,
 ) -> ImageProblemsResult:
     context = _context(request)
@@ -1040,6 +1063,7 @@ async def list_image_problems(
             offset,
             limit,
             kind,
+            q,
         )
     except ImageIndexUnavailableError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error

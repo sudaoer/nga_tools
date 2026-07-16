@@ -178,6 +178,7 @@ export interface ImageProblemIssueItem {
   url: string
   occurrenceCount: number
   imageIndexes: number[]
+  sourceIndexes: number[]
   relativePath: string | null
 }
 
@@ -213,6 +214,7 @@ export interface ImageProblemsResult {
   offset: number
   limit: number
   kind: ImageProblemFilter
+  query: string
   computedAt: string
   archiveCount: number
   scannedPostCount: number

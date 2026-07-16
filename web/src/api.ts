@@ -309,6 +309,7 @@ export interface FetchImageProblemsOptions {
   offset: number
   limit: number
   kind: ImageProblemFilter
+  q: string
   refresh?: boolean
 }
 
@@ -320,6 +321,9 @@ export async function fetchImageProblems(
     limit: String(options.limit),
     kind: options.kind,
   })
+  if (options.q.trim()) {
+    params.set('q', options.q.trim())
+  }
   if (options.refresh) {
     params.set('refresh', '1')
   }
