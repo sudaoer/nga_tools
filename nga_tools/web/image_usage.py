@@ -110,6 +110,7 @@ class ImageProblemIssueItem(TypedDict):
     kind: ImageProblemKind
     url: str
     occurrenceCount: int
+    imageIndexes: list[int]
     relativePath: Optional[str]
 
 
@@ -171,6 +172,7 @@ class ImageProblemIssue:
     kind: ImageProblemKind
     url: str
     occurrence_count: int
+    image_indexes: tuple[int, ...]
     relative_path: Optional[str]
 
 
@@ -358,33 +360,43 @@ def _problem_issues_for_references(
     image_paths: dict[str, str],
     availability_cache: dict[str, bool],
 ) -> tuple[ImageProblemIssue, ...]:
-    counts: Counter[tuple[ImageProblemKind, str, Optional[str]]] = Counter()
+    image_indexes_by_issue: dict[
+        tuple[ImageProblemKind, str, Optional[str]],
+        list[int],
+    ] = defaultdict(list)
     for reference in references:
         if not reference.valid:
-            counts[("invalid_url", reference.url, None)] += 1
+            image_indexes_by_issue[("invalid_url", reference.url, None)].append(
+                reference.image_index
+            )
             continue
 
         relative_path = image_paths.get(reference.url)
         if relative_path is None:
-            counts[("unmapped", reference.url, None)] += 1
+            image_indexes_by_issue[("unmapped", reference.url, None)].append(
+                reference.image_index
+            )
             continue
         if not _mapped_image_file_exists(
             images_root,
             relative_path,
             availability_cache,
         ):
-            counts[("missing_file", reference.url, relative_path)] += 1
+            image_indexes_by_issue[
+                ("missing_file", reference.url, relative_path)
+            ].append(reference.image_index)
 
     kind_order = {kind: index for index, kind in enumerate(_IMAGE_PROBLEM_KINDS)}
     return tuple(
         ImageProblemIssue(
             kind=kind,
             url=url,
-            occurrence_count=occurrence_count,
+            occurrence_count=len(image_indexes),
+            image_indexes=tuple(sorted(image_indexes)),
             relative_path=relative_path,
         )
-        for (kind, url, relative_path), occurrence_count in sorted(
-            counts.items(),
+        for (kind, url, relative_path), image_indexes in sorted(
+            image_indexes_by_issue.items(),
             key=lambda item: (
                 kind_order[item[0][0]],
                 item[0][1],

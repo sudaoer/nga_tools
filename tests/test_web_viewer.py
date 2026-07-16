@@ -7,6 +7,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
+from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -37,6 +38,8 @@ from nga_tools.web.data import (
     scan_thread_summaries,
 )
 from nga_tools.web import server as web_server
+from nga_tools.web.image_problem_markup import annotate_image_problem_html
+from nga_tools.web.image_usage import ImageProblemIssue
 from nga_tools.web.server import create_app
 
 
@@ -1559,8 +1562,12 @@ class WebImageUsageTest:
                 _post(
                     0,
                     '<img src="./broken.png"><img src="./broken.png">'
-                    f"[img]{unmapped_url}[/img]"
+                    f'<img src="about:blank" data-srcorg="{unmapped_url}">'
+                    '<div class="foldBox">'
+                    '<div class="collapse_btn">+问题图片...</div>'
+                    '<div class="collapse_content">'
                     f"[img]{missing_url}[/img]"
+                    "</div></div>"
                     f"[img]{healthy_url}[/img]",
                     pid=1000,
                 ),
@@ -1604,28 +1611,69 @@ class WebImageUsageTest:
                 "kind": "invalid_url",
                 "url": "./broken.png",
                 "occurrenceCount": 2,
+                "imageIndexes": [1, 2],
                 "relativePath": None,
             },
             {
                 "kind": "unmapped",
                 "url": unmapped_url,
                 "occurrenceCount": 1,
+                "imageIndexes": [3],
                 "relativePath": None,
             },
             {
                 "kind": "missing_file",
                 "url": missing_url,
                 "occurrenceCount": 1,
+                "imageIndexes": [4],
                 "relativePath": "images_unique/missing.png",
             },
         ]
         assert healthy_url not in json.dumps(first["issues"])
+        rendered = BeautifulSoup(first["html"], "html.parser")
+        markers = rendered.select(".image-problem-inline")
+        assert len(markers) == 4
+        assert [marker.find("strong").get_text(" ", strip=True) for marker in markers] == [
+            "第1张图片 · 链接无效",
+            "第2张图片 · 链接无效",
+            "第3张图片 · 未建立本地映射",
+            "第4张图片 · 本地文件缺失",
+        ]
+        folded_problem = rendered.find("details")
+        assert folded_problem is not None
+        assert folded_problem.has_attr("open")
+        healthy_image = rendered.find(
+            "img",
+            attrs={"src": "/api/files/images_unique/healthy.png"},
+        )
+        assert healthy_image is not None
+        assert healthy_image.find_parent(class_="image-problem-inline") is None
 
         assert missing_only.status_code == 200
         assert missing_only.json()["total"] == 1
         assert len(missing_only.json()["items"][0]["issues"]) == 3
         assert second_page.status_code == 200
         assert second_page.json()["items"][0]["pid"] == 1001
+
+    def test_image_problem_markup_reports_unlocated_images(self) -> None:
+        issue = ImageProblemIssue(
+            kind="invalid_url",
+            url="./not-rendered.png",
+            occurrence_count=1,
+            image_indexes=(2,),
+            relative_path=None,
+        )
+
+        rendered = BeautifulSoup(
+            annotate_image_problem_html("<p>只有正文</p>", (issue,)),
+            "html.parser",
+        )
+
+        fallback = rendered.select_one(".image-problem-unlocated")
+        assert fallback is not None
+        assert "部分问题图片未能在当前渲染正文中定位" in fallback.get_text()
+        assert "第2张图片 · 链接无效" in fallback.get_text()
+        assert fallback.find("code").get_text() == "./not-rendered.png"
 
     def test_image_problem_cache_tracks_image_directory_changes(
         self,

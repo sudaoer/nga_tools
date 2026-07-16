@@ -88,6 +88,7 @@ from nga_tools.web.image_usage import (
     image_usage_detail,
     image_usage_result,
 )
+from nga_tools.web.image_problem_markup import annotate_image_problem_html
 
 _MAX_POST_LIMIT = 200
 _MAX_DATABASE_ROW_LIMIT = 200
@@ -938,6 +939,7 @@ def _image_problem_post_item(
             "kind": issue.kind,
             "url": issue.url,
             "occurrenceCount": issue.occurrence_count,
+            "imageIndexes": list(issue.image_indexes),
             "relativePath": issue.relative_path,
         }
         for issue in reference.issues
@@ -967,7 +969,7 @@ def _image_problem_post_item(
         "postdate": post["postdate"],
         "issueCount": sum(issue["occurrenceCount"] for issue in issues),
         "issues": issues,
-        "html": post["html"],
+        "html": annotate_image_problem_html(post["html"], reference.issues),
         "editUrl": f"/threads?{edit_query}",
     }
 

@@ -177,6 +177,7 @@ export interface ImageProblemIssueItem {
   kind: ImageProblemKind
   url: string
   occurrenceCount: number
+  imageIndexes: number[]
   relativePath: string | null
 }
 
