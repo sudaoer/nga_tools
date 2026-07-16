@@ -9,6 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
+from nga_tools.forum.timing import (
+    ForumSyncTimingCollector,
+    ForumSyncTimingSnapshot,
+)
 from nga_tools.timing import (
     TimingSectionRecord,
     TimingSnapshot,
@@ -21,6 +25,35 @@ from nga_tools.timing import (
 
 
 class TimingLogTest:
+    def test_forum_sync_timing_collector_accumulates_phases_and_counts(
+        self,
+    ) -> None:
+        ticks = iter((0.0, 1.0, 3.0, 4.0, 7.0, 10.0))
+        collector = ForumSyncTimingCollector(clock=lambda: next(ticks))
+
+        with collector.measure("setup"):
+            pass
+        with collector.measure("setup"):
+            pass
+        collector.record_forum_page_request_attempt()
+        collector.record_successful_forum_page(35)
+        collector.record_rate_limit_retry()
+        collector.record_scanned_threads(100)
+        collector.record_author_page_request()
+        collector.record_config_saved()
+
+        snapshot = collector.snapshot()
+
+        assert snapshot.total_seconds == 10.0
+        assert snapshot.setup_seconds == 5.0
+        assert snapshot.successful_page_count == 1
+        assert snapshot.forum_page_request_attempt_count == 1
+        assert snapshot.rate_limit_retry_count == 1
+        assert snapshot.fetched_thread_count == 35
+        assert snapshot.scanned_thread_count == 100
+        assert snapshot.author_page_request_count == 1
+        assert snapshot.config_saved is True
+
     def test_timing_log_records_sections_without_overwriting_legacy_file(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             log_path = Path(temp_dir_name) / "thread" / "timing.log"
@@ -243,3 +276,79 @@ class TimingLogTest:
         assert summary.index("- target-5: 100.000s") < summary.index(
             "- target-4: 4.000s"
         )
+
+    def test_batch_timing_summary_expands_forum_sync_breakdown(self) -> None:
+        started_at = datetime.now().astimezone()
+        forum_timing = ForumSyncTimingSnapshot(
+            total_seconds=15.0,
+            setup_seconds=1.0,
+            fetch_seconds=5.0,
+            forum_page_request_seconds=2.0,
+            rate_limit_wait_seconds=1.0,
+            watermark_read_seconds=0.5,
+            database_upsert_seconds=0.5,
+            screening_seconds=6.0,
+            database_read_seconds=1.0,
+            author_page_request_seconds=4.0,
+            config_merge_seconds=1.0,
+            config_save_seconds=1.0,
+            reporting_seconds=1.0,
+            successful_page_count=3,
+            forum_page_request_attempt_count=4,
+            rate_limit_retry_count=1,
+            fetched_thread_count=105,
+            scanned_thread_count=25826,
+            author_page_request_count=40,
+            config_saved=True,
+        )
+
+        with TemporaryDirectory() as temp_dir_name:
+            output_path = write_batch_timing_summary(
+                Path(temp_dir_name) / "batch_timing.log",
+                task_name="backup auto",
+                started_at=started_at,
+                wall_seconds=30.0,
+                total_threads=0,
+                snapshots=(),
+                thread_failure_categories=Counter(),
+                forum_sync_seconds=20.0,
+                forum_sync_timing=forum_timing,
+            )
+            summary = output_path.read_text(encoding="utf-8")
+
+        assert "- 论坛同步：20.000s\n" in summary
+        assert "  - 准备：1.000s\n" in summary
+        assert "  - 版面抓取与入库：5.000s（成功3页，抓取105个主题）\n" in summary
+        assert "    - 版面页请求：2.000s（尝试4次，限流重试1次）\n" in summary
+        assert "    - 限流等待：1.000s\n" in summary
+        assert "    - 水位读取：0.500s\n" in summary
+        assert "    - SQLite写入：0.500s\n" in summary
+        assert "    - 其余页处理与进度：1.000s\n" in summary
+        assert "    - SQLite读取：1.000s（筛查25826条记录）\n" in summary
+        assert "    - 只看作者请求：4.000s（请求40次）\n" in summary
+        assert "    - 本地规则匹配与进度：1.000s\n" in summary
+        assert "  - 配置保存：1.000s（已写入）\n" in summary
+        assert (
+            "  - 结果输出/其他：6.000s"
+            "（结果输出 1.000s，未归类 5.000s）\n"
+            in summary
+        )
+
+    def test_batch_timing_summary_keeps_legacy_forum_sync_line_without_snapshot(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            output_path = write_batch_timing_summary(
+                Path(temp_dir_name) / "batch_timing.log",
+                task_name="backup auto",
+                started_at=datetime.now().astimezone(),
+                wall_seconds=10.0,
+                total_threads=0,
+                snapshots=(),
+                thread_failure_categories=Counter(),
+                forum_sync_seconds=3.0,
+            )
+            summary = output_path.read_text(encoding="utf-8")
+
+        assert "命令阶段耗时：\n- 论坛同步：3.000s\n" in summary
+        assert "版面抓取与入库" not in summary

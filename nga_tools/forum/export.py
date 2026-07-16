@@ -11,6 +11,7 @@ from typing import Literal, Protocol, TypedDict
 from nga_tools.config import get_config
 from nga_tools.core.atomic import open_text_atomically
 from nga_tools.forum.thread_store import ForumThreadStore, timestamp_text
+from nga_tools.forum.timing import ForumSyncTimingCollector
 from nga_tools.ngaclient.client import (
     FORUM_MIRROR_TYPE_BIT,
     ForumThread,
@@ -455,6 +456,7 @@ def _fetch_default_page_with_retry(
     page_delay_seconds: int,
     sleep_func: SleepFunc,
     progress_callback: ForumDefaultScanProgressCallback | None,
+    timing_collector: ForumSyncTimingCollector | None,
 ) -> ForumThreadPage:
     attempt = 0
     while True:
@@ -468,12 +470,20 @@ def _fetch_default_page_with_retry(
             status="fetching",
             message="请求版面主题",
         )
+        if timing_collector is not None:
+            timing_collector.record_forum_page_request_attempt()
         try:
-            return client.get_forum_thread_page(fid, page)
+            if timing_collector is None:
+                page_data = client.get_forum_thread_page(fid, page)
+            else:
+                with timing_collector.measure("forum_page_request"):
+                    page_data = client.get_forum_thread_page(fid, page)
         except NGAForumPageError as error:
             if not _is_rate_limited(error) or attempt >= MAX_RATE_LIMIT_RETRIES:
                 raise
             attempt += 1
+            if timing_collector is not None:
+                timing_collector.record_rate_limit_retry()
             wait_seconds = max(page_delay_seconds * 3, 10)
             _report_default_progress(
                 progress_callback,
@@ -488,7 +498,18 @@ def _fetch_default_page_with_retry(
                     f"{attempt}/{MAX_RATE_LIMIT_RETRIES}"
                 ),
             )
-            sleep_func(wait_seconds)
+            if timing_collector is None:
+                sleep_func(wait_seconds)
+            else:
+                with timing_collector.measure("rate_limit_wait"):
+                    sleep_func(wait_seconds)
+            continue
+
+        if timing_collector is not None:
+            timing_collector.record_successful_forum_page(
+                len(page_data["threads"])
+            )
+        return page_data
 
 
 def _report_default_progress(
@@ -525,6 +546,7 @@ def sync_default_forum_threads_to_db(
     page_delay_seconds: int = 0,
     sleep_func: SleepFunc = time.sleep,
     progress_callback: ForumDefaultScanProgressCallback | None = None,
+    timing_collector: ForumSyncTimingCollector | None = None,
 ) -> ForumDefaultDbSyncResult:
     if page_delay_seconds < 0:
         raise ValueError("page_delay_seconds不能为负数。")
@@ -543,8 +565,11 @@ def sync_default_forum_threads_to_db(
 
     for fid in ordered_fids:
         pages_cap = fids_pages[fid]
-        cutoff = store.max_normal_lastpost(fid)
-        first_scan = cutoff is None
+        if timing_collector is None:
+            cutoff = store.max_normal_lastpost(fid)
+        else:
+            with timing_collector.measure("watermark_read"):
+                cutoff = store.max_normal_lastpost(fid)
         if cutoff is not None:
             last_watermark = cutoff
 
@@ -565,6 +590,7 @@ def sync_default_forum_threads_to_db(
                 page_delay_seconds=page_delay_seconds,
                 sleep_func=sleep_func,
                 progress_callback=progress_callback,
+                timing_collector=timing_collector,
             )
             total_pages = page_data["total_page"]
             threads = page_data["threads"]
@@ -578,7 +604,7 @@ def sync_default_forum_threads_to_db(
                 page_number=page,
             )
             if (
-                not first_scan
+                cutoff is not None
                 and not crossed
                 and normal_lastposts
                 and min(normal_lastposts) <= cutoff
@@ -612,6 +638,7 @@ def sync_default_forum_threads_to_db(
                         page_delay_seconds=page_delay_seconds,
                         sleep_func=sleep_func,
                         progress_callback=progress_callback,
+                        timing_collector=timing_collector,
                     )
                     overlap_threads = overlap_data["threads"]
                     page_buffers.append(overlap_threads)
@@ -638,7 +665,14 @@ def sync_default_forum_threads_to_db(
                 sleep_func(page_delay_seconds)
             page += 1
 
-        upsert_results = store.upsert_fid_pages_atomically(fid, page_buffers)
+        if timing_collector is None:
+            upsert_results = store.upsert_fid_pages_atomically(fid, page_buffers)
+        else:
+            with timing_collector.measure("database_upsert"):
+                upsert_results = store.upsert_fid_pages_atomically(
+                    fid,
+                    page_buffers,
+                )
         fid_inserted = 0
         fid_updated = 0
         for upsert_result in upsert_results:

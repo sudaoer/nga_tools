@@ -12,7 +12,7 @@ from typing import cast
 from unittest.mock import patch
 
 from nga_tools.cli import args_parse
-from nga_tools.commands.forum import handle_forum_sync
+from nga_tools.commands.forum import handle_forum_sync, sync_default_forum_watch
 from nga_tools.forum.export import (
     scan_postdate_forum_threads,
     sync_default_forum_threads_to_db,
@@ -37,6 +37,7 @@ from nga_tools.forum.watch import (
 )
 from nga_tools.ngaclient.client import ForumThread, ForumThreadPage, NGAForumPageError
 from nga_tools.forum.thread_configs import ThreadConfig
+from nga_tools.forum.timing import ForumSyncTimingCollector
 
 
 def _thread(
@@ -1280,6 +1281,46 @@ class ForumDefaultScanTest:
         assert result.stopped_at_watermark is False
         assert result.watermark is None
 
+    def test_default_scan_timing_counts_retries_and_successful_pages(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(
+                    threads=[_thread(tid=101, lastpost=5000)],
+                ),
+            },
+            failures={
+                (784, 1): [
+                    NGAForumPageError(2048, "刷新过快 请等候数秒再行访问")
+                ]
+            },
+        )
+        sleeps: list[float] = []
+        timing_collector = ForumSyncTimingCollector()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = sync_default_forum_threads_to_db(
+                client,
+                fids_pages={784: 1},
+                store=ForumThreadStore(
+                    Path(tmp_dir) / "forum_threads.sqlite3"
+                ),
+                sleep_func=sleeps.append,
+                timing_collector=timing_collector,
+            )
+        timing = timing_collector.snapshot()
+
+        assert result.page_count == 1
+        assert client.thread_page_fetches == [(784, 1, None), (784, 1, None)]
+        assert sleeps == [10]
+        assert timing.successful_page_count == 1
+        assert timing.forum_page_request_attempt_count == 2
+        assert timing.rate_limit_retry_count == 1
+        assert timing.fetched_thread_count == 1
+        assert timing.forum_page_request_seconds >= 0.0
+        assert timing.rate_limit_wait_seconds >= 0.0
+        assert timing.watermark_read_seconds >= 0.0
+        assert timing.database_upsert_seconds >= 0.0
+
     def test_incremental_stops_at_watermark_with_one_page_overlap(self) -> None:
         client = _FakePostdateClient(
             {
@@ -1549,7 +1590,7 @@ class ForumWatchCommandTest:
             ),
             patch("sys.stdout", new_callable=io.StringIO) as output,
         ):
-            handle_forum_sync({})
+            result = sync_default_forum_watch({})
 
         output_text = output.getvalue()
         assert '\r正在筛查数据库 rp784 fid=784，已扫描2个，匹配2个\n' in output_text
@@ -1558,8 +1599,16 @@ class ForumWatchCommandTest:
         assert '主题数据库：路径：fake_forum_threads.sqlite3' in output_text
         assert '[added] rp784-102 (tid=102, aid=456) - 已添加配置' in output_text
         assert '[added] rp784-101 (tid=101, aid=456) - 已添加配置' in output_text
+        assert '版面抓取与入库' not in output_text
         assert forum_store.upserts == [(784, [101])]
         assert thread_configs.saved
+        assert result.timing is not None
+        assert result.timing.successful_page_count == 1
+        assert result.timing.forum_page_request_attempt_count == 1
+        assert result.timing.fetched_thread_count == 1
+        assert result.timing.scanned_thread_count == 2
+        assert result.timing.author_page_request_count == 2
+        assert result.timing.config_saved is True
 
     def test_forum_sync_hides_skipped_result_details(self) -> None:
         watch = _watch(keywords=["安价"])
@@ -1600,7 +1649,7 @@ class ForumWatchCommandTest:
             ),
             patch("sys.stdout", new_callable=io.StringIO) as output,
         ):
-            handle_forum_sync({})
+            result = sync_default_forum_watch({})
 
         output_text = output.getvalue()
         assert '远端抓取1个主题，数据库新增1个，更新0个。' in output_text
@@ -1610,6 +1659,9 @@ class ForumWatchCommandTest:
         assert forum_store.upserts == [(784, [101])]
         assert client.page_fetches == []
         assert not thread_configs.saved
+        assert result.timing is not None
+        assert result.timing.author_page_request_count == 0
+        assert result.timing.config_saved is False
 
     def test_forum_sync_updates_existing_metadata_and_saves(self) -> None:
         watch = _watch(keywords=["安价"])

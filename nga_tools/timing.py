@@ -16,6 +16,7 @@ from time import perf_counter
 from typing import TextIO
 
 from nga_tools.core.atomic import write_text_atomically
+from nga_tools.forum.timing import ForumSyncTimingSnapshot
 
 
 TIMING_LOG_RETENTION_COUNT = 5
@@ -365,6 +366,100 @@ def _duration_distribution_text(values: list[float]) -> str:
     )
 
 
+def _remaining_seconds(parent: float, *children: float) -> float:
+    return max(0.0, parent - sum(children))
+
+
+def _forum_sync_timing_lines(
+    total_seconds: float,
+    timing: ForumSyncTimingSnapshot,
+) -> list[str]:
+    fetch_local_seconds = _remaining_seconds(
+        timing.fetch_seconds,
+        timing.forum_page_request_seconds,
+        timing.rate_limit_wait_seconds,
+        timing.watermark_read_seconds,
+        timing.database_upsert_seconds,
+    )
+    screening_local_seconds = _remaining_seconds(
+        timing.screening_seconds,
+        timing.database_read_seconds,
+        timing.author_page_request_seconds,
+    )
+    unclassified_seconds = _remaining_seconds(
+        total_seconds,
+        timing.setup_seconds,
+        timing.fetch_seconds,
+        timing.screening_seconds,
+        timing.config_merge_seconds,
+        timing.config_save_seconds,
+        timing.reporting_seconds,
+    )
+    reporting_and_other_seconds = (
+        timing.reporting_seconds + unclassified_seconds
+    )
+    config_save_status = "已写入" if timing.config_saved else "未触发写入"
+    return [
+        f"- 论坛同步：{_format_duration(total_seconds)}",
+        f"  - 准备：{_format_duration(timing.setup_seconds)}",
+        (
+            "  - 版面抓取与入库："
+            f"{_format_duration(timing.fetch_seconds)}"
+            f"（成功{timing.successful_page_count}页，"
+            f"抓取{timing.fetched_thread_count}个主题）"
+        ),
+        (
+            "    - 版面页请求："
+            f"{_format_duration(timing.forum_page_request_seconds)}"
+            f"（尝试{timing.forum_page_request_attempt_count}次，"
+            f"限流重试{timing.rate_limit_retry_count}次）"
+        ),
+        (
+            "    - 限流等待："
+            f"{_format_duration(timing.rate_limit_wait_seconds)}"
+        ),
+        (
+            "    - 水位读取："
+            f"{_format_duration(timing.watermark_read_seconds)}"
+        ),
+        (
+            "    - SQLite写入："
+            f"{_format_duration(timing.database_upsert_seconds)}"
+        ),
+        (
+            "    - 其余页处理与进度："
+            f"{_format_duration(fetch_local_seconds)}"
+        ),
+        f"  - 数据库筛查：{_format_duration(timing.screening_seconds)}",
+        (
+            "    - SQLite读取："
+            f"{_format_duration(timing.database_read_seconds)}"
+            f"（筛查{timing.scanned_thread_count}条记录）"
+        ),
+        (
+            "    - 只看作者请求："
+            f"{_format_duration(timing.author_page_request_seconds)}"
+            f"（请求{timing.author_page_request_count}次）"
+        ),
+        (
+            "    - 本地规则匹配与进度："
+            f"{_format_duration(screening_local_seconds)}"
+        ),
+        f"  - 配置合并：{_format_duration(timing.config_merge_seconds)}",
+        (
+            "  - 配置保存："
+            f"{_format_duration(timing.config_save_seconds)}"
+            f"（{config_save_status}）"
+        ),
+        (
+            "  - 结果输出/其他："
+            f"{_format_duration(reporting_and_other_seconds)}"
+            f"（结果输出 {_format_duration(timing.reporting_seconds)}，"
+            f"未归类 {_format_duration(unclassified_seconds)}）"
+        ),
+    ]
+
+
 def write_batch_timing_summary(
     path: Path,
     *,
@@ -376,6 +471,7 @@ def write_batch_timing_summary(
     thread_failure_categories: Counter[str],
     expected_thread_failure_categories: Counter[str] | None = None,
     forum_sync_seconds: float | None = None,
+    forum_sync_timing: ForumSyncTimingSnapshot | None = None,
     planning_seconds: float | None = None,
     water_level_seconds: float | None = None,
     batch_execution_seconds: float | None = None,
@@ -468,13 +564,30 @@ def write_batch_timing_summary(
 
     has_command_phases = (
         forum_sync_seconds is not None
+        or forum_sync_timing is not None
         or planning_seconds is not None
         or water_level_seconds is not None
     )
     if has_command_phases:
         lines.extend(["", "命令阶段耗时："])
-        if forum_sync_seconds is not None:
-            lines.append(f"- 论坛同步：{_format_duration(forum_sync_seconds)}")
+        effective_forum_sync_seconds = forum_sync_seconds
+        if (
+            effective_forum_sync_seconds is None
+            and forum_sync_timing is not None
+        ):
+            effective_forum_sync_seconds = forum_sync_timing.total_seconds
+        if effective_forum_sync_seconds is not None:
+            if forum_sync_timing is None:
+                lines.append(
+                    f"- 论坛同步：{_format_duration(effective_forum_sync_seconds)}"
+                )
+            else:
+                lines.extend(
+                    _forum_sync_timing_lines(
+                        effective_forum_sync_seconds,
+                        forum_sync_timing,
+                    )
+                )
         planning_line = (
             f"- 任务选择：{_format_duration(planning_seconds)}"
             if planning_seconds is not None

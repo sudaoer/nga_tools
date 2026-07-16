@@ -28,6 +28,10 @@ from nga_tools.forum.export import (
     unique_fids,
 )
 from nga_tools.forum.thread_store import ForumThreadStore, timestamp_text
+from nga_tools.forum.timing import (
+    ForumSyncTimingCollector,
+    ForumSyncTimingSnapshot,
+)
 from nga_tools.console import InlineProgress, report_info
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import ForumThread
@@ -44,6 +48,7 @@ class DefaultForumSyncResult:
     matched_count: int
     stopped_at_watermark: bool = False
     watermark: int | None = None
+    timing: ForumSyncTimingSnapshot | None = None
 
 
 def handle_forum_list(args: CommandArgs) -> None:
@@ -144,6 +149,7 @@ def _fetch_default_forum_pages_to_db(
     watch_configs: list[ForumWatchConfig],
     progress_display: InlineProgress,
     page_delay_seconds: int,
+    timing_collector: ForumSyncTimingCollector | None = None,
 ) -> tuple[int, int, int, tuple[ForumThread, ...], bool, int | None]:
     fids_pages = _max_default_pages_by_fid(watch_configs)
 
@@ -163,6 +169,7 @@ def _fetch_default_forum_pages_to_db(
         store=forum_store,
         page_delay_seconds=page_delay_seconds,
         progress_callback=update_fetch_progress,
+        timing_collector=timing_collector,
     )
     return (
         result.thread_count,
@@ -175,17 +182,31 @@ def _fetch_default_forum_pages_to_db(
 
 
 def sync_default_forum_watch(args: CommandArgs) -> DefaultForumSyncResult:
-    watch_config_path = optional_str(args, "watch_config") or DEFAULT_WATCH_CONFIG_PATH
-    watch_configs = load_forum_watch_configs(watch_config_path)
+    timing_collector = ForumSyncTimingCollector()
+    with timing_collector.measure("setup"):
+        watch_config_path = (
+            optional_str(args, "watch_config") or DEFAULT_WATCH_CONFIG_PATH
+        )
+        watch_configs = load_forum_watch_configs(watch_config_path)
     if not watch_configs:
-        report_info("没有找到任何版面监控配置。")
-        return DefaultForumSyncResult((), 0, 0, 0, 0, 0)
+        with timing_collector.measure("reporting"):
+            report_info("没有找到任何版面监控配置。")
+        return DefaultForumSyncResult(
+            (),
+            0,
+            0,
+            0,
+            0,
+            0,
+            timing=timing_collector.snapshot(),
+        )
 
-    configure_network_limits_from_args(args)
-    client = NGAClient()
-    thread_configs = NGAThreadConfigs()
-    forum_store = ForumThreadStore()
-    progress_display = InlineProgress()
+    with timing_collector.measure("setup"):
+        configure_network_limits_from_args(args)
+        client = NGAClient()
+        thread_configs = NGAThreadConfigs()
+        forum_store = ForumThreadStore()
+        progress_display = InlineProgress()
 
     def update_db_scan_progress(progress: ForumDatabaseScanProgress) -> None:
         progress_display.update(
@@ -200,63 +221,76 @@ def sync_default_forum_watch(args: CommandArgs) -> DefaultForumSyncResult:
         )
 
     try:
-        (
-            fetched_count,
-            db_inserted_count,
-            db_updated_count,
-            fresh_threads,
-            stopped_at_watermark,
-            watermark,
-        ) = _fetch_default_forum_pages_to_db(
-            client,
-            forum_store,
-            watch_configs,
-            progress_display,
-            0,
+        with timing_collector.measure("fetch"):
+            (
+                fetched_count,
+                db_inserted_count,
+                db_updated_count,
+                fresh_threads,
+                stopped_at_watermark,
+                watermark,
+            ) = _fetch_default_forum_pages_to_db(
+                client,
+                forum_store,
+                watch_configs,
+                progress_display,
+                0,
+                timing_collector,
         )
         progress_display.update("正在筛查数据库…")
-        scanned_count, matches = collect_matching_threads_from_thread_source(
-            client=client,
-            watch_configs=watch_configs,
-            thread_source=threads_for_watch,
-            progress_callback=update_db_scan_progress,
-            existing_thread_list=thread_configs.ThreadList,
-        )
+        with timing_collector.measure("screening"):
+            (
+                scanned_count,
+                matches,
+            ) = collect_matching_threads_from_thread_source(
+                client=client,
+                watch_configs=watch_configs,
+                thread_source=threads_for_watch,
+                progress_callback=update_db_scan_progress,
+                existing_thread_list=thread_configs.ThreadList,
+                timing_collector=timing_collector,
+            )
     finally:
         progress_display.finish()
 
-    outcomes = sync_matches_to_thread_list(
-        thread_configs.ThreadList,
-        matches,
-        base_url=client.base_url,
-    )
-    status_counts = Counter(outcome.status for outcome in outcomes)
+    with timing_collector.measure("config_merge"):
+        outcomes = sync_matches_to_thread_list(
+            thread_configs.ThreadList,
+            matches,
+            base_url=client.base_url,
+        )
+        status_counts = Counter(outcome.status for outcome in outcomes)
     if status_counts["added"] > 0 or status_counts["updated"] > 0:
-        thread_configs.save_configs()
+        with timing_collector.measure("config_save"):
+            thread_configs.save_configs()
+        timing_collector.record_config_saved()
 
-    report_info(
-        f"远端抓取{fetched_count}个主题，"
-        f"数据库新增{db_inserted_count}个，更新{db_updated_count}个。"
-    )
-    if stopped_at_watermark:
-        watermark_text = "无" if watermark is None else timestamp_text(watermark)
+    with timing_collector.measure("reporting"):
         report_info(
-            f"已到达上次扫描水位（{watermark_text}）并完成一页重叠，提前停止后续扫描。"
+            f"远端抓取{fetched_count}个主题，"
+            f"数据库新增{db_inserted_count}个，更新{db_updated_count}个。"
         )
-    report_info(
-        f"数据库筛查{scanned_count}个主题，匹配{len(matches)}个；"
-        f"新增{status_counts['added']}个，更新{status_counts['updated']}个，"
-        f"跳过{status_counts['skipped']}个，冲突{status_counts['conflict']}个。"
-    )
-    report_info(f"主题数据库：路径：{forum_store.db_path}")
-    for outcome in outcomes:
-        if outcome.status == "skipped":
-            continue
-        thread = outcome.match.thread
+        if stopped_at_watermark:
+            watermark_text = (
+                "无" if watermark is None else timestamp_text(watermark)
+            )
+            report_info(
+                f"已到达上次扫描水位（{watermark_text}）并完成一页重叠，提前停止后续扫描。"
+            )
         report_info(
-            f"[{outcome.status}] {outcome.match.thread_name} "
-            f"(tid={thread['tid']}, aid={thread['authorid']}) - {outcome.message}"
+            f"数据库筛查{scanned_count}个主题，匹配{len(matches)}个；"
+            f"新增{status_counts['added']}个，更新{status_counts['updated']}个，"
+            f"跳过{status_counts['skipped']}个，冲突{status_counts['conflict']}个。"
         )
+        report_info(f"主题数据库：路径：{forum_store.db_path}")
+        for outcome in outcomes:
+            if outcome.status == "skipped":
+                continue
+            thread = outcome.match.thread
+            report_info(
+                f"[{outcome.status}] {outcome.match.thread_name} "
+                f"(tid={thread['tid']}, aid={thread['authorid']}) - {outcome.message}"
+            )
 
     return DefaultForumSyncResult(
         fresh_threads=fresh_threads,
@@ -267,6 +301,7 @@ def sync_default_forum_watch(args: CommandArgs) -> DefaultForumSyncResult:
         matched_count=len(matches),
         stopped_at_watermark=stopped_at_watermark,
         watermark=watermark,
+        timing=timing_collector.snapshot(),
     )
 
 

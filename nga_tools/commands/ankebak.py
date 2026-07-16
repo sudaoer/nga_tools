@@ -239,6 +239,7 @@ def backup_auto(args: CommandArgs) -> None:
             command_started_at=command_started_at,
             command_wall_start=command_wall_start,
             forum_sync_seconds=forum_sync_seconds,
+            forum_sync_timing=forum_result.timing,
             planning_seconds=planning_seconds,
             water_level_seconds=water_level_seconds,
         )

@@ -14,6 +14,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_name,
     thread_config_tid,
 )
+from nga_tools.forum.timing import ForumSyncTimingCollector
 
 DEFAULT_WATCH_CONFIG_PATH = "forum_watch_configs.json"
 DEFAULT_NAME_TEMPLATE = "{watch_name}-{tid}"
@@ -215,8 +216,17 @@ def thread_matches_watch(thread: ForumThread, watch_config: ForumWatchConfig) ->
     return has_keyword and not has_excluded_keyword and has_enough_replies
 
 
-def _author_lou_count_for_thread(client: NGAClient, thread: ForumThread) -> int:
-    page_data = client.get_page(thread["tid"], thread["authorid"], 1)
+def _author_lou_count_for_thread(
+    client: NGAClient,
+    thread: ForumThread,
+    timing_collector: ForumSyncTimingCollector | None = None,
+) -> int:
+    if timing_collector is None:
+        page_data = client.get_page(thread["tid"], thread["authorid"], 1)
+    else:
+        timing_collector.record_author_page_request()
+        with timing_collector.measure("author_page_request"):
+            page_data = client.get_page(thread["tid"], thread["authorid"], 1)
     author_lous = page_data.get("vrows")
     if type(author_lous) is int:
         return author_lous
@@ -230,9 +240,10 @@ def _thread_has_enough_author_lous(
     client: NGAClient,
     thread: ForumThread,
     watch_config: ForumWatchConfig,
+    timing_collector: ForumSyncTimingCollector | None = None,
 ) -> bool:
     return (
-        _author_lou_count_for_thread(client, thread)
+        _author_lou_count_for_thread(client, thread, timing_collector)
         >= watch_config["min_author_lous"]
     )
 
@@ -289,6 +300,7 @@ def _matching_thread_or_none(
     watch_config: ForumWatchConfig,
     thread: ForumThread,
     existing_thread_list: list[ThreadConfig] | None,
+    timing_collector: ForumSyncTimingCollector | None = None,
 ) -> MatchedForumThread | None:
     if not thread_matches_watch(thread, watch_config):
         return None
@@ -305,6 +317,7 @@ def _matching_thread_or_none(
             client,
             thread,
             watch_config,
+            timing_collector,
         ):
             return None
     return matched_thread
@@ -356,12 +369,18 @@ def collect_matching_threads_from_thread_source(
     thread_source: ForumThreadSource,
     progress_callback: ForumDatabaseScanProgressCallback | None = None,
     existing_thread_list: list[ThreadConfig] | None = None,
+    timing_collector: ForumSyncTimingCollector | None = None,
 ) -> tuple[int, list[MatchedForumThread]]:
     scanned_count = 0
     matched_threads: list[MatchedForumThread] = []
 
     for watch_config in watch_configs:
-        threads = thread_source(watch_config)
+        if timing_collector is None:
+            threads = thread_source(watch_config)
+        else:
+            with timing_collector.measure("database_read"):
+                threads = thread_source(watch_config)
+            timing_collector.record_scanned_threads(len(threads))
         scanned_count += len(threads)
         for thread in threads:
             matched_thread = _matching_thread_or_none(
@@ -369,6 +388,7 @@ def collect_matching_threads_from_thread_source(
                 watch_config,
                 thread,
                 existing_thread_list,
+                timing_collector,
             )
             if matched_thread is not None:
                 matched_threads.append(matched_thread)

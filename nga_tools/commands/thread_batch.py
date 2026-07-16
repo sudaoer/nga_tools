@@ -38,6 +38,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_name,
     thread_config_tid,
 )
+from nga_tools.forum.timing import ForumSyncTimingSnapshot
 from nga_tools.ngaclient import is_hidden_thread_error
 from nga_tools.timing import (
     BatchTimingCollector,
@@ -327,6 +328,7 @@ def run_thread_config_batch(
     command_started_at: datetime | None = None,
     command_wall_start: float | None = None,
     forum_sync_seconds: float | None = None,
+    forum_sync_timing: ForumSyncTimingSnapshot | None = None,
     planning_seconds: float | None = None,
     water_level_seconds: float | None = None,
     raise_on_failure: bool = True,
@@ -427,6 +429,7 @@ def run_thread_config_batch(
                 if is_hidden_thread_error(error)
             ),
             forum_sync_seconds=forum_sync_seconds,
+            forum_sync_timing=forum_sync_timing,
             planning_seconds=planning_seconds,
             water_level_seconds=water_level_seconds,
             batch_execution_seconds=(
