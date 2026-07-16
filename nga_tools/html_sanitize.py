@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 
 import nh3
@@ -70,6 +71,9 @@ _DROP_CONTENT_TAGS = {
     "svg",
     "template",
 }
+_DOUBLE_ENCODED_NUMERIC_ENTITY_RE = re.compile(
+    r"&amp;(#(?:[0-9]+|[xX][0-9A-Fa-f]+);)"
+)
 
 
 @lru_cache(maxsize=1)
@@ -85,4 +89,5 @@ def _post_html_cleaner() -> nh3.Cleaner:
 
 
 def sanitize_post_html(html: str) -> str:
-    return _post_html_cleaner().clean(html)
+    normalized_html = _DOUBLE_ENCODED_NUMERIC_ENTITY_RE.sub(r"&\1", html)
+    return _post_html_cleaner().clean(normalized_html)

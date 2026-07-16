@@ -530,6 +530,35 @@ class WebViewerDataTest:
         assert "<img" not in current_html
         assert "<img" not in historical_html
 
+    def test_current_and_historical_posts_decode_numeric_entities(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        thread_dir = output_dir / "101_201"
+        _write_archive(thread_dir, [_post(1, "old&amp;#160;decimal")])
+        _write_archive(
+            thread_dir,
+            [_post(1, "new&amp;#xA0;hex")],
+        )
+        with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
+            old_version_id = connection.execute(
+                "SELECT id FROM post_versions WHERE content LIKE 'old%'"
+            ).fetchone()[0]
+
+        current_html = read_posts(output_dir, 101, "201", page=1)["items"][0][
+            "html"
+        ]
+        historical_html = read_post_version_preview(
+            output_dir,
+            101,
+            "201",
+            old_version_id,
+        )["item"]["html"]
+
+        assert current_html == "new&nbsp;hex"
+        assert historical_html == "old&nbsp;decimal"
+
     def test_reads_posts_sanitizes_untrusted_html(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
         thread_dir = output_dir / "101_201"
@@ -545,6 +574,7 @@ class WebViewerDataTest:
                         '<svg><animate onbegin="alert(1)" /></svg>'
                         f'[img]{image_url}[/img]'
                         '<a href="javascript:alert(3)" onclick="alert(4)">bad</a>'
+                        '<a href="&amp;#106;avascript:alert(5)">encoded bad</a>'
                         '<span style="color:red;position:fixed">styled</span>'
                     ),
                 )

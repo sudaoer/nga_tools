@@ -314,6 +314,90 @@ class NGAClientPidRedirectTest:
 
 
 class NGAClientPageBatchTest:
+    def test_fetches_independent_requests_concurrently_and_preserves_order(
+        self,
+    ) -> None:
+        configure_network_limits(api_concurrency=2, image_concurrency=1)
+        tracker = _ConcurrentRequestTracker(expected_overlap=2)
+        worker_sessions: list[_ConcurrentPageSession] = []
+
+        def create_worker_session() -> _ConcurrentPageSession:
+            session = _ConcurrentPageSession(tracker)
+            worker_sessions.append(session)
+            return session
+
+        parent_session = MagicMock(spec=requests.Session)
+        with (
+            patch(
+                "nga_tools.ngaclient.client.create_api_session",
+                return_value=parent_session,
+            ),
+            patch(
+                "nga_tools.ngaclient.session.create_api_session",
+                side_effect=create_worker_session,
+            ),
+        ):
+            client = NGAClient()
+            pages = client.get_page_batch(
+                [
+                    (101, 456, 3),
+                    (102, 789, 1),
+                    (103, None, 2),
+                ]
+            )
+
+        assert [page["currentPage"] for page in pages] == [3, 1, 2]
+        assert tracker.max_active == 2
+        assert sorted(tracker.pages) == [1, 2, 3]
+        assert set(client.page_cache) == {
+            client.page_cache_key(101, 456, 3),
+            client.page_cache_key(102, 789, 1),
+            client.page_cache_key(103, None, 2),
+        }
+        assert len(worker_sessions) == 2
+        assert all(session.closed for session in worker_sessions)
+        parent_session.post.assert_not_called()
+
+    def test_independent_batch_deduplicates_requests_and_reuses_cache(
+        self,
+    ) -> None:
+        configure_network_limits(api_concurrency=1, image_concurrency=1)
+        session = MagicMock(spec=requests.Session)
+        session.post.side_effect = [
+            _SuccessfulPageResponse(3),
+            _SuccessfulPageResponse(1),
+        ]
+        client = NGAClient(session=session)
+
+        first = client.get_page_batch(
+            [
+                (101, 456, 3),
+                (102, 789, 1),
+                (101, 456, 3),
+            ]
+        )
+        cached = client.get_page_batch([(102, 789, 1), (101, 456, 3)])
+
+        assert [page["currentPage"] for page in first] == [3, 1, 3]
+        assert [page["currentPage"] for page in cached] == [1, 3]
+        assert session.post.call_count == 2
+
+    def test_failed_independent_batch_does_not_commit_partial_cache(
+        self,
+    ) -> None:
+        configure_network_limits(api_concurrency=1, image_concurrency=1)
+        session = MagicMock(spec=requests.Session)
+        session.post.side_effect = [
+            _SuccessfulPageResponse(1),
+            RuntimeError("second target failed"),
+        ]
+        client = NGAClient(session=session)
+
+        with pytest.raises(RuntimeError, match="second target failed"):
+            client.get_page_batch([(101, 456, 1), (102, 789, 1)])
+
+        assert client.page_cache == {}
+
     def test_fetches_pages_concurrently_with_thread_local_sessions(self) -> None:
         configure_network_limits(api_concurrency=2, image_concurrency=1)
         tracker = _ConcurrentRequestTracker(expected_overlap=2)

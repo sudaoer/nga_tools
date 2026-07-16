@@ -251,6 +251,12 @@ def test_overlay_rendering_sanitizes_html_and_supports_existing_nga_images(
         render_overlay_html("[flash]https://example.test/a.swf[/flash]")
 
 
+def test_overlay_rendering_decodes_double_encoded_numeric_entities() -> None:
+    html = render_overlay_html("before&amp;#160;after")
+
+    assert html == "before&nbsp;after"
+
+
 def test_overlay_rejects_unmapped_or_invalid_local_image(tmp_path: Path) -> None:
     mapped_url = (
         "https://img.nga.178.com/attachments/"

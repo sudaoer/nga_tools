@@ -81,6 +81,8 @@ pixi run python main.py forum sync
 不要把 `vrows` 当成最大楼号。`min_replies` 未配置时默认为 500，
 `min_author_lous` 未配置时默认为 20。保存时会把主题楼主 `authorid` 写为 `aid`，后续使用
 `backup all/sub --name 帖子名` 会默认只看楼主。
+需要验证 `min_author_lous` 的候选会在完成标题、排除词、回复数和已有配置检查后，
+按 `api_concurrency` 并行请求只看作者第一页；匹配结果仍按数据库读取顺序应用。
 
 `thread_configs.json` 中每项必须包含 `thread_name` 和 `tid`；可额外保存任意
 标量字段（字符串、数字、布尔值或 `null`），但不能保存数组或对象。

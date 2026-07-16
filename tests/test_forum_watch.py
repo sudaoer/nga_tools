@@ -5,7 +5,7 @@ import io
 import json
 import sqlite3
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import closing
 from pathlib import Path
 from typing import cast
@@ -108,6 +108,7 @@ class _FakeForumClient:
         self.base_url = "https://bbs.nga.cn"
         self.forum_fetches: list[tuple[int, int]] = []
         self.page_fetches: list[tuple[int, int | None, int]] = []
+        self.page_batches: list[list[tuple[int, int | None, int]]] = []
 
     def _resolved_total_page(self, fid: int) -> int:
         if self._total_page is not None:
@@ -144,6 +145,14 @@ class _FakeForumClient:
         if aid is None:
             raise AssertionError("forum sync should fetch author-only pages")
         return self._author_pages.get((tid, aid), {"totalPage": 1, "vrows": 20})
+
+    def get_page_batch(
+        self,
+        page_requests: Sequence[tuple[int, int | None, int]],
+    ) -> list[dict[str, object]]:
+        requests = list(page_requests)
+        self.page_batches.append(requests)
+        return [self.get_page(tid, aid, page) for tid, aid, page in requests]
 
 
 class _FakeThreadConfigs:
@@ -607,6 +616,45 @@ class ForumWatchCollectTest:
         assert [match.thread['tid'] for match in matches] == [101]
         assert client.forum_fetches == []
         assert client.page_fetches == [(101, 456, 1)]
+
+    def test_collect_from_thread_source_batches_author_checks_in_order(
+        self,
+    ) -> None:
+        watch = _watch(keywords=["安价"], include_tids=[104])
+        client = _FakeForumClient(
+            {},
+            author_pages={
+                (101, 456): {"totalPage": 1, "vrows": 20},
+                (103, 456): {"totalPage": 1, "vrows": 19},
+            },
+        )
+        existing_thread_list: list[ThreadConfig] = [
+            {
+                "thread_name": "existing",
+                "tid": 102,
+                "aid": 456,
+            }
+        ]
+        timing_collector = ForumSyncTimingCollector()
+
+        scanned_count, matches = collect_matching_threads_from_thread_source(
+            client,
+            [watch],
+            lambda _watch_config: [
+                _thread(tid=101, subject="安价待验证一"),
+                _thread(tid=102, subject="安价已存在"),
+                _thread(tid=103, subject="安价待验证二"),
+                _thread(tid=104, subject="强制包含", replies=1),
+            ],
+            existing_thread_list=existing_thread_list,
+            timing_collector=timing_collector,
+        )
+
+        assert scanned_count == 4
+        assert [match.thread["tid"] for match in matches] == [101, 102, 104]
+        assert client.page_batches == [[(101, 456, 1), (103, 456, 1)]]
+        assert client.page_fetches == [(101, 456, 1), (103, 456, 1)]
+        assert timing_collector.snapshot().author_page_request_count == 2
 
     def test_collect_filters_keyword_matches_by_min_author_lous(self) -> None:
         watch = _watch(keywords=["安价"], min_author_lous=20)

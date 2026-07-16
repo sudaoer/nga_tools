@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, Optional, TypeAlias, TypedDict, cast
 
 from nga_tools.ngaclient import NGAClient
-from nga_tools.ngaclient.client import ForumThread
+from nga_tools.ngaclient.client import ForumThread, PageData
 from nga_tools.forum.thread_configs import (
     ThreadConfig,
     thread_config_aid,
@@ -49,6 +49,12 @@ class MatchedForumThread:
     watch_name: str
     thread: ForumThread
     thread_name: str
+
+
+@dataclass(frozen=True)
+class _WatchMatchCandidate:
+    match: MatchedForumThread
+    needs_author_check: bool
 
 
 @dataclass(frozen=True)
@@ -216,17 +222,10 @@ def thread_matches_watch(thread: ForumThread, watch_config: ForumWatchConfig) ->
     return has_keyword and not has_excluded_keyword and has_enough_replies
 
 
-def _author_lou_count_for_thread(
-    client: NGAClient,
+def _author_lou_count_from_page_data(
     thread: ForumThread,
-    timing_collector: ForumSyncTimingCollector | None = None,
+    page_data: PageData,
 ) -> int:
-    if timing_collector is None:
-        page_data = client.get_page(thread["tid"], thread["authorid"], 1)
-    else:
-        timing_collector.record_author_page_request()
-        with timing_collector.measure("author_page_request"):
-            page_data = client.get_page(thread["tid"], thread["authorid"], 1)
     author_lous = page_data.get("vrows")
     if type(author_lous) is int:
         return author_lous
@@ -236,14 +235,21 @@ def _author_lou_count_for_thread(
     )
 
 
+def _author_lou_count_for_thread(
+    client: NGAClient,
+    thread: ForumThread,
+) -> int:
+    page_data = client.get_page(thread["tid"], thread["authorid"], 1)
+    return _author_lou_count_from_page_data(thread, page_data)
+
+
 def _thread_has_enough_author_lous(
     client: NGAClient,
     thread: ForumThread,
     watch_config: ForumWatchConfig,
-    timing_collector: ForumSyncTimingCollector | None = None,
 ) -> bool:
     return (
-        _author_lou_count_for_thread(client, thread, timing_collector)
+        _author_lou_count_for_thread(client, thread)
         >= watch_config["min_author_lous"]
     )
 
@@ -295,13 +301,11 @@ def build_matched_thread(
     )
 
 
-def _matching_thread_or_none(
-    client: NGAClient,
+def _watch_match_candidate_or_none(
     watch_config: ForumWatchConfig,
     thread: ForumThread,
     existing_thread_list: list[ThreadConfig] | None,
-    timing_collector: ForumSyncTimingCollector | None = None,
-) -> MatchedForumThread | None:
+) -> _WatchMatchCandidate | None:
     if not thread_matches_watch(thread, watch_config):
         return None
 
@@ -310,17 +314,34 @@ def _matching_thread_or_none(
         existing_thread_list is not None
         and _match_would_not_add(existing_thread_list, matched_thread)
     ):
-        return matched_thread
+        return _WatchMatchCandidate(matched_thread, False)
 
-    if not _thread_is_forced(thread, watch_config):
-        if not _thread_has_enough_author_lous(
-            client,
-            thread,
-            watch_config,
-            timing_collector,
-        ):
-            return None
-    return matched_thread
+    return _WatchMatchCandidate(
+        matched_thread,
+        not _thread_is_forced(thread, watch_config),
+    )
+
+
+def _matching_thread_or_none(
+    client: NGAClient,
+    watch_config: ForumWatchConfig,
+    thread: ForumThread,
+    existing_thread_list: list[ThreadConfig] | None,
+) -> MatchedForumThread | None:
+    candidate = _watch_match_candidate_or_none(
+        watch_config,
+        thread,
+        existing_thread_list,
+    )
+    if candidate is None:
+        return None
+    if candidate.needs_author_check and not _thread_has_enough_author_lous(
+        client,
+        thread,
+        watch_config,
+    ):
+        return None
+    return candidate.match
 
 
 def collect_matching_threads(
@@ -382,16 +403,57 @@ def collect_matching_threads_from_thread_source(
                 threads = thread_source(watch_config)
             timing_collector.record_scanned_threads(len(threads))
         scanned_count += len(threads)
+        candidates: list[_WatchMatchCandidate] = []
+        pending_candidate_positions: list[int] = []
         for thread in threads:
-            matched_thread = _matching_thread_or_none(
-                client,
+            candidate = _watch_match_candidate_or_none(
                 watch_config,
                 thread,
                 existing_thread_list,
-                timing_collector,
             )
-            if matched_thread is not None:
-                matched_threads.append(matched_thread)
+            if candidate is None:
+                continue
+            if candidate.needs_author_check:
+                pending_candidate_positions.append(len(candidates))
+            candidates.append(candidate)
+
+        author_check_passed: dict[int, bool] = {}
+        if pending_candidate_positions:
+            page_requests = [
+                (
+                    candidates[position].match.thread["tid"],
+                    candidates[position].match.thread["authorid"],
+                    1,
+                )
+                for position in pending_candidate_positions
+            ]
+            if timing_collector is None:
+                page_data_list = client.get_page_batch(page_requests)
+            else:
+                for _page_request in page_requests:
+                    timing_collector.record_author_page_request()
+                with timing_collector.measure("author_page_request"):
+                    page_data_list = client.get_page_batch(page_requests)
+            for position, page_data in zip(
+                pending_candidate_positions,
+                page_data_list,
+                strict=True,
+            ):
+                candidate = candidates[position]
+                author_check_passed[position] = (
+                    _author_lou_count_from_page_data(
+                        candidate.match.thread,
+                        page_data,
+                    )
+                    >= watch_config["min_author_lous"]
+                )
+
+        matched_threads.extend(
+            candidate.match
+            for position, candidate in enumerate(candidates)
+            if not candidate.needs_author_check
+            or author_check_passed[position]
+        )
         if progress_callback is not None:
             progress_callback(
                 ForumDatabaseScanProgress(

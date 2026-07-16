@@ -20,6 +20,7 @@ Tid: TypeAlias = int | str
 Aid: TypeAlias = Optional[int | str]
 PageData: TypeAlias = dict[str, Any]
 PageProgressCallback: TypeAlias = Callable[[int, int, int], None]
+PageRequest: TypeAlias = tuple[Tid, Aid, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +303,86 @@ class NGAClient:
         page_data = self._request_page(tid, aid, page)
         self.page_cache[cache_key] = page_data
         return page_data
+
+    def get_page_batch(
+        self,
+        page_requests: Sequence[PageRequest],
+    ) -> list[PageData]:
+        """Fetch independent page requests concurrently and preserve input order."""
+        ordered_requests = list(page_requests)
+        if not ordered_requests:
+            return []
+        for _tid, _aid, page in ordered_requests:
+            if page < 1:
+                raise ValueError("Page number must be greater than 0.")
+
+        missing_requests_by_key: dict[str, PageRequest] = {}
+        for tid, aid, page in ordered_requests:
+            cache_key = self.page_cache_key(tid, aid, page)
+            if cache_key not in self.page_cache:
+                missing_requests_by_key.setdefault(
+                    cache_key,
+                    (tid, aid, page),
+                )
+
+        missing_requests = list(missing_requests_by_key.values())
+        fetched_pages: dict[str, PageData] = {}
+        worker_count = min(get_api_concurrency(), len(missing_requests))
+        if worker_count <= 1 or not self._parallel_page_fetch_enabled:
+            for tid, aid, page in missing_requests:
+                fetched_pages[self.page_cache_key(tid, aid, page)] = (
+                    self._request_page(tid, aid, page)
+                )
+        elif (runtime := current_api_runtime()) is not None:
+            def fetch_runtime_page(
+                session: requests.Session,
+                page_request: PageRequest,
+            ) -> PageData:
+                tid, aid, page = page_request
+                return self._request_page_with_session(
+                    session,
+                    tid,
+                    aid,
+                    page,
+                )
+
+            for page_request, page_data in runtime.map_ordered(
+                missing_requests,
+                fetch_runtime_page,
+            ):
+                tid, aid, page = page_request
+                fetched_pages[self.page_cache_key(tid, aid, page)] = page_data
+        else:
+            session_pool = ThreadLocalAPISessionPool()
+
+            def fetch_page(page_request: PageRequest) -> PageData:
+                tid, aid, page = page_request
+                worker_client = NGAClient(session=session_pool.session())
+                worker_client.base_url = self.base_url
+                return worker_client._request_page(tid, aid, page)
+
+            with session_pool:
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    future_requests: dict[Future[PageData], PageRequest] = {
+                        executor.submit(fetch_page, page_request): page_request
+                        for page_request in missing_requests
+                    }
+                    try:
+                        for future in as_completed(future_requests):
+                            tid, aid, page = future_requests[future]
+                            fetched_pages[
+                                self.page_cache_key(tid, aid, page)
+                            ] = future.result()
+                    except BaseException:
+                        for future in future_requests:
+                            future.cancel()
+                        raise
+
+        self.page_cache.update(fetched_pages)
+        return [
+            self.page_cache[self.page_cache_key(tid, aid, page)]
+            for tid, aid, page in ordered_requests
+        ]
 
     def get_pages(
         self,
