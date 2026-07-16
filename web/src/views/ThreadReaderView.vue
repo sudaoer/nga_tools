@@ -142,6 +142,9 @@ const visibleThreads = computed(() => {
 
 const pageStart = computed(() => (posts.value ? posts.value.pageStartLou : 0))
 const pageEnd = computed(() => (posts.value ? posts.value.pageEndLou : 0))
+const displayedPostSlots = computed<PostItem[]>(() =>
+  (posts.value?.slots || []).filter((post) => post.emptyReason !== 'filtered'),
+)
 const pagerTokens = computed<PageToken[]>(() => {
   if (!posts.value || posts.value.totalPages <= 1) {
     return []
@@ -975,8 +978,15 @@ onBeforeUnmount(() => {
           </form>
         </div>
 
+        <div
+          v-if="posts && displayedPostSlots.length === 0"
+          class="empty-state"
+        >
+          当前页没有匹配的楼层。
+        </div>
+
         <article
-          v-for="post in posts?.slots || []"
+          v-for="post in displayedPostSlots"
           :key="post.lou"
           class="post-card"
           :class="{ empty: post.emptyReason !== null }"
