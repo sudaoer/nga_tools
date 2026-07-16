@@ -41,6 +41,10 @@ const router = createRouter({
           path: 'image-usage',
           component: () => import('./views/ImageUsageAdminView.vue'),
         },
+        {
+          path: 'image-problems',
+          component: () => import('./views/ImageProblemsAdminView.vue'),
+        },
       ],
     },
     {

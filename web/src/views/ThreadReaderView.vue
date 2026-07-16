@@ -81,6 +81,7 @@ const loadingThreads = ref(false)
 const loadingThreadStats = ref(false)
 const loadingPosts = ref(false)
 const requestedThread = ref<{ tid: number; aidKey: string } | null>(null)
+const requestedOverlayLou = ref<number | null>(null)
 const pageJumpInput = ref('')
 const readerPaneRef = ref<HTMLElement | null>(null)
 let threadListRequestId = 0
@@ -438,6 +439,17 @@ function integerFromParam(value: string | null): number | null {
   return numberValue
 }
 
+function nonNegativeIntegerFromParam(value: string | null): number | null {
+  if (value === null || !value.trim()) {
+    return null
+  }
+  const numberValue = Number(value)
+  if (!Number.isInteger(numberValue) || numberValue < 0) {
+    return null
+  }
+  return numberValue
+}
+
 function isSortKey(value: string | null): value is SortKey {
   return value !== null && SORT_KEYS.includes(value as SortKey)
 }
@@ -452,6 +464,9 @@ function hydrateStateFromUrl(): void {
   const aidKey = params.get('aid')
   if (tid !== null && aidKey !== null && aidKey.trim()) {
     requestedThread.value = { tid, aidKey }
+    requestedOverlayLou.value = nonNegativeIntegerFromParam(
+      params.get('overlay_lou'),
+    )
   }
 
   const page = integerFromParam(params.get('page'))
@@ -497,6 +512,10 @@ function syncUrl(): void {
   }
   if (listFilter.sortDirection !== 'desc') {
     params.set('dir', listFilter.sortDirection)
+  }
+  const overlayLou = overlayEditor.lou ?? requestedOverlayLou.value
+  if (overlayLou !== null) {
+    params.set('overlay_lou', String(overlayLou))
   }
 
   const query = params.toString()
@@ -574,6 +593,9 @@ async function loadThreads(refresh = false): Promise<void> {
     threads.value = lightThreads
     const { target, requestedMatched } = findInitialThread(lightThreads)
     requestedThread.value = null
+    if (!requestedMatched) {
+      requestedOverlayLou.value = null
+    }
     loadingThreads.value = false
     if (target !== null && selectedThread.value === null) {
       void selectThread(target, { resetPage: !requestedMatched })
@@ -607,6 +629,7 @@ async function selectThread(
     postQuery.page = 1
   }
   if (thread.status !== 'ready') {
+    requestedOverlayLou.value = null
     return
   }
   loadingPosts.value = true
@@ -621,6 +644,7 @@ async function selectThread(
     selectedThread.value = threadDetail
     posts.value = postResult
     postQuery.page = postResult.page
+    await openRequestedOverlay(postResult)
   } catch (error) {
     if (requestId === postRequestId) {
       postError.value = error instanceof Error ? error.message : String(error)
@@ -630,6 +654,22 @@ async function selectThread(
       loadingPosts.value = false
     }
   }
+}
+
+async function openRequestedOverlay(postResult: PostsResult): Promise<void> {
+  const lou = requestedOverlayLou.value
+  if (lou === null) {
+    return
+  }
+  requestedOverlayLou.value = null
+  const post = postResult.items.find(
+    (item) => item.lou === lou && item.pid !== null,
+  )
+  if (post === undefined) {
+    postError.value = `无法打开第${lou}楼的 overlay 编辑器：楼层不存在或已变化。`
+    return
+  }
+  await openOverlayEditor(post)
 }
 
 async function loadPosts(): Promise<void> {
@@ -662,6 +702,7 @@ async function loadPosts(): Promise<void> {
 }
 
 function applyPostFilter(): void {
+  closeOverlayEditor()
   postQuery.page = pageFromLouInput(postQuery.louFrom) || 1
   void loadPosts()
 }
@@ -670,6 +711,7 @@ function nextPage(): void {
   if (!posts.value || posts.value.page >= posts.value.totalPages) {
     return
   }
+  closeOverlayEditor()
   postQuery.page = posts.value.page + 1
   void loadPosts()
 }
@@ -678,6 +720,7 @@ function previousPage(): void {
   if (!posts.value || posts.value.page <= 1) {
     return
   }
+  closeOverlayEditor()
   postQuery.page = posts.value.page - 1
   void loadPosts()
 }
@@ -691,6 +734,7 @@ function goToPage(page: number): void {
     pageJumpInput.value = String(posts.value.page)
     return
   }
+  closeOverlayEditor()
   postQuery.page = nextPage
   void loadPosts()
 }
@@ -715,6 +759,8 @@ watch(
     listFilter.q,
     listFilter.sortBy,
     listFilter.sortDirection,
+    overlayEditor.lou,
+    requestedOverlayLou.value,
   ],
   syncUrl,
 )

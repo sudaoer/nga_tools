@@ -1526,6 +1526,188 @@ class WebDatabaseViewerTest:
 
 
 class WebImageUsageTest:
+    def test_lists_image_problem_posts_by_kind_and_builds_overlay_link(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        unmapped_url = (
+            "https://img.nga.178.com/attachments/mon_202607/16/unmapped.png"
+        )
+        missing_url = (
+            "https://img.nga.178.com/attachments/mon_202607/16/missing.png"
+        )
+        healthy_url = (
+            "https://img.nga.178.com/attachments/mon_202607/16/healthy.png"
+        )
+        _write_image_mapping(
+            output_dir,
+            missing_url,
+            "images_unique/missing.png",
+        )
+        _write_image_mapping(
+            output_dir,
+            healthy_url,
+            "images_unique/healthy.png",
+        )
+        healthy_path = output_dir / "images_unique" / "healthy.png"
+        healthy_path.parent.mkdir(parents=True)
+        Image.new("RGB", (2, 2), color="white").save(healthy_path)
+        _write_archive(
+            output_dir / "101_201",
+            [
+                _post(
+                    0,
+                    '<img src="./broken.png"><img src="./broken.png">'
+                    f"[img]{unmapped_url}[/img]"
+                    f"[img]{missing_url}[/img]"
+                    f"[img]{healthy_url}[/img]",
+                    pid=1000,
+                ),
+                _post(1, '<img src="https://example.test/other.png">', pid=1001),
+            ],
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        response = client.get("/api/admin/image-problems")
+        missing_only = client.get(
+            "/api/admin/image-problems",
+            params={"kind": "missing_file"},
+        )
+        second_page = client.get(
+            "/api/admin/image-problems",
+            params={"offset": 1, "limit": 1},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["problemPostCount"] == 2
+        assert payload["problemThreadCount"] == 1
+        assert payload["problemOccurrenceCount"] == 5
+        assert payload["kindCounts"] == {
+            "invalid_url": {"postCount": 2, "occurrenceCount": 3},
+            "unmapped": {"postCount": 1, "occurrenceCount": 1},
+            "missing_file": {"postCount": 1, "occurrenceCount": 1},
+        }
+        assert payload["total"] == 2
+        first = payload["items"][0]
+        assert first["pid"] == 1000
+        assert first["lou"] == 0
+        assert first["issueCount"] == 4
+        assert first["editUrl"] == (
+            "/threads?tid=101&aid=201&page=1&lou_from=0&lou_to=0&overlay_lou=0"
+        )
+        assert first["issues"] == [
+            {
+                "kind": "invalid_url",
+                "url": "./broken.png",
+                "occurrenceCount": 2,
+                "relativePath": None,
+            },
+            {
+                "kind": "unmapped",
+                "url": unmapped_url,
+                "occurrenceCount": 1,
+                "relativePath": None,
+            },
+            {
+                "kind": "missing_file",
+                "url": missing_url,
+                "occurrenceCount": 1,
+                "relativePath": "images_unique/missing.png",
+            },
+        ]
+        assert healthy_url not in json.dumps(first["issues"])
+
+        assert missing_only.status_code == 200
+        assert missing_only.json()["total"] == 1
+        assert len(missing_only.json()["items"][0]["issues"]) == 3
+        assert second_page.status_code == 200
+        assert second_page.json()["items"][0]["pid"] == 1001
+
+    def test_image_problem_cache_tracks_image_directory_changes(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        image_url = (
+            "https://img.nga.178.com/attachments/mon_202607/16/appears.png"
+        )
+        _write_image_mapping(
+            output_dir,
+            image_url,
+            "images_unique/appears.png",
+        )
+        images_dir = output_dir / "images_unique"
+        images_dir.mkdir()
+        _write_archive(
+            output_dir / "101_201",
+            [_post(1, f"[img]{image_url}[/img]")],
+        )
+        calls: list[Path] = []
+        original_build = web_server.build_image_usage_snapshot
+
+        def wrapped_build(path: Path):
+            calls.append(path)
+            return original_build(path)
+
+        monkeypatch.setattr(web_server, "build_image_usage_snapshot", wrapped_build)
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        missing = client.get("/api/admin/image-problems")
+        image_path = images_dir / "appears.png"
+        image_path.write_bytes(b"available")
+        available = client.get("/api/admin/image-problems")
+        image_path.unlink()
+        missing_again = client.get("/api/admin/image-problems")
+
+        assert missing.json()["kindCounts"]["missing_file"]["postCount"] == 1
+        assert available.json()["problemPostCount"] == 0
+        assert missing_again.json()["problemPostCount"] == 1
+        assert calls == [output_dir, output_dir, output_dir]
+
+    def test_overlay_removes_post_from_current_image_problems(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        unused_url = (
+            "https://img.nga.178.com/attachments/mon_202607/16/unused.png"
+        )
+        problem_url = (
+            "https://img.nga.178.com/attachments/mon_202607/16/problem.png"
+        )
+        _write_image_mapping(
+            output_dir,
+            unused_url,
+            "images_unique/unused.png",
+        )
+        _write_archive(
+            output_dir / "101_201",
+            [_post(1, f"[img]{problem_url}[/img]")],
+        )
+        client = TestClient(
+            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
+        )
+
+        before = client.get("/api/admin/image-problems")
+        saved = client.put(
+            "/api/admin/threads/101/201/overlays/1",
+            json={"bbcode": "已用 overlay 修复正文"},
+        )
+        after = client.get("/api/admin/image-problems")
+
+        assert before.status_code == 200
+        assert before.json()["problemPostCount"] == 1
+        assert saved.status_code == 200
+        assert after.status_code == 200
+        assert after.json()["problemPostCount"] == 0
+
     def test_counts_each_reference_groups_physical_images_and_includes_zero(
         self,
         tmp_path: Path,
@@ -1771,9 +1953,12 @@ class WebImageUsageTest:
         )
 
         response = client.get("/api/admin/image-usage")
+        problem_response = client.get("/api/admin/image-problems")
 
         assert response.status_code == 409
         assert response.json() == {"error": "缺少image_index.sqlite3。"}
+        assert problem_response.status_code == 409
+        assert problem_response.json() == {"error": "缺少image_index.sqlite3。"}
 
     def test_navigation_reads_do_not_invalidate_image_usage_cache(
         self,

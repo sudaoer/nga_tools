@@ -69,6 +69,11 @@ from nga_tools.web.database import (
 )
 from nga_tools.web.image_usage import (
     ImageIndexUnavailableError,
+    ImageProblemFilter,
+    ImageProblemIssueItem,
+    ImageProblemPostReference,
+    ImageProblemPostItem,
+    ImageProblemsResult,
     ImageUsageDetailResult,
     ImageUsageNotFoundError,
     ImageUsageRepliesResult,
@@ -77,6 +82,8 @@ from nga_tools.web.image_usage import (
     ImageUsageSnapshot,
     ImageUsageSort,
     build_image_usage_snapshot,
+    copy_image_problem_kind_counts,
+    image_problem_references,
     image_reply_references,
     image_usage_detail,
     image_usage_result,
@@ -213,6 +220,7 @@ def _image_usage_fingerprint(output_dir: Path) -> ImageUsageFingerprint:
         f"output:{_file_fingerprint(output_dir)}",
         f"image:{_file_fingerprint(image_index_path)}",
         f"image-wal:{_file_fingerprint(Path(str(image_index_path) + '-wal'))}",
+        f"images:{_file_fingerprint(output_dir / 'images_unique')}",
     ]
     if not output_dir.is_dir():
         return tuple(entries)
@@ -897,6 +905,146 @@ async def list_image_usage(
     return image_usage_result(snapshot, offset=offset, limit=limit, sort=sort)
 
 
+def _image_problem_post_item(
+    output_dir: Path,
+    snapshot: ImageUsageSnapshot,
+    reference: ImageProblemPostReference,
+    page_cache: dict[tuple[int, str, int], PostsResult],
+) -> Optional[ImageProblemPostItem]:
+    page = reference.lou // ORIGINAL_POSTS_PER_PAGE + 1
+    cache_key = (reference.tid, reference.aid_key, page)
+    posts = page_cache.get(cache_key)
+    if posts is None:
+        posts = read_posts(
+            output_dir,
+            reference.tid,
+            reference.aid_key,
+            page=page,
+        )
+        page_cache[cache_key] = posts
+    post = next(
+        (
+            item
+            for item in posts["items"]
+            if item["lou"] == reference.lou and item["pid"] == reference.pid
+        ),
+        None,
+    )
+    if post is None:
+        return None
+
+    issues: list[ImageProblemIssueItem] = [
+        {
+            "kind": issue.kind,
+            "url": issue.url,
+            "occurrenceCount": issue.occurrence_count,
+            "relativePath": issue.relative_path,
+        }
+        for issue in reference.issues
+    ]
+    edit_query = urlencode(
+        {
+            "tid": reference.tid,
+            "aid": reference.aid_key,
+            "page": page,
+            "lou_from": reference.lou,
+            "lou_to": reference.lou,
+            "overlay_lou": reference.lou,
+        }
+    )
+    return {
+        "tid": reference.tid,
+        "aidKey": reference.aid_key,
+        "dirName": reference.dir_name,
+        "title": snapshot.thread_titles.get(
+            reference.tid,
+            f"tid {reference.tid}",
+        ),
+        "pid": reference.pid,
+        "lou": reference.lou,
+        "floorLabel": post["floorLabel"],
+        "authorName": post["authorName"],
+        "postdate": post["postdate"],
+        "issueCount": sum(issue["occurrenceCount"] for issue in issues),
+        "issues": issues,
+        "html": post["html"],
+        "editUrl": f"/threads?{edit_query}",
+    }
+
+
+def _read_image_problems_sync(
+    output_dir: Path,
+    snapshot: ImageUsageSnapshot,
+    offset: int,
+    limit: int,
+    kind: ImageProblemFilter,
+) -> ImageProblemsResult:
+    references = image_problem_references(snapshot, kind)
+    selected_references = references[offset : offset + limit]
+    page_cache: dict[tuple[int, str, int], PostsResult] = {}
+    items: list[ImageProblemPostItem] = []
+    for reference in selected_references:
+        item = _image_problem_post_item(
+            output_dir,
+            snapshot,
+            reference,
+            page_cache,
+        )
+        if item is not None:
+            items.append(item)
+
+    kind_counts = copy_image_problem_kind_counts(snapshot.problem_kind_counts)
+    return {
+        "items": items,
+        "total": len(references),
+        "offset": offset,
+        "limit": limit,
+        "kind": kind,
+        "computedAt": snapshot.computed_at,
+        "archiveCount": snapshot.archive_count,
+        "scannedPostCount": snapshot.post_count,
+        "problemPostCount": len(snapshot.problem_references),
+        "problemThreadCount": len(
+            {reference.tid for reference in snapshot.problem_references}
+        ),
+        "problemOccurrenceCount": (
+            kind_counts["invalid_url"]["occurrenceCount"]
+            + kind_counts["unmapped"]["occurrenceCount"]
+            + kind_counts["missing_file"]["occurrenceCount"]
+        ),
+        "kindCounts": kind_counts,
+        "skippedArchives": deepcopy(snapshot.skipped_archives),
+    }
+
+
+async def list_image_problems(
+    request: Request,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(gt=0, le=_MAX_POST_LIMIT)] = 20,
+    kind: ImageProblemFilter = "all",
+    refresh: bool = False,
+) -> ImageProblemsResult:
+    context = _context(request)
+    try:
+        snapshot = await run_in_threadpool(
+            context.image_usage_cache.read,
+            context.output_dir,
+            refresh=refresh,
+        )
+        return await run_in_threadpool(
+            _read_image_problems_sync,
+            context.output_dir,
+            snapshot,
+            offset,
+            limit,
+            kind,
+        )
+    except ImageIndexUnavailableError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (ThreadNotFoundError, ThreadUnavailableError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
 async def image_usage_detail_route(
     request: Request,
     relative_path: Annotated[str, Query(min_length=1)],
@@ -1203,6 +1351,11 @@ def create_app(
     app.add_api_route(
         "/api/admin/image-usage/replies",
         image_usage_replies_route,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/api/admin/image-problems",
+        list_image_problems,
         methods=["GET"],
     )
     app.add_api_route("/api/databases/{db_id}/schema", database_schema, methods=["GET"])

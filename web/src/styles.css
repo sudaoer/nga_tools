@@ -1129,6 +1129,153 @@ select {
   justify-self: center;
 }
 
+.image-problems-shell {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 22px 28px;
+}
+
+.image-problems-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.image-problems-header p {
+  color: var(--nga-text-muted);
+  margin: 4px 0 0;
+}
+
+.image-problem-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.image-problem-filters button {
+  display: inline-flex;
+  gap: 7px;
+  border: 1px solid var(--nga-border);
+  border-radius: 4px;
+  background: var(--nga-button-bg);
+  color: var(--nga-button-text);
+  padding: 7px 12px;
+}
+
+.image-problem-filters button.active {
+  border-color: var(--nga-red);
+  background: var(--nga-red);
+  color: var(--nga-nav-text);
+  font-weight: 700;
+}
+
+.image-problem-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  border: 1px solid var(--nga-border-soft);
+  border-radius: 4px;
+  background: var(--nga-surface);
+  margin-bottom: 12px;
+  padding: 10px 12px;
+}
+
+.image-problem-summary strong {
+  color: var(--nga-red);
+}
+
+.image-problem-posts {
+  display: grid;
+  gap: 14px;
+}
+
+.image-problem-post {
+  overflow: hidden;
+  border: 1px solid var(--nga-border-muted);
+  border-radius: 5px;
+  background: var(--nga-surface);
+}
+
+.image-problem-post > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  border-bottom: 1px solid var(--nga-border-soft);
+  background: var(--nga-surface-alt);
+  padding: 10px 12px;
+}
+
+.image-problem-post > header strong {
+  color: var(--nga-red);
+}
+
+.image-problem-post > header .overlay-edit-button {
+  flex: 0 0 auto;
+  text-decoration: none;
+}
+
+.image-problem-post-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  color: var(--nga-text-muted);
+  margin-top: 5px;
+  font-size: 12px;
+}
+
+.image-problem-issues {
+  display: grid;
+  gap: 7px;
+  border-bottom: 1px solid var(--nga-border-soft);
+  background: var(--nga-warning-bg);
+  margin: 0;
+  padding: 10px 12px;
+  list-style: none;
+}
+
+.image-problem-issues li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.image-problem-issues code {
+  min-width: 180px;
+  flex: 1 1 520px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.image-problem-kind {
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.image-problem-kind.kind-invalid_url {
+  color: var(--nga-red);
+}
+
+.image-problem-kind.kind-unmapped {
+  color: var(--nga-warning-text);
+}
+
+.image-problem-kind.kind-missing_file {
+  color: #7a1f17;
+}
+
+.image-problem-post-body {
+  padding: 12px;
+}
+
 .version-admin-shell {
   display: flex;
   height: 100%;
@@ -1639,6 +1786,19 @@ select {
 
   .image-usage-shell {
     padding: 12px;
+  }
+
+  .image-problems-shell {
+    padding: 12px;
+  }
+
+  .image-problem-post > header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .image-problem-post > header .overlay-edit-button {
+    width: fit-content;
   }
 
   .image-usage-grid {

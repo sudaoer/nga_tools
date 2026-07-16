@@ -8,6 +8,7 @@ import { RouterLink, RouterView } from 'vue-router'
       <RouterLink to="/admin/post-versions">正文版本</RouterLink>
       <RouterLink to="/admin/databases">数据库</RouterLink>
       <RouterLink to="/admin/image-usage">图片使用</RouterLink>
+      <RouterLink to="/admin/image-problems">图片问题</RouterLink>
     </nav>
     <RouterView />
   </main>

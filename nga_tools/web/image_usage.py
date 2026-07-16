@@ -15,6 +15,7 @@ from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveSto
 from nga_tools.backup.image_reference_cache import (
     scan_image_references_for_records_readonly,
 )
+from nga_tools.backup.image_pipeline import PostImageReference
 from nga_tools.backup.post_overlay import apply_post_overlays_to_records
 from nga_tools.core.sqlite import configure_readonly_connection
 from nga_tools.forum.thread_configs import (
@@ -26,8 +27,20 @@ from nga_tools.forum.thread_configs import (
 )
 
 ImageUsageSort = Literal["usage", "threads"]
+ImageProblemKind = Literal["invalid_url", "unmapped", "missing_file"]
+ImageProblemFilter = Literal[
+    "all",
+    "invalid_url",
+    "unmapped",
+    "missing_file",
+]
 PostDate = int | str
 _THREAD_DIR_RE = re.compile(r"^(\d+)_(all|\d+)$")
+_IMAGE_PROBLEM_KINDS: tuple[ImageProblemKind, ...] = (
+    "invalid_url",
+    "unmapped",
+    "missing_file",
+)
 
 
 class ImageUsageItem(TypedDict):
@@ -93,6 +106,56 @@ class ImageUsageRepliesResult(TypedDict):
     limit: int
 
 
+class ImageProblemIssueItem(TypedDict):
+    kind: ImageProblemKind
+    url: str
+    occurrenceCount: int
+    relativePath: Optional[str]
+
+
+class ImageProblemPostItem(TypedDict):
+    tid: int
+    aidKey: str
+    dirName: str
+    title: str
+    pid: int
+    lou: int
+    floorLabel: str
+    authorName: Optional[str]
+    postdate: Optional[PostDate]
+    issueCount: int
+    issues: list[ImageProblemIssueItem]
+    html: str
+    editUrl: str
+
+
+class ImageProblemKindCount(TypedDict):
+    postCount: int
+    occurrenceCount: int
+
+
+class ImageProblemKindCounts(TypedDict):
+    invalid_url: ImageProblemKindCount
+    unmapped: ImageProblemKindCount
+    missing_file: ImageProblemKindCount
+
+
+class ImageProblemsResult(TypedDict):
+    items: list[ImageProblemPostItem]
+    total: int
+    offset: int
+    limit: int
+    kind: ImageProblemFilter
+    computedAt: str
+    archiveCount: int
+    scannedPostCount: int
+    problemPostCount: int
+    problemThreadCount: int
+    problemOccurrenceCount: int
+    kindCounts: ImageProblemKindCounts
+    skippedArchives: list[SkippedImageUsageArchive]
+
+
 @dataclass(frozen=True, slots=True)
 class ImageReplyReference:
     tid: int
@@ -103,12 +166,32 @@ class ImageReplyReference:
     occurrence_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class ImageProblemIssue:
+    kind: ImageProblemKind
+    url: str
+    occurrence_count: int
+    relative_path: Optional[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ImageProblemPostReference:
+    tid: int
+    aid_key: str
+    dir_name: str
+    pid: int
+    lou: int
+    issues: tuple[ImageProblemIssue, ...]
+
+
 @dataclass(frozen=True)
 class ImageUsageSnapshot:
     items_by_usage: list[ImageUsageItem]
     items_by_threads: list[ImageUsageItem]
     items_by_path: dict[str, ImageUsageItem]
     references_by_path: dict[str, tuple[ImageReplyReference, ...]]
+    problem_references: tuple[ImageProblemPostReference, ...]
+    problem_kind_counts: ImageProblemKindCounts
     thread_titles: dict[int, str]
     computed_at: str
     archive_count: int
@@ -230,6 +313,7 @@ def _image_paths_for_urls(
 class _ReferenceScanResult:
     usage_counts: Counter[str]
     references_by_path: dict[str, list[ImageReplyReference]]
+    problem_references: list[ImageProblemPostReference]
     archive_count: int
     post_count: int
     reference_count: int
@@ -237,12 +321,95 @@ class _ReferenceScanResult:
     skipped_archives: list[SkippedImageUsageArchive]
 
 
+def _mapped_image_file_exists(
+    images_root: Optional[Path],
+    relative_path: str,
+    availability_cache: dict[str, bool],
+) -> bool:
+    cached = availability_cache.get(relative_path)
+    if cached is not None:
+        return cached
+
+    path = Path(relative_path)
+    available = False
+    if (
+        images_root is not None
+        and not path.is_absolute()
+        and len(path.parts) >= 2
+        and path.parts[0] == "images_unique"
+        and ".." not in path.parts
+    ):
+        candidate = images_root.joinpath(*path.parts[1:])
+        if len(path.parts) == 2 and not candidate.is_symlink():
+            available = candidate.is_file()
+        else:
+            resolved_candidate = candidate.resolve()
+            available = (
+                resolved_candidate.is_relative_to(images_root)
+                and resolved_candidate.is_file()
+            )
+    availability_cache[relative_path] = available
+    return available
+
+
+def _problem_issues_for_references(
+    images_root: Optional[Path],
+    references: tuple[PostImageReference, ...],
+    image_paths: dict[str, str],
+    availability_cache: dict[str, bool],
+) -> tuple[ImageProblemIssue, ...]:
+    counts: Counter[tuple[ImageProblemKind, str, Optional[str]]] = Counter()
+    for reference in references:
+        if not reference.valid:
+            counts[("invalid_url", reference.url, None)] += 1
+            continue
+
+        relative_path = image_paths.get(reference.url)
+        if relative_path is None:
+            counts[("unmapped", reference.url, None)] += 1
+            continue
+        if not _mapped_image_file_exists(
+            images_root,
+            relative_path,
+            availability_cache,
+        ):
+            counts[("missing_file", reference.url, relative_path)] += 1
+
+    kind_order = {kind: index for index, kind in enumerate(_IMAGE_PROBLEM_KINDS)}
+    return tuple(
+        ImageProblemIssue(
+            kind=kind,
+            url=url,
+            occurrence_count=occurrence_count,
+            relative_path=relative_path,
+        )
+        for (kind, url, relative_path), occurrence_count in sorted(
+            counts.items(),
+            key=lambda item: (
+                kind_order[item[0][0]],
+                item[0][1],
+                item[0][2] or "",
+            ),
+        )
+    )
+
+
 def _scan_references(
     connection: sqlite3.Connection,
     thread_groups: dict[int, list[Path]],
+    output_dir: Path,
 ) -> _ReferenceScanResult:
     usage_counts: Counter[str] = Counter()
     references_by_path: dict[str, list[ImageReplyReference]] = defaultdict(list)
+    problem_references: list[ImageProblemPostReference] = []
+    availability_cache: dict[str, bool] = {}
+    output_root = output_dir.resolve()
+    resolved_images_root = (output_root / "images_unique").resolve()
+    images_root = (
+        resolved_images_root
+        if resolved_images_root.is_relative_to(output_root)
+        else None
+    )
     archive_count = 0
     post_count = 0
     reference_count = 0
@@ -309,6 +476,23 @@ def _scan_references(
                                 occurrence_count=occurrence_count,
                             )
                         )
+                    problem_issues = _problem_issues_for_references(
+                        images_root,
+                        scan.references,
+                        image_paths,
+                        availability_cache,
+                    )
+                    if problem_issues:
+                        problem_references.append(
+                            ImageProblemPostReference(
+                                tid=tid,
+                                aid_key=aid_key,
+                                dir_name=thread_folder.name,
+                                pid=pid,
+                                lou=scan.lou,
+                                issues=problem_issues,
+                            )
+                        )
                 archive_count += 1
             except Exception as error:
                 skipped_archives.append(
@@ -321,6 +505,7 @@ def _scan_references(
     return _ReferenceScanResult(
         usage_counts=usage_counts,
         references_by_path=references_by_path,
+        problem_references=problem_references,
         archive_count=archive_count,
         post_count=post_count,
         reference_count=reference_count,
@@ -367,6 +552,33 @@ def _inventory_items(
     return items
 
 
+def _problem_kind_counts(
+    references: list[ImageProblemPostReference],
+) -> ImageProblemKindCounts:
+    post_counts: Counter[ImageProblemKind] = Counter()
+    occurrence_counts: Counter[ImageProblemKind] = Counter()
+    for reference in references:
+        kinds_in_post: set[ImageProblemKind] = set()
+        for issue in reference.issues:
+            kinds_in_post.add(issue.kind)
+            occurrence_counts[issue.kind] += issue.occurrence_count
+        post_counts.update(kinds_in_post)
+    return {
+        "invalid_url": {
+            "postCount": post_counts["invalid_url"],
+            "occurrenceCount": occurrence_counts["invalid_url"],
+        },
+        "unmapped": {
+            "postCount": post_counts["unmapped"],
+            "occurrenceCount": occurrence_counts["unmapped"],
+        },
+        "missing_file": {
+            "postCount": post_counts["missing_file"],
+            "occurrenceCount": occurrence_counts["missing_file"],
+        },
+    }
+
+
 def build_image_usage_snapshot(output_dir: Path) -> ImageUsageSnapshot:
     thread_groups = _thread_folder_groups(output_dir)
     metadata = _thread_metadata()
@@ -379,7 +591,7 @@ def build_image_usage_snapshot(output_dir: Path) -> ImageUsageSnapshot:
             connection.execute(
                 "SELECT url, unique_rel_path FROM image_mappings LIMIT 0"
             ).fetchall()
-            scan_result = _scan_references(connection, thread_groups)
+            scan_result = _scan_references(connection, thread_groups, output_dir)
             items = _inventory_items(connection, scan_result)
     except (sqlite3.Error, OSError) as error:
         raise ImageIndexUnavailableError(
@@ -394,6 +606,15 @@ def build_image_usage_snapshot(output_dir: Path) -> ImageUsageSnapshot:
         items,
         key=lambda item: (-item["threadCount"], item["relativePath"]),
     )
+    problem_references = sorted(
+        scan_result.problem_references,
+        key=lambda reference: (
+            reference.tid,
+            reference.lou,
+            reference.pid,
+            reference.aid_key,
+        ),
+    )
     return ImageUsageSnapshot(
         items_by_usage=items_by_usage,
         items_by_threads=items_by_threads,
@@ -402,6 +623,8 @@ def build_image_usage_snapshot(output_dir: Path) -> ImageUsageSnapshot:
             relative_path: tuple(references)
             for relative_path, references in scan_result.references_by_path.items()
         },
+        problem_references=tuple(problem_references),
+        problem_kind_counts=_problem_kind_counts(problem_references),
         thread_titles=thread_titles,
         computed_at=_now_utc_iso(),
         archive_count=scan_result.archive_count,
@@ -490,3 +713,33 @@ def image_reply_references(
     if not references:
         raise ImageUsageNotFoundError("该图片没有来自指定主题的引用。")
     return sorted(references, key=lambda reference: (reference.lou, reference.pid))
+
+
+def image_problem_references(
+    snapshot: ImageUsageSnapshot,
+    kind: ImageProblemFilter,
+) -> tuple[ImageProblemPostReference, ...]:
+    if kind == "all":
+        return snapshot.problem_references
+    return tuple(
+        reference
+        for reference in snapshot.problem_references
+        if any(issue.kind == kind for issue in reference.issues)
+    )
+
+
+def copy_image_problem_kind_counts(
+    counts: ImageProblemKindCounts,
+) -> ImageProblemKindCounts:
+    def copy_count(kind: ImageProblemKind) -> ImageProblemKindCount:
+        count = counts[kind]
+        return {
+            "postCount": count["postCount"],
+            "occurrenceCount": count["occurrenceCount"],
+        }
+
+    return {
+        "invalid_url": copy_count("invalid_url"),
+        "unmapped": copy_count("unmapped"),
+        "missing_file": copy_count("missing_file"),
+    }

@@ -170,6 +170,58 @@ export interface ImageUsageRepliesResult {
   limit: number
 }
 
+export type ImageProblemKind = 'invalid_url' | 'unmapped' | 'missing_file'
+export type ImageProblemFilter = 'all' | ImageProblemKind
+
+export interface ImageProblemIssueItem {
+  kind: ImageProblemKind
+  url: string
+  occurrenceCount: number
+  relativePath: string | null
+}
+
+export interface ImageProblemPostItem {
+  tid: number
+  aidKey: string
+  dirName: string
+  title: string
+  pid: number
+  lou: number
+  floorLabel: string
+  authorName: string | null
+  postdate: number | string | null
+  issueCount: number
+  issues: ImageProblemIssueItem[]
+  html: string
+  editUrl: string
+}
+
+export interface ImageProblemKindCount {
+  postCount: number
+  occurrenceCount: number
+}
+
+export type ImageProblemKindCounts = Record<
+  ImageProblemKind,
+  ImageProblemKindCount
+>
+
+export interface ImageProblemsResult {
+  items: ImageProblemPostItem[]
+  total: number
+  offset: number
+  limit: number
+  kind: ImageProblemFilter
+  computedAt: string
+  archiveCount: number
+  scannedPostCount: number
+  problemPostCount: number
+  problemThreadCount: number
+  problemOccurrenceCount: number
+  kindCounts: ImageProblemKindCounts
+  skippedArchives: SkippedImageUsageArchive[]
+}
+
 export type DatabaseKind =
   | 'forum_threads'
   | 'backup_state'

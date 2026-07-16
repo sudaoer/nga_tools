@@ -1,6 +1,8 @@
 import type {
   DatabaseSchema,
   DatabaseSummary,
+  ImageProblemFilter,
+  ImageProblemsResult,
   ImageUsageDetailResult,
   ImageUsageRepliesResult,
   ImageUsageResult,
@@ -300,6 +302,29 @@ export async function fetchImageUsageReplies(
   })
   return readJson<ImageUsageRepliesResult>(
     `/api/admin/image-usage/replies?${params.toString()}`,
+  )
+}
+
+export interface FetchImageProblemsOptions {
+  offset: number
+  limit: number
+  kind: ImageProblemFilter
+  refresh?: boolean
+}
+
+export async function fetchImageProblems(
+  options: FetchImageProblemsOptions,
+): Promise<ImageProblemsResult> {
+  const params = new URLSearchParams({
+    offset: String(options.offset),
+    limit: String(options.limit),
+    kind: options.kind,
+  })
+  if (options.refresh) {
+    params.set('refresh', '1')
+  }
+  return readJson<ImageProblemsResult>(
+    `/api/admin/image-problems?${params.toString()}`,
   )
 }
 
