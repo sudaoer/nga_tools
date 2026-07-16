@@ -5,6 +5,7 @@ import io
 import json
 import sqlite3
 import tempfile
+from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
 from typing import cast
@@ -14,6 +15,7 @@ from nga_tools.cli import args_parse
 from nga_tools.commands.forum import handle_forum_sync
 from nga_tools.forum.export import (
     scan_postdate_forum_threads,
+    sync_default_forum_threads_to_db,
     sync_postdate_forum_threads_to_db,
 )
 from nga_tools.forum.thread_store import (
@@ -47,6 +49,8 @@ def _thread(
     postdate: int = 1000,
     lastpost: int = 2000,
     replies: int = 600,
+    topic_type: int = 0,
+    is_forum: bool = False,
 ) -> ForumThread:
     return {
         "tid": tid,
@@ -58,6 +62,8 @@ def _thread(
         "lastpost": lastpost,
         "replies": replies,
         "forumname": "二次元跑团综合",
+        "topic_type": topic_type,
+        "is_forum": is_forum,
     }
 
 
@@ -92,19 +98,45 @@ class _FakeForumClient:
         *,
         author_pages: dict[tuple[int, int], dict[str, object]] | None = None,
         fail_on: tuple[int, int] | None = None,
+        total_page: int | None = None,
     ) -> None:
         self._pages = pages
         self._author_pages = {} if author_pages is None else author_pages
         self._fail_on = fail_on
+        self._total_page = total_page
         self.base_url = "https://bbs.nga.cn"
         self.forum_fetches: list[tuple[int, int]] = []
         self.page_fetches: list[tuple[int, int | None, int]] = []
+
+    def _resolved_total_page(self, fid: int) -> int:
+        if self._total_page is not None:
+            return self._total_page
+        known = [page for (f, page) in self._pages if f == fid]
+        return max(known) if known else 1
 
     def get_forum_threads(self, fid: int, page: int) -> list[ForumThread]:
         self.forum_fetches.append((fid, page))
         if self._fail_on == (fid, page):
             raise RuntimeError("forum fetch failed")
         return self._pages[(fid, page)]
+
+    def get_forum_thread_page(
+        self,
+        fid: int,
+        page: int,
+        *,
+        order_by: str | None = None,
+    ) -> ForumThreadPage:
+        self.forum_fetches.append((fid, page))
+        if self._fail_on == (fid, page):
+            raise RuntimeError("forum fetch failed")
+        threads = self._pages.get((fid, page), [])
+        return _forum_page(
+            fid=fid,
+            page=page,
+            total_page=self._resolved_total_page(fid),
+            threads=threads,
+        )
 
     def get_page(self, tid: int, aid: int | None, page: int) -> dict[str, object]:
         self.page_fetches.append((tid, aid, page))
@@ -142,6 +174,8 @@ class _FakeForumThreadStore:
         self,
         fid: int,
         threads: list[ForumThread],
+        *,
+        connection: object = None,
     ) -> ForumThreadUpsertResult:
         self.upserts.append((fid, [thread["tid"] for thread in threads]))
         stored_threads = self._threads_by_fid.setdefault(fid, {})
@@ -157,6 +191,25 @@ class _FakeForumThreadStore:
             inserted_count=inserted_count,
             updated_count=updated_count,
         )
+
+    def upsert_fid_pages_atomically(
+        self,
+        fid: int,
+        page_threads: Iterable[Iterable[ForumThread]],
+    ) -> list[ForumThreadUpsertResult]:
+        results: list[ForumThreadUpsertResult] = []
+        for threads in page_threads:
+            results.append(self.upsert_threads(fid, list(threads)))
+        return results
+
+    def max_normal_lastpost(self, fid: int) -> int | None:
+        stored_threads = self._threads_by_fid.get(fid, {})
+        normal_lastposts = [
+            thread["lastpost"]
+            for thread in stored_threads.values()
+            if not thread["is_forum"]
+        ]
+        return max(normal_lastposts) if normal_lastposts else None
 
     def list_threads(self, fid: int, *, forumname: str) -> list[ForumThread]:
         stored_threads = self._threads_by_fid.get(fid, {})
@@ -1172,6 +1225,223 @@ class ForumPostdateDbSyncTest:
         assert result.stopped_existing_count == 0
 
 
+class ForumDefaultScanTest:
+    def _store_with_watermark(
+        self,
+        db_path: Path,
+        fid: int,
+        lastpost: int,
+        *,
+        tid: int = 900,
+        is_forum: bool = False,
+    ) -> ForumThreadStore:
+        store = ForumThreadStore(db_path)
+        store.upsert_threads(
+            fid,
+            [
+                _thread(
+                    tid=tid,
+                    subject="上次扫描已保存",
+                    lastpost=lastpost,
+                    replies=10,
+                    is_forum=is_forum,
+                )
+            ],
+        )
+        return store
+
+    def test_first_scan_scans_up_to_pages_cap(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(
+                    page=1, total_page=2,
+                    threads=[_thread(tid=101, lastpost=5000)],
+                ),
+                (784, 2): _forum_page(
+                    page=2, total_page=2,
+                    threads=[_thread(tid=102, lastpost=4000)],
+                ),
+            }
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = ForumThreadStore(Path(tmp_dir) / "forum_threads.sqlite3")
+            result = sync_default_forum_threads_to_db(
+                client,
+                fids_pages={784: 2},
+                store=store,
+                sleep_func=sleeps.append,
+            )
+
+        assert client.thread_page_fetches == [(784, 1, None), (784, 2, None)]
+        assert result.page_count == 2
+        assert result.thread_count == 2
+        assert result.stopped_at_watermark is False
+        assert result.watermark is None
+
+    def test_incremental_stops_at_watermark_with_one_page_overlap(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(
+                    page=1, total_page=5,
+                    threads=[_thread(tid=101, lastpost=5000)],
+                ),
+                (784, 2): _forum_page(
+                    page=2, total_page=5,
+                    threads=[
+                        _thread(tid=102, lastpost=4000),
+                        _thread(tid=103, lastpost=3000),
+                    ],
+                ),
+                (784, 3): _forum_page(
+                    page=3, total_page=5,
+                    threads=[_thread(tid=104, lastpost=2500)],
+                ),
+                (784, 4): _forum_page(
+                    page=4, total_page=5,
+                    threads=[_thread(tid=105, lastpost=2000)],
+                ),
+            }
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "forum_threads.sqlite3"
+            store = self._store_with_watermark(db_path, 784, lastpost=3000)
+            result = sync_default_forum_threads_to_db(
+                client,
+                fids_pages={784: 10},
+                store=store,
+                sleep_func=sleeps.append,
+            )
+            table_name = forum_thread_table_name(784)
+            with closing(sqlite3.connect(db_path)) as connection:
+                tids = sorted(
+                    row[0]
+                    for row in connection.execute(
+                        f"SELECT tid FROM {table_name}"
+                    ).fetchall()
+                )
+
+        assert client.thread_page_fetches == [
+            (784, 1, None), (784, 2, None), (784, 3, None),
+        ]
+        assert result.page_count == 3
+        assert result.stopped_at_watermark is True
+        assert result.watermark == 3000
+        assert tids == [101, 102, 103, 104, 900]
+
+    def test_pinned_thread_on_page1_does_not_trigger_early_stop(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(
+                    page=1, total_page=3,
+                    threads=[
+                        _thread(tid=100, subject="置顶公告", lastpost=100),
+                        _thread(tid=101, lastpost=5000),
+                        _thread(tid=102, lastpost=4950),
+                    ],
+                ),
+                (784, 2): _forum_page(
+                    page=2, total_page=3,
+                    threads=[_thread(tid=103, lastpost=4800)],
+                ),
+                (784, 3): _forum_page(
+                    page=3, total_page=3,
+                    threads=[_thread(tid=104, lastpost=4700)],
+                ),
+            }
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "forum_threads.sqlite3"
+            store = self._store_with_watermark(db_path, 784, lastpost=4900)
+            result = sync_default_forum_threads_to_db(
+                client,
+                fids_pages={784: 10},
+                store=store,
+                sleep_func=sleeps.append,
+            )
+
+        assert client.thread_page_fetches == [
+            (784, 1, None), (784, 2, None), (784, 3, None),
+        ]
+        assert result.stopped_at_watermark is True
+        assert result.thread_count == 5
+
+    def test_mirror_thread_excluded_from_watermark(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(
+                    page=1, total_page=2,
+                    threads=[
+                        _thread(tid=101, lastpost=5000),
+                        _thread(
+                            tid=200, subject="版面镜像", lastpost=100,
+                            topic_type=0x200000, is_forum=True,
+                        ),
+                        _thread(tid=102, lastpost=4900),
+                    ],
+                ),
+                (784, 2): _forum_page(
+                    page=2, total_page=2,
+                    threads=[_thread(tid=103, lastpost=4800)],
+                ),
+            }
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "forum_threads.sqlite3"
+            store = self._store_with_watermark(db_path, 784, lastpost=4850)
+            result = sync_default_forum_threads_to_db(
+                client,
+                fids_pages={784: 10},
+                store=store,
+                sleep_func=sleeps.append,
+            )
+            table_name = forum_thread_table_name(784)
+            with closing(sqlite3.connect(db_path)) as connection:
+                mirror_row = connection.execute(
+                    f"SELECT is_forum FROM {table_name} WHERE tid = 200"
+                ).fetchone()
+
+        assert client.thread_page_fetches == [(784, 1, None), (784, 2, None)]
+        assert result.stopped_at_watermark is True
+        assert mirror_row == (1,)
+
+    def test_lastpost_equal_to_cutoff_triggers_crossing(self) -> None:
+        client = _FakePostdateClient(
+            {
+                (784, 1): _forum_page(
+                    page=1, total_page=2,
+                    threads=[_thread(tid=101, lastpost=3000)],
+                ),
+                (784, 2): _forum_page(
+                    page=2, total_page=2,
+                    threads=[_thread(tid=102, lastpost=2500)],
+                ),
+            }
+        )
+        sleeps: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "forum_threads.sqlite3"
+            store = self._store_with_watermark(db_path, 784, lastpost=3000)
+            result = sync_default_forum_threads_to_db(
+                client,
+                fids_pages={784: 10},
+                store=store,
+                sleep_func=sleeps.append,
+            )
+
+        assert client.thread_page_fetches == [(784, 1, None), (784, 2, None)]
+        assert result.stopped_at_watermark is True
+        assert result.watermark == 3000
+
+
 class ForumWatchCommandTest:
     def test_forum_sync_full_postdate_writes_database_only(self) -> None:
         client = _FakePostdateClient(
@@ -1427,6 +1697,7 @@ class ForumWatchCommandTest:
                 (784, 1): [_thread(tid=101, subject="安价一号")],
             },
             fail_on=(784, 2),
+            total_page=2,
         )
         forum_store = _FakeForumThreadStore()
 

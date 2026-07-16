@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
+from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, cast
+from typing import cast
 
 from nga_tools.config import get_config
 from nga_tools.core.sqlite import (
@@ -42,7 +43,9 @@ def timestamp_text(timestamp: int) -> str:
     return datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _thread_row(thread: ForumThread) -> tuple[int, int, str, str, int, str, int, str, int]:
+def _thread_row(
+    thread: ForumThread,
+) -> tuple[int, int, str, str, int, str, int, str, int, int, int]:
     return (
         thread["tid"],
         thread["authorid"],
@@ -53,6 +56,8 @@ def _thread_row(thread: ForumThread) -> tuple[int, int, str, str, int, str, int,
         thread["lastpost"],
         timestamp_text(thread["lastpost"]),
         thread["replies"],
+        thread["topic_type"],
+        1 if thread["is_forum"] else 0,
     )
 
 
@@ -96,12 +101,36 @@ class ForumThreadStore:
                 postdate_text TEXT NOT NULL,
                 lastpost INTEGER NOT NULL,
                 lastpost_text TEXT NOT NULL,
-                replies INTEGER NOT NULL
+                replies INTEGER NOT NULL,
+                topic_type INTEGER NOT NULL DEFAULT 0,
+                is_forum INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+        self._migrate_table_columns(connection, table_name)
         connection.commit()
         return table_name
+
+    @staticmethod
+    def _migrate_table_columns(
+        connection: sqlite3.Connection,
+        table_name: str,
+    ) -> None:
+        existing_columns = {
+            row[1]
+            for row in connection.execute(
+                f"PRAGMA table_info({table_name})"
+            ).fetchall()
+        }
+        migrations: list[tuple[str, str]] = [
+            ("topic_type", "INTEGER NOT NULL DEFAULT 0"),
+            ("is_forum", "INTEGER NOT NULL DEFAULT 0"),
+        ]
+        for column_name, column_def in migrations:
+            if column_name not in existing_columns:
+                connection.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}"
+                )
 
     def existing_tids(self, fid: int) -> set[int]:
         with closing(self._connect()) as connection:
@@ -115,14 +144,52 @@ class ForumThreadStore:
                 tids.add(tid)
         return tids
 
+    def max_normal_lastpost(self, fid: int) -> int | None:
+        with closing(self._connect()) as connection:
+            table_name = self._ensure_table(connection, fid)
+            return self._max_normal_lastpost_in_connection(connection, table_name)
+
+    def upsert_fid_pages_atomically(
+        self,
+        fid: int,
+        page_threads: Iterable[Iterable[ForumThread]],
+    ) -> list[ForumThreadUpsertResult]:
+        results: list[ForumThreadUpsertResult] = []
+        with closing(self._connect()) as connection:
+            self._ensure_table(connection, fid)
+            with connection:
+                for threads in page_threads:
+                    thread_list = list(threads)
+                    if not thread_list:
+                        results.append(ForumThreadUpsertResult(0, 0))
+                        continue
+                    results.append(
+                        self.upsert_threads(fid, thread_list, connection=connection)
+                    )
+        return results
+
+    @staticmethod
+    def _max_normal_lastpost_in_connection(
+        connection: sqlite3.Connection,
+        table_name: str,
+    ) -> int | None:
+        row = connection.execute(
+            f"SELECT MAX(lastpost) FROM {table_name} WHERE is_forum = 0"
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        value = row[0]
+        return value if isinstance(value, int) else None
+
     def list_threads(self, fid: int, *, forumname: str) -> list[ForumThread]:
         with closing(self._connect()) as connection:
             table_name = self._ensure_table(connection, fid)
             rows = cast(
-                list[tuple[int, int, str, str, int, int, int]],
+                list[tuple[int, int, str, str, int, int, int, int, int]],
                 connection.execute(
                     f"""
-                    SELECT tid, aid, author, subject, postdate, lastpost, replies
+                    SELECT tid, aid, author, subject, postdate, lastpost,
+                           replies, topic_type, is_forum
                     FROM {table_name}
                     ORDER BY lastpost DESC, tid DESC
                     """
@@ -140,14 +207,49 @@ class ForumThreadStore:
                 "lastpost": lastpost,
                 "replies": replies,
                 "forumname": forumname,
+                "topic_type": topic_type,
+                "is_forum": bool(is_forum),
             }
-            for tid, aid, author, subject, postdate, lastpost, replies in rows
+            for tid, aid, author, subject, postdate, lastpost, replies,
+            topic_type, is_forum in rows
         ]
+
+    _UPSERT_SQL = (
+        """
+        INSERT INTO {table_name} (
+            tid,
+            aid,
+            author,
+            subject,
+            postdate,
+            postdate_text,
+            lastpost,
+            lastpost_text,
+            replies,
+            topic_type,
+            is_forum
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tid) DO UPDATE SET
+            aid = excluded.aid,
+            author = excluded.author,
+            subject = excluded.subject,
+            postdate = excluded.postdate,
+            postdate_text = excluded.postdate_text,
+            lastpost = excluded.lastpost,
+            lastpost_text = excluded.lastpost_text,
+            replies = excluded.replies,
+            topic_type = excluded.topic_type,
+            is_forum = excluded.is_forum
+        """
+    )
 
     def upsert_threads(
         self,
         fid: int,
         threads: Iterable[ForumThread],
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> ForumThreadUpsertResult:
         rows_by_tid = {thread["tid"]: _thread_row(thread) for thread in threads}
         if not rows_by_tid:
@@ -155,38 +257,32 @@ class ForumThreadStore:
 
         rows = list(rows_by_tid.values())
         incoming_tids = set(rows_by_tid)
-        with closing(self._connect()) as connection:
-            table_name = self._ensure_table(connection, fid)
+        if connection is not None:
+            table_name = forum_thread_table_name(fid)
             existing_tids = self._existing_tids_in_connection(
                 connection,
                 table_name,
                 incoming_tids,
             )
-            with connection:
-                connection.executemany(
-                    f"""
-                    INSERT INTO {table_name} (
-                        tid,
-                        aid,
-                        author,
-                        subject,
-                        postdate,
-                        postdate_text,
-                        lastpost,
-                        lastpost_text,
-                        replies
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(tid) DO UPDATE SET
-                        aid = excluded.aid,
-                        author = excluded.author,
-                        subject = excluded.subject,
-                        postdate = excluded.postdate,
-                        postdate_text = excluded.postdate_text,
-                        lastpost = excluded.lastpost,
-                        lastpost_text = excluded.lastpost_text,
-                        replies = excluded.replies
-                    """,
+            connection.executemany(
+                self._UPSERT_SQL.format(table_name=table_name),
+                rows,
+            )
+            return ForumThreadUpsertResult(
+                inserted_count=len(incoming_tids) - len(existing_tids),
+                updated_count=len(existing_tids),
+            )
+
+        with closing(self._connect()) as own_connection:
+            table_name = self._ensure_table(own_connection, fid)
+            existing_tids = self._existing_tids_in_connection(
+                own_connection,
+                table_name,
+                incoming_tids,
+            )
+            with own_connection:
+                own_connection.executemany(
+                    self._UPSERT_SQL.format(table_name=table_name),
                     rows,
                 )
 

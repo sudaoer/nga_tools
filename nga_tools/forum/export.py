@@ -11,7 +11,12 @@ from typing import Literal, Protocol, TypedDict
 from nga_tools.config import get_config
 from nga_tools.core.atomic import open_text_atomically
 from nga_tools.forum.thread_store import ForumThreadStore, timestamp_text
-from nga_tools.ngaclient.client import ForumThread, ForumThreadPage, NGAForumPageError
+from nga_tools.ngaclient.client import (
+    FORUM_MIRROR_TYPE_BIT,
+    ForumThread,
+    ForumThreadPage,
+    NGAForumPageError,
+)
 
 POSTDATE_ORDER = "postdatedesc"
 DEFAULT_PAGE_DELAY_SECONDS = 3
@@ -375,4 +380,283 @@ def sync_postdate_forum_threads_to_db(
         inserted_count=total_inserted,
         updated_count=total_updated,
         stopped_existing_count=stopped_existing_count,
+    )
+
+
+@dataclass(frozen=True)
+class ForumDefaultScanProgress:
+    fid: int
+    page: int
+    total_pages: int | None
+    pages_cap: int
+    fetched_count: int
+    status: ProgressStatus
+    message: str
+
+
+@dataclass(frozen=True)
+class ForumDefaultDbSyncResult:
+    db_path: Path
+    fids: list[int]
+    page_count: int
+    thread_count: int
+    inserted_count: int
+    updated_count: int
+    stopped_at_watermark: bool
+    watermark: int | None
+    fresh_threads: tuple[ForumThread, ...]
+
+
+ForumDefaultScanProgressCallback = Callable[[ForumDefaultScanProgress], None]
+
+
+def _is_mirror_thread(thread: ForumThread) -> bool:
+    return thread["is_forum"] or bool(thread["topic_type"] & FORUM_MIRROR_TYPE_BIT)
+
+
+def _normal_lastposts_for_watermark(
+    threads: Sequence[ForumThread],
+    *,
+    page_number: int,
+) -> list[int]:
+    """Return lastpost values of threads that participate in the watermark check.
+
+    Forum-mirror slots are always excluded. On page 1 the leading pinned prefix
+    (threads forced above their lastpost rank) is also excluded, because NGA
+    pins sticky/announcement threads to the top regardless of lastpost.
+    """
+    non_mirror = [thread for thread in threads if not _is_mirror_thread(thread)]
+    if not non_mirror:
+        return []
+    if page_number != 1:
+        return [thread["lastpost"] for thread in non_mirror]
+
+    page_max = max(thread["lastpost"] for thread in non_mirror)
+    normal_lastposts: list[int] = []
+    reached_normal = False
+    for thread in non_mirror:
+        if not reached_normal:
+            if thread["lastpost"] >= page_max:
+                reached_normal = True
+                normal_lastposts.append(thread["lastpost"])
+        else:
+            normal_lastposts.append(thread["lastpost"])
+    return normal_lastposts
+
+
+def _fetch_default_page_with_retry(
+    client: ForumThreadPageClient,
+    *,
+    fid: int,
+    page: int,
+    total_pages: int | None,
+    fetched_count: int,
+    pages_cap: int,
+    page_delay_seconds: int,
+    sleep_func: SleepFunc,
+    progress_callback: ForumDefaultScanProgressCallback | None,
+) -> ForumThreadPage:
+    attempt = 0
+    while True:
+        _report_default_progress(
+            progress_callback,
+            fid=fid,
+            page=page,
+            total_pages=total_pages,
+            pages_cap=pages_cap,
+            fetched_count=fetched_count,
+            status="fetching",
+            message="请求版面主题",
+        )
+        try:
+            return client.get_forum_thread_page(fid, page)
+        except NGAForumPageError as error:
+            if not _is_rate_limited(error) or attempt >= MAX_RATE_LIMIT_RETRIES:
+                raise
+            attempt += 1
+            wait_seconds = max(page_delay_seconds * 3, 10)
+            _report_default_progress(
+                progress_callback,
+                fid=fid,
+                page=page,
+                total_pages=total_pages,
+                pages_cap=pages_cap,
+                fetched_count=fetched_count,
+                status="retrying",
+                message=(
+                    f"刷新过快，等待{wait_seconds}秒后重试"
+                    f"{attempt}/{MAX_RATE_LIMIT_RETRIES}"
+                ),
+            )
+            sleep_func(wait_seconds)
+
+
+def _report_default_progress(
+    progress_callback: ForumDefaultScanProgressCallback | None,
+    *,
+    fid: int,
+    page: int,
+    total_pages: int | None,
+    pages_cap: int,
+    fetched_count: int,
+    status: ProgressStatus,
+    message: str,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        ForumDefaultScanProgress(
+            fid=fid,
+            page=page,
+            total_pages=total_pages,
+            pages_cap=pages_cap,
+            fetched_count=fetched_count,
+            status=status,
+            message=message,
+        )
+    )
+
+
+def sync_default_forum_threads_to_db(
+    client: ForumThreadPageClient,
+    *,
+    fids_pages: dict[int, int],
+    store: ForumThreadStore,
+    page_delay_seconds: int = 0,
+    sleep_func: SleepFunc = time.sleep,
+    progress_callback: ForumDefaultScanProgressCallback | None = None,
+) -> ForumDefaultDbSyncResult:
+    if page_delay_seconds < 0:
+        raise ValueError("page_delay_seconds不能为负数。")
+
+    if not fids_pages:
+        raise ValueError("至少需要一个fid。")
+
+    ordered_fids = list(fids_pages.keys())
+    total_threads = 0
+    total_inserted = 0
+    total_updated = 0
+    total_pages_scanned = 0
+    any_stopped = False
+    last_watermark: int | None = None
+    fresh_threads_by_tid: dict[int, ForumThread] = {}
+
+    for fid in ordered_fids:
+        pages_cap = fids_pages[fid]
+        cutoff = store.max_normal_lastpost(fid)
+        first_scan = cutoff is None
+        if cutoff is not None:
+            last_watermark = cutoff
+
+        page_buffers: list[list[ForumThread]] = []
+        fid_threads = 0
+        total_pages: int | None = None
+        page = 1
+        crossed = False
+
+        while True:
+            page_data = _fetch_default_page_with_retry(
+                client,
+                fid=fid,
+                page=page,
+                total_pages=total_pages,
+                fetched_count=total_threads + fid_threads,
+                pages_cap=pages_cap,
+                page_delay_seconds=page_delay_seconds,
+                sleep_func=sleep_func,
+                progress_callback=progress_callback,
+            )
+            total_pages = page_data["total_page"]
+            threads = page_data["threads"]
+            page_buffers.append(threads)
+            fid_threads += len(threads)
+            for thread in threads:
+                fresh_threads_by_tid[thread["tid"]] = thread
+
+            normal_lastposts = _normal_lastposts_for_watermark(
+                threads,
+                page_number=page,
+            )
+            if (
+                not first_scan
+                and not crossed
+                and normal_lastposts
+                and min(normal_lastposts) <= cutoff
+            ):
+                crossed = True
+
+            max_page = min(pages_cap, total_pages)
+
+            if crossed:
+                if page < max_page:
+                    if page_delay_seconds > 0:
+                        _report_default_progress(
+                            progress_callback,
+                            fid=fid,
+                            page=page,
+                            total_pages=total_pages,
+                            pages_cap=pages_cap,
+                            fetched_count=total_threads + fid_threads,
+                            status="waiting",
+                            message=f"等待{page_delay_seconds}秒（重叠页）",
+                        )
+                        sleep_func(page_delay_seconds)
+                    overlap_page = page + 1
+                    overlap_data = _fetch_default_page_with_retry(
+                        client,
+                        fid=fid,
+                        page=overlap_page,
+                        total_pages=total_pages,
+                        fetched_count=total_threads + fid_threads,
+                        pages_cap=pages_cap,
+                        page_delay_seconds=page_delay_seconds,
+                        sleep_func=sleep_func,
+                        progress_callback=progress_callback,
+                    )
+                    overlap_threads = overlap_data["threads"]
+                    page_buffers.append(overlap_threads)
+                    fid_threads += len(overlap_threads)
+                    for thread in overlap_threads:
+                        fresh_threads_by_tid[thread["tid"]] = thread
+                any_stopped = True
+                break
+
+            if page >= max_page:
+                break
+
+            if page_delay_seconds > 0:
+                _report_default_progress(
+                    progress_callback,
+                    fid=fid,
+                    page=page,
+                    total_pages=total_pages,
+                    pages_cap=pages_cap,
+                    fetched_count=total_threads + fid_threads,
+                    status="waiting",
+                    message=f"等待{page_delay_seconds}秒",
+                )
+                sleep_func(page_delay_seconds)
+            page += 1
+
+        upsert_results = store.upsert_fid_pages_atomically(fid, page_buffers)
+        fid_inserted = 0
+        fid_updated = 0
+        for upsert_result in upsert_results:
+            fid_inserted += upsert_result.inserted_count
+            fid_updated += upsert_result.updated_count
+        total_threads += fid_threads
+        total_inserted += fid_inserted
+        total_updated += fid_updated
+        total_pages_scanned += len(page_buffers)
+
+    return ForumDefaultDbSyncResult(
+        db_path=store.db_path,
+        fids=ordered_fids,
+        page_count=total_pages_scanned,
+        thread_count=total_threads,
+        inserted_count=total_inserted,
+        updated_count=total_updated,
+        stopped_at_watermark=any_stopped,
+        watermark=last_watermark,
+        fresh_threads=tuple(fresh_threads_by_tid.values()),
     )

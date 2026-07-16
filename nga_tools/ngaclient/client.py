@@ -61,6 +61,13 @@ class ForumThread(TypedDict):
     lastpost: int
     replies: int
     forumname: str
+    topic_type: int
+    is_forum: bool
+
+
+# Bitmask flag in the NGA ``type`` field marking a forum-mirror / megathread slot
+# (e.g. "旅行者指引广场") that is pinned/sunk out of the normal lastpost order.
+FORUM_MIRROR_TYPE_BIT = 0x200000
 
 
 class ForumThreadPage(TypedDict):
@@ -108,6 +115,15 @@ def _required_str(data: dict[str, object], key: str, source: object) -> str:
     raise ValueError(f"NGA forum thread has invalid {key}: {source!r}")
 
 
+def _optional_int(data: dict[str, object], key: str, default: int) -> int:
+    value = data.get(key)
+    if value is None:
+        return default
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return default
+
+
 def _forum_thread_forumname(
     thread: dict[str, object],
     *,
@@ -142,6 +158,8 @@ def _parse_forum_thread(raw_thread: object, *, default_forumname: str) -> ForumT
             default_forumname=default_forumname,
             source=source,
         ),
+        "topic_type": _optional_int(thread, "type", 0),
+        "is_forum": bool(thread.get("is_forum", False)),
     }
 
 

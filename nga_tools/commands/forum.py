@@ -21,11 +21,13 @@ from nga_tools.forum.watch import (
 )
 from nga_tools.forum.export import (
     DEFAULT_PAGE_DELAY_SECONDS,
+    ForumDefaultScanProgress,
     ForumPostdateScanProgress,
+    sync_default_forum_threads_to_db,
     sync_postdate_forum_threads_to_db,
     unique_fids,
 )
-from nga_tools.forum.thread_store import ForumThreadStore
+from nga_tools.forum.thread_store import ForumThreadStore, timestamp_text
 from nga_tools.console import InlineProgress, report_info
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import ForumThread
@@ -40,6 +42,8 @@ class DefaultForumSyncResult:
     db_updated_count: int
     scanned_count: int
     matched_count: int
+    stopped_at_watermark: bool = False
+    watermark: int | None = None
 
 
 def handle_forum_list(args: CommandArgs) -> None:
@@ -139,35 +143,34 @@ def _fetch_default_forum_pages_to_db(
     forum_store: ForumThreadStore,
     watch_configs: list[ForumWatchConfig],
     progress_display: InlineProgress,
-) -> tuple[int, int, int, tuple[ForumThread, ...]]:
-    fetched_count = 0
-    db_inserted_count = 0
-    db_updated_count = 0
-    fresh_threads_by_tid: dict[int, ForumThread] = {}
+    page_delay_seconds: int,
+) -> tuple[int, int, int, tuple[ForumThread, ...], bool, int | None]:
+    fids_pages = _max_default_pages_by_fid(watch_configs)
 
-    for fid, pages in _max_default_pages_by_fid(watch_configs).items():
-        for page in range(1, pages + 1):
-            progress_display.update(
-                f"正在抓取 fid={fid} 第{page}/{pages}页，"
-                f"已保存{fetched_count}个"
-            )
-            threads = client.get_forum_threads(fid, page)
-            result = forum_store.upsert_threads(fid, threads)
-            for thread in threads:
-                fresh_threads_by_tid[thread["tid"]] = thread
-            fetched_count += len(threads)
-            db_inserted_count += result.inserted_count
-            db_updated_count += result.updated_count
-            progress_display.update(
-                f"正在抓取 fid={fid} 第{page}/{pages}页，"
-                f"已保存{fetched_count}个"
-            )
+    def update_fetch_progress(progress: ForumDefaultScanProgress) -> None:
+        total_pages_text = (
+            "?" if progress.total_pages is None else str(progress.total_pages)
+        )
+        progress_display.update(
+            f"正在抓取 fid={progress.fid} "
+            f"第{progress.page}/{total_pages_text}页（上限{progress.pages_cap}页），"
+            f"已抓取{progress.fetched_count}个，{progress.message}"
+        )
 
+    result = sync_default_forum_threads_to_db(
+        client,
+        fids_pages=fids_pages,
+        store=forum_store,
+        page_delay_seconds=page_delay_seconds,
+        progress_callback=update_fetch_progress,
+    )
     return (
-        fetched_count,
-        db_inserted_count,
-        db_updated_count,
-        tuple(fresh_threads_by_tid.values()),
+        result.thread_count,
+        result.inserted_count,
+        result.updated_count,
+        result.fresh_threads,
+        result.stopped_at_watermark,
+        result.watermark,
     )
 
 
@@ -197,14 +200,21 @@ def sync_default_forum_watch(args: CommandArgs) -> DefaultForumSyncResult:
         )
 
     try:
-        fetched_count, db_inserted_count, db_updated_count, fresh_threads = (
-            _fetch_default_forum_pages_to_db(
-                client,
-                forum_store,
-                watch_configs,
-                progress_display,
-            )
+        (
+            fetched_count,
+            db_inserted_count,
+            db_updated_count,
+            fresh_threads,
+            stopped_at_watermark,
+            watermark,
+        ) = _fetch_default_forum_pages_to_db(
+            client,
+            forum_store,
+            watch_configs,
+            progress_display,
+            0,
         )
+        progress_display.update("正在筛查数据库…")
         scanned_count, matches = collect_matching_threads_from_thread_source(
             client=client,
             watch_configs=watch_configs,
@@ -228,6 +238,11 @@ def sync_default_forum_watch(args: CommandArgs) -> DefaultForumSyncResult:
         f"远端抓取{fetched_count}个主题，"
         f"数据库新增{db_inserted_count}个，更新{db_updated_count}个。"
     )
+    if stopped_at_watermark:
+        watermark_text = "无" if watermark is None else timestamp_text(watermark)
+        report_info(
+            f"已到达上次扫描水位（{watermark_text}）并完成一页重叠，提前停止后续扫描。"
+        )
     report_info(
         f"数据库筛查{scanned_count}个主题，匹配{len(matches)}个；"
         f"新增{status_counts['added']}个，更新{status_counts['updated']}个，"
@@ -250,6 +265,8 @@ def sync_default_forum_watch(args: CommandArgs) -> DefaultForumSyncResult:
         db_updated_count=db_updated_count,
         scanned_count=scanned_count,
         matched_count=len(matches),
+        stopped_at_watermark=stopped_at_watermark,
+        watermark=watermark,
     )
 
 
