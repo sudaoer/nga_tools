@@ -25,7 +25,11 @@ from nga_tools.backup.floor_map import (
     validate_floor_labels,
 )
 from nga_tools.backup import image_store
-from nga_tools.backup.html_images import effective_image_src, image_src_path
+from nga_tools.backup.html_images import (
+    effective_image_src,
+    image_src_path,
+    tag_attr_str,
+)
 from nga_tools.backup.post_html import (
     fill_missing_post_records,
     find_missing_lou,
@@ -125,13 +129,6 @@ class PdfRenderPool:
     ) -> None:
         del exc_type, exc, traceback
         self.close()
-
-
-def _tag_attr_str(tag: Tag, attr_name: str) -> Optional[str]:
-    value = tag.get(attr_name)
-    if isinstance(value, str):
-        return value
-    return None
 
 
 def _normalize_img_classes(img: Tag) -> list[str]:
@@ -344,7 +341,7 @@ def _replace_long_image_with_slices(
 ) -> None:
     wrapper = soup.new_tag("div")
     wrapper["class"] = "long-image-slices"
-    alt_text = _tag_attr_str(img, "alt") or ""
+    alt_text = tag_attr_str(img, "alt") or ""
     for slice_path in slice_paths:
         slice_img = soup.new_tag("img")
         slice_img["src"] = _relative_dir_path(html_dir, slice_path)

@@ -30,6 +30,10 @@ from nga_tools.core.atomic import (
     write_json_atomically,
 )
 from nga_tools.core.sqlite import SQLITE_BUSY_TIMEOUT_SECONDS
+from nga_tools.replay.file_state import (
+    DatabaseState as _DatabaseState,
+    database_state as snapshot_database_state,
+)
 
 InitialState = Literal["empty", "warm", "existing"]
 REPLAY_TARGET_MARKER_FILENAME = ".nga-replay-target.json"
@@ -66,19 +70,6 @@ class PreparationStats:
 
     def as_dict(self) -> dict[str, object]:
         return cast(dict[str, object], asdict(self))
-
-
-@dataclass(frozen=True, slots=True)
-class _FileState:
-    exists: bool
-    size: int
-    mtime_ns: int
-
-
-@dataclass(frozen=True, slots=True)
-class _DatabaseState:
-    database: _FileState
-    wal: _FileState
 
 
 def _is_windows() -> bool:
@@ -231,22 +222,8 @@ def _iter_archive_directories(source_output: Path) -> list[Path]:
     )
 
 
-def _file_state(path: Path) -> _FileState:
-    try:
-        stat_result = path.stat()
-    except FileNotFoundError:
-        return _FileState(False, 0, 0)
-    return _FileState(True, stat_result.st_size, stat_result.st_mtime_ns)
-
-
 def _database_state(path: Path) -> _DatabaseState:
-    wal_state = _file_state(Path(f"{path}-wal"))
-    if wal_state.size == 0:
-        wal_state = _FileState(False, 0, 0)
-    return _DatabaseState(
-        database=_file_state(path),
-        wal=wal_state,
-    )
+    return snapshot_database_state(path, ignore_empty_wal=True)
 
 
 def _source_database_states(source_output: Path) -> dict[str, _DatabaseState]:

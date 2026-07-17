@@ -21,6 +21,11 @@ from nga_tools.backup.image_store import require_current_image_index
 from nga_tools.core.hashing import hash_text, sha256
 from nga_tools.core.nga_audio import normalize_nga_audio_url
 from nga_tools.core.sqlite import configure_readonly_connection
+from nga_tools.replay.file_state import (
+    DatabaseState as _DatabaseState,
+    database_state as _database_state,
+    file_state as _file_state,
+)
 
 _CORPUS_FORMAT_VERSION = 8
 
@@ -280,37 +285,9 @@ class _ThreadReplayConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class _FileState:
-    exists: bool
-    size: int
-    mtime_ns: int
-
-
-@dataclass(frozen=True, slots=True)
-class _DatabaseState:
-    database: _FileState
-    wal: _FileState
-
-
-@dataclass(frozen=True, slots=True)
 class _ArchiveContent:
     posts_by_lou: dict[int, _ReplayPost]
     database_state: _DatabaseState
-
-
-def _file_state(path: Path) -> _FileState:
-    try:
-        stat_result = path.stat()
-    except FileNotFoundError:
-        return _FileState(False, 0, 0)
-    return _FileState(True, stat_result.st_size, stat_result.st_mtime_ns)
-
-
-def _database_state(path: Path) -> _DatabaseState:
-    return _DatabaseState(
-        database=_file_state(path),
-        wal=_file_state(Path(f"{path}-wal")),
-    )
 
 
 def _connect_frozen(

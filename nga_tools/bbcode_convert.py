@@ -1,52 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from functools import lru_cache
 from html import escape
-from typing import Protocol, cast
+from typing import cast
 
-import bbcode # type: ignore
-
-_Formatter = Callable[[str, str, dict[str, str], object | None, dict[str, object]], str]
-ImageSrcResolver = Callable[[str], str | None]
-_IMAGE_SRC_RESOLVER_CONTEXT_KEY = "image_src_resolver"
-
-
-class _BBCodeParser(Protocol):
-    def add_formatter(
-        self,
-        tag_name: str,
-        render_func: _Formatter,
-        **kwargs: object,
-    ) -> None: ...
-
-    def add_simple_formatter(
-        self,
-        tag_name: str,
-        format_string: str,
-        **kwargs: object,
-    ) -> None: ...
-
-    def format(self, data: str, **context: object) -> str: ...
-
-    def strip(self, data: str, strip_newlines: bool = False) -> str: ...
-
-
-_ParserFactory = Callable[..., _BBCodeParser]
-_PARSER_FACTORY = cast(_ParserFactory, bbcode.Parser)
-_INLINE_OPTIONS: dict[str, object] = {
-    "escape_html": False,
-    "replace_links": False,
-    "replace_cosmetic": False,
-}
-
-
-def _first_option(options: dict[str, str], tag_name: str) -> str:
-    if tag_name in options:
-        return options[tag_name]
-    if options:
-        return next(iter(options.keys()))
-    return ""
+from nga_tools.bbcode_parser import (
+    BBCodeParser,
+    IMAGE_SRC_RESOLVER_CONTEXT_KEY,
+    INLINE_OPTIONS,
+    ImageSrcResolver,
+    first_option,
+    new_parser,
+)
 
 
 def _render_url(
@@ -67,7 +32,7 @@ def _render_img(
     _parent: object | None,
     context: dict[str, object],
 ) -> str:
-    resolver = context.get(_IMAGE_SRC_RESOLVER_CONTEXT_KEY)
+    resolver = context.get(IMAGE_SRC_RESOLVER_CONTEXT_KEY)
     if callable(resolver):
         resolved_value = cast(ImageSrcResolver, resolver)(value)
         if resolved_value is None:
@@ -84,7 +49,7 @@ def _render_color(
     _parent: object | None,
     _context: dict[str, object],
 ) -> str:
-    color = _first_option(options, name)
+    color = first_option(options, name)
     return f'<span style="color:{color}">{value}</span>'
 
 
@@ -95,42 +60,32 @@ def _render_size(
     _parent: object | None,
     _context: dict[str, object],
 ) -> str:
-    size = _first_option(options, name)
+    size = first_option(options, name)
     return f'<span style="font-size:{size}">{value}</span>'
 
 
-def _new_parser() -> _BBCodeParser:
-    return _PARSER_FACTORY(
-        newline="\n",
-        install_defaults=False,
-        escape_html=False,
-        replace_links=False,
-        replace_cosmetic=False,
-    )
-
-
-def _install_html_formatters(parser: _BBCodeParser) -> None:
-    parser.add_simple_formatter("b", "<strong>%(value)s</strong>", **_INLINE_OPTIONS)
-    parser.add_simple_formatter("i", "<em>%(value)s</em>", **_INLINE_OPTIONS)
-    parser.add_simple_formatter("u", "<u>%(value)s</u>", **_INLINE_OPTIONS)
-    parser.add_simple_formatter("s", "<del>%(value)s</del>", **_INLINE_OPTIONS)
+def _install_html_formatters(parser: BBCodeParser) -> None:
+    parser.add_simple_formatter("b", "<strong>%(value)s</strong>", **INLINE_OPTIONS)
+    parser.add_simple_formatter("i", "<em>%(value)s</em>", **INLINE_OPTIONS)
+    parser.add_simple_formatter("u", "<u>%(value)s</u>", **INLINE_OPTIONS)
+    parser.add_simple_formatter("s", "<del>%(value)s</del>", **INLINE_OPTIONS)
     parser.add_simple_formatter(
         "quote",
         "<blockquote>%(value)s</blockquote>",
-        **_INLINE_OPTIONS,
+        **INLINE_OPTIONS,
     )
     parser.add_simple_formatter(
         "code",
         "<pre><code>%(value)s</code></pre>",
-        **_INLINE_OPTIONS,
+        **INLINE_OPTIONS,
     )
-    parser.add_formatter("url", _render_url, **_INLINE_OPTIONS)
-    parser.add_formatter("img", _render_img, **_INLINE_OPTIONS)
-    parser.add_formatter("color", _render_color, **_INLINE_OPTIONS)
-    parser.add_formatter("size", _render_size, **_INLINE_OPTIONS)
+    parser.add_formatter("url", _render_url, **INLINE_OPTIONS)
+    parser.add_formatter("img", _render_img, **INLINE_OPTIONS)
+    parser.add_formatter("color", _render_color, **INLINE_OPTIONS)
+    parser.add_formatter("size", _render_size, **INLINE_OPTIONS)
 
 
-def _install_strip_formatters(parser: _BBCodeParser) -> None:
+def _install_strip_formatters(parser: BBCodeParser) -> None:
     _install_html_formatters(parser)
     for tag_name in (
         "align",
@@ -142,20 +97,20 @@ def _install_strip_formatters(parser: _BBCodeParser) -> None:
         "pid",
         "uid",
     ):
-        parser.add_simple_formatter(tag_name, "%(value)s", **_INLINE_OPTIONS)
-    parser.add_simple_formatter("*", "%(value)s", standalone=True, **_INLINE_OPTIONS)
+        parser.add_simple_formatter(tag_name, "%(value)s", **INLINE_OPTIONS)
+    parser.add_simple_formatter("*", "%(value)s", standalone=True, **INLINE_OPTIONS)
 
 
 @lru_cache(maxsize=1)
-def _html_parser() -> _BBCodeParser:
-    parser = _new_parser()
+def _html_parser() -> BBCodeParser:
+    parser = new_parser()
     _install_html_formatters(parser)
     return parser
 
 
 @lru_cache(maxsize=1)
-def _strip_parser() -> _BBCodeParser:
-    parser = _new_parser()
+def _strip_parser() -> BBCodeParser:
+    parser = new_parser()
     _install_strip_formatters(parser)
     return parser
 
@@ -169,7 +124,7 @@ def bbcode_to_html(
         return _html_parser().format(text)
     return _html_parser().format(
         text,
-        **{_IMAGE_SRC_RESOLVER_CONTEXT_KEY: image_src_resolver},
+        **{IMAGE_SRC_RESOLVER_CONTEXT_KEY: image_src_resolver},
     )
 
 
