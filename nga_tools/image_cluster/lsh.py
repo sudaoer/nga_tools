@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from nga_tools.image_cluster.features import hamming_distance
+
+_HASH_BITS = 64
+
+
+@dataclass(frozen=True)
+class LshConfig:
+    bands: int = 4
+    seed: int = 20260717
+
+
+@dataclass(frozen=True)
+class CandidatePair:
+    a: str
+    b: str
+
+    @classmethod
+    def sorted(cls, a: str, b: str) -> CandidatePair:
+        if a <= b:
+            return cls(a=a, b=b)
+        return cls(a=b, b=a)
+
+
+def _validate_bands(bands: int) -> int:
+    if bands <= 0:
+        raise ValueError(f"lsh_bands 必须为正数：{bands}")
+    if _HASH_BITS % bands != 0:
+        raise ValueError(
+            f"lsh_bands={bands} 必须能整除 {_HASH_BITS}"
+        )
+    return bands
+
+
+def generate_candidate_pairs(
+    hashes: dict[str, str],
+    config: LshConfig,
+) -> list[CandidatePair]:
+    if len(hashes) < 2:
+        return []
+
+    bands = _validate_bands(config.bands)
+    bits_per_band = _HASH_BITS // bands
+    mask = (1 << bits_per_band) - 1
+
+    seen: set[tuple[str, str]] = set()
+    for band_idx in range(bands):
+        shift = band_idx * bits_per_band
+        buckets: dict[int, list[str]] = {}
+        for path, hash_hex in hashes.items():
+            value = int(hash_hex, 16)
+            band_value = (value >> shift) & mask
+            buckets.setdefault(band_value, []).append(path)
+
+        for members in buckets.values():
+            if len(members) < 2:
+                continue
+            count = len(members)
+            for i in range(count):
+                for j in range(i + 1, count):
+                    seen.add(
+                        (min(members[i], members[j]), max(members[i], members[j]))
+                    )
+
+    return sorted(
+        (CandidatePair(a=a, b=b) for a, b in seen),
+        key=lambda p: (p.a, p.b),
+    )
+
+
+def collect_distance_histogram(
+    pairs: list[CandidatePair],
+    hashes: dict[str, str],
+    max_distance: int = _HASH_BITS,
+) -> list[int]:
+    histogram = [0] * (max_distance + 1)
+    for pair in pairs:
+        hash_a = hashes.get(pair.a)
+        hash_b = hashes.get(pair.b)
+        if hash_a is None or hash_b is None:
+            continue
+        distance = hamming_distance(hash_a, hash_b)
+        if distance <= max_distance:
+            histogram[distance] += 1
+    return histogram
