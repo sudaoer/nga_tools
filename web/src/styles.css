@@ -1719,6 +1719,15 @@ select {
   gap: 1px;
 }
 
+.database-filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--nga-border-soft);
+  background: var(--nga-surface);
+}
+
 .database-item,
 .table-item {
   display: grid;
@@ -1980,6 +1989,10 @@ select {
   .database-content,
   .version-detail-pane {
     padding: 12px;
+  }
+
+  .database-filters {
+    grid-template-columns: 1fr;
   }
 
   .db-toolbar {

@@ -22,6 +22,21 @@ import type {
   TableSummary,
 } from '../types'
 
+const DATABASE_SORT_KEYS = [
+  'relativePath',
+  'sizeBytes',
+  'updatedAt',
+  'tableCount',
+] as const
+type DatabaseSortKey = (typeof DATABASE_SORT_KEYS)[number]
+
+const DATABASE_SORT_LABELS: Record<DatabaseSortKey, string> = {
+  relativePath: '文件路径',
+  sizeBytes: '大小',
+  updatedAt: '更新时间',
+  tableCount: '表数量',
+}
+
 const DATABASE_LIST_PANE_ID = 'database-list'
 const TABLE_LIST_PANE_ID = 'table-list'
 const {
@@ -83,6 +98,11 @@ const requestedTableName = ref<string | null>(null)
 const requestedRowId = ref<number | null>(null)
 const schemaCache = new Map<string, DatabaseSchema>()
 
+const databaseSort = reactive({
+  sortBy: null as DatabaseSortKey | null,
+  sortDirection: 'asc' as SortDirection,
+})
+
 const rowQuery = reactive({
   q: '',
   offset: 0,
@@ -106,6 +126,13 @@ interface TableSelectionOptions {
 const selectedDatabase = computed(
   () => databases.value.find((database) => database.id === selectedDatabaseId.value) || null,
 )
+
+const sortedDatabases = computed(() => {
+  if (databaseSort.sortBy === null) {
+    return databases.value
+  }
+  return databases.value.toSorted(compareDatabases)
+})
 
 const selectedTable = computed(
   () => schema.value?.tables.find((table) => table.name === selectedTableName.value) || null,
@@ -167,6 +194,46 @@ function formatTime(value: string): string {
     return value || '-'
   }
   return date.toLocaleString()
+}
+
+function isDatabaseSortKey(value: string | null): value is DatabaseSortKey {
+  return value !== null && DATABASE_SORT_KEYS.includes(value as DatabaseSortKey)
+}
+
+function compareDatabaseValues(
+  left: DatabaseSummary,
+  right: DatabaseSummary,
+  sortBy: DatabaseSortKey,
+): number {
+  if (sortBy === 'relativePath') {
+    return left.relativePath.localeCompare(right.relativePath, 'zh-Hans-CN')
+  }
+  if (sortBy === 'sizeBytes') {
+    return left.sizeBytes - right.sizeBytes
+  }
+  if (sortBy === 'tableCount') {
+    return left.tableCount - right.tableCount
+  }
+
+  const leftTime = Date.parse(left.updatedAt)
+  const rightTime = Date.parse(right.updatedAt)
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
+    return leftTime - rightTime
+  }
+  return left.updatedAt.localeCompare(right.updatedAt, 'zh-Hans-CN')
+}
+
+function compareDatabases(left: DatabaseSummary, right: DatabaseSummary): number {
+  if (databaseSort.sortBy === null) {
+    return 0
+  }
+
+  const result = compareDatabaseValues(left, right, databaseSort.sortBy)
+  if (result !== 0) {
+    return databaseSort.sortDirection === 'desc' ? -result : result
+  }
+  const pathResult = left.relativePath.localeCompare(right.relativePath, 'zh-Hans-CN')
+  return pathResult !== 0 ? pathResult : left.id.localeCompare(right.id, 'zh-Hans-CN')
 }
 
 function columnLabel(column: ColumnInfo): string {
@@ -244,6 +311,15 @@ function hydrateStateFromUrl(): void {
   }
   requestedRowId.value = integerFromParam(params.get('rowid'), 1)
 
+  const databaseSortBy = params.get('db_sort')
+  if (isDatabaseSortKey(databaseSortBy)) {
+    databaseSort.sortBy = databaseSortBy
+    const databaseSortDirection = params.get('db_sort_direction')
+    if (isSortDirection(databaseSortDirection)) {
+      databaseSort.sortDirection = databaseSortDirection
+    }
+  }
+
   rowQuery.q = params.get('q') || ''
   rowQuery.offset = integerFromParam(params.get('offset'), 0) || 0
   rowQuery.limit = integerFromParam(params.get('limit'), 1) || 50
@@ -270,6 +346,10 @@ function syncUrl(): void {
   const params = new URLSearchParams()
   setParam(params, 'db', selectedDatabaseId.value)
   setParam(params, 'table', selectedTableName.value)
+  setParam(params, 'db_sort', databaseSort.sortBy)
+  if (databaseSort.sortBy !== null && databaseSort.sortDirection !== 'asc') {
+    params.set('db_sort_direction', databaseSort.sortDirection)
+  }
   if (rowQuery.offset !== 0) {
     params.set('offset', String(rowQuery.offset))
   }
@@ -346,6 +426,12 @@ async function loadDatabases(refresh = false): Promise<void> {
 
 function refreshDatabases(): void {
   void loadDatabases(true)
+}
+
+function changeDatabaseSortField(): void {
+  if (databaseSort.sortBy === null) {
+    databaseSort.sortDirection = 'asc'
+  }
 }
 
 async function selectDatabase(
@@ -507,6 +593,8 @@ watch(
     selectedDatabaseId.value,
     selectedTableName.value,
     selectedRow.value?.rowId,
+    databaseSort.sortBy,
+    databaseSort.sortDirection,
     rowQuery.q,
     rowQuery.offset,
     rowQuery.limit,
@@ -573,9 +661,30 @@ onMounted(() => {
             <div v-else-if="loadingDatabases" class="empty-state">正在读取数据库列表...</div>
             <div v-else-if="databases.length === 0" class="empty-state">未找到项目内 SQLite 数据库。</div>
 
+            <div class="database-filters" aria-label="数据库排序">
+              <select
+                v-model="databaseSort.sortBy"
+                aria-label="数据库排序字段"
+                @change="changeDatabaseSortField"
+              >
+                <option :value="null">保持当前顺序</option>
+                <option v-for="key in DATABASE_SORT_KEYS" :key="key" :value="key">
+                  按{{ DATABASE_SORT_LABELS[key] }}
+                </option>
+              </select>
+              <select
+                v-model="databaseSort.sortDirection"
+                aria-label="数据库排序方向"
+                :disabled="databaseSort.sortBy === null"
+              >
+                <option value="asc">升序</option>
+                <option value="desc">降序</option>
+              </select>
+            </div>
+
             <div class="database-list">
         <button
-          v-for="database in databases"
+          v-for="database in sortedDatabases"
           :key="database.id"
           type="button"
           class="database-item"
