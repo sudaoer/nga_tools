@@ -9,6 +9,7 @@ import { RouterLink, RouterView } from 'vue-router'
       <RouterLink to="/admin/databases">数据库</RouterLink>
       <RouterLink to="/admin/image-usage">图片使用</RouterLink>
       <RouterLink to="/admin/image-problems">图片问题</RouterLink>
+      <RouterLink to="/admin/clusters">图片聚类</RouterLink>
     </nav>
     <RouterView />
   </main>

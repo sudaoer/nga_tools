@@ -296,3 +296,41 @@ export interface TableRows {
 export interface TableRowDetail {
   row: TableRow
 }
+
+export interface ClusterMemberItem {
+  relativePath: string
+  fileUrl: string
+  isSourceCandidate: boolean
+}
+
+export interface ClusterListItem {
+  clusterId: number
+  memberCount: number
+  sourceRelativePath: string
+  sourceFileUrl: string
+}
+
+export interface ClustersResult {
+  runId: number | null
+  items: ClusterListItem[]
+  total: number
+  offset: number
+  limit: number
+}
+
+export interface ClusterDetailItem {
+  clusterId: number
+  members: ClusterMemberItem[]
+}
+
+export interface ClusterDetailResult {
+  runId: number | null
+  cluster: ClusterDetailItem | null
+}
+
+export interface ClusterStatsResult {
+  runId: number | null
+  totalClusters: number
+  totalImages: number
+  maxClusterSize: number
+}

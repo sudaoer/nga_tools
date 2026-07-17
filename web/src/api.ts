@@ -1,4 +1,7 @@
 import type {
+  ClusterDetailResult,
+  ClustersResult,
+  ClusterStatsResult,
   DatabaseSchema,
   DatabaseSummary,
   ImageProblemFilter,
@@ -407,5 +410,54 @@ export async function fetchTableRowDetail(
     `/api/databases/${encodeURIComponent(dbId)}/tables/${encodeURIComponent(
       tableName,
     )}/rows/${rowId}`,
+  )
+}
+
+export interface FetchClustersOptions {
+  runId?: number | null
+  minSize?: number
+  offset: number
+  limit: number
+}
+
+export async function fetchClusters(
+  options: FetchClustersOptions,
+): Promise<ClustersResult> {
+  const params = new URLSearchParams()
+  if (options.runId != null) {
+    params.set('run_id', String(options.runId))
+  }
+  if (options.minSize != null) {
+    params.set('min_size', String(options.minSize))
+  }
+  params.set('offset', String(options.offset))
+  params.set('limit', String(options.limit))
+  return readJson<ClustersResult>(`/api/clusters?${params.toString()}`)
+}
+
+export async function fetchClusterDetail(
+  clusterId: number,
+  runId?: number | null,
+): Promise<ClusterDetailResult> {
+  const params = new URLSearchParams()
+  if (runId != null) {
+    params.set('run_id', String(runId))
+  }
+  const query = params.toString()
+  return readJson<ClusterDetailResult>(
+    `/api/clusters/${clusterId}${query ? `?${query}` : ''}`,
+  )
+}
+
+export async function fetchClusterStats(
+  runId?: number | null,
+): Promise<ClusterStatsResult> {
+  const params = new URLSearchParams()
+  if (runId != null) {
+    params.set('run_id', String(runId))
+  }
+  const query = params.toString()
+  return readJson<ClusterStatsResult>(
+    `/api/clusters/stats${query ? `?${query}` : ''}`,
   )
 }

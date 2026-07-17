@@ -18,6 +18,7 @@ class ClusterListItem(TypedDict):
     clusterId: int
     memberCount: int
     sourceRelativePath: str
+    sourceFileUrl: str
 
 
 class ClusterDetailItem(TypedDict):
@@ -60,6 +61,10 @@ def _source_path(cluster: Cluster) -> str:
     return cluster.members[0].relative_path if cluster.members else ""
 
 
+def _file_url(relative_path: str) -> str:
+    return "/api/files/" + quote(relative_path, safe="/")
+
+
 def read_clusters(
     output_dir: Path,
     run_id: int | None,
@@ -88,6 +93,7 @@ def read_clusters(
             "clusterId": c.cluster_id,
             "memberCount": len(c.members),
             "sourceRelativePath": _source_path(c),
+            "sourceFileUrl": _file_url(_source_path(c)),
         }
         for c in page
     ]
