@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image
 from rich.console import Console
 
-from nga_tools.backup import image_store
+from nga_tools.backup import image_index, image_store
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.image_verify import (
     ImageVerifyResult,
@@ -463,7 +463,9 @@ class ImageVerifyAllTest:
                 "nga_tools.config.get_config",
                 return_value=config,
             ):
-                image_store.upsert_image_mapping(image_url, unique_image)
+                image_index.ImageIndexStore(output_dir).upsert_mapping(
+                    image_url, unique_image
+                )
                 unique_image.write_bytes(b"corrupted after overlay save")
                 paths = _list_thread_referenced_image_paths(
                     101,

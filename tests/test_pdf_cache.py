@@ -16,7 +16,7 @@ import pytest
 from PIL import Image
 from rich.console import Console
 
-from nga_tools.backup import image_store
+from nga_tools.backup import image_index
 from nga_tools.backup import pdf_renderer
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_map import FloorLabels
@@ -541,7 +541,9 @@ class PdfImageSourceTest:
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),
                 patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
             ):
-                image_store.upsert_image_mapping(image_url, unique_image)
+                image_index.ImageIndexStore(output_dir).upsert_mapping(
+                    image_url, unique_image
+                )
                 html_content_by_lou, folder_pdf, _floor_labels = _read_pdf_html(
                     101,
                     None,
@@ -583,7 +585,9 @@ class PdfImageSourceTest:
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),
                 patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
             ):
-                image_store.upsert_image_mapping(image_url, unique_image)
+                image_index.ImageIndexStore(output_dir).upsert_mapping(
+                    image_url, unique_image
+                )
                 html_content_by_lou, folder_pdf, _floor_labels = _read_pdf_html(
                     101,
                     None,
@@ -718,7 +722,9 @@ class PdfImageSourceTest:
                     return_value=False,
                 ),
             ):
-                image_store.upsert_image_mapping(image_url, unique_image)
+                image_index.ImageIndexStore(output_dir).upsert_mapping(
+                    image_url, unique_image
+                )
                 store = ThreadArchiveStore(thread_dir)
                 store.upsert_post_overlay(
                     1,
@@ -770,7 +776,9 @@ class PdfImageSourceTest:
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),
                 patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
             ):
-                image_store.upsert_image_mapping(image_url, unique_image)
+                image_index.ImageIndexStore(output_dir).upsert_mapping(
+                    image_url, unique_image
+                )
                 html_content_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
                     101,
                     None,

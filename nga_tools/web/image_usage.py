@@ -11,7 +11,7 @@ from typing import Literal, Optional, TypedDict, cast
 from urllib.parse import quote
 
 from nga_tools.core.nga_images import NGA_img_link_verify
-from nga_tools.backup import image_store
+from nga_tools.backup import image_index
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
 from nga_tools.backup.image_reference_cache import (
     scan_image_references_for_records_readonly,
@@ -19,7 +19,6 @@ from nga_tools.backup.image_reference_cache import (
 from nga_tools.backup.image_pipeline import PostImageReference
 from nga_tools.backup.models import PostRecord
 from nga_tools.backup.post_overlay import apply_post_overlays_to_records
-from nga_tools.core.sqlite import configure_readonly_connection
 from nga_tools.forum.thread_configs import (
     NGAThreadConfigs,
     ThreadConfig,
@@ -292,43 +291,29 @@ def _thread_title(
 
 
 def _image_index_connection(output_dir: Path) -> sqlite3.Connection:
-    db_path = (output_dir / image_store.IMAGE_INDEX_FILENAME).resolve()
+    store = image_index.ImageIndexStore(output_dir)
+    db_path = store.db_path
     if not db_path.is_file():
-        raise ImageIndexUnavailableError(f"缺少{image_store.IMAGE_INDEX_FILENAME}。")
-    connection = sqlite3.connect(
-        f"file:{quote(str(db_path), safe='/:')}?mode=ro",
-        uri=True,
-    )
-    configure_readonly_connection(connection)
+        raise ImageIndexUnavailableError(f"缺少{image_index.IMAGE_INDEX_FILENAME}。")
     try:
-        image_store.require_current_image_index(connection, db_path)
-    except BaseException:
-        connection.close()
-        raise
-    return connection
+        return store.connect_readonly(create=False)
+    except FileNotFoundError as error:
+        raise ImageIndexUnavailableError(
+            f"缺少{image_index.IMAGE_INDEX_FILENAME}。"
+        ) from error
 
 
 def _image_paths_for_urls(
     connection: sqlite3.Connection,
     urls: set[str],
+    output_dir: Path,
 ) -> dict[str, str]:
-    mappings: dict[str, str] = {}
-    sorted_urls = sorted(urls)
-    for start in range(0, len(sorted_urls), 900):
-        chunk = sorted_urls[start : start + 900]
-        placeholders = ",".join("?" for _ in chunk)
-        rows = connection.execute(
-            f"""
-            SELECT url, unique_rel_path
-            FROM image_mappings
-            WHERE url IN ({placeholders})
-            """,
-            chunk,
-        ).fetchall()
-        for raw_url, raw_path in rows:
-            if isinstance(raw_url, str) and isinstance(raw_path, str):
-                mappings[raw_url] = raw_path
-    return mappings
+    mappings = image_index.ImageIndexStore(
+        output_dir
+    ).mappings_for_urls_in_connection(connection, urls)
+    return {
+        url: mapping.unique_rel_path for url, mapping in mappings.items()
+    }
 
 
 @dataclass(frozen=True)
@@ -412,7 +397,7 @@ def _invalid_image_sources(content: str) -> tuple[_InvalidImageSource, ...]:
             )
             cursor = value_start
 
-        normalized_source = image_store.normalize_nga_image_url(raw_source)
+        normalized_source = image_index.normalize_nga_image_url(raw_source)
         if not well_formed or not NGA_img_link_verify(normalized_source):
             invalid_sources.append(
                 _InvalidImageSource(
@@ -599,7 +584,11 @@ def _scan_references(
                     for reference in scan.references
                     if reference.valid
                 }
-                image_paths = _image_paths_for_urls(connection, valid_urls)
+                image_paths = _image_paths_for_urls(
+                    connection,
+                    valid_urls,
+                    output_dir,
+                )
                 rows_by_lou = {row.lou: row for row in rows}
                 for scan in scan_result.scans:
                     row = rows_by_lou.get(scan.lou)
@@ -691,23 +680,20 @@ def _scan_references(
 def _inventory_items(
     connection: sqlite3.Connection,
     scan_result: _ReferenceScanResult,
+    output_dir: Path,
 ) -> list[ImageUsageItem]:
     inventory: dict[str, tuple[str, int]] = {}
-    cursor = connection.execute("SELECT url, unique_rel_path FROM image_mappings")
-    while rows := cursor.fetchmany(10_000):
-        for raw_url, raw_relative_path in rows:
-            if not isinstance(raw_url, str) or not isinstance(
-                raw_relative_path, str
-            ):
-                continue
-            previous = inventory.get(raw_relative_path)
-            if previous is None:
-                inventory[raw_relative_path] = (raw_url, 1)
-            else:
-                inventory[raw_relative_path] = (
-                    min(previous[0], raw_url),
-                    previous[1] + 1,
-                )
+    for url, relative_path in image_index.ImageIndexStore(
+        output_dir
+    ).iter_mapping_rows(connection):
+        previous = inventory.get(relative_path)
+        if previous is None:
+            inventory[relative_path] = (url, 1)
+        else:
+            inventory[relative_path] = (
+                min(previous[0], url),
+                previous[1] + 1,
+            )
 
     items: list[ImageUsageItem] = []
     for relative_path, (source_url, mapping_count) in inventory.items():
@@ -763,19 +749,16 @@ def build_image_usage_snapshot(output_dir: Path) -> ImageUsageSnapshot:
     }
     try:
         with closing(_image_index_connection(output_dir)) as connection:
-            connection.execute(
-                "SELECT url, unique_rel_path FROM image_mappings LIMIT 0"
-            ).fetchall()
             scan_result = _scan_references(
                 connection,
                 thread_groups,
                 thread_titles,
                 output_dir,
             )
-            items = _inventory_items(connection, scan_result)
+            items = _inventory_items(connection, scan_result, output_dir)
     except (sqlite3.Error, OSError, ValueError) as error:
         raise ImageIndexUnavailableError(
-            f"无法读取{image_store.IMAGE_INDEX_FILENAME}：{error}"
+            f"无法读取{image_index.IMAGE_INDEX_FILENAME}：{error}"
         ) from error
 
     items_by_usage = sorted(

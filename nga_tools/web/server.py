@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from nga_tools.config import get_config
 from nga_tools.console import report_info
-from nga_tools.backup import image_store
+from nga_tools.backup import image_index
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.core.output_lock import ThreadOutputLockError, use_output_root_lock
@@ -216,7 +216,7 @@ def _database_schema_fingerprint(
 
 
 def _image_usage_fingerprint(output_dir: Path) -> ImageUsageFingerprint:
-    image_index_path = output_dir / image_store.IMAGE_INDEX_FILENAME
+    image_index_path = output_dir / image_index.IMAGE_INDEX_FILENAME
     entries = [
         f"config:{_file_fingerprint(Path(get_config().thread_config_file))}",
         f"output:{_file_fingerprint(output_dir)}",

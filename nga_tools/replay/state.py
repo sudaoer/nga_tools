@@ -15,7 +15,7 @@ from typing import Literal, cast
 
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
 from nga_tools.backup.audio_store import AUDIO_INDEX_FILENAME, AUDIO_UNIQUE_DIRNAME
-from nga_tools.backup.image_store import (
+from nga_tools.backup.image_index import (
     IMAGE_INDEX_FILENAME,
 )
 from nga_tools.backup.image_validation_store import IMAGE_CACHE_FILENAME

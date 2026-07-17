@@ -16,7 +16,7 @@ import pytest
 from PIL import Image
 
 from nga_tools.core.nga_images import NGA_img_link_verify
-from nga_tools.backup import image_store
+from nga_tools.backup import image_index, image_store
 from nga_tools.core import image_formats
 from nga_tools.storage import UnsupportedStorageFormatError
 
@@ -118,7 +118,9 @@ class ImageStoreTest:
                     temp_image,
                     {"url": image_url},
                 )
-                mapping = image_store.image_mapping_for_url(image_url)
+                mapping = image_index.ImageIndexStore(
+                    output_dir
+                ).mapping_for_url(image_url)
 
             unique_path = Path(result["unique_path"])
             assert unique_path.exists()
@@ -145,7 +147,9 @@ class ImageStoreTest:
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
                 result = image_store.store_existing_image(legacy_image, image_url)
-                mapping = image_store.image_mapping_for_url(image_url)
+                mapping = image_index.ImageIndexStore(
+                    output_dir
+                ).mapping_for_url(image_url)
 
             unique_path = Path(result["unique_path"])
             assert legacy_image.exists()
@@ -168,7 +172,9 @@ class ImageStoreTest:
                 "https://img.nga.178.com/attachments/"
                 "mon_202506/06/lsQkle-,552eXuT3cS10p-7f7.png"
             )
-            existing_url = image_store.normalize_nga_image_url(existing_url_with_comma)
+            existing_url = image_index.normalize_nga_image_url(
+                existing_url_with_comma
+            )
             missing_url = (
                 "https://img.nga.178.com/attachments/"
                 "mon_202506/06/lsQ2w-8o79K8ToS5k-5k.webp"
@@ -179,8 +185,9 @@ class ImageStoreTest:
                 "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
-                image_store.upsert_image_mapping(existing_url, existing_path)
-                mappings = image_store.image_mappings_for_urls(
+                index_store = image_index.ImageIndexStore(output_dir)
+                index_store.upsert_mapping(existing_url, existing_path)
+                mappings = index_store.mappings_for_urls(
                     [existing_url_with_comma, missing_url, invalid_url]
                 )
                 pending_tasks = image_store.pending_image_download_tasks(
@@ -206,16 +213,17 @@ class ImageStoreTest:
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ),
             patch(
-                "nga_tools.backup.image_store.configure_connection",
-                wraps=image_store.configure_connection,
+                "nga_tools.backup.image_index.configure_connection",
+                wraps=image_index.configure_connection,
             ) as writable_config_mock,
             patch(
-                "nga_tools.backup.image_store.configure_readonly_connection",
-                wraps=image_store.configure_readonly_connection,
+                "nga_tools.backup.image_index.configure_readonly_connection",
+                wraps=image_index.configure_readonly_connection,
             ) as readonly_config_mock,
         ):
-            assert image_store.image_mappings_for_urls([missing_url]) == {}
-            assert image_store.image_mappings_for_urls([missing_url]) == {}
+            index_store = image_index.ImageIndexStore(output_dir)
+            assert index_store.mappings_for_urls([missing_url]) == {}
+            assert index_store.mappings_for_urls([missing_url]) == {}
 
         assert (output_dir / "image_index.sqlite3").is_file()
         assert writable_config_mock.call_count == 1
@@ -240,7 +248,7 @@ class ImageStoreTest:
         )
         old_relative_path = "images_unique/old.png"
         with sqlite3.connect(image_index_path) as connection:
-            image_store.ensure_storage_metadata(connection, role="image_index")
+            image_index.ensure_storage_metadata(connection, role="image_index")
             connection.execute(
                 """
                 CREATE TABLE image_mappings (
@@ -270,7 +278,7 @@ class ImageStoreTest:
             return_value=SimpleNamespace(output_dir=str(output_dir)),
         ):
             with pytest.raises(UnsupportedStorageFormatError):
-                image_store.upsert_image_mapping(
+                image_index.ImageIndexStore(output_dir).upsert_mapping(
                     image_url,
                     output_dir / "images_unique/new.png",
                 )
@@ -301,7 +309,9 @@ class ImageStoreTest:
                 "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
-                image_store.upsert_image_mapping(image_url, invalid_path)
+                image_index.ImageIndexStore(output_dir).upsert_mapping(
+                    image_url, invalid_path
+                )
                 pending_tasks = image_store.pending_image_download_tasks(
                     [{"url": image_url}]
                 )
@@ -326,7 +336,9 @@ class ImageStoreTest:
                 "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
-                image_store.upsert_image_mapping(image_url, avif_path)
+                image_index.ImageIndexStore(output_dir).upsert_mapping(
+                    image_url, avif_path
+                )
                 pending_tasks = image_store.pending_image_download_tasks(
                     [{"url": image_url}]
                 )
@@ -579,7 +591,9 @@ def test_prepare_image_download_tasks_uses_persistent_cache(tmp_path: Path) -> N
         "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
-        image_store.upsert_image_mappings([(url, image_path)])
+        image_index.ImageIndexStore(output_dir).upsert_mappings(
+            [(url, image_path)]
+        )
 
         cache_a = ImageValidationCache()
         with use_image_validation_cache(cache_a):
@@ -627,7 +641,7 @@ def test_shared_validation_cache_reports_batch_local_persistent_hits(
         "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
-        image_store.upsert_image_mapping(url, image_path)
+        image_index.ImageIndexStore(output_dir).upsert_mapping(url, image_path)
         seed_cache = ImageValidationCache()
         seed_cache.validate(image_path)
         seed_cache.flush_new_entries()

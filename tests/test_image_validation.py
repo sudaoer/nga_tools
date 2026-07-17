@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from nga_tools.backup import image_store
+from nga_tools.backup import image_index, image_store
 from nga_tools.backup.image_pipeline import download_images_compact
 from nga_tools.backup.image_validation import (
     ImageValidationCache,
@@ -40,7 +40,7 @@ def test_preparation_deep_validates_alias_mappings_once(tmp_path: Path) -> None:
         "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
-        image_store.upsert_image_mappings(
+        image_index.ImageIndexStore(output_dir).upsert_mappings(
             [(first_url, image_path), (second_url, image_path)]
         )
         with (
@@ -227,7 +227,7 @@ def test_image_preparation_writes_subphases_and_metrics(tmp_path: Path) -> None:
         "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
-        image_store.upsert_image_mappings(
+        image_index.ImageIndexStore(output_dir).upsert_mappings(
             [(first_url, image_path), (second_url, image_path)]
         )
         with use_timing_log(

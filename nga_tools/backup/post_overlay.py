@@ -9,7 +9,7 @@ from typing import Literal, TypedDict
 from bs4 import BeautifulSoup
 
 from nga_tools.core.nga_images import NGA_img_link_verify
-from nga_tools.backup import image_store
+from nga_tools.backup import image_index
 from nga_tools.backup.models import PostRecord
 from nga_tools.bbcode_render import ImageSrcResolver, render_web_bbcode
 from nga_tools.core.hashing import hash_object, hash_text
@@ -96,7 +96,7 @@ def make_existing_overlay_image_src_resolver(
     raw_sources = overlay_image_sources(bbcode)
     normalized_by_source: dict[str, str] = {}
     for raw_source in raw_sources:
-        normalized_source = image_store.normalize_nga_image_url(raw_source)
+        normalized_source = image_index.normalize_nga_image_url(raw_source)
         if not NGA_img_link_verify(normalized_source):
             if require_all:
                 raise ValueError(
@@ -106,10 +106,9 @@ def make_existing_overlay_image_src_resolver(
             continue
         normalized_by_source[raw_source] = normalized_source
 
-    paths_by_url = image_store.existing_image_paths_for_urls(
-        output_dir,
-        normalized_by_source.values(),
-    )
+    paths_by_url = image_index.ImageIndexStore(
+        output_dir
+    ).existing_paths_for_urls(normalized_by_source.values())
     resolved_src_by_url: dict[str, str] = {}
     for normalized_source, image_path in paths_by_url.items():
         resolved_src = (
@@ -129,7 +128,7 @@ def make_existing_overlay_image_src_resolver(
 
     def resolve_image_src(image_src: str) -> str | None:
         raw_source = image_src.strip()
-        normalized_source = image_store.normalize_nga_image_url(raw_source)
+        normalized_source = image_index.normalize_nga_image_url(raw_source)
         if not NGA_img_link_verify(normalized_source):
             return None
         return resolved_src_by_url.get(normalized_source)

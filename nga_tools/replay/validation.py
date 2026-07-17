@@ -7,8 +7,9 @@ from pathlib import Path
 from time import perf_counter
 from typing import cast
 
-from nga_tools.backup.image_store import (
+from nga_tools.backup.image_index import (
     IMAGE_INDEX_FILENAME,
+    ImageIndexStore,
     require_current_image_index,
 )
 from nga_tools.backup.image_validation_store import IMAGE_CACHE_FILENAME
@@ -160,14 +161,9 @@ def _image_mappings(path: Path, *, immutable: bool) -> dict[str, str]:
         return {}
     with closing(_connect_readonly(path, immutable=immutable)) as connection:
         require_current_image_index(connection, path)
-        rows = connection.execute(
-            "SELECT url, unique_rel_path FROM image_mappings"
-        ).fetchall()
-    mappings: dict[str, str] = {}
-    for raw_url, raw_path in rows:
-        if isinstance(raw_url, str) and isinstance(raw_path, str):
-            mappings[raw_url] = raw_path
-    return mappings
+        return dict(
+            ImageIndexStore(path.parent).iter_mapping_rows(connection)
+        )
 
 
 def _audio_mappings(path: Path, *, immutable: bool) -> dict[str, str]:

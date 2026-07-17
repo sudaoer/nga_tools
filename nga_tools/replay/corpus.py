@@ -17,7 +17,7 @@ from nga_tools.backup.audio_store import (
     AUDIO_UNIQUE_DIRNAME,
     require_current_audio_index,
 )
-from nga_tools.backup.image_store import require_current_image_index
+from nga_tools.backup.image_index import ImageIndexStore, require_current_image_index
 from nga_tools.core.hashing import hash_text, sha256
 from nga_tools.core.nga_audio import normalize_nga_audio_url
 from nga_tools.core.sqlite import configure_readonly_connection
@@ -866,15 +866,11 @@ def _load_images(source_output: Path, hasher: _Hasher) -> _ImageLoadResult:
         connection, database_state = _connect_frozen(index_path)
         with closing(connection):
             require_current_image_index(connection, index_path)
-            rows = cast(
-                list[tuple[object, object]],
-                connection.execute(
-                    """
-                    SELECT url, unique_rel_path
-                    FROM image_mappings
-                    ORDER BY url
-                    """
-                ).fetchall(),
+            rows = list(
+                ImageIndexStore(source_output).iter_raw_mapping_rows(
+                    connection,
+                    order_by_url=True,
+                )
             )
         _verify_frozen(index_path, database_state)
     except (sqlite3.Error, ValueError) as error:

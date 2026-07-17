@@ -8,7 +8,7 @@ from typing import Optional
 
 from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.core.paths import get_folder, list_files_in_folder
-from nga_tools.backup import image_store
+from nga_tools.backup import image_index
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_map import FloorLabels, load_floor_labels_from_archive
 from nga_tools.backup.image_pipeline import (
@@ -118,18 +118,20 @@ def _list_thread_referenced_image_paths(
     task_urls = {task["url"] for task in tasks}
     for overlay in overlays.values():
         for image_src in overlay_image_sources(overlay["bbcode"]):
-            normalized_url = image_store.normalize_nga_image_url(image_src)
+            normalized_url = image_index.normalize_nga_image_url(image_src)
             if (
                 NGA_img_link_verify(normalized_url)
                 and normalized_url not in task_urls
             ):
                 task_urls.add(normalized_url)
                 tasks.append({"url": normalized_url})
-    mappings = image_store.image_mappings_for_urls(task["url"] for task in tasks)
+    mappings = image_index.ImageIndexStore(
+        thread_folder.parent
+    ).mappings_for_urls(task["url"] for task in tasks)
     image_paths: list[Path] = []
     seen_paths: set[str] = set()
     for task in tasks:
-        normalized_url = image_store.normalize_nga_image_url(task["url"])
+        normalized_url = image_index.normalize_nga_image_url(task["url"])
         mapping = mappings.get(normalized_url)
         if mapping is None:
             report_warning(

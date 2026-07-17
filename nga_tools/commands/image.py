@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from nga_tools.backup import image_store
+from nga_tools.backup import image_index, image_store
 from nga_tools.backup.image_verify import (
     verify_all_downloaded_images,
     verify_downloaded_images,
@@ -39,7 +39,7 @@ def _image_download_failure_message(
 
 def image_add(args: CommandArgs) -> None:
     raw_url = required_str(args, "url")
-    url = image_store.normalize_nga_image_url(raw_url.strip())
+    url = image_index.normalize_nga_image_url(raw_url.strip())
     image_store.parse_nga_image_url(url)
 
     existing_path = image_store.mapped_image_path_for_url(url)

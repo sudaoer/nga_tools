@@ -6,7 +6,7 @@ from typing import Optional
 from bs4 import Tag
 
 from nga_tools.core.nga_images import NGA_img_link_verify
-from nga_tools.backup import image_store
+from nga_tools.backup.image_index import normalize_nga_image_url
 
 ABOUT_BLANK_IMAGE_SRC = "about:blank"
 _LAZY_IMAGE_URL_ATTRS = ("data-srcorg", "data-srclazy")
@@ -28,7 +28,7 @@ def _style_has_display_none(tag: Tag) -> bool:
 
 
 def _normalized_src(value: str) -> str:
-    return image_store.normalize_nga_image_url(value.strip())
+    return normalize_nga_image_url(value.strip())
 
 
 def valid_nga_image_src(value: str) -> Optional[str]:

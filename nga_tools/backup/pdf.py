@@ -24,7 +24,7 @@ from nga_tools.backup.floor_map import (
     load_floor_labels_from_archive,
     validate_floor_labels,
 )
-from nga_tools.backup import image_store
+from nga_tools.backup import image_index, image_store
 from nga_tools.backup.html_images import (
     effective_image_src,
     image_src_path,
@@ -433,7 +433,7 @@ def _image_path_for_pdf(
     source_dir: Path,
     image_lookup: image_store.ImageLookupCache | None = None,
 ) -> Path:
-    normalized_src = image_store.normalize_nga_image_url(image_src)
+    normalized_src = image_index.normalize_nga_image_url(image_src)
     if NGA_img_link_verify(normalized_src):
         lookup = (
             image_store.ImageLookupCache.for_urls([normalized_src])

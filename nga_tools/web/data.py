@@ -13,7 +13,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from bs4 import BeautifulSoup, Tag
 
 import nga_tools.config as config
-from nga_tools.backup import audio_store, image_store
+from nga_tools.backup import audio_store, image_index
 from nga_tools.backup.audio_store import AudioMapping
 from nga_tools.backup.archive_posts import postdate_from_json
 from nga_tools.backup.archive_schema import require_current_archive_schema
@@ -38,7 +38,6 @@ from nga_tools.backup.post_overlay import (
 )
 from nga_tools.core.sqlite import configure_readonly_connection
 from nga_tools.core.nga_audio import extract_nga_audio_urls, normalize_nga_audio_url
-from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.forum.thread_configs import (
     NGAThreadConfigs,
     ThreadConfig,
@@ -675,44 +674,16 @@ def _read_image_mappings_for_urls(
     output_dir: Path,
     urls: set[str],
 ) -> dict[str, str]:
-    normalized_urls = sorted(
-        {
-            normalized_url
-            for url in urls
-            if NGA_img_link_verify(
-                normalized_url := image_store.normalize_nga_image_url(url)
-            )
-        }
-    )
-    if not normalized_urls:
-        return {}
-
-    db_path = output_dir / image_store.IMAGE_INDEX_FILENAME
-    if not db_path.is_file():
-        return {}
-
-    mappings: dict[str, str] = {}
     try:
-        with closing(_connect_readonly(db_path)) as connection:
-            image_store.require_current_image_index(connection, db_path)
-            for start in range(0, len(normalized_urls), 900):
-                chunk = normalized_urls[start : start + 900]
-                placeholders = ",".join("?" for _ in chunk)
-                rows = connection.execute(
-                    f"""
-                    SELECT url, unique_rel_path
-                    FROM image_mappings
-                    WHERE url IN ({placeholders})
-                    """,
-                    chunk,
-                ).fetchall()
-                for url, unique_rel_path in rows:
-                    if isinstance(url, str) and isinstance(unique_rel_path, str):
-                        mappings[url] = unique_rel_path
+        mappings = image_index.ImageIndexStore(output_dir).mappings_for_urls(
+            urls,
+            create=False,
+        )
     except sqlite3.Error:
         return {}
-
-    return mappings
+    return {
+        url: mapping.unique_rel_path for url, mapping in mappings.items()
+    }
 
 
 def _output_image_url(
@@ -720,7 +691,7 @@ def _output_image_url(
     image_mappings: dict[str, str],
     image_url: str,
 ) -> Optional[str]:
-    normalized_url = image_store.normalize_nga_image_url(image_url)
+    normalized_url = image_index.normalize_nga_image_url(image_url)
     unique_rel_path = image_mappings.get(normalized_url)
     if unique_rel_path is None:
         return None

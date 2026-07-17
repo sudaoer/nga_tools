@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 from PIL import Image
 
-from nga_tools.backup import image_store
+from nga_tools.backup import image_index, image_store
 from nga_tools.backup.image_index_writer import (
     image_index_writer_metrics,
     use_image_index_writer,
@@ -352,7 +352,9 @@ class ImageIndexWriterTest:
             patch("nga_tools.config.get_config", return_value=config),
             use_image_index_writer(),
         ):
-            _image_mappings, future = image_store.enqueue_image_mappings(mappings)
+            _image_mappings, future = image_index.ImageIndexStore(
+                output_dir
+            ).enqueue_mappings(mappings)
             future.result(timeout=5)
             metrics = image_index_writer_metrics()
             assert metrics is not None
@@ -374,7 +376,7 @@ class ImageIndexWriterTest:
         output_dir = tmp_path / "output"
         config = SimpleNamespace(output_dir=str(output_dir))
         with patch("nga_tools.config.get_config", return_value=config):
-            image_store.upsert_image_mapping(
+            image_index.ImageIndexStore(output_dir).upsert_mapping(
                 _image_url("seed"),
                 output_dir / "images_unique" / "seed.png",
             )
@@ -391,7 +393,9 @@ class ImageIndexWriterTest:
                 connection.commit()
 
             with use_image_index_writer():
-                _mappings, future = image_store.enqueue_image_mappings(
+                _mappings, future = image_index.ImageIndexStore(
+                    output_dir
+                ).enqueue_mappings(
                     [
                         (
                             _image_url("rejected"),
@@ -630,7 +634,7 @@ class ImageMappingBatchTest:
                     on_progress(current, len(download_tasks), result)
             return {"succeeded": results, "failed": []}
 
-        real_enqueue = image_store.enqueue_image_mappings
+        real_enqueue = image_store._enqueue_image_mappings
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
@@ -638,7 +642,7 @@ class ImageMappingBatchTest:
                 side_effect=fake_download,
             ),
             patch(
-                "nga_tools.backup.image_store.enqueue_image_mappings",
+                "nga_tools.backup.image_store._enqueue_image_mappings",
                 wraps=real_enqueue,
             ) as enqueue_mock,
             use_image_index_writer(),
@@ -653,7 +657,7 @@ class ImageMappingBatchTest:
             )
             metrics = image_store_metrics()
             writer_metrics = image_index_writer_metrics()
-            mappings = image_store.image_mappings_for_urls(
+            mappings = image_index.ImageIndexStore(output_dir).mappings_for_urls(
                 task["url"] for task in tasks
             )
 
@@ -720,7 +724,7 @@ class ImageMappingBatchTest:
                 "failed": [result for result in results if not result["success"]],
             }
 
-        real_enqueue = image_store.enqueue_image_mappings
+        real_enqueue = image_store._enqueue_image_mappings
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
@@ -728,7 +732,7 @@ class ImageMappingBatchTest:
                 side_effect=fake_download,
             ),
             patch(
-                "nga_tools.backup.image_store.enqueue_image_mappings",
+                "nga_tools.backup.image_store._enqueue_image_mappings",
                 wraps=real_enqueue,
             ) as enqueue_mock,
             use_image_index_writer(),
@@ -781,7 +785,7 @@ class ImageMappingBatchTest:
             return {"succeeded": results, "failed": []}
 
         with patch("nga_tools.config.get_config", return_value=config):
-            image_store.upsert_image_mapping(
+            image_index.ImageIndexStore(output_dir).upsert_mapping(
                 _image_url("mapping-failure-seed"),
                 output_dir / "images_unique" / "seed.png",
             )
@@ -808,7 +812,9 @@ class ImageMappingBatchTest:
             ):
                 failed_summary = image_store.download_image_tasks(tasks)
                 failed_metrics = image_store_metrics()
-                failed_mappings = image_store.image_mappings_for_urls(
+                failed_mappings = image_index.ImageIndexStore(
+                    output_dir
+                ).mappings_for_urls(
                     task["url"] for task in tasks
                 )
 
@@ -826,7 +832,9 @@ class ImageMappingBatchTest:
                 image_store.use_image_download_coordination(),
             ):
                 retry_summary = image_store.download_image_tasks(tasks)
-                retry_mappings = image_store.image_mappings_for_urls(
+                retry_mappings = image_index.ImageIndexStore(
+                    output_dir
+                ).mappings_for_urls(
                     task["url"] for task in tasks
                 )
 
@@ -893,7 +901,7 @@ class ImageMappingBatchTest:
                     ),
                 )
             metrics = image_store_metrics()
-            persisted = image_store.image_mappings_for_urls(
+            persisted = image_index.ImageIndexStore(output_dir).mappings_for_urls(
                 task["url"] for task in tasks
             )
 

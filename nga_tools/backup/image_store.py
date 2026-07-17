@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import filecmp
 import os
-import sqlite3
 import tempfile
 import threading
 from concurrent.futures import Future
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,12 +35,6 @@ from nga_tools.core.image_formats import (
     image_extension_from_file as detect_image_extension_from_file,
     image_file_is_valid,
 )
-from nga_tools.core.sqlite import (
-    SQLITE_BUSY_TIMEOUT_SECONDS,
-    configure_connection,
-    configure_readonly_connection,
-    iter_in_clause_chunks,
-)
 from nga_tools.backup.image_validation import (
     ImageValidationCache,
     ImageValidationOutcome,
@@ -50,22 +43,19 @@ from nga_tools.backup.image_validation import (
     invalidate_current_image_validation,
 )
 from nga_tools.timing import time_section
-from nga_tools.backup.image_index_writer import (
-    ImageMappingRow,
-    active_image_index_writer,
+from nga_tools.backup.image_index import (
+    ImageIndexStore,
+    ImageMapping,
+    normalize_nga_image_url,
 )
 from nga_tools.backup.image_store_metrics import (
     record_image_hash_source,
-    record_image_mapping_failure,
-    record_image_mapping_submission,
     record_image_single_flight_wait,
     record_image_store_attempt,
     record_image_store_completed,
     record_image_store_failed,
     time_image_store_phase,
 )
-from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
-from nga_tools.storage.schema import require_exact_columns, require_table_names
 
 
 class ImageDownloadTask(TypedDict):
@@ -93,16 +83,6 @@ class NgaImageUrl:
 
 
 @dataclass(frozen=True)
-class ImageMapping:
-    url: str
-    unique_rel_path: str
-
-    @property
-    def unique_path(self) -> Path:
-        return output_dir() / self.unique_rel_path
-
-
-@dataclass(frozen=True)
 class ImageLookupCache:
     mappings_by_url: dict[str, ImageMapping]
     validation_cache: ImageValidationCache = field(
@@ -113,7 +93,7 @@ class ImageLookupCache:
     def for_urls(cls, urls: Iterable[str]) -> ImageLookupCache:
         validation_cache = current_image_validation_cache()
         return cls(
-            image_mappings_for_urls(urls),
+            _image_index_store().mappings_for_urls(urls),
             validation_cache
             if validation_cache is not None
             else ImageValidationCache(),
@@ -171,12 +151,10 @@ class ImageDownloadPreparation:
     stats: ImagePreparationStats
 
 
-IMAGE_INDEX_FILENAME = "image_index.sqlite3"
 PLACEHOLDER_IMAGE_FILENAME = "download_failed_placeholder.png"
 _IMAGE_STORE_LOCK = threading.RLock()
 _IMAGE_HASH_LOCKS = tuple(threading.Lock() for _index in range(256))
 _IMAGE_PREPARATION_SEMAPHORE = threading.BoundedSemaphore(1)
-_INITIALIZED_IMAGE_INDEX_PATHS: set[Path] = set()
 
 
 @dataclass(slots=True)
@@ -219,82 +197,6 @@ def use_image_download_coordination() -> Generator[None]:
                 _COMPLETED_IMAGE_URL_CLAIMS.clear()
 
 
-def normalize_nga_image_url(url: str) -> str:
-    return url.replace(",", "")
-
-
-def existing_image_paths_for_urls(
-    output_root: Path,
-    urls: Iterable[str],
-) -> dict[str, Path]:
-    """Return valid, already-downloaded NGA images under ``output_root``.
-
-    Unlike the command-oriented image-store helpers, this lookup never creates
-    the image index and does not depend on the process-global configured output
-    directory.  That makes it safe for the web viewer's explicit output root.
-    """
-    normalized_urls = sorted(
-        {
-            normalized_url
-            for url in urls
-            if NGA_img_link_verify(
-                normalized_url := normalize_nga_image_url(url.strip())
-            )
-        }
-    )
-    if not normalized_urls:
-        return {}
-
-    resolved_output_root = output_root.resolve()
-    images_root = (resolved_output_root / "images_unique").resolve()
-    db_path = resolved_output_root / IMAGE_INDEX_FILENAME
-    if not db_path.is_file():
-        return {}
-
-    rows: list[tuple[object, object]] = []
-    try:
-        database_uri = f"{db_path.as_uri()}?mode=ro"
-        with closing(
-            sqlite3.connect(
-                database_uri,
-                timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
-                uri=True,
-            )
-        ) as connection:
-            configure_readonly_connection(connection)
-            for chunk in iter_in_clause_chunks(normalized_urls):
-                placeholders = ",".join("?" for _ in chunk)
-                rows.extend(
-                    connection.execute(
-                        f"""
-                        SELECT url, unique_rel_path
-                        FROM image_mappings
-                        WHERE url IN ({placeholders})
-                        """,
-                        chunk,
-                    ).fetchall()
-                )
-    except sqlite3.Error:
-        return {}
-
-    paths_by_url: dict[str, Path] = {}
-    for raw_url, raw_relative_path in rows:
-        if not isinstance(raw_url, str) or not isinstance(raw_relative_path, str):
-            continue
-        relative_path = Path(raw_relative_path)
-        if relative_path.is_absolute() or not relative_path.parts:
-            continue
-        if relative_path.parts[0] != "images_unique":
-            continue
-        image_path = (resolved_output_root / relative_path).resolve()
-        if not image_path.is_relative_to(images_root):
-            continue
-        if not _image_file_is_valid(image_path):
-            continue
-        paths_by_url[raw_url] = image_path
-    return paths_by_url
-
-
 def parse_nga_image_url(url: str) -> NgaImageUrl:
     if not NGA_img_link_verify(url):
         raise ValueError(f"NGA图片链接无效：{url}")
@@ -311,6 +213,20 @@ def parse_nga_image_url(url: str) -> NgaImageUrl:
 
 def output_dir() -> Path:
     return Path(config.get_config().output_dir)
+
+
+def _image_index_store() -> ImageIndexStore:
+    return ImageIndexStore(output_dir())
+
+
+def _enqueue_image_mappings(
+    mappings: list[tuple[str, Path]],
+) -> tuple[list[ImageMapping], Future[None]]:
+    return _image_index_store().enqueue_mappings(mappings)
+
+
+def _wait_image_mapping(future: Future[None]) -> None:
+    _image_index_store().wait_for_mapping(future)
 
 
 def unique_images_dir() -> Path:
@@ -345,224 +261,6 @@ def placeholder_image_src_from_html_dir(html_dir: str | Path) -> str:
     return os.path.relpath(placeholder_image_path(), html_dir).replace("\\", "/")
 
 
-def image_index_path() -> Path:
-    return output_dir() / IMAGE_INDEX_FILENAME
-
-
-_IMAGE_MAPPINGS_COLUMNS = (("url", "TEXT"), ("unique_rel_path", "TEXT"))
-
-
-def _create_image_mappings_schema(connection: sqlite3.Connection) -> None:
-    connection.execute(
-        """
-        CREATE TABLE image_mappings (
-            url TEXT PRIMARY KEY,
-            unique_rel_path TEXT NOT NULL
-        )
-        """
-    )
-
-
-def require_current_image_index(
-    connection: sqlite3.Connection,
-    db_path: Path,
-) -> None:
-    source = f"image_index {db_path}"
-    require_storage_metadata(connection, role="image_index")
-    require_table_names(
-        connection,
-        expected={"storage_metadata", "image_mappings"},
-        source=source,
-    )
-    require_exact_columns(
-        connection,
-        "image_mappings",
-        _IMAGE_MAPPINGS_COLUMNS,
-        source=source,
-    )
-
-
-def _initialize_image_index() -> Path:
-    db_path = image_index_path().resolve()
-    with _IMAGE_STORE_LOCK:
-        if db_path in _INITIALIZED_IMAGE_INDEX_PATHS and db_path.is_file():
-            return db_path
-
-        new_database = not db_path.is_file()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(
-            sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
-        ) as connection:
-            configure_connection(connection)
-            if new_database:
-                ensure_storage_metadata(connection, role="image_index")
-                _create_image_mappings_schema(connection)
-            else:
-                require_current_image_index(connection, db_path)
-            connection.commit()
-        _INITIALIZED_IMAGE_INDEX_PATHS.add(db_path)
-    return db_path
-
-
-def _connect_image_index_writable() -> sqlite3.Connection:
-    connection = sqlite3.connect(
-        _initialize_image_index(),
-        timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
-    )
-    configure_connection(connection)
-    return connection
-
-
-def _connect_image_index_readonly() -> sqlite3.Connection:
-    db_uri = f"{_initialize_image_index().as_uri()}?mode=ro"
-    connection = sqlite3.connect(
-        db_uri,
-        timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
-        uri=True,
-    )
-    configure_readonly_connection(connection)
-    return connection
-
-
-def _unique_rel_path(path: Path) -> str:
-    return os.path.relpath(path, output_dir()).replace("\\", "/")
-
-
-def upsert_image_mapping(url: str, unique_path: Path) -> ImageMapping:
-    return upsert_image_mappings([(url, unique_path)])[0]
-
-
-def upsert_image_mappings(
-    mappings: list[tuple[str, Path]],
-) -> list[ImageMapping]:
-    image_mappings, future = enqueue_image_mappings(mappings)
-    _wait_image_mapping(future)
-    return image_mappings
-
-
-def enqueue_image_mappings(
-    mappings: list[tuple[str, Path]],
-) -> tuple[list[ImageMapping], Future[None]]:
-    if not mappings:
-        future = Future[None]()
-        future.set_result(None)
-        return [], future
-
-    record_image_mapping_submission(len(mappings))
-    with time_image_store_phase("mapping_submit"):
-        image_mappings = [
-            ImageMapping(url=url, unique_rel_path=_unique_rel_path(unique_path))
-            for url, unique_path in mappings
-        ]
-        rows: list[ImageMappingRow] = [
-            (mapping.url, mapping.unique_rel_path)
-            for mapping in image_mappings
-        ]
-        db_path = _initialize_image_index()
-        writer = active_image_index_writer(db_path)
-        if writer is not None:
-            return image_mappings, writer.submit(rows)
-
-        future = Future[None]()
-        with _IMAGE_STORE_LOCK:
-            try:
-                with closing(_connect_image_index_writable()) as connection:
-                    with connection:
-                        connection.executemany(
-                            """
-                            INSERT INTO image_mappings (
-                                url,
-                                unique_rel_path
-                            )
-                            VALUES (?, ?)
-                            ON CONFLICT(url) DO UPDATE SET
-                                unique_rel_path = excluded.unique_rel_path
-                            """,
-                            rows,
-                        )
-            except BaseException as error:
-                future.set_exception(error)
-            else:
-                future.set_result(None)
-        return image_mappings, future
-
-
-def _wait_image_mapping(future: Future[None]) -> None:
-    with time_image_store_phase("mapping_wait"):
-        try:
-            future.result()
-        except BaseException:
-            record_image_mapping_failure()
-            raise
-
-
-def image_mapping_for_url(url: str) -> ImageMapping | None:
-    normalized_url = normalize_nga_image_url(url)
-    if not NGA_img_link_verify(normalized_url):
-        return None
-
-    with closing(_connect_image_index_readonly()) as connection:
-        row = connection.execute(
-            "SELECT unique_rel_path FROM image_mappings WHERE url = ?",
-            (normalized_url,),
-        ).fetchone()
-
-    if row is None:
-        return None
-    unique_rel_path = row[0]
-    if not isinstance(unique_rel_path, str):
-        return None
-    return ImageMapping(url=normalized_url, unique_rel_path=unique_rel_path)
-
-
-def image_mappings_by_url() -> dict[str, ImageMapping]:
-    with closing(_connect_image_index_readonly()) as connection:
-        rows = connection.execute(
-            "SELECT url, unique_rel_path FROM image_mappings"
-        ).fetchall()
-
-    mappings: dict[str, ImageMapping] = {}
-    for url, unique_rel_path in rows:
-        if isinstance(url, str) and isinstance(unique_rel_path, str):
-            mappings[url] = ImageMapping(url=url, unique_rel_path=unique_rel_path)
-    return mappings
-
-
-def image_mappings_for_urls(urls: Iterable[str]) -> dict[str, ImageMapping]:
-    normalized_urls = sorted(
-        {
-            normalized_url
-            for url in urls
-            if NGA_img_link_verify(
-                normalized_url := normalize_nga_image_url(url)
-            )
-        }
-    )
-    if not normalized_urls:
-        return {}
-
-    mappings: dict[str, ImageMapping] = {}
-    with closing(_connect_image_index_readonly()) as connection:
-        for start in range(0, len(normalized_urls), 900):
-            chunk = normalized_urls[start : start + 900]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = connection.execute(
-                f"""
-                SELECT url, unique_rel_path
-                FROM image_mappings
-                WHERE url IN ({placeholders})
-                """,
-                chunk,
-            ).fetchall()
-            for url, unique_rel_path in rows:
-                if isinstance(url, str) and isinstance(unique_rel_path, str):
-                    mappings[url] = ImageMapping(
-                        url=url,
-                        unique_rel_path=unique_rel_path,
-                    )
-    return mappings
-
-
 def mapped_image_path_for_url(url: str) -> Path | None:
     return ImageLookupCache.for_urls([url]).mapped_image_path_for_url(url)
 
@@ -593,7 +291,7 @@ def _prepare_image_download_tasks_uncoordinated(
     image_tasks: list[ImageDownloadTask],
 ) -> ImageDownloadPreparation:
     with time_section("图片索引批量查询"):
-        mappings_by_url = image_mappings_for_urls(
+        mappings_by_url = _image_index_store().mappings_for_urls(
             task["url"] for task in image_tasks
         )
 
@@ -830,7 +528,7 @@ def _store_image_file_deferred_mapping(
         move_source=move_source,
         download_result=download_result,
     )
-    _mappings, mapping_future = enqueue_image_mappings(
+    _mappings, mapping_future = _enqueue_image_mappings(
         [(task["url"], Path(result["unique_path"]))]
     )
     return result, mapping_future
@@ -1056,7 +754,7 @@ def _run_download_image_tasks(
         pending_batch = tuple(pending_mapping_results)
         pending_mapping_results.clear()
         try:
-            _mappings, mapping_future = enqueue_image_mappings(
+            _mappings, mapping_future = _enqueue_image_mappings(
                 [pending.mapping for pending in pending_batch]
             )
             _wait_image_mapping(mapping_future)

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from nga_tools.backup import image_store, image_validation_store
+from nga_tools.backup import image_index, image_validation_store
 from nga_tools.backup.archive_schema import ARCHIVE_SCHEMA_VERSION
 from nga_tools.backup.archive_store import (
     PostImageReferenceCacheEntry,
@@ -207,7 +207,7 @@ def test_data_only_handoff_reads_without_state_or_cache_databases(
         ]
     )
     with closing(
-        sqlite3.connect(source_output / image_store.IMAGE_INDEX_FILENAME)
+        sqlite3.connect(source_output / image_index.IMAGE_INDEX_FILENAME)
     ) as connection:
         ensure_storage_metadata(connection, role="image_index")
         connection.execute(
@@ -228,8 +228,8 @@ def test_data_only_handoff_reads_without_state_or_cache_databases(
     target_thread.mkdir(parents=True)
     shutil.copy2(source_store.db_path, target_thread / source_store.db_path.name)
     shutil.copy2(
-        source_output / image_store.IMAGE_INDEX_FILENAME,
-        target_output / image_store.IMAGE_INDEX_FILENAME,
+        source_output / image_index.IMAGE_INDEX_FILENAME,
+        target_output / image_index.IMAGE_INDEX_FILENAME,
     )
 
     target_store = ThreadArchiveStore(target_thread)
@@ -243,7 +243,7 @@ def test_data_only_handoff_reads_without_state_or_cache_databases(
         "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(target_output)),
     ):
-        mappings = image_store.image_mappings_by_url()
+        mappings = image_index.ImageIndexStore(target_output).mappings_by_url()
     assert mappings["https://img.nga.178.com/portable.png"].unique_rel_path == (
         "images_unique/image.png"
     )
