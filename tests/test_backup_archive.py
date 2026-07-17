@@ -40,6 +40,7 @@ from nga_tools.backup.processing_state import BackupProcessingSnapshot
 from nga_tools.core.downloads import DownloadFailureKind, DownloadFileResult
 from nga_tools.core.hashing import hash_text
 from nga_tools.ngaclient.client import NGAPageError
+from nga_tools.storage import UnsupportedStorageFormatError
 from nga_tools.timing import use_timing_log
 
 
@@ -394,7 +395,7 @@ class SparseAuthorPageTest:
 
 
 class BackupRawArchiveTest:
-    def test_local_work_planning_ignores_legacy_archive_processing_schema(
+    def test_local_work_planning_rejects_unexpected_archive_table(
         self,
         tmp_path: Path,
     ) -> None:
@@ -437,12 +438,13 @@ class BackupRawArchiveTest:
             "get_folder",
             side_effect=_fake_get_folder(thread_dir),
         ):
-            work_kind = backup_local_work_kind(123, 456)
+            with pytest.raises(UnsupportedStorageFormatError):
+                backup_local_work_kind(123, 456)
 
-        snapshot = ThreadArchiveStore(thread_dir).read_backup_processing_snapshot()
-        assert work_kind == "refresh"
-        assert snapshot.floor_state is not None
-        assert snapshot.image_state is None
+        with sqlite3.connect(thread_dir / "archive.sqlite3") as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM backup_processing_state"
+            ).fetchone() == (1,)
 
     @pytest.mark.parametrize("mode", ["sub", "all"])
     def test_backup_writes_archive_without_intermediate_html(
@@ -511,16 +513,17 @@ class BackupRawArchiveTest:
         assert (thread_dir / "debug_json" / "page_1.json").is_file()
         assert not (thread_dir / "json").exists()
 
-    def test_sub_requires_explicit_migration_for_legacy_json(self, tmp_path: Path) -> None:
+    def test_sub_ignores_legacy_json(self, tmp_path: Path) -> None:
         thread_dir = tmp_path / "123_456"
         json_dir = thread_dir / "json"
         json_dir.mkdir(parents=True)
         (json_dir / "page_1.json").write_text("{not json", encoding="utf-8")
 
-        with pytest.raises(RuntimeError, match="正常备份不再读取旧JSON"):
-            _run_backup(thread_dir, MutableFakeClient())
+        _run_backup(thread_dir, MutableFakeClient())
 
-        assert not (thread_dir / "archive.sqlite3").exists()
+        assert (thread_dir / "archive.sqlite3").exists()
+        assert (json_dir / "page_1.json").read_text(encoding="utf-8") == "{not json"
+        assert ThreadArchiveStore(thread_dir).read_page_numbers() == {1}
 
     def test_sub_only_parses_changed_effective_records_after_cache_warmup(
         self,

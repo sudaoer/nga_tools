@@ -34,6 +34,7 @@ from nga_tools.backup.processing_state import (
 )
 from nga_tools.core.downloads import DownloadFailureKind
 from nga_tools.core.hashing import hash_text
+from nga_tools.storage import UnsupportedStorageFormatError
 from nga_tools.word_count import WORD_COUNT_VERSION
 
 
@@ -203,7 +204,7 @@ class ThreadArchiveStoreTest:
 
         assert refs == [{"pid": 1002, "author_lou": 1}]
 
-    def test_schema_replaces_latest_post_index_with_covering_order(self) -> None:
+    def test_schema_rejects_legacy_latest_post_index_without_mutating_it(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
@@ -219,7 +220,8 @@ class ThreadArchiveStoreTest:
                 )
                 connection.commit()
 
-            ThreadArchiveStore(store.thread_folder).ensure_schema()
+            with pytest.raises(UnsupportedStorageFormatError, match="索引不符合"):
+                ThreadArchiveStore(store.thread_folder).ensure_schema()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 indexes = dict(
                     connection.execute(
@@ -235,13 +237,9 @@ class ThreadArchiveStoreTest:
                     f"EXPLAIN QUERY PLAN {_LATEST_AUTHOR_POST_REFS_QUERY}"
                 ).fetchall()
 
-        assert set(indexes) == {"idx_post_versions_latest_covering"}
-        index_sql = indexes["idx_post_versions_latest_covering"]
-        assert index_sql is not None
-        normalized_index_sql = " ".join(index_sql.split())
-        assert "(lou, last_seen_at DESC, id DESC, pid)" in normalized_index_sql
-        assert any(
-            "USING COVERING INDEX idx_post_versions_latest_covering" in detail
+        assert set(indexes) == {"idx_post_versions_latest"}
+        assert not any(
+            "idx_post_versions_latest_covering" in detail
             for _node_id, _parent_id, _unused, detail in query_plan
         )
 
@@ -523,7 +521,7 @@ class ThreadArchiveStoreTest:
         assert after_newer.page_count == 2
         assert after_newer.vrows is None
 
-    def test_runtime_rejects_unmigrated_archive_schema(self) -> None:
+    def test_runtime_rejects_unsupported_archive_schema(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             thread_folder = Path(temp_dir_name)
             store = ThreadArchiveStore(thread_folder)
@@ -533,9 +531,9 @@ class ThreadArchiveStoreTest:
                 connection.commit()
 
             reader = ThreadArchiveStore(thread_folder)
-            with pytest.raises(ValueError, match="backup migrate-layout"):
+            with pytest.raises(UnsupportedStorageFormatError, match="版本不受支持"):
                 reader.read_page_numbers()
-            with pytest.raises(ValueError, match="backup migrate-layout"):
+            with pytest.raises(UnsupportedStorageFormatError, match="版本不受支持"):
                 reader.ensure_schema()
 
     def test_upsert_pages_rolls_back_every_page_when_one_write_fails(self) -> None:
@@ -619,91 +617,6 @@ class ThreadArchiveStoreTest:
             with closing(reader._connect_read()) as connection:
                 with pytest.raises(sqlite3.OperationalError, match="readonly"):
                     connection.execute("DELETE FROM archive_change_state")
-
-    def test_refresh_stored_word_counts_migrates_old_schema(self) -> None:
-        with TemporaryDirectory() as temp_dir_name:
-            store = ThreadArchiveStore(
-                Path(temp_dir_name),
-                allow_layout_upgrade=True,
-            )
-            with closing(sqlite3.connect(store.db_path)) as connection:
-                connection.execute(
-                    """
-                    CREATE TABLE post_versions (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        pid INTEGER NOT NULL,
-                        lou INTEGER NOT NULL,
-                        post_hash TEXT NOT NULL,
-                        source_hash TEXT NOT NULL,
-                        post_json TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        first_seen_at TEXT NOT NULL,
-                        last_seen_at TEXT NOT NULL,
-                        seen_count INTEGER NOT NULL
-                    )
-                    """
-                )
-                connection.execute(
-                    """
-                    INSERT INTO post_versions (
-                        pid,
-                        lou,
-                        post_hash,
-                        source_hash,
-                        post_json,
-                        content,
-                        first_seen_at,
-                        last_seen_at,
-                        seen_count
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        1001,
-                        1,
-                        "post-hash",
-                        "source-hash",
-                        json.dumps(
-                            {"lou": 1, "pid": 1001, "content": "旧文，"},
-                            ensure_ascii=False,
-                        ),
-                        "旧文，",
-                        "2026-07-07T01:00:00+00:00",
-                        "2026-07-07T01:00:00+00:00",
-                        1,
-                    ),
-                )
-                connection.commit()
-
-            updated = store.refresh_stored_word_counts()
-            with closing(sqlite3.connect(store.db_path)) as connection:
-                columns = {
-                    row[1]
-                    for row in connection.execute(
-                        "PRAGMA table_info(post_versions)"
-                    ).fetchall()
-                }
-                row = connection.execute(
-                    """
-                    SELECT
-                        word_count_version,
-                        word_count_chinese_chars,
-                        word_count_chinese_with_punctuation,
-                        source_hash
-                    FROM post_versions
-                    WHERE pid = 1001
-                    """
-                ).fetchone()
-
-        assert updated == 0
-        assert {
-            "word_count_version",
-            "word_count_chinese_chars",
-            "word_count_chinese_with_punctuation",
-        } <= columns
-        assert "post_hash" not in columns
-        assert "post_json" not in columns
-        assert row == (WORD_COUNT_VERSION, 2, 3, hash_text("旧文，"))
 
     def test_page_refresh_preserves_posts_missing_from_new_response(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -947,7 +860,7 @@ class ThreadArchiveStoreTest:
         assert cleared_selections == {}
         assert cleared_fingerprint == empty_fingerprint
 
-    def test_missing_selection_table_is_empty_until_next_write(self) -> None:
+    def test_missing_selection_table_is_rejected_without_recreation(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             thread_folder = Path(temp_dir_name)
             store = ThreadArchiveStore(thread_folder)
@@ -982,12 +895,20 @@ class ThreadArchiveStoreTest:
                 connection.commit()
 
             reopened = ThreadArchiveStore(thread_folder)
-            selections_before = reopened.read_valid_post_version_selections()
-            reopened.upsert_post_version_selection(1, old_version_id)
-            selections_after = reopened.read_valid_post_version_selections()
+            with pytest.raises(UnsupportedStorageFormatError):
+                reopened.read_valid_post_version_selections()
+            with pytest.raises(UnsupportedStorageFormatError):
+                reopened.upsert_post_version_selection(1, old_version_id)
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                table_exists = connection.execute(
+                    """
+                    SELECT 1 FROM sqlite_schema
+                    WHERE type = 'table'
+                      AND name = 'post_version_selections'
+                    """
+                ).fetchone()
 
-        assert selections_before == {}
-        assert selections_after[1]["version_id"] == old_version_id
+        assert table_exists is None
 
     def test_metadata_only_change_does_not_create_post_version(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1057,14 +978,11 @@ class ThreadArchiveStoreTest:
         assert version_row == (1, hash_text("same body"), 2)
         assert metadata_row == ("author", 2001, "1002", 2)
 
-    def test_old_schema_migration_merges_metadata_only_versions(
+    def test_old_schema_is_rejected_without_mutation(
         self,
     ) -> None:
         with TemporaryDirectory() as temp_dir_name:
-            store = ThreadArchiveStore(
-                Path(temp_dir_name),
-                allow_layout_upgrade=True,
-            )
+            store = ThreadArchiveStore(Path(temp_dir_name))
             with closing(sqlite3.connect(store.db_path)) as connection:
                 connection.execute(
                     """
@@ -1158,7 +1076,8 @@ class ThreadArchiveStoreTest:
                     )
                 connection.commit()
 
-            store.ensure_schema()
+            with pytest.raises(UnsupportedStorageFormatError):
+                store.ensure_schema()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 columns = {
                     row[1]
@@ -1166,35 +1085,13 @@ class ThreadArchiveStoreTest:
                         "PRAGMA table_info(post_versions)"
                     ).fetchall()
                 }
-                version_row = connection.execute(
-                    """
-                    SELECT COUNT(*), source_hash, seen_count
-                    FROM post_versions
-                    """
-                ).fetchone()
-                observation_table = connection.execute(
-                    """
-                    SELECT 1 FROM sqlite_schema
-                    WHERE type = 'table' AND name = 'post_observations'
-                    """
-                ).fetchone()
-                metadata_row = connection.execute(
-                    """
-                    SELECT
-                        author_name,
-                        author_uid,
-                        image_attachments_json,
-                        seen_count
-                    FROM post_latest_metadata
-                    WHERE pid = 1001 AND lou = 1
-                    """
-                ).fetchone()
+                version_count = connection.execute(
+                    "SELECT COUNT(*) FROM post_versions"
+                ).fetchone()[0]
 
-        assert "post_hash" not in columns
-        assert "post_json" not in columns
-        assert version_row == (1, hash_text("same body"), 2)
-        assert observation_table is None
-        assert metadata_row == ("author", 2001, "[]", 2)
+        assert "post_hash" in columns
+        assert "post_json" in columns
+        assert version_count == 2
 
     def test_read_latest_post_record_summaries_skip_post_json(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1303,7 +1200,7 @@ class ThreadArchiveStoreTest:
 
         assert total_lou_count is None
 
-    def test_migrate_json_pages_is_repeatable_and_keeps_json_files(self) -> None:
+    def test_json_pages_are_not_imported(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             thread_folder = Path(temp_dir_name)
             json_dir = thread_folder / "json"
@@ -1323,16 +1220,12 @@ class ThreadArchiveStoreTest:
             )
             store = ThreadArchiveStore(thread_folder)
 
-            first = store.migrate_json_pages()
-            second = store.migrate_json_pages()
+            store.ensure_schema()
             json_still_exists = page_path.is_file()
             page_numbers = store.read_page_numbers()
 
         assert json_still_exists
-        assert first.page_files == 1
-        assert first.post_versions_inserted == 1
-        assert second.post_versions_inserted == 0
-        assert page_numbers == {1}
+        assert page_numbers == set()
 
     def test_processing_state_and_pending_images_round_trip_atomically(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1467,7 +1360,7 @@ class ThreadArchiveStoreTest:
             "backup_pending_images",
         }
 
-    def test_legacy_image_reference_rows_are_not_read_or_modified(self) -> None:
+    def test_unexpected_archive_table_is_rejected_without_mutation(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
@@ -1490,15 +1383,13 @@ class ThreadArchiveStoreTest:
                 )
                 connection.commit()
 
-            assert store.commit_image_reference_state(image_state, ())
-            snapshot = store.read_backup_processing_snapshot()
-            store.clear_backup_processing_state()
+            with pytest.raises(UnsupportedStorageFormatError):
+                store.commit_image_reference_state(image_state, ())
             with closing(sqlite3.connect(store.db_path)) as connection:
                 legacy_rows = connection.execute(
                     "SELECT url FROM backup_image_references"
                 ).fetchall()
 
-        assert snapshot.image_state == image_state
         assert legacy_rows == [("https://example.invalid/legacy.png",)]
 
     def test_processing_snapshot_does_not_scan_manifest_rows(self) -> None:
@@ -1736,7 +1627,7 @@ class ThreadArchiveStoreTest:
                 )
                 connection.commit()
 
-            with pytest.raises(ValueError, match="backup migrate-layout"):
+            with pytest.raises(UnsupportedStorageFormatError):
                 store.ensure_schema()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 legacy_exists = connection.execute(
@@ -1764,7 +1655,7 @@ class ThreadArchiveStoreTest:
                 connection.commit()
 
             store = ThreadArchiveStore(thread_folder)
-            with pytest.raises(ValueError, match="backup migrate-layout"):
+            with pytest.raises(UnsupportedStorageFormatError):
                 store.ensure_backup_processing_schema()
 
         assert not store.state_store.db_path.exists()

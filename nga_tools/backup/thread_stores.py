@@ -10,11 +10,72 @@ from nga_tools.core.sqlite import (
     configure_connection,
     configure_readonly_connection,
 )
-from nga_tools.storage import ensure_storage_metadata, read_storage_metadata
+from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
+from nga_tools.storage.schema import (
+    require_exact_columns,
+    require_index_names,
+    require_table_names,
+)
 
 
 ARCHIVE_STATE_DB_FILENAME = "archive_state.sqlite3"
 ARCHIVE_CACHE_DB_FILENAME = "archive_cache.sqlite3"
+
+_STATE_COLUMNS = {
+    "backup_floor_processing_state": (
+        ("singleton", "INTEGER"), ("format_version", "INTEGER"),
+        ("processed_archive_revision", "INTEGER"),
+        ("processed_floor_map_revision", "INTEGER"), ("page_count", "INTEGER"),
+        ("author_total_lou_count", "INTEGER"),
+        ("floor_map_format_version", "INTEGER"),
+        ("floor_map_generation_version", "INTEGER"),
+        ("floor_map_hash_algorithm", "TEXT"), ("completed_at", "TEXT"),
+    ),
+    "backup_image_reference_state": (
+        ("singleton", "INTEGER"), ("format_version", "INTEGER"),
+        ("processed_archive_revision", "INTEGER"),
+        ("post_overlays_fingerprint", "TEXT"),
+        ("post_version_selections_fingerprint", "TEXT"),
+        ("image_reference_extractor_version", "INTEGER"),
+        ("completed_at", "TEXT"),
+    ),
+    "backup_image_reference_manifest_state": (
+        ("singleton", "INTEGER"), ("format_version", "INTEGER"),
+        ("processed_archive_revision", "INTEGER"),
+    ),
+    "backup_image_reference_manifest_posts": (
+        ("lou", "INTEGER"), ("cache_key", "TEXT"),
+    ),
+    "backup_image_reference_manifest_entries": (
+        ("lou", "INTEGER"), ("image_index", "INTEGER"),
+        ("url", "TEXT"), ("valid", "INTEGER"),
+    ),
+    "backup_image_reference_manifest_urls": (
+        ("url", "TEXT"), ("reference_count", "INTEGER"),
+        ("valid", "INTEGER"),
+    ),
+    "backup_pending_images": (
+        ("url", "TEXT"), ("last_attempt_at", "TEXT"),
+        ("failure_kind", "TEXT"), ("http_status", "INTEGER"),
+    ),
+    "backup_audio_processing_state": (
+        ("singleton", "INTEGER"), ("format_version", "INTEGER"),
+        ("extractor_version", "INTEGER"),
+        ("processed_max_post_version_id", "INTEGER"),
+        ("completed_at", "TEXT"),
+    ),
+    "backup_pending_audio": (
+        ("url", "TEXT"), ("last_attempt_at", "TEXT"),
+        ("failure_kind", "TEXT"), ("http_status", "INTEGER"),
+    ),
+}
+_CACHE_COLUMNS = {
+    "post_image_reference_cache": (
+        ("cache_key", "TEXT"), ("source_hash", "TEXT"),
+        ("extractor_version", "INTEGER"), ("references_json", "TEXT"),
+        ("created_at", "TEXT"), ("updated_at", "TEXT"),
+    ),
+}
 
 
 def _open_writable(path: Path) -> sqlite3.Connection:
@@ -56,18 +117,65 @@ def _validate_source_binding(
     expected_role: str,
     source_store_id: str,
 ) -> None:
-    metadata = read_storage_metadata(connection)
-    if metadata is None:
-        raise ValueError(f"{expected_role}缺少storage_metadata。")
-    if metadata.role != expected_role:
-        raise ValueError(
-            f"SQLite存储角色不匹配：期望{expected_role}，实际{metadata.role}。"
+    role = "archive_state" if expected_role == "archive_state" else "archive_cache"
+    require_storage_metadata(
+        connection,
+        role=role,
+        source_store_id=source_store_id,
+    )
+
+
+def _require_current_schema(
+    connection: sqlite3.Connection,
+    *,
+    role: str,
+    source_store_id: str,
+    columns_by_table: dict[str, tuple[tuple[str, str], ...]],
+) -> None:
+    _validate_source_binding(
+        connection,
+        expected_role=role,
+        source_store_id=source_store_id,
+    )
+    source = f"{role} SQLite"
+    require_table_names(
+        connection,
+        expected={"storage_metadata", *columns_by_table},
+        source=source,
+    )
+    for table_name, columns in columns_by_table.items():
+        require_exact_columns(connection, table_name, columns, source=source)
+    if role == "archive_state":
+        require_index_names(
+            connection,
+            required={"idx_image_reference_manifest_entries_url"},
+            forbidden=set(),
+            source=source,
         )
-    if metadata.source_store_id != source_store_id:
-        raise ValueError(
-            f"{expected_role}不属于当前archive："
-            f"{metadata.source_store_id!r} != {source_store_id!r}。"
-        )
+
+
+def require_current_archive_state_schema(
+    connection: sqlite3.Connection,
+    source_store_id: str,
+) -> None:
+    _require_current_schema(
+        connection,
+        role="archive_state",
+        source_store_id=source_store_id,
+        columns_by_table=_STATE_COLUMNS,
+    )
+
+
+def require_current_archive_cache_schema(
+    connection: sqlite3.Connection,
+    source_store_id: str,
+) -> None:
+    _require_current_schema(
+        connection,
+        role="archive_cache",
+        source_store_id=source_store_id,
+        columns_by_table=_CACHE_COLUMNS,
+    )
 
 
 class ThreadArchiveStateStore:
@@ -79,10 +187,19 @@ class ThreadArchiveStateStore:
         return self.db_path.is_file()
 
     def connect_write(self, source_store_id: str) -> sqlite3.Connection:
+        new_database = not self.db_path.is_file()
         connection = _open_writable(self.db_path)
         if self._schema_initialized_for != source_store_id:
             try:
-                self._ensure_schema(connection, source_store_id)
+                if new_database:
+                    self._initialize_schema(connection, source_store_id)
+                else:
+                    _require_current_schema(
+                        connection,
+                        role="archive_state",
+                        source_store_id=source_store_id,
+                        columns_by_table=_STATE_COLUMNS,
+                    )
             except BaseException:
                 connection.close()
                 raise
@@ -94,10 +211,11 @@ class ThreadArchiveStateStore:
             raise FileNotFoundError(f"缺少archive_state.sqlite3：{self.db_path}")
         connection = _open_readonly(self.db_path)
         try:
-            _validate_source_binding(
+            _require_current_schema(
                 connection,
-                expected_role="archive_state",
+                role="archive_state",
                 source_store_id=source_store_id,
+                columns_by_table=_STATE_COLUMNS,
             )
         except BaseException:
             connection.close()
@@ -114,7 +232,7 @@ class ThreadArchiveStateStore:
         self.ensure_schema(source_store_id)
 
     @staticmethod
-    def _ensure_schema(
+    def _initialize_schema(
         connection: sqlite3.Connection,
         source_store_id: str,
     ) -> None:
@@ -239,10 +357,19 @@ class ThreadArchiveCacheStore:
         return self.db_path.is_file()
 
     def connect_write(self, source_store_id: str) -> sqlite3.Connection:
+        new_database = not self.db_path.is_file()
         connection = _open_writable(self.db_path)
         if self._schema_initialized_for != source_store_id:
             try:
-                self._ensure_schema(connection, source_store_id)
+                if new_database:
+                    self._initialize_schema(connection, source_store_id)
+                else:
+                    _require_current_schema(
+                        connection,
+                        role="archive_cache",
+                        source_store_id=source_store_id,
+                        columns_by_table=_CACHE_COLUMNS,
+                    )
             except BaseException:
                 connection.close()
                 raise
@@ -254,10 +381,11 @@ class ThreadArchiveCacheStore:
             raise FileNotFoundError(f"缺少archive_cache.sqlite3：{self.db_path}")
         connection = _open_readonly(self.db_path)
         try:
-            _validate_source_binding(
+            _require_current_schema(
                 connection,
-                expected_role="archive_cache",
+                role="archive_cache",
                 source_store_id=source_store_id,
+                columns_by_table=_CACHE_COLUMNS,
             )
         except BaseException:
             connection.close()
@@ -274,7 +402,7 @@ class ThreadArchiveCacheStore:
         self.ensure_schema(source_store_id)
 
     @staticmethod
-    def _ensure_schema(
+    def _initialize_schema(
         connection: sqlite3.Connection,
         source_store_id: str,
     ) -> None:

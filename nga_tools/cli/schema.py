@@ -4,9 +4,6 @@ from typing import Literal, NotRequired, TypedDict
 
 from nga_tools.commands.backup import (
     backup_all,
-    backup_migrate_content,
-    backup_migrate_layout,
-    backup_migrate_store,
     backup_sub,
     pdf_generate,
 )
@@ -152,22 +149,6 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": int,
         "metavar": "N",
         "help": "发布时间全版面扫描起始页",
-    },
-    "all": {
-        "flags": ("--all",),
-        "action": "store_true",
-        "help": "处理所有已有备份目录",
-    },
-    "rollback": {
-        "flags": ("--rollback",),
-        "type": str,
-        "metavar": "RUN_ID",
-        "help": "按迁移运行ID恢复保留的旧布局",
-    },
-    "dry_run": {
-        "flags": ("--dry-run", "--dry_run"),
-        "action": "store_true",
-        "help": "只统计正文压缩空间，不修改数据库",
     },
     "all_threads": {
         "flags": ("--all-threads", "--all_threads"),
@@ -426,78 +407,6 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "output_root_lock": True,
         },
-        "migrate-store": {
-            "handler": backup_migrate_store,
-            "summary": "把旧分页JSON迁移到当前每帖SQLite存储",
-            "usage": (
-                f"{PROGRAM_USAGE} backup migrate-store "
-                "((--name NAME | --tid TID [--aid AID]) | --all)"
-            ),
-            "examples": [
-                f"{PROGRAM_USAGE} backup migrate-store --name 帖子名",
-                f"{PROGRAM_USAGE} backup migrate-store --tid 12345678 --aid 987654",
-                f"{PROGRAM_USAGE} backup migrate-store --all",
-            ],
-            "notes": [
-                "每个帖子目录会生成或更新当前schema的archive.sqlite3。",
-                "SQLite只保存紧凑分页状态和归一化帖子数据，不复制原始分页响应。",
-                "迁移只读取旧json/page_*.json，不删除或改写旧JSON。",
-                "--all会扫描output_dir下已有备份目录。",
-            ],
-            "args": ["name", "tid", "aid", "all"],
-            "required_any": ["name", "tid", "all"],
-            "output_root_lock": True,
-        },
-        "migrate-layout": {
-            "handler": backup_migrate_layout,
-            "summary": "迁移SQLite分库布局和archive分页存储schema",
-            "usage": (
-                f"{PROGRAM_USAGE} backup migrate-layout "
-                "((--name NAME | --tid TID [--aid AID]) | --all | "
-                "--rollback RUN_ID)"
-            ),
-            "examples": [
-                f"{PROGRAM_USAGE} backup migrate-layout --name 帖子名",
-                f"{PROGRAM_USAGE} backup migrate-layout --all",
-                (
-                    f"{PROGRAM_USAGE} backup migrate-layout "
-                    "--rollback 20260715T120000Z-1234abcd"
-                ),
-            ],
-            "notes": [
-                "迁移会保留可回滚SQLite快照，并在中断后按同一清单续跑。",
-                "每页只保留最新紧凑状态；原始页快照和逐帖页内观察记录会被移除。",
-                "archive.sqlite3最后发布；旧分页、状态和缓存表不会留在活动数据文件中。",
-                "只迁移与当前修订和格式匹配的状态及可解析缓存。",
-            ],
-            "args": ["name", "tid", "aid", "all", "rollback"],
-            "required_any": ["name", "tid", "all", "rollback"],
-        },
-        "migrate-content": {
-            "handler": backup_migrate_content,
-            "summary": "将post_versions正文迁移为zstd压缩BLOB",
-            "usage": (
-                f"{PROGRAM_USAGE} backup migrate-content "
-                "((--name NAME | --tid TID [--aid AID]) | --all | "
-                "--rollback RUN_ID)"
-            ),
-            "examples": [
-                f"{PROGRAM_USAGE} backup migrate-content --all --dry-run",
-                f"{PROGRAM_USAGE} backup migrate-content --all",
-                (
-                    f"{PROGRAM_USAGE} backup migrate-content "
-                    "--rollback 20260717T120000Z-1234abcd"
-                ),
-            ],
-            "notes": [
-                "新写入的post_versions.content使用Python 3.14标准库zstd level 3。",
-                "迁移会保留正文版本ID、手动选择和其他archive表。",
-                "迁移会保留可回滚SQLite快照，并支持中断后续跑。",
-                "--dry-run只读取archive.sqlite3并统计预计节省空间。",
-            ],
-            "args": ["name", "tid", "aid", "all", "rollback", "dry_run"],
-            "required_any": ["name", "tid", "all", "rollback"],
-        },
         "pdf": {
             "handler": pdf_generate,
             "summary": "根据archive原始正文和已下载图片生成PDF",
@@ -589,10 +498,10 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "notes": [
                 "普通阅读和数据库浏览只读取本地备份，管理页可写入正文版本选择和overlay。",
-                "此命令不访问NGA；管理写入会与布局迁移和其他output写任务互斥。",
+                "此命令不访问NGA；管理写入会与其他output写任务互斥。",
                 "默认只监听本机地址，避免把本地备份暴露到局域网。",
                 "线程列表会显示已存盘的正文字数，并支持按正文字数排序。",
-                "只支持当前archive.sqlite3备份；旧JSON请先迁移。",
+                "只支持当前archive.sqlite3格式；只有旧JSON的目录不会显示。",
             ],
             "args": ["host", "port", "static_dir"],
             "defaults": {

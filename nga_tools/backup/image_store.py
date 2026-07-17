@@ -58,7 +58,8 @@ from nga_tools.backup.image_store_metrics import (
     record_image_store_failed,
     time_image_store_phase,
 )
-from nga_tools.storage import ensure_storage_metadata, read_storage_metadata
+from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
+from nga_tools.storage.schema import require_exact_columns, require_table_names
 
 
 class ImageDownloadTask(TypedDict):
@@ -359,65 +360,60 @@ def _now_utc_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-_IMAGE_MAPPINGS_COLUMNS = ("url", "unique_rel_path")
-_LEGACY_IMAGE_MAPPINGS_COLUMNS = (
-    "url",
-    "unique_rel_path",
-    "created_at",
-    "updated_at",
+_IMAGE_MAPPINGS_COLUMNS = (("url", "TEXT"), ("unique_rel_path", "TEXT"))
+_IMAGE_CACHE_COLUMNS = (
+    ("relative_path", "TEXT"), ("size", "INTEGER"),
+    ("mtime_ns", "INTEGER"), ("valid", "INTEGER"),
+    ("updated_at", "TEXT"),
 )
 
 
-def _image_mappings_columns(connection: sqlite3.Connection) -> tuple[str, ...]:
-    return tuple(
-        row[1]
-        for row in connection.execute("PRAGMA table_info(image_mappings)")
-        if len(row) > 1 and isinstance(row[1], str)
-    )
-
-
-def ensure_image_mappings_schema(connection: sqlite3.Connection) -> None:
-    """Create or normalize the persistent URL-to-file mapping table."""
-    columns = _image_mappings_columns(connection)
-    if not columns:
-        connection.execute(
-            """
-            CREATE TABLE image_mappings (
-                url TEXT PRIMARY KEY,
-                unique_rel_path TEXT NOT NULL
-            )
-            """
-        )
-        return
-
-    if columns == _IMAGE_MAPPINGS_COLUMNS:
-        return
-
-    if columns != _LEGACY_IMAGE_MAPPINGS_COLUMNS:
-        raise ValueError(
-            "image_mappings表结构不受支持："
-            f"期望{_IMAGE_MAPPINGS_COLUMNS!r}或旧结构，实际{columns!r}。"
-        )
-
-    connection.execute("DROP TABLE IF EXISTS image_mappings__new")
+def _create_image_mappings_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
-        CREATE TABLE image_mappings__new (
+        CREATE TABLE image_mappings (
             url TEXT PRIMARY KEY,
             unique_rel_path TEXT NOT NULL
         )
         """
     )
-    connection.execute(
-        """
-        INSERT INTO image_mappings__new (url, unique_rel_path)
-        SELECT url, unique_rel_path
-        FROM image_mappings
-        """
+
+
+def require_current_image_index(
+    connection: sqlite3.Connection,
+    db_path: Path,
+) -> None:
+    source = f"image_index {db_path}"
+    require_storage_metadata(connection, role="image_index")
+    require_table_names(
+        connection,
+        expected={"storage_metadata", "image_mappings"},
+        source=source,
     )
-    connection.execute("DROP TABLE image_mappings")
-    connection.execute(
-        "ALTER TABLE image_mappings__new RENAME TO image_mappings"
+    require_exact_columns(
+        connection,
+        "image_mappings",
+        _IMAGE_MAPPINGS_COLUMNS,
+        source=source,
+    )
+
+
+def require_current_image_cache(
+    connection: sqlite3.Connection,
+    db_path: Path,
+) -> None:
+    source = f"image_cache {db_path}"
+    require_storage_metadata(connection, role="image_cache")
+    require_table_names(
+        connection,
+        expected={"storage_metadata", "image_validation_cache"},
+        source=source,
+    )
+    require_exact_columns(
+        connection,
+        "image_validation_cache",
+        _IMAGE_CACHE_COLUMNS,
+        source=source,
     )
 
 
@@ -427,26 +423,17 @@ def _initialize_image_index() -> Path:
         if db_path in _INITIALIZED_IMAGE_INDEX_PATHS and db_path.is_file():
             return db_path
 
+        new_database = not db_path.is_file()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(
             sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
         ) as connection:
             configure_connection(connection)
-            existing_metadata = read_storage_metadata(connection)
-            if existing_metadata is None:
-                existing_tables = connection.execute(
-                    """
-                    SELECT name FROM sqlite_schema
-                    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                    """
-                ).fetchall()
-                if existing_tables:
-                    raise ValueError(
-                        f"image_index仍是旧单库布局：{db_path}。"
-                        "请先运行 backup migrate-layout --all。"
-                    )
-            ensure_storage_metadata(connection, role="image_index")
-            ensure_image_mappings_schema(connection)
+            if new_database:
+                ensure_storage_metadata(connection, role="image_index")
+                _create_image_mappings_schema(connection)
+            else:
+                require_current_image_index(connection, db_path)
             connection.commit()
         _INITIALIZED_IMAGE_INDEX_PATHS.add(db_path)
     return db_path
@@ -458,23 +445,27 @@ def _initialize_image_cache() -> Path:
         if db_path in _INITIALIZED_IMAGE_CACHE_PATHS and db_path.is_file():
             return db_path
 
+        new_database = not db_path.is_file()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(
             sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
         ) as connection:
             configure_connection(connection)
-            ensure_storage_metadata(connection, role="image_cache")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS image_validation_cache (
-                    relative_path TEXT PRIMARY KEY,
-                    size INTEGER NOT NULL,
-                    mtime_ns INTEGER NOT NULL,
-                    valid INTEGER NOT NULL,
-                    updated_at TEXT NOT NULL
+            if new_database:
+                ensure_storage_metadata(connection, role="image_cache")
+                connection.execute(
+                    """
+                    CREATE TABLE image_validation_cache (
+                        relative_path TEXT PRIMARY KEY,
+                        size INTEGER NOT NULL,
+                        mtime_ns INTEGER NOT NULL,
+                        valid INTEGER NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
                 )
-                """
-            )
+            else:
+                require_current_image_cache(connection, db_path)
             connection.commit()
         _INITIALIZED_IMAGE_CACHE_PATHS.add(db_path)
     return db_path

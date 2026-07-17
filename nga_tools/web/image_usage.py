@@ -300,6 +300,11 @@ def _image_index_connection(output_dir: Path) -> sqlite3.Connection:
         uri=True,
     )
     configure_readonly_connection(connection)
+    try:
+        image_store.require_current_image_index(connection, db_path)
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
@@ -768,7 +773,7 @@ def build_image_usage_snapshot(output_dir: Path) -> ImageUsageSnapshot:
                 output_dir,
             )
             items = _inventory_items(connection, scan_result)
-    except (sqlite3.Error, OSError) as error:
+    except (sqlite3.Error, OSError, ValueError) as error:
         raise ImageIndexUnavailableError(
             f"无法读取{image_store.IMAGE_INDEX_FILENAME}：{error}"
         ) from error

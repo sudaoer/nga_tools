@@ -18,6 +18,7 @@ from PIL import Image
 from nga_tools import utils
 from nga_tools.backup import image_store
 from nga_tools.core import image_formats
+from nga_tools.storage import UnsupportedStorageFormatError
 
 
 def _write_avif_image(path: Path) -> None:
@@ -226,7 +227,7 @@ class ImageStoreTest:
                 )
             ] == ["url", "unique_rel_path"]
 
-    def test_legacy_image_index_schema_is_migrated_before_writes(
+    def test_old_image_index_schema_is_rejected_without_mutation(
         self,
         tmp_path: Path,
     ) -> None:
@@ -238,7 +239,6 @@ class ImageStoreTest:
             "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
         )
         old_relative_path = "images_unique/old.png"
-        new_relative_path = "images_unique/new.png"
         with sqlite3.connect(image_index_path) as connection:
             image_store.ensure_storage_metadata(connection, role="image_index")
             connection.execute(
@@ -269,21 +269,21 @@ class ImageStoreTest:
             "nga_tools.backup.image_store.get_config",
             return_value=SimpleNamespace(output_dir=str(output_dir)),
         ):
-            mapping = image_store.upsert_image_mapping(
-                image_url,
-                output_dir / new_relative_path,
-            )
+            with pytest.raises(UnsupportedStorageFormatError):
+                image_store.upsert_image_mapping(
+                    image_url,
+                    output_dir / "images_unique/new.png",
+                )
 
-        assert mapping.unique_rel_path == new_relative_path
         with sqlite3.connect(image_index_path) as connection:
             assert [
                 row[1] for row in connection.execute(
                     "PRAGMA table_info(image_mappings)"
                 )
-            ] == ["url", "unique_rel_path"]
+            ] == ["url", "unique_rel_path", "created_at", "updated_at"]
             assert connection.execute(
                 "SELECT url, unique_rel_path FROM image_mappings"
-            ).fetchall() == [(image_url, new_relative_path)]
+            ).fetchall() == [(image_url, old_relative_path)]
 
     def test_pending_image_download_tasks_retries_invalid_mapped_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:

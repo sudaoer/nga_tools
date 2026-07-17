@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime
-import json
 import sqlite3
 from collections import Counter
 from contextlib import closing
@@ -16,11 +15,9 @@ from nga_tools.backup.archive_posts import (
 from nga_tools.backup.content_codec import decode_content, encode_content
 from nga_tools.backup.archive_schema import (
     ARCHIVE_SCHEMA_VERSION,
-    read_archive_schema_version,
     require_current_archive_schema,
 )
 from nga_tools.backup.floor_models import (
-    PAGE_JSON_RE,
     AuthorPostRef,
     FloorMapEntry,
     RecoveredMissingPost,
@@ -56,7 +53,6 @@ from nga_tools.backup.thread_stores import (
     ThreadArchiveStateStore,
 )
 from nga_tools.core.downloads import DOWNLOAD_FAILURE_KINDS
-from nga_tools.core.hashing import hash_text
 from nga_tools.core.sqlite import (
     SQLITE_BUSY_TIMEOUT_SECONDS,
     configure_connection,
@@ -64,7 +60,7 @@ from nga_tools.core.sqlite import (
     iter_in_clause_chunks,
 )
 from nga_tools.ngaclient.client import PageData
-from nga_tools.storage import ensure_storage_metadata, read_storage_metadata
+from nga_tools.storage import UnsupportedStorageFormatError, ensure_storage_metadata
 from nga_tools.timing import time_section
 from nga_tools.word_count import (
     WORD_COUNT_VERSION,
@@ -73,8 +69,6 @@ from nga_tools.word_count import (
 )
 
 ARCHIVE_DB_FILENAME = "archive.sqlite3"
-_LATEST_POST_INDEX = "idx_post_versions_latest_covering"
-_LEGACY_LATEST_POST_INDEX = "idx_post_versions_latest"
 _EMPTY_IMAGE_ATTACHMENTS_JSON = "[]"
 _LATEST_POST_RECORDS_QUERY = """
     SELECT
@@ -199,12 +193,6 @@ class ArchivePagePagination:
 
 
 @dataclass(frozen=True)
-class ArchiveMigrationResult:
-    page_files: int
-    post_versions_inserted: int
-
-
-@dataclass(frozen=True)
 class ArchiveEffectivePostStats:
     post_count: int
     max_lou: Optional[int]
@@ -238,32 +226,6 @@ class PostImageReferenceCacheEntry:
     references_json: str
 
 
-@dataclass
-class _MergedPostVersion:
-    pid: int
-    lou: int
-    source_hash: str
-    content: str
-    first_seen_at: str
-    last_seen_at: str
-    seen_count: int
-    old_ids: list[int]
-
-
-@dataclass
-class _LatestPostMetadata:
-    pid: int
-    lou: int
-    author_name: Optional[str]
-    author_uid: Optional[int]
-    postdate_json: Optional[str]
-    first_seen_at: str
-    last_seen_at: str
-    seen_count: int
-    selected_last_seen_at: str
-    selected_old_id: int
-
-
 @dataclass(frozen=True)
 class _PreparedArchivePost:
     raw_post: object
@@ -287,26 +249,6 @@ def _now_utc_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def _mtime_utc_iso(path: Path) -> str:
-    return datetime.datetime.fromtimestamp(
-        path.stat().st_mtime,
-        datetime.timezone.utc,
-    ).isoformat()
-
-
-def _read_json_object(path: Path) -> dict[str, object]:
-    try:
-        raw_data: object = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as error:
-        raise FileNotFoundError(f"JSON备份文件不存在：{path}") from error
-    except json.JSONDecodeError as error:
-        raise ValueError(f"JSON备份文件不是有效JSON：{path}") from error
-
-    if not isinstance(raw_data, dict):
-        raise ValueError(f"JSON备份文件顶层必须是对象：{path}")
-    return cast(dict[str, object], raw_data)
-
-
 def _optional_int(data: dict[str, object], key: str) -> Optional[int]:
     value = data.get(key)
     if type(value) is int:
@@ -314,43 +256,10 @@ def _optional_int(data: dict[str, object], key: str) -> Optional[int]:
     return None
 
 
-def _page_json_sort_key(path: Path) -> int:
-    match = PAGE_JSON_RE.fullmatch(path.name)
-    if match is None:
-        return 0
-    return int(match.group(1))
-
-
-def _page_number_from_path(path: Path) -> int:
-    match = PAGE_JSON_RE.fullmatch(path.name)
-    if match is None:
-        raise ValueError(f"不是分页JSON文件：{path}")
-    return int(match.group(1))
-
-
-def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
-    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-    return {row[1] for row in rows if isinstance(row[1], str)}
-
-
-def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
-    row = connection.execute(
-        """
-        SELECT 1
-        FROM sqlite_schema
-        WHERE type = 'table' AND name = ?
-        """,
-        (table_name,),
-    ).fetchone()
-    return row is not None
-
-
 class ThreadArchiveStore:
     def __init__(
         self,
         thread_folder: Path,
-        *,
-        allow_layout_upgrade: bool = False,
     ) -> None:
         self.thread_folder = thread_folder
         self.db_path = thread_folder / ARCHIVE_DB_FILENAME
@@ -358,7 +267,6 @@ class ThreadArchiveStore:
         self.cache_store = ThreadArchiveCacheStore(thread_folder)
         self._schema_initialized = False
         self._store_id: str | None = None
-        self._allow_layout_upgrade = allow_layout_upgrade
 
     def exists(self) -> bool:
         return self.db_path.is_file()
@@ -366,12 +274,11 @@ class ThreadArchiveStore:
     def require_exists(self) -> None:
         if not self.exists():
             raise RuntimeError(
-                f"缺少archive.sqlite3：{self.db_path}。"
-                "请先运行 backup migrate-layout、backup migrate-store "
-                "或重新运行备份初始化。"
+                f"缺少archive.sqlite3：{self.db_path}。请重新运行备份初始化。"
             )
 
     def _connect_write(self) -> sqlite3.Connection:
+        new_database = not self.db_path.is_file()
         self.thread_folder.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(
             self.db_path,
@@ -380,7 +287,7 @@ class ThreadArchiveStore:
         configure_connection(connection)
         if not self._schema_initialized:
             try:
-                self._ensure_schema(connection)
+                self._ensure_schema(connection, new_database=new_database)
             except BaseException:
                 connection.close()
                 raise
@@ -397,13 +304,7 @@ class ThreadArchiveStore:
         )
         configure_readonly_connection(connection)
         try:
-            metadata = read_storage_metadata(connection)
-            if metadata is None or metadata.role != "archive_data":
-                raise ValueError(
-                    f"archive不是当前分库格式：{self.db_path}。"
-                    "请先运行 backup migrate-layout。"
-                )
-            require_current_archive_schema(connection, self.db_path)
+            metadata = require_current_archive_schema(connection, self.db_path)
             self._store_id = metadata.store_id
         except BaseException:
             connection.close()
@@ -413,11 +314,10 @@ class ThreadArchiveStore:
     def archive_store_id(self) -> str:
         if self._store_id is not None:
             return self._store_id
-        with closing(self._connect_read()) as connection:
-            metadata = read_storage_metadata(connection)
-            if metadata is None:
-                raise ValueError(f"archive缺少storage_metadata：{self.db_path}")
-            self._store_id = metadata.store_id
+        with closing(self._connect_read()):
+            pass
+        if self._store_id is None:
+            raise RuntimeError(f"archive无法读取store_id：{self.db_path}")
         return self._store_id
 
     def _connect_state_write(self) -> sqlite3.Connection:
@@ -458,97 +358,6 @@ class ThreadArchiveStore:
             )
             """
         )
-
-    def _migrate_legacy_page_schema(
-        self,
-        connection: sqlite3.Connection,
-    ) -> None:
-        has_snapshots = _table_exists(connection, "page_snapshots")
-        has_compact_pages = _table_exists(connection, "archive_pages")
-        if has_snapshots and has_compact_pages:
-            raise ValueError(
-                f"archive同时包含page_snapshots与archive_pages：{self.db_path}"
-            )
-        if has_compact_pages:
-            raise ValueError(
-                f"archive_pages缺少schema版本标记：{self.db_path}"
-            )
-
-        expected_rows: list[tuple[object, object, object, object]] = []
-        if has_snapshots:
-            columns = _table_columns(connection, "page_snapshots")
-            required_columns = {
-                "id",
-                "page_number",
-                "page_json",
-                "total_page",
-                "vrows",
-                "last_seen_at",
-            }
-            if not required_columns <= columns:
-                raise ValueError(
-                    f"archive page_snapshots字段不完整：{self.db_path} "
-                    f"columns={sorted(columns)}"
-                )
-            expected_rows = connection.execute(
-                """
-                SELECT page_number, total_page, vrows, last_seen_at
-                FROM (
-                    SELECT
-                        page_number,
-                        total_page,
-                        vrows,
-                        last_seen_at,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY page_number
-                            ORDER BY last_seen_at DESC, id DESC
-                        ) AS row_number
-                    FROM page_snapshots
-                )
-                WHERE row_number = 1
-                ORDER BY page_number
-                """
-            ).fetchall()
-
-        self._create_archive_pages_table(connection)
-        if has_snapshots:
-            connection.execute(
-                """
-                INSERT INTO archive_pages (
-                    page_number,
-                    total_page,
-                    vrows,
-                    last_seen_at
-                )
-                SELECT page_number, total_page, vrows, last_seen_at
-                FROM (
-                    SELECT
-                        page_number,
-                        total_page,
-                        vrows,
-                        last_seen_at,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY page_number
-                            ORDER BY last_seen_at DESC, id DESC
-                        ) AS row_number
-                    FROM page_snapshots
-                )
-                WHERE row_number = 1
-                """
-            )
-        actual_rows = connection.execute(
-            """
-            SELECT page_number, total_page, vrows, last_seen_at
-            FROM archive_pages
-            ORDER BY page_number
-            """
-        ).fetchall()
-        if actual_rows != expected_rows:
-            raise ValueError(f"archive分页状态迁移校验失败：{self.db_path}")
-
-        connection.execute("DROP TABLE IF EXISTS post_observations")
-        connection.execute("DROP TABLE IF EXISTS page_snapshots")
-        connection.execute(f"PRAGMA user_version = {ARCHIVE_SCHEMA_VERSION}")
 
     def _create_post_versions_table(
         self,
@@ -663,59 +472,6 @@ class ThreadArchiveStore:
             """
         )
 
-    def _ensure_post_overlays_table(
-        self,
-        connection: sqlite3.Connection,
-    ) -> None:
-        if not _table_exists(connection, "post_overlays"):
-            self._create_post_overlays_table(connection)
-            return
-
-        schema_row = connection.execute(
-            """
-            SELECT sql
-            FROM sqlite_schema
-            WHERE type = 'table' AND name = 'post_overlays'
-            """
-        ).fetchone()
-        schema_sql = schema_row[0] if schema_row is not None else None
-        if not isinstance(schema_sql, str):
-            raise ValueError(
-                f"archive post_overlays表结构无效：{self.db_path}"
-            )
-        normalized_schema = "".join(schema_sql.lower().split())
-        if "check(length(trim(bbcode))>0)" not in normalized_schema:
-            return
-
-        legacy_table = "post_overlays_nonempty_legacy"
-        if _table_exists(connection, legacy_table):
-            raise ValueError(
-                f"archive overlay迁移临时表已存在：{self.db_path} {legacy_table}"
-            )
-        connection.execute(
-            f"ALTER TABLE post_overlays RENAME TO {legacy_table}"
-        )
-        self._create_post_overlays_table(connection)
-        connection.execute(
-            f"""
-            INSERT INTO post_overlays (
-                lou,
-                mode,
-                bbcode,
-                content_hash,
-                updated_at
-            )
-            SELECT
-                lou,
-                mode,
-                bbcode,
-                content_hash,
-                updated_at
-            FROM {legacy_table}
-            """
-        )
-        connection.execute(f"DROP TABLE {legacy_table}")
-
     def _create_archive_change_state_table(
         self,
         connection: sqlite3.Connection,
@@ -740,62 +496,34 @@ class ThreadArchiveStore:
             ON CONFLICT(singleton) DO NOTHING
             """
         )
-    def _ensure_schema(self, connection: sqlite3.Connection) -> None:
-        existing_metadata = read_storage_metadata(connection)
-        existing_tables = {
-            row[0]
-            for row in connection.execute(
+    def _ensure_schema(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        new_database: bool,
+    ) -> None:
+        if not new_database:
+            metadata = require_current_archive_schema(connection, self.db_path)
+            self._store_id = metadata.store_id
+            return
+
+        with connection:
+            metadata = ensure_storage_metadata(connection, role="archive_data")
+            self._store_id = metadata.store_id
+            self._create_archive_pages_table(connection)
+            self._create_post_versions_table(connection)
+            self._create_post_latest_metadata_table(connection)
+            self._create_post_version_selections_table(connection)
+            self._create_floor_map_tables(connection)
+            self._create_post_overlays_table(connection)
+            self._create_archive_change_state_table(connection)
+            connection.execute(
                 """
-                SELECT name FROM sqlite_schema
-                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                CREATE INDEX idx_post_versions_latest_covering
+                ON post_versions(lou, last_seen_at DESC, id DESC, pid)
                 """
             )
-            if isinstance(row[0], str)
-        }
-        new_database = existing_metadata is None and not existing_tables
-        if existing_metadata is None and existing_tables:
-            if not self._allow_layout_upgrade:
-                raise ValueError(
-                    f"archive仍是旧单库布局：{self.db_path}。"
-                    "请先运行 backup migrate-layout；运行时不会原地读取或"
-                    "升级旧缓存。"
-                )
-        metadata = ensure_storage_metadata(connection, role="archive_data")
-        self._store_id = metadata.store_id
-        if new_database:
-            self._create_archive_pages_table(connection)
             connection.execute(f"PRAGMA user_version = {ARCHIVE_SCHEMA_VERSION}")
-        elif read_archive_schema_version(connection) != ARCHIVE_SCHEMA_VERSION:
-            if not self._allow_layout_upgrade:
-                raise ValueError(
-                    f"archive仍是旧分页存储schema：{self.db_path}。"
-                    "请先运行 backup migrate-layout；运行时不会读取或升级旧表。"
-                )
-            self._migrate_legacy_page_schema(connection)
-        else:
-            require_current_archive_schema(connection, self.db_path)
-        if not _table_exists(connection, "post_versions"):
-            self._create_post_versions_table(connection)
-        else:
-            columns = _table_columns(connection, "post_versions")
-            if "post_hash" in columns or "post_json" in columns:
-                self._migrate_post_versions_schema(connection, columns)
-            else:
-                self._ensure_post_version_word_count_columns(connection)
-        self._create_post_latest_metadata_table(connection)
-        self._create_post_version_selections_table(connection)
-        self._create_floor_map_tables(connection)
-        self._ensure_post_overlays_table(connection)
-        self._create_archive_change_state_table(connection)
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_post_versions_latest_covering
-            ON post_versions(lou, last_seen_at DESC, id DESC, pid)
-            """
-        )
-        connection.execute(f"DROP INDEX IF EXISTS {_LEGACY_LATEST_POST_INDEX}")
-        connection.execute(f"PRAGMA user_version = {ARCHIVE_SCHEMA_VERSION}")
-        connection.commit()
 
     @staticmethod
     def _post_overlays_from_rows(
@@ -835,8 +563,6 @@ class ThreadArchiveStore:
             params = sorted_lous
 
         with closing(self._connect_read()) as connection:
-            if not _table_exists(connection, "post_overlays"):
-                return {}
             rows = cast(
                 list[tuple[object, object, object, object, object]],
                 connection.execute(
@@ -967,7 +693,7 @@ class ThreadArchiveStore:
             if (
                 len(row) != 2
                 or type(row[0]) is not int
-                or not isinstance(row[1], (str, bytes))
+                or not isinstance(row[1], bytes)
             ):
                 raise ValueError(f"archive帖子版本正文行无效：{row!r}")
             result.append(
@@ -987,6 +713,8 @@ class ThreadArchiveStore:
         try:
             with closing(self._connect_state_read()):
                 pass
+        except UnsupportedStorageFormatError:
+            raise
         except (OSError, sqlite3.Error, ValueError):
             self.state_store.recreate_after_error(source_store_id)
             return BackupProcessingSnapshot(
@@ -2221,6 +1949,8 @@ class ThreadArchiveStore:
             return {}
         try:
             return self._read_post_image_reference_cache(cache_keys)
+        except UnsupportedStorageFormatError:
+            raise
         except (OSError, sqlite3.Error, ValueError):
             self.cache_store.recreate_after_error(self.archive_store_id())
             return {}
@@ -2552,273 +2282,6 @@ class ThreadArchiveStore:
             return None
         with closing(self._connect_read()) as connection:
             return self._read_floor_map(connection)
-
-    def _ensure_post_version_word_count_columns(
-        self,
-        connection: sqlite3.Connection,
-    ) -> None:
-        columns = _table_columns(connection, "post_versions")
-        missing_columns = [
-            (
-                "word_count_version",
-                "ALTER TABLE post_versions ADD COLUMN "
-                "word_count_version INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "word_count_chinese_chars",
-                "ALTER TABLE post_versions ADD COLUMN "
-                "word_count_chinese_chars INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "word_count_chinese_with_punctuation",
-                "ALTER TABLE post_versions ADD COLUMN "
-                "word_count_chinese_with_punctuation INTEGER NOT NULL DEFAULT 0",
-            ),
-        ]
-        for column_name, alter_sql in missing_columns:
-            if column_name not in columns:
-                connection.execute(alter_sql)
-
-    def _read_old_post_version_rows(
-        self,
-        connection: sqlite3.Connection,
-        columns: set[str],
-    ) -> list[tuple[int, int, int, str, str, str, int, Optional[str]]]:
-        post_json_expression = "post_json" if "post_json" in columns else "NULL"
-        rows = connection.execute(
-            f"""
-            SELECT
-                id,
-                pid,
-                lou,
-                content,
-                first_seen_at,
-                last_seen_at,
-                seen_count,
-                {post_json_expression}
-            FROM post_versions
-            ORDER BY id
-            """
-        ).fetchall()
-        old_rows: list[tuple[int, int, int, str, str, str, int, Optional[str]]] = []
-        for row in rows:
-            old_id, pid, lou, content, first_seen_at, last_seen_at, seen_count, post_json = row
-            if (
-                type(old_id) is not int
-                or type(pid) is not int
-                or type(lou) is not int
-                or not isinstance(content, (str, bytes))
-                or not isinstance(first_seen_at, str)
-                or not isinstance(last_seen_at, str)
-                or type(seen_count) is not int
-                or (post_json is not None and not isinstance(post_json, str))
-            ):
-                raise ValueError(
-                    f"archive post_versions旧行字段无效：{self.db_path} row={row!r}"
-                )
-            old_rows.append(
-                (
-                    old_id,
-                    pid,
-                    lou,
-                    decode_content(content, source=f"archive旧帖子版本{old_id}正文"),
-                    first_seen_at,
-                    last_seen_at,
-                    seen_count,
-                    post_json,
-                )
-            )
-        return old_rows
-
-    def _merge_old_post_version_row(
-        self,
-        merged_versions: dict[tuple[int, int, str], _MergedPostVersion],
-        *,
-        old_id: int,
-        pid: int,
-        lou: int,
-        content: str,
-        first_seen_at: str,
-        last_seen_at: str,
-        seen_count: int,
-    ) -> None:
-        source_hash = hash_text(content)
-        key = (pid, lou, source_hash)
-        merged = merged_versions.get(key)
-        if merged is None:
-            merged_versions[key] = _MergedPostVersion(
-                pid=pid,
-                lou=lou,
-                source_hash=source_hash,
-                content=content,
-                first_seen_at=first_seen_at,
-                last_seen_at=last_seen_at,
-                seen_count=seen_count,
-                old_ids=[old_id],
-            )
-            return
-
-        if first_seen_at < merged.first_seen_at:
-            merged.first_seen_at = first_seen_at
-        if last_seen_at > merged.last_seen_at:
-            merged.last_seen_at = last_seen_at
-        merged.seen_count += seen_count
-        merged.old_ids.append(old_id)
-
-    def _merge_old_post_metadata_row(
-        self,
-        metadata_by_post: dict[tuple[int, int], _LatestPostMetadata],
-        *,
-        old_id: int,
-        pid: int,
-        lou: int,
-        first_seen_at: str,
-        last_seen_at: str,
-        seen_count: int,
-        post_json: Optional[str],
-    ) -> None:
-        raw_post: object = None
-        if post_json is not None:
-            try:
-                raw_post = json.loads(post_json)
-            except json.JSONDecodeError:
-                raw_post = None
-        metadata = metadata_from_raw_post(raw_post)
-        key = (pid, lou)
-        current = metadata_by_post.get(key)
-        if current is None:
-            metadata_by_post[key] = _LatestPostMetadata(
-                pid=pid,
-                lou=lou,
-                author_name=metadata["author_name"],
-                author_uid=metadata["author_uid"],
-                postdate_json=metadata["postdate_json"],
-                first_seen_at=first_seen_at,
-                last_seen_at=last_seen_at,
-                seen_count=seen_count,
-                selected_last_seen_at=last_seen_at,
-                selected_old_id=old_id,
-            )
-            return
-
-        if first_seen_at < current.first_seen_at:
-            current.first_seen_at = first_seen_at
-        if last_seen_at > current.last_seen_at:
-            current.last_seen_at = last_seen_at
-        current.seen_count += seen_count
-        if (last_seen_at, old_id) >= (
-            current.selected_last_seen_at,
-            current.selected_old_id,
-        ):
-            current.author_name = metadata["author_name"]
-            current.author_uid = metadata["author_uid"]
-            current.postdate_json = metadata["postdate_json"]
-            current.selected_last_seen_at = last_seen_at
-            current.selected_old_id = old_id
-
-    def _migrate_post_versions_schema(
-        self,
-        connection: sqlite3.Connection,
-        columns: set[str],
-    ) -> None:
-        old_rows = self._read_old_post_version_rows(connection, columns)
-
-        merged_versions: dict[tuple[int, int, str], _MergedPostVersion] = {}
-        metadata_by_post: dict[tuple[int, int], _LatestPostMetadata] = {}
-        for old_id, pid, lou, content, first_seen_at, last_seen_at, seen_count, post_json in old_rows:
-            self._merge_old_post_version_row(
-                merged_versions,
-                old_id=old_id,
-                pid=pid,
-                lou=lou,
-                content=content,
-                first_seen_at=first_seen_at,
-                last_seen_at=last_seen_at,
-                seen_count=seen_count,
-            )
-            self._merge_old_post_metadata_row(
-                metadata_by_post,
-                old_id=old_id,
-                pid=pid,
-                lou=lou,
-                first_seen_at=first_seen_at,
-                last_seen_at=last_seen_at,
-                seen_count=seen_count,
-                post_json=post_json,
-            )
-
-        connection.execute("DROP TABLE IF EXISTS post_observations")
-        connection.execute("DROP TABLE IF EXISTS post_versions")
-        connection.execute("DROP TABLE IF EXISTS post_latest_metadata")
-        self._create_post_versions_table(connection)
-        self._create_post_latest_metadata_table(connection)
-
-        for merged in sorted(
-            merged_versions.values(),
-            key=lambda item: min(item.old_ids),
-        ):
-            word_count = count_post_content(merged.content)
-            cursor = connection.execute(
-                """
-                INSERT INTO post_versions (
-                    pid,
-                    lou,
-                    source_hash,
-                    content,
-                    word_count_version,
-                    word_count_chinese_chars,
-                    word_count_chinese_with_punctuation,
-                    first_seen_at,
-                    last_seen_at,
-                    seen_count
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    merged.pid,
-                    merged.lou,
-                    merged.source_hash,
-                    encode_content(merged.content),
-                    WORD_COUNT_VERSION,
-                    word_count.chinese_chars,
-                    word_count.chinese_with_punctuation,
-                    merged.first_seen_at,
-                    merged.last_seen_at,
-                    merged.seen_count,
-                ),
-            )
-            new_id = cursor.lastrowid
-            if type(new_id) is not int:
-                raise RuntimeError("迁移post_versions后无法读取新version id。")
-
-        for metadata in metadata_by_post.values():
-            connection.execute(
-                """
-                INSERT INTO post_latest_metadata (
-                    pid,
-                    lou,
-                    author_name,
-                    author_uid,
-                    postdate_json,
-                    image_attachments_json,
-                    first_seen_at,
-                    last_seen_at,
-                    seen_count
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    metadata.pid,
-                    metadata.lou,
-                    metadata.author_name,
-                    metadata.author_uid,
-                    metadata.postdate_json,
-                    _EMPTY_IMAGE_ATTACHMENTS_JSON,
-                    metadata.first_seen_at,
-                    metadata.last_seen_at,
-                    metadata.seen_count,
-                ),
-            )
 
     def _upsert_archive_page(
         self,
@@ -3388,9 +2851,6 @@ class ThreadArchiveStore:
         connection: sqlite3.Connection,
         lous: set[int] | None = None,
     ) -> dict[int, PostVersionSelection]:
-        if not _table_exists(connection, "post_version_selections"):
-            return {}
-
         rows = cast(
             list[tuple[object, object, object]],
             connection.execute(
@@ -3974,38 +3434,3 @@ class ThreadArchiveStore:
                 raise ValueError(f"archive page_number字段无效：{page_number!r}")
             page_numbers.add(page_number)
         return page_numbers
-
-    def migrate_json_pages(self) -> ArchiveMigrationResult:
-        folder_json = self.thread_folder / "json"
-        if not folder_json.exists():
-            raise RuntimeError(f"缺少JSON备份目录：{folder_json}")
-        if not folder_json.is_dir():
-            raise RuntimeError(f"JSON备份路径不是目录：{folder_json}")
-
-        page_paths = sorted(
-            (
-                path
-                for path in folder_json.iterdir()
-                if path.is_file() and PAGE_JSON_RE.fullmatch(path.name)
-            ),
-            key=_page_json_sort_key,
-        )
-        if not page_paths:
-            raise RuntimeError(f"缺少JSON备份文件：{folder_json}/page_*.json")
-
-        post_versions_inserted = 0
-        for path in page_paths:
-            page_data = cast(PageData, _read_json_object(path))
-            result = self.upsert_page(
-                _page_number_from_path(path),
-                page_data,
-                observed_at=_mtime_utc_iso(path),
-                count_observation=False,
-            )
-            post_versions_inserted += result.post_versions_inserted
-
-        self.refresh_stored_word_counts()
-        return ArchiveMigrationResult(
-            page_files=len(page_paths),
-            post_versions_inserted=post_versions_inserted,
-        )

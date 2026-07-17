@@ -183,20 +183,24 @@ class BackupCliTest:
 
         assert args["force_processing"] is True
 
+    def test_backup_write_json_is_rejected_for_non_fetch_commands(self) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(["backup", "pdf", "--tid", "123", "--write_json"])
+
+        assert context.value.code == 2
+
     @pytest.mark.parametrize(
-        "argv",
-        [
-            ["backup", "migrate-store", "--tid", "123", "--write_json"],
-            ["backup", "pdf", "--tid", "123", "--write_json"],
-        ],
+        "action",
+        ["migrate-store", "migrate-layout", "migrate-content"],
     )
-    def test_backup_write_json_is_rejected_for_non_fetch_commands(
+    def test_removed_backup_migration_commands_are_rejected(
         self,
-        argv: list[str],
+        action: str,
     ) -> None:
         with patch("sys.stderr", new_callable=io.StringIO):
             with pytest.raises(SystemExit) as context:
-                args_parse(argv)
+                args_parse(["backup", action, "--all"])
 
         assert context.value.code == 2
 
@@ -230,72 +234,6 @@ class BackupCliTest:
             with pytest.raises(SystemExit) as context:
                 args_parse(argv)
         assert context.value.code == 2
-
-    def test_backup_migrate_store_parses_all(self) -> None:
-        args = args_parse(["backup", "migrate-store", "--all"])
-
-        assert args['command'] == 'backup'
-        assert args['action'] == 'migrate-store'
-        assert args['all'] is True
-
-    def test_backup_migrate_store_rejects_all_with_thread_target(self) -> None:
-        with patch("sys.stderr", new_callable=io.StringIO):
-            with pytest.raises(SystemExit) as context:
-                args_parse(["backup", "migrate-store", "--all", "--tid", "123"])
-
-        assert context.value.code == 2
-
-    def test_backup_migrate_layout_parses_all_and_rollback(self) -> None:
-        all_args = args_parse(["backup", "migrate-layout", "--all"])
-        rollback_args = args_parse(
-            ["backup", "migrate-layout", "--rollback", "run-123"]
-        )
-
-        assert all_args["all"] is True
-        assert rollback_args["rollback"] == "run-123"
-
-    def test_backup_migrate_layout_rejects_rollback_with_target(self) -> None:
-        with patch("sys.stderr", new_callable=io.StringIO):
-            with pytest.raises(SystemExit) as context:
-                args_parse(
-                    [
-                        "backup",
-                        "migrate-layout",
-                        "--rollback",
-                        "run-123",
-                        "--tid",
-                        "123",
-                    ]
-                )
-
-        assert context.value.code == 2
-
-    def test_backup_migrate_content_parses_dry_run_and_rollback(self) -> None:
-        dry_run_args = args_parse(
-            ["backup", "migrate-content", "--all", "--dry-run"]
-        )
-        rollback_args = args_parse(
-            ["backup", "migrate-content", "--rollback", "run-123"]
-        )
-
-        assert dry_run_args["dry_run"] is True
-        assert rollback_args["rollback"] == "run-123"
-
-    def test_backup_migrate_content_rejects_rollback_with_dry_run(self) -> None:
-        with patch("sys.stderr", new_callable=io.StringIO):
-            with pytest.raises(SystemExit) as context:
-                args_parse(
-                    [
-                        "backup",
-                        "migrate-content",
-                        "--rollback",
-                        "run-123",
-                        "--dry-run",
-                    ]
-                )
-
-        assert context.value.code == 2
-
 
 def _backup_config_app_config(
     workers: int = 4,

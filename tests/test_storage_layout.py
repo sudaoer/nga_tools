@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from nga_tools.backup import image_store
 from nga_tools.backup.archive_schema import ARCHIVE_SCHEMA_VERSION
 from nga_tools.backup.archive_store import (
@@ -16,6 +18,7 @@ from nga_tools.backup.archive_store import (
 from nga_tools.backup.processing_state import ArchiveChangeState, ImageReferenceState
 from nga_tools.storage import (
     STORAGE_LAYOUT_VERSION,
+    UnsupportedStorageFormatError,
     ensure_storage_metadata,
     read_storage_metadata,
 )
@@ -91,7 +94,7 @@ def test_thread_databases_have_disjoint_roles_and_source_binding(
     assert cache_metadata.source_store_id == data_metadata.store_id
 
 
-def test_mismatched_state_store_is_quarantined_and_rebuilt(
+def test_mismatched_state_store_is_rejected_without_mutation(
     tmp_path: Path,
 ) -> None:
     store = ThreadArchiveStore(tmp_path / "123_456")
@@ -112,14 +115,39 @@ def test_mismatched_state_store_is_quarantined_and_rebuilt(
         )
         connection.commit()
 
-    rebuilt = store.read_backup_processing_snapshot()
+    with pytest.raises(UnsupportedStorageFormatError):
+        store.read_backup_processing_snapshot()
 
-    assert rebuilt.image_state is None
-    assert list(store.thread_folder.glob("archive_state.sqlite3.corrupt-*"))
+    assert not list(store.thread_folder.glob("archive_state.sqlite3.corrupt-*"))
     with closing(sqlite3.connect(store.state_store.db_path)) as connection:
         metadata = read_storage_metadata(connection)
     assert metadata is not None
-    assert metadata.source_store_id == store.archive_store_id()
+    assert metadata.source_store_id == "wrong"
+
+
+def test_missing_state_index_is_rejected_without_recreation(
+    tmp_path: Path,
+) -> None:
+    store = ThreadArchiveStore(tmp_path / "123_456")
+    store.ensure_schema()
+    store.ensure_backup_processing_schema()
+    with closing(sqlite3.connect(store.state_store.db_path)) as connection:
+        connection.execute("DROP INDEX idx_image_reference_manifest_entries_url")
+        connection.commit()
+
+    reopened = ThreadArchiveStore(store.thread_folder)
+    with pytest.raises(UnsupportedStorageFormatError):
+        reopened.read_backup_processing_snapshot()
+
+    with closing(sqlite3.connect(store.state_store.db_path)) as connection:
+        index_exists = connection.execute(
+            """
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'index'
+              AND name = 'idx_image_reference_manifest_entries_url'
+            """
+        ).fetchone()
+    assert index_exists is None
 
 
 def test_state_commit_double_checks_archive_revision(tmp_path: Path) -> None:
@@ -186,23 +214,15 @@ def test_data_only_handoff_reads_without_state_or_cache_databases(
             """
             CREATE TABLE image_mappings (
                 url TEXT PRIMARY KEY,
-                unique_rel_path TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                unique_rel_path TEXT NOT NULL
             )
             """
         )
         connection.execute(
-            "INSERT INTO image_mappings VALUES (?, ?, '', '')",
+            "INSERT INTO image_mappings VALUES (?, ?)",
             ("https://img.nga.178.com/portable.png", "images_unique/image.png"),
         )
         connection.commit()
-    with closing(
-        sqlite3.connect(source_output / image_store.IMAGE_CACHE_FILENAME)
-    ) as connection:
-        ensure_storage_metadata(connection, role="image_cache")
-        connection.commit()
-
     target_output = tmp_path / "handoff"
     target_thread = target_output / "123_456"
     target_thread.mkdir(parents=True)

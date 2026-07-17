@@ -10,8 +10,13 @@ from typing import cast
 from nga_tools.backup.image_store import (
     IMAGE_CACHE_FILENAME,
     IMAGE_INDEX_FILENAME,
+    require_current_image_index,
 )
-from nga_tools.backup.audio_store import AUDIO_INDEX_FILENAME
+from nga_tools.backup.archive_schema import require_current_archive_schema
+from nga_tools.backup.audio_store import (
+    AUDIO_INDEX_FILENAME,
+    require_current_audio_index,
+)
 from nga_tools.backup.thread_stores import (
     ARCHIVE_CACHE_DB_FILENAME,
     ARCHIVE_STATE_DB_FILENAME,
@@ -80,6 +85,7 @@ def _latest_post_signature(
     immutable: bool,
 ) -> tuple[int, str]:
     with closing(_connect_readonly(path, immutable=immutable)) as connection:
+        require_current_archive_schema(connection, path)
         rows = connection.execute(
             """
             SELECT
@@ -116,36 +122,33 @@ def _floor_map_rows(
     immutable: bool,
 ) -> tuple[list[tuple[object, ...]], list[tuple[object, ...]]]:
     with closing(_connect_readonly(path, immutable=immutable)) as connection:
-        try:
-            entries = cast(
-                list[tuple[object, ...]],
-                connection.execute(
-                    """
-                    SELECT author_lou, pid, original_lou, original_pid
-                    FROM floor_map_entries
-                    ORDER BY author_lou
-                    """
-                ).fetchall(),
-            )
-            candidates = cast(
-                list[tuple[object, ...]],
-                connection.execute(
-                    """
-                    SELECT author_lou, candidate_index, original_lou
-                    FROM floor_map_candidates
-                    ORDER BY author_lou, candidate_index
-                    """
-                ).fetchall(),
-            )
-            return entries, candidates
-        except sqlite3.OperationalError as error:
-            if "no such table" in str(error).lower():
-                return [], []
-            raise
+        require_current_archive_schema(connection, path)
+        entries = cast(
+            list[tuple[object, ...]],
+            connection.execute(
+                """
+                SELECT author_lou, pid, original_lou, original_pid
+                FROM floor_map_entries
+                ORDER BY author_lou
+                """
+            ).fetchall(),
+        )
+        candidates = cast(
+            list[tuple[object, ...]],
+            connection.execute(
+                """
+                SELECT author_lou, candidate_index, original_lou
+                FROM floor_map_candidates
+                ORDER BY author_lou, candidate_index
+                """
+            ).fetchall(),
+        )
+        return entries, candidates
 
 
 def _post_version_count(path: Path, *, immutable: bool) -> int:
     with closing(_connect_readonly(path, immutable=immutable)) as connection:
+        require_current_archive_schema(connection, path)
         row = connection.execute("SELECT COUNT(*) FROM post_versions").fetchone()
     if row is None or type(row[0]) is not int:
         raise RuntimeError(f"无法读取帖子版本数：{path}")
@@ -156,14 +159,10 @@ def _image_mappings(path: Path, *, immutable: bool) -> dict[str, str]:
     if not path.is_file():
         return {}
     with closing(_connect_readonly(path, immutable=immutable)) as connection:
-        try:
-            rows = connection.execute(
-                "SELECT url, unique_rel_path FROM image_mappings"
-            ).fetchall()
-        except sqlite3.OperationalError as error:
-            if "no such table" in str(error).lower():
-                return {}
-            raise
+        require_current_image_index(connection, path)
+        rows = connection.execute(
+            "SELECT url, unique_rel_path FROM image_mappings"
+        ).fetchall()
     mappings: dict[str, str] = {}
     for raw_url, raw_path in rows:
         if isinstance(raw_url, str) and isinstance(raw_path, str):
@@ -175,14 +174,10 @@ def _audio_mappings(path: Path, *, immutable: bool) -> dict[str, str]:
     if not path.is_file():
         return {}
     with closing(_connect_readonly(path, immutable=immutable)) as connection:
-        try:
-            rows = connection.execute(
-                "SELECT url, unique_rel_path FROM audio_mappings"
-            ).fetchall()
-        except sqlite3.OperationalError as error:
-            if "no such table" in str(error).lower():
-                return {}
-            raise
+        require_current_audio_index(connection, path)
+        rows = connection.execute(
+            "SELECT url, unique_rel_path FROM audio_mappings"
+        ).fetchall()
     mappings: dict[str, str] = {}
     for raw_url, raw_path in rows:
         if isinstance(raw_url, str) and isinstance(raw_path, str):

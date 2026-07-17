@@ -20,8 +20,9 @@ def test_content_codec_round_trip(content: str) -> None:
     assert decode_content(encoded) == content
 
 
-def test_content_codec_accepts_legacy_text() -> None:
-    assert decode_content("legacy content") == "legacy content"
+def test_content_codec_rejects_text() -> None:
+    with pytest.raises(ContentCodecError, match="存储类型无效"):
+        decode_content("legacy content")
 
 
 def test_content_codec_rejects_invalid_zstd() -> None:

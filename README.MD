@@ -137,8 +137,8 @@ pixi run python main.py backup sub --name 帖子名
 
 完整或增量备份会复用 `archive_state.sqlite3` 中的楼层处理状态和图片引用集合状态。页数、`vrows` 或楼层映射输入变化时只刷新楼层派生状态；归档正文、overlay、手动版本选择和图片引用解析版本未变化时，不再读取完整归档或批量展开全部帖子图片引用，只重试上次未完成的图片 URL。该状态同时适用于只看作者和没有 `aid` 的原帖备份；`backup all` 的状态复用判定发生在完整网络抓取及归档写入之后，不会跳过远端刷新。
 
-正文来源实际变化后才会重建图片引用集合，并复用 `archive_cache.sqlite3` 中的帖子级图片引用派生缓存，只重新解析新增或正文、overlay、手动版本选择发生变化的楼层。下载失败的图片待重试队列保存在 `archive_state.sqlite3`：新 URL、HTTP 429、5xx、网络、payload 和本地存储失败会在下一次相关备份继续尝试；已知 HTTP 3xx 和除 429 外的 4xx 会根据距上次尝试的时间概率重试。累计触发概率为 `x^3`（`x` 是已等待时间占最大间隔的比例），同一 URL 在一个重试周期内使用稳定票据，不会因为频繁运行而反复抽签；达到 `backup_image_retry_max_interval_hours` 后必定重试。音频失败使用同样的稳定概率规则，并以 `backup_audio_retry_max_interval_hours` 为最长间隔。概率延后的 URL 不会单独触发 `backup auto` 本地维护，新 URL 始终立即尝试，不再被正文引用的图片 URL 会移出图片队列；音频队列覆盖所有历史正文版本，因此历史引用仍会保留。状态复用不会重新校验已成功的历史图片，本地文件后续被删除或损坏时请运行 `image verify` 检测。只看作者备份还会重试恢复缺失楼内容；恢复出的匿名正文会提升归档修订并使图片集合按需更新。旧版单体 SQLite 不会在正常备份时自动升级或读取其中的旧缓存，必须先显式运行 `backup migrate-layout`。需要忽略所有派生状态并强制重新处理时，可给 `backup all` 或 `backup sub` 加 `--force-processing`（兼容 `--force_processing`）；此选项会立即重试全部仍被引用的失败图片并重扫、重试全部历史 BGM，但不会禁用帖子级图片引用缓存。
-增量刷新到的新页会合并进历史楼层库；同一页新响应中消失的旧楼不会从库中删除。尚未迁移的旧备份目录如果含有 `json/page_*.json` 但 `archive.sqlite3` 不完整，正常备份会报错提示先运行 `backup migrate-store`，不会自动读取旧 JSON。
+正文来源实际变化后才会重建图片引用集合，并复用 `archive_cache.sqlite3` 中的帖子级图片引用派生缓存，只重新解析新增或正文、overlay、手动版本选择发生变化的楼层。下载失败的图片待重试队列保存在 `archive_state.sqlite3`：新 URL、HTTP 429、5xx、网络、payload 和本地存储失败会在下一次相关备份继续尝试；已知 HTTP 3xx 和除 429 外的 4xx 会根据距上次尝试的时间概率重试。累计触发概率为 `x^3`（`x` 是已等待时间占最大间隔的比例），同一 URL 在一个重试周期内使用稳定票据，不会因为频繁运行而反复抽签；达到 `backup_image_retry_max_interval_hours` 后必定重试。音频失败使用同样的稳定概率规则，并以 `backup_audio_retry_max_interval_hours` 为最长间隔。概率延后的 URL 不会单独触发 `backup auto` 本地维护，新 URL 始终立即尝试，不再被正文引用的图片 URL 会移出图片队列；音频队列覆盖所有历史正文版本，因此历史引用仍会保留。状态复用不会重新校验已成功的历史图片，本地文件后续被删除或损坏时请运行 `image verify` 检测。只看作者备份还会重试恢复缺失楼内容；恢复出的匿名正文会提升归档修订并使图片集合按需更新。需要忽略所有派生状态并强制重新处理时，可给 `backup all` 或 `backup sub` 加 `--force-processing`（兼容 `--force_processing`）；此选项会立即重试全部仍被引用的失败图片并重扫、重试全部历史 BGM，但不会禁用帖子级图片引用缓存。
+增量刷新到的新页会合并进历史楼层库；同一页新响应中消失的旧楼不会从库中删除。历史 `json/page_*.json` 不会被读取、导入或改写；不存在 `archive.sqlite3` 时，正常备份会直接创建当前格式数据库。
 
 也可以不使用保存的名称，直接指定 `tid` 和可选的 `aid`：
 
@@ -305,7 +305,7 @@ pixi run python main.py backup sub --all-threads --force-processing
 
 楼层映射会增量刷新并保存在同一备份的 `archive.sqlite3` 中。缺失楼无法唯一确定原帖楼层时，数据库会保存候选原楼层；若能从匿名原帖恢复正文，正文也会直接写入该数据库。
 
-## 数据库布局、交付与迁移
+## 数据库格式与交付
 
 当前布局给每个 SQLite 文件写入 `storage_metadata`，其中包含角色、布局版本和
 存储 ID；每帖状态库与缓存库还会绑定对应 `archive.sqlite3` 的存储 ID，避免把
@@ -316,7 +316,7 @@ pixi run python main.py backup sub --all-threads --force-processing
 | 持久数据 | `forum_threads.sqlite3`、各帖 `archive.sqlite3`、`image_index.sqlite3`、`images_unique/`、`audio_index.sqlite3`、`audio_unique/` | 必须保留；它们包含离线时无法重新从本机推导的版面数据、正文历史、图片/音频 URL 映射和媒体内容 |
 | 用户选择 | `thread_configs.json`；各帖正文版本选择位于 `archive.sqlite3` 的 `post_version_selections` 表 | 必须保留；正文版本选择已包含在持久数据库中 |
 | 运行状态 | `backup_state.sqlite3`、各帖 `archive_state.sqlite3` | 建议随完整工作副本保留；只读交付可省略，之后会从持久数据重建派生状态，但智能备份水位和失败图片/音频重试历史会丢失 |
-| 可重建缓存 | `image_cache.sqlite3`、各帖 `archive_cache.sqlite3` | 可以不交付或删除；程序不会把它们当作持久数据，缺失或损坏时会重新创建 |
+| 可重建缓存 | `image_cache.sqlite3`、各帖 `archive_cache.sqlite3` | 可以不交付或删除；程序不会把它们当作持久数据，缺失时会按当前格式重新创建 |
 | 可选产物 | `json/`、`pdf/`、日志、`replay_run-*.json` | 按用途保留；当前 SQLite 数据完整时不属于恢复 Web/PDF/replay 读取能力的必要输入 |
 
 只复制持久数据和用户选择后，接收方仍可在不访问 NGA 的情况下使用 Web、生成
@@ -325,60 +325,16 @@ PDF 或启动 `replay serve`；首次需要派生处理时会新建 state/cache 
 `config.json` 并让接收方修改 `output_dir`；不要把 `secrets.json`、Cookie 或其他
 凭据交给不应获得 NGA 账号权限的人。
 
-旧版单体 SQLite 布局或旧分页存储 schema 必须显式迁移。全量命令同时处理所有
-帖子以及根目录的 forum、ankebak 和图片数据库：
+当前程序只接受当前数据库格式。所有已存在的 SQLite 文件都会在读写前校验
+`storage_metadata`、角色、来源绑定、表、字段、索引以及归档 `user_version`；任何
+缺表、额外旧表、字段或约束不匹配都会报格式不受支持，并保持原库不变。程序不再
+提供布局、正文或 JSON 存储迁移命令，也不会自动补表、补列或转换正文。
 
-```powershell
-pixi run python main.py backup migrate-layout --all
-```
-
-迁移持有 output 根锁，Web 管理写入和其他会修改 output 的命令不会与换库发布
-交叉执行。每次迁移会输出 `run_id`，在
-`output/.migration-backups/<run_id>/` 保存原库的 SQLite Online Backup、清单和
-持久数据指纹；中断或部分失败后再次运行同一命令会从该清单续跑。迁移只接收与
-当前数据修订及格式匹配的状态、可解析缓存和仍对应现有图片文件的校验项；无效
-缓存直接丢弃。对于旧分页存储，每个页码只迁移最后观察到的 `totalPage`、`vrows`
-和时间，原始响应 `page_snapshots` 及已停用的 `post_observations` 不进入活动库。
-活动 `archive.sqlite3`、`forum_threads.sqlite3` 和 `image_index.sqlite3` 发布后不再
-包含旧分页、状态或缓存表，正常程序也不会回读旧格式库。
-
-验收失败时可用命令输出的 `run_id` 恢复迁移前布局：
-
-```powershell
-pixi run python main.py backup migrate-layout --rollback <run_id>
-```
-
-回滚后的旧布局仅用于撤销和排障；当前程序会拒绝把它当作正常运行库，重新使用前
-仍需完成迁移。确认新布局及交付副本可读前，不要删除 `.migration-backups/`。
-
-`post_versions.content` 可单独迁移为 Python 3.14 标准库 `compression.zstd`、固定
-level 3 的压缩 BLOB。先用 dry-run 汇总原始正文、压缩后正文和预计节省空间：
-
-```powershell
-pixi run python main.py backup migrate-content --all --dry-run
-```
-
-确认结果后执行迁移；命令会保留正文版本 ID、手动版本选择和其他 archive 表，使用
-`output/.migration-backups/<run_id>/` 中的 SQLite 快照支持中断续跑和回滚：
-
-```powershell
-pixi run python main.py backup migrate-content --all
-pixi run python main.py backup migrate-content --rollback <run_id>
-```
-
-旧的 TEXT 正文仍可被读取；正常新写入和迁移后的 `post_versions.content` 都是 zstd
-BLOB。迁移完成后不要删除对应的 `.migration-backups/<run_id>/`，直到验收结束。
-
-更早期只有 `json/page_*.json` 的备份目录可先显式迁移到每帖 SQLite 存储。
-该迁移不会删除或改写旧 JSON：
-
-```powershell
-pixi run python main.py backup migrate-store --name 帖子名
-pixi run python main.py backup migrate-store --all
-```
-
-旧目录中的 `floor_map.json` 不参与迁移，也不会被读取；只看作者备份迁移分页数据后，
-请运行 `backup sub --name 帖子名 --force-processing` 在 `archive.sqlite3` 中重新生成楼层映射。
+`post_versions.content` 必须是由 Python 3.14 标准库 `compression.zstd`、固定
+level 3 写入的 BLOB。旧 TEXT 正文和旧分页、状态、缓存表不再兼容读取。只有数据库
+文件完全不存在时，程序才会创建当前格式；可重建的 state/cache 文件如需重置，先
+在程序外备份并删除对应文件，再由正常运行路径重新创建。仅含历史
+`json/page_*.json` 的目录不会出现在 Web 帖子列表中。
 
 手动下载一张完整NGA图片URL并写入全局图片索引：
 
@@ -421,8 +377,8 @@ pixi run python main.py web serve --host 0.0.0.0 --port 18736
 
 Web 查看器读取当前主线备份结构中的 `archive.sqlite3`，并在页面请求时从归档
 正文和最新展示元数据重新渲染 HTML；普通阅读器的线程列表默认按作者最后发言倒序，
-也会显示已存盘的正文字数并支持按正文字数排序。旧版只有 `json/page_*.json` 的目录会在页面中显示为“需迁移”，请先运行
-`backup migrate-store`。
+也会显示已存盘的正文字数并支持按正文字数排序。只有 `json/page_*.json`、没有
+当前格式 `archive.sqlite3` 的历史目录不会显示在线程列表中。
 
 前端使用 Vue Router 管理页面：`/threads` 是普通帖子阅读器，`/admin` 是
 管理界面；旧 `/databases` 会跳转到 `/admin/databases`。管理界面中的数据库
@@ -492,13 +448,13 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `json/`：加 `--write-json` 时输出的接口最近响应分页数据
 - `archive.sqlite3`：每帖持久数据。保存每页最新的紧凑分页状态、正文版本、最新
   展示元数据、用户正文版本选择、楼层映射与候选原楼层、归档修订和管理页
-  BBCode overlay；不保存 NGA 原始分页响应。完成 `backup migrate-content` 后，
-  `post_versions.content` 以 zstd BLOB 保存，Web、PDF 和 replay 仍从此库读取解压后的正文
+  BBCode overlay；不保存 NGA 原始分页响应。`post_versions.content` 始终以 zstd
+  BLOB 保存，Web、PDF 和 replay 从此库读取解压后的正文
 - `archive_state.sqlite3`：每帖运行状态。保存楼层/图片引用处理水位、逐楼引用
   清单、URL 引用计数、音频历史版本扫描水位以及失败图片/音频待重试队列；删除后可从 `archive.sqlite3`
   重建，但会丢失尚未完成工作的历史状态
 - `archive_cache.sqlite3`：每帖可重建缓存。当前保存帖子级图片引用解析结果；
-  缺失、损坏或与 `archive.sqlite3` 的存储 ID 不匹配时按空缓存处理并重建
+  缺失时按当前格式创建；格式或 `archive.sqlite3` 存储 ID 不匹配时拒绝读取
 - `pdf/`：生成 PDF 时使用的中间 HTML、长图切片和 PDF 文件
 
 全局数据库与媒体产物位于 `output/` 根目录：
@@ -511,15 +467,9 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `image_cache.sqlite3`：以 `images_unique/...` 相对路径为键的文件校验缓存；可删除重建
 - `audio_unique/`：按 SHA-256 内容 hash 保存的实际 MP3 文件
 - `audio_index.sqlite3`：持久的原始 NGA 音频 URL 到 `audio_unique` 文件映射及内容元数据
-- `.migration-backups/<run_id>/`：布局迁移的原库快照、恢复清单和验收指纹
-- `output/.migration-backups/<run_id>/files/<thread>/archive.sqlite3`：
-  `post_versions.content` 压缩迁移的原库快照和清单
-
 旧版本生成的 `html_modified/`、`backup_state.json`、`floor_map.json`、
 `post_overlays.json` 和 `overlay/post_*.html` 不再读取，
-程序也不会自动删除或改写这些历史产物。旧版 SQLite 中的原始分页快照、处理状态表
-和缓存表同样不会被正常运行路径读取；只能由显式 `backup migrate-layout` 检查后
-迁移。
+程序也不会自动删除或改写这些历史产物。旧格式 SQLite 会被拒绝且不会自动修改。
 
 ## 协议
 

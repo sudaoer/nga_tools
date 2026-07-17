@@ -12,7 +12,12 @@ from typing import Optional, Protocol, TypeAlias, cast
 from nga_tools.backup.archive_schema import require_current_archive_schema
 from nga_tools.backup.content_codec import decode_content
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
-from nga_tools.backup.audio_store import AUDIO_INDEX_FILENAME, AUDIO_UNIQUE_DIRNAME
+from nga_tools.backup.audio_store import (
+    AUDIO_INDEX_FILENAME,
+    AUDIO_UNIQUE_DIRNAME,
+    require_current_audio_index,
+)
+from nga_tools.backup.image_store import require_current_image_index
 from nga_tools.core.hashing import hash_text, sha256
 from nga_tools.core.nga_audio import normalize_nga_audio_url
 from nga_tools.core.sqlite import configure_readonly_connection
@@ -883,6 +888,7 @@ def _load_images(source_output: Path, hasher: _Hasher) -> _ImageLoadResult:
     try:
         connection, database_state = _connect_frozen(index_path)
         with closing(connection):
+            require_current_image_index(connection, index_path)
             rows = cast(
                 list[tuple[object, object]],
                 connection.execute(
@@ -894,7 +900,7 @@ def _load_images(source_output: Path, hasher: _Hasher) -> _ImageLoadResult:
                 ).fetchall(),
             )
         _verify_frozen(index_path, database_state)
-    except sqlite3.Error as error:
+    except (sqlite3.Error, ValueError) as error:
         raise ReplayCorpusError(f"无法读取重放图片索引：{index_path}: {error}") from error
 
     images_by_url: dict[str, ImageReplayEntry] = {}
@@ -981,6 +987,7 @@ def _load_audio(source_output: Path, hasher: _Hasher) -> _AudioLoadResult:
     try:
         connection, database_state = _connect_frozen(index_path)
         with closing(connection):
+            require_current_audio_index(connection, index_path)
             rows = cast(
                 list[tuple[object, object, object, object]],
                 connection.execute(
@@ -992,7 +999,7 @@ def _load_audio(source_output: Path, hasher: _Hasher) -> _AudioLoadResult:
                 ).fetchall(),
             )
         _verify_frozen(index_path, database_state)
-    except sqlite3.Error as error:
+    except (sqlite3.Error, ValueError) as error:
         raise ReplayCorpusError(
             f"无法读取重放音频索引：{index_path}: {error}"
         ) from error

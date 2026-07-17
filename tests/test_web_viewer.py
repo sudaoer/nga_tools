@@ -79,6 +79,7 @@ def _write_image_mapping(output_dir: Path, url: str, unique_rel_path: str) -> No
     output_dir.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(output_dir / "image_index.sqlite3")
     try:
+        ensure_storage_metadata(connection, role="image_index")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS image_mappings (
@@ -174,6 +175,7 @@ def _write_forum_thread_db(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(output_dir / "forum_threads.sqlite3")
     try:
+        ensure_storage_metadata(connection, role="forum_data")
         connection.execute(
             """
             CREATE TABLE forum_threads_fid_784 (
@@ -185,7 +187,9 @@ def _write_forum_thread_db(output_dir: Path) -> None:
                 postdate_text TEXT NOT NULL,
                 lastpost INTEGER NOT NULL,
                 lastpost_text TEXT NOT NULL,
-                replies INTEGER NOT NULL
+                replies INTEGER NOT NULL,
+                topic_type INTEGER NOT NULL DEFAULT 0,
+                is_forum INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -199,10 +203,12 @@ def _write_forum_thread_db(output_dir: Path) -> None:
                 postdate,
                 postdate_text,
                 lastpost,
-                lastpost_text,
-                replies
+                    lastpost_text,
+                    replies,
+                    topic_type,
+                    is_forum
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 101,
@@ -214,6 +220,8 @@ def _write_forum_thread_db(output_dir: Path) -> None:
                 1783490000,
                 "2026-07-08 00:00:00",
                 12,
+                0,
+                0,
             ),
         )
         connection.commit()
@@ -222,7 +230,7 @@ def _write_forum_thread_db(output_dir: Path) -> None:
 
 
 class WebViewerDataTest:
-    def test_scans_ready_and_legacy_backup_summaries(self, tmp_path: Path) -> None:
+    def test_scans_ready_and_omits_json_only_backups(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
         ready_dir = output_dir / "101_201"
         legacy_dir = output_dir / "102_all"
@@ -259,7 +267,7 @@ class WebViewerDataTest:
             "https://bbs.nga.cn/read.php?tid=101&authorid=201"
         )
         assert "hasHtmlModified" not in by_dir["101_201"]
-        assert by_dir["102_all"]["status"] == "needs_migration"
+        assert "102_all" not in by_dir
 
     def test_light_scan_skips_archive_stats(
         self,
@@ -286,7 +294,7 @@ class WebViewerDataTest:
         assert summaries[0]["statsLoaded"] is False
         assert summaries[0]["postCount"] is None
 
-    def test_full_scan_rejects_unmigrated_archive_schema(
+    def test_full_scan_rejects_unsupported_archive_schema(
         self,
         tmp_path: Path,
     ) -> None:
@@ -302,7 +310,7 @@ class WebViewerDataTest:
         assert len(summaries) == 1
         assert summaries[0]["status"] == "invalid"
         assert summaries[0]["message"] is not None
-        assert "backup migrate-layout" in summaries[0]["message"]
+        assert "版本不受支持" in summaries[0]["message"]
 
     def test_scans_stored_word_count_summary(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
@@ -1441,7 +1449,7 @@ class WebDatabaseViewerTest:
         assert refreshed_response.status_code == 200
         assert len(calls) == 2
 
-    def test_overlay_write_invalidates_database_list_cache(
+    def test_overlay_write_does_not_recreate_missing_table(
         self,
         tmp_path: Path,
     ) -> None:
@@ -1459,19 +1467,21 @@ class WebDatabaseViewerTest:
             "/api/admin/threads/101/201/overlays/1",
             json={"bbcode": "database overlay"},
         )
-        after_response = client.get("/api/databases")
+        with sqlite3.connect(thread_dir / "archive.sqlite3") as connection:
+            table_exists = connection.execute(
+                """
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'table' AND name = 'post_overlays'
+                """
+            ).fetchone()
 
         assert before_response.status_code == 200
-        assert save_response.status_code == 200
-        assert after_response.status_code == 200
+        assert save_response.status_code == 400
         before_items = {
             item["id"]: item for item in before_response.json()["items"]
         }
-        after_items = {
-            item["id"]: item for item in after_response.json()["items"]
-        }
-        assert before_items["archive:101_201"]["tableCount"] == 9
-        assert after_items["archive:101_201"]["tableCount"] == 10
+        assert before_items["archive:101_201"]["status"] == "invalid"
+        assert table_exists is None
 
     def test_database_schema_and_rows_support_search_sort_and_detail(
         self,
@@ -1564,7 +1574,12 @@ class WebDatabaseViewerTest:
         assert first_response.status_code == 200
         assert second_response.status_code == 200
         assert refreshed_response.status_code == 200
-        assert calls == ["forum_threads_fid_784", "forum_threads_fid_784"]
+        assert calls == [
+            "forum_threads_fid_784",
+            "storage_metadata",
+            "forum_threads_fid_784",
+            "storage_metadata",
+        ]
 
     def test_database_rows_reject_unknown_sort_column(
         self,
@@ -2474,7 +2489,7 @@ class WebImageUsageTest:
         assert changed.status_code == 200
         assert calls == [output_dir, output_dir]
 
-    def test_full_thread_read_does_not_migrate_invalid_archive(
+    def test_full_thread_read_does_not_modify_invalid_archive(
         self,
         tmp_path: Path,
     ) -> None:

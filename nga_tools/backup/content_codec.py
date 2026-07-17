@@ -20,9 +20,6 @@ def encode_content(content: str) -> bytes:
 
 
 def decode_content(value: object, *, source: str = "帖子正文") -> str:
-    if isinstance(value, str):
-        # Archives created before the content migration store UTF-8 text.
-        return value
     if not isinstance(value, bytes):
         raise ContentCodecError(f"{source}存储类型无效：{type(value).__name__}")
     try:

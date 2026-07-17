@@ -14,9 +14,45 @@ from nga_tools.core.sqlite import (
     configure_connection,
 )
 from nga_tools.ngaclient.client import ForumThread
-from nga_tools.storage import ensure_storage_metadata, read_storage_metadata
+from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
+from nga_tools.storage.schema import require_exact_columns, require_table_names
 
 FORUM_THREAD_DB_FILENAME = "forum_threads.sqlite3"
+_FORUM_THREAD_COLUMNS = (
+    ("tid", "INTEGER"), ("aid", "INTEGER"), ("author", "TEXT"),
+    ("subject", "TEXT"), ("postdate", "INTEGER"),
+    ("postdate_text", "TEXT"), ("lastpost", "INTEGER"),
+    ("lastpost_text", "TEXT"), ("replies", "INTEGER"),
+    ("topic_type", "INTEGER"), ("is_forum", "INTEGER"),
+)
+
+
+def require_current_forum_schema(
+    connection: sqlite3.Connection,
+    db_path: Path,
+) -> None:
+    source = f"forum_data {db_path}"
+    require_storage_metadata(connection, role="forum_data")
+    require_table_names(
+        connection,
+        expected={"storage_metadata"},
+        allowed_prefixes=("forum_threads_fid_",),
+        source=source,
+    )
+    rows = connection.execute(
+        """
+        SELECT name FROM sqlite_schema
+        WHERE type = 'table' AND name LIKE 'forum_threads_fid_%'
+        """
+    ).fetchall()
+    for row in rows:
+        if isinstance(row[0], str):
+            require_exact_columns(
+                connection,
+                row[0],
+                _FORUM_THREAD_COLUMNS,
+                source=source,
+            )
 
 
 @dataclass(frozen=True)
@@ -70,21 +106,10 @@ class ForumThreadStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
         configure_connection(connection)
-        existing_metadata = read_storage_metadata(connection)
-        if existing_metadata is None and existed:
-            existing_tables = connection.execute(
-                """
-                SELECT name FROM sqlite_schema
-                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                """
-            ).fetchall()
-            if existing_tables:
-                connection.close()
-                raise ValueError(
-                    f"forum_threads仍是旧单库布局：{self.db_path}。"
-                    "请先运行 backup migrate-layout --all。"
-                )
-        ensure_storage_metadata(connection, role="forum_data")
+        if existed:
+            require_current_forum_schema(connection, self.db_path)
+        else:
+            ensure_storage_metadata(connection, role="forum_data")
         connection.commit()
         return connection
 
@@ -107,30 +132,14 @@ class ForumThreadStore:
             )
             """
         )
-        self._migrate_table_columns(connection, table_name)
+        require_exact_columns(
+            connection,
+            table_name,
+            _FORUM_THREAD_COLUMNS,
+            source=f"forum_data {self.db_path}",
+        )
         connection.commit()
         return table_name
-
-    @staticmethod
-    def _migrate_table_columns(
-        connection: sqlite3.Connection,
-        table_name: str,
-    ) -> None:
-        existing_columns = {
-            row[1]
-            for row in connection.execute(
-                f"PRAGMA table_info({table_name})"
-            ).fetchall()
-        }
-        migrations: list[tuple[str, str]] = [
-            ("topic_type", "INTEGER NOT NULL DEFAULT 0"),
-            ("is_forum", "INTEGER NOT NULL DEFAULT 0"),
-        ]
-        for column_name, column_def in migrations:
-            if column_name not in existing_columns:
-                connection.execute(
-                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}"
-                )
 
     def existing_tids(self, fid: int) -> set[int]:
         with closing(self._connect()) as connection:

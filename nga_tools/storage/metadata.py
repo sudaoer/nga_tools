@@ -5,6 +5,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal
 
+from nga_tools.storage.errors import UnsupportedStorageFormatError
+
 
 STORAGE_LAYOUT_VERSION = 2
 StorageRole = Literal[
@@ -152,3 +154,51 @@ def ensure_storage_metadata(
         ),
     )
     return new_metadata
+
+
+def require_storage_metadata(
+    connection: sqlite3.Connection,
+    *,
+    role: StorageRole,
+    source_store_id: str | None = None,
+) -> StorageMetadata:
+    columns = tuple(
+        (row[1], str(row[2]).upper())
+        for row in connection.execute("PRAGMA table_info(storage_metadata)")
+        if len(row) > 2 and isinstance(row[1], str)
+    )
+    expected_columns = (
+        ("singleton", "INTEGER"),
+        ("role", "TEXT"),
+        ("layout_version", "INTEGER"),
+        ("store_id", "TEXT"),
+        ("source_store_id", "TEXT"),
+    )
+    if columns != expected_columns:
+        raise UnsupportedStorageFormatError(
+            "SQLite storage_metadata不符合当前格式："
+            f"expected={expected_columns!r}, actual={columns!r}"
+        )
+    try:
+        metadata = read_storage_metadata(connection)
+    except ValueError as error:
+        raise UnsupportedStorageFormatError(
+            f"SQLite storage_metadata记录无效：{error}"
+        ) from error
+    if metadata is None:
+        raise UnsupportedStorageFormatError("SQLite缺少storage_metadata记录。")
+    if metadata.role != role:
+        raise UnsupportedStorageFormatError(
+            f"SQLite存储角色不匹配：期望{role}，实际{metadata.role}。"
+        )
+    if metadata.layout_version != STORAGE_LAYOUT_VERSION:
+        raise UnsupportedStorageFormatError(
+            "SQLite存储布局版本不受支持："
+            f"期望{STORAGE_LAYOUT_VERSION}，实际{metadata.layout_version}。"
+        )
+    if metadata.source_store_id != source_store_id:
+        raise UnsupportedStorageFormatError(
+            "SQLite存储来源不匹配："
+            f"期望{source_store_id!r}，实际{metadata.source_store_id!r}。"
+        )
+    return metadata

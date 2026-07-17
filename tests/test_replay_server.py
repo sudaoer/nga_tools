@@ -30,6 +30,7 @@ from nga_tools.replay.server import (
     DEFAULT_REPLAY_PORT,
     create_replay_app,
 )
+from nga_tools.storage import ensure_storage_metadata
 
 IMAGE_URL = (
     "https://img.nga.178.com/attachments/mon_202607/12/"
@@ -102,6 +103,7 @@ def _write_image_index(output_dir: Path, *, unsafe: bool = False) -> Path:
     image_path.write_bytes(b"replayed-image-bytes")
     connection = sqlite3.connect(output_dir / "image_index.sqlite3")
     try:
+        ensure_storage_metadata(connection, role="image_index")
         connection.execute(
             """
             CREATE TABLE image_mappings (
@@ -145,6 +147,7 @@ def _write_audio_index(output_dir: Path) -> Path:
     audio_path = audio_dir / f"{content_hash}.mp3"
     audio_path.write_bytes(content)
     with sqlite3.connect(output_dir / "audio_index.sqlite3") as connection:
+        ensure_storage_metadata(connection, role="audio_index")
         connection.execute(
             """
             CREATE TABLE audio_mappings (
@@ -156,6 +159,12 @@ def _write_audio_index(output_dir: Path) -> Path:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX idx_audio_mappings_unique_rel_path
+            ON audio_mappings(unique_rel_path)
             """
         )
         rows = [
@@ -433,7 +442,7 @@ class ReplayCorpusTest:
         assert json.loads(first_page.payload)["result"][0]["content"] == "latest"
         assert corpus.manifest.archive_content_page_count == 2
 
-    def test_rejects_unmigrated_archive_schema(self, tmp_path: Path) -> None:
+    def test_rejects_unsupported_archive_schema(self, tmp_path: Path) -> None:
         output_dir, thread_config, _image_path = _build_source(tmp_path)
         archive_path = output_dir / "123_456" / "archive.sqlite3"
         with sqlite3.connect(archive_path) as connection:
@@ -441,7 +450,7 @@ class ReplayCorpusTest:
             connection.commit()
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
-        with pytest.raises(ReplayCorpusError, match="backup migrate-layout"):
+        with pytest.raises(ReplayCorpusError, match="版本不受支持"):
             load_replay_corpus(output_dir, thread_config)
 
     def test_synthesizes_original_pages_from_tid_all_content(

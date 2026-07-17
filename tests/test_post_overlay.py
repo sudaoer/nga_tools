@@ -17,6 +17,7 @@ from nga_tools.backup.post_overlay import (
     source_hashes_by_lou_with_post_overlays,
 )
 from nga_tools.core.hashing import hash_text
+from nga_tools.storage import UnsupportedStorageFormatError, ensure_storage_metadata
 
 
 def _write_existing_image(output_dir: Path, image_url: str) -> Path:
@@ -24,6 +25,7 @@ def _write_existing_image(output_dir: Path, image_url: str) -> Path:
     image_path.parent.mkdir(parents=True)
     Image.new("RGB", (2, 2), color="white").save(image_path)
     with sqlite3.connect(output_dir / "image_index.sqlite3") as connection:
+        ensure_storage_metadata(connection, role="image_index")
         connection.execute(
             """
             CREATE TABLE image_mappings (
@@ -117,10 +119,10 @@ def test_empty_post_overlay_is_stored_and_replaces_the_floor(tmp_path: Path) -> 
     assert applied[0]["source_hash"] != records[0]["source_hash"]
 
 
-def test_existing_nonempty_overlay_table_is_migrated(tmp_path: Path) -> None:
+def test_old_overlay_constraint_is_rejected_without_mutation(tmp_path: Path) -> None:
     thread_dir = tmp_path / "101_201"
     thread_dir.mkdir()
-    store = ThreadArchiveStore(thread_dir, allow_layout_upgrade=True)
+    store = ThreadArchiveStore(thread_dir)
     with sqlite3.connect(store.db_path) as connection:
         connection.execute(
             """
@@ -143,23 +145,23 @@ def test_existing_nonempty_overlay_table_is_migrated(tmp_path: Path) -> None:
             (hash_text("existing"),),
         )
 
-    store.ensure_schema()
-    empty_overlay = store.upsert_post_overlay(2, make_post_overlay(""))
-
-    assert store.read_post_overlays()[1]["bbcode"] == "existing"
-    assert store.read_post_overlays()[2] == empty_overlay
+    with pytest.raises(UnsupportedStorageFormatError):
+        store.ensure_schema()
     with sqlite3.connect(store.db_path) as connection:
         schema_sql = connection.execute(
             "SELECT sql FROM sqlite_schema WHERE name = 'post_overlays'"
         ).fetchone()[0]
-    assert "length(trim(bbcode))" not in schema_sql
+        rows = connection.execute(
+            "SELECT lou, bbcode FROM post_overlays"
+        ).fetchall()
+    assert "length(trim(bbcode))" in schema_sql
+    assert rows == [(1, "existing")]
 
 
 def test_old_archive_without_overlay_table_ignores_legacy_json(tmp_path: Path) -> None:
     thread_dir = tmp_path / "101_201"
     thread_dir.mkdir()
     store = ThreadArchiveStore(thread_dir)
-    sqlite3.connect(store.db_path).close()
     store.ensure_schema()
     legacy_path = thread_dir / "post_overlays.json"
     legacy_text = '{"version":1,"overlays":{"1":{"bbcode":"legacy"}}}\n'

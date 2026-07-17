@@ -214,6 +214,12 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
             """
         )
         connection.execute(
+            """
+            CREATE INDEX idx_audio_mappings_unique_rel_path
+            ON audio_mappings(unique_rel_path)
+            """
+        )
+        connection.execute(
             "INSERT INTO audio_mappings VALUES (?, ?, ?, ?, ?, '', '')",
             (
                 AUDIO_URL,

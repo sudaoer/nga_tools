@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import NotRequired, Optional, TypedDict
@@ -8,7 +7,6 @@ from typing import NotRequired, Optional, TypedDict
 FLOOR_MAP_VERSION = 1
 FLOOR_MAP_GENERATION_VERSION = 1
 FLOOR_MAP_HASH_ALGORITHM = "sha256"
-PAGE_JSON_RE = re.compile(r"^page_(\d+)\.json$")
 MISSING_POST_HTML = "<p><em>本楼层内容缺失。</em></p>"
 ORIGINAL_POSTS_PER_PAGE = 20
 

@@ -13,10 +13,36 @@ from nga_tools.core.retry_schedule import (
 from nga_tools.core.sqlite import SQLITE_BUSY_TIMEOUT_SECONDS, configure_connection
 from nga_tools.config import get_config
 from nga_tools.ngaclient.client import ForumThread
-from nga_tools.storage import ensure_storage_metadata
+from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
+from nga_tools.storage.schema import require_exact_columns, require_table_names
 
 
 BACKUP_STATE_DB_FILENAME = "backup_state.sqlite3"
+_ANKEBAK_STATE_COLUMNS = (
+    ("target_key", "TEXT"), ("tid", "INTEGER"), ("aid", "INTEGER"),
+    ("forum_replies", "INTEGER"), ("forum_lastpost", "INTEGER"),
+    ("last_backup_success_at", "TEXT"),
+    ("last_full_backup_success_at", "TEXT"),
+)
+
+
+def require_current_backup_state_schema(
+    connection: sqlite3.Connection,
+    db_path: Path,
+) -> None:
+    source = f"backup_state {db_path}"
+    require_storage_metadata(connection, role="backup_state")
+    require_table_names(
+        connection,
+        expected={"storage_metadata", "ankebak_thread_state"},
+        source=source,
+    )
+    require_exact_columns(
+        connection,
+        "ankebak_thread_state",
+        _ANKEBAK_STATE_COLUMNS,
+        source=source,
+    )
 
 
 def backup_state_db_path() -> Path:
@@ -71,13 +97,17 @@ class AnkebakStateStore:
         self.db_path = backup_state_db_path() if db_path is None else db_path
 
     def _connect(self) -> sqlite3.Connection:
+        new_database = not self.db_path.is_file()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(
             self.db_path,
             timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
         )
         configure_connection(connection)
-        ensure_storage_metadata(connection, role="backup_state")
+        if new_database:
+            ensure_storage_metadata(connection, role="backup_state")
+        else:
+            require_current_backup_state_schema(connection, self.db_path)
         connection.commit()
         return connection
 
@@ -95,6 +125,12 @@ class AnkebakStateStore:
                 last_full_backup_success_at TEXT
             )
             """
+        )
+        require_exact_columns(
+            connection,
+            "ankebak_thread_state",
+            _ANKEBAK_STATE_COLUMNS,
+            source="backup_state SQLite",
         )
         connection.commit()
 

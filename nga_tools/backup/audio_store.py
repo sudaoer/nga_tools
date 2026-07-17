@@ -23,7 +23,12 @@ from nga_tools.core.sqlite import (
     configure_readonly_connection,
     iter_in_clause_chunks,
 )
-from nga_tools.storage import ensure_storage_metadata
+from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
+from nga_tools.storage.schema import (
+    require_exact_columns,
+    require_index_names,
+    require_table_names,
+)
 
 AUDIO_INDEX_FILENAME = "audio_index.sqlite3"
 AUDIO_UNIQUE_DIRNAME = "audio_unique"
@@ -67,6 +72,37 @@ _INITIALIZED_AUDIO_INDEX_PATHS: set[Path] = set()
 _AUDIO_VALIDATION_LOCK = threading.RLock()
 _AUDIO_VALIDATION_CACHE: dict[Path, tuple[int, int, int, str]] = {}
 _AUDIO_VALIDATION_CACHE_MAX_ENTRIES = 8192
+_AUDIO_MAPPING_COLUMNS = (
+    ("url", "TEXT"), ("unique_rel_path", "TEXT"),
+    ("content_sha256", "TEXT"), ("content_bytes", "INTEGER"),
+    ("duration_seconds", "REAL"), ("created_at", "TEXT"),
+    ("updated_at", "TEXT"),
+)
+
+
+def require_current_audio_index(
+    connection: sqlite3.Connection,
+    db_path: Path,
+) -> None:
+    source = f"audio_index {db_path}"
+    require_storage_metadata(connection, role="audio_index")
+    require_table_names(
+        connection,
+        expected={"storage_metadata", "audio_mappings"},
+        source=source,
+    )
+    require_exact_columns(
+        connection,
+        "audio_mappings",
+        _AUDIO_MAPPING_COLUMNS,
+        source=source,
+    )
+    require_index_names(
+        connection,
+        required={"idx_audio_mappings_unique_rel_path"},
+        forbidden=set(),
+        source=source,
+    )
 
 
 def configured_output_root() -> Path:
@@ -92,32 +128,36 @@ def _initialize_audio_index(output_root: Path) -> Path:
     with _SCHEMA_LOCK:
         if db_path in _INITIALIZED_AUDIO_INDEX_PATHS and db_path.is_file():
             return db_path
+        new_database = not db_path.is_file()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(
             sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
         ) as connection:
             configure_connection(connection)
             with connection:
-                ensure_storage_metadata(connection, role="audio_index")
-                connection.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS audio_mappings (
-                        url TEXT PRIMARY KEY,
-                        unique_rel_path TEXT NOT NULL,
-                        content_sha256 TEXT NOT NULL,
-                        content_bytes INTEGER NOT NULL CHECK(content_bytes > 0),
-                        duration_seconds REAL NOT NULL CHECK(duration_seconds > 0),
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
+                if new_database:
+                    ensure_storage_metadata(connection, role="audio_index")
+                    connection.execute(
+                        """
+                        CREATE TABLE audio_mappings (
+                            url TEXT PRIMARY KEY,
+                            unique_rel_path TEXT NOT NULL,
+                            content_sha256 TEXT NOT NULL,
+                            content_bytes INTEGER NOT NULL CHECK(content_bytes > 0),
+                            duration_seconds REAL NOT NULL CHECK(duration_seconds > 0),
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL
+                        )
+                        """
                     )
-                    """
-                )
-                connection.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_audio_mappings_unique_rel_path
-                    ON audio_mappings(unique_rel_path)
-                    """
-                )
+                    connection.execute(
+                        """
+                        CREATE INDEX idx_audio_mappings_unique_rel_path
+                        ON audio_mappings(unique_rel_path)
+                        """
+                    )
+                else:
+                    require_current_audio_index(connection, db_path)
         _INITIALIZED_AUDIO_INDEX_PATHS.add(db_path)
     return db_path
 
@@ -135,6 +175,11 @@ def _connect_readonly(db_path: Path) -> sqlite3.Connection:
         uri=True,
     )
     configure_readonly_connection(connection)
+    try:
+        require_current_audio_index(connection, db_path)
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 

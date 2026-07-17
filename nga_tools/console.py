@@ -36,7 +36,6 @@ class WarningCategory(StrEnum):
     PROCESSING_STATE = "处理状态"
     CACHE = "缓存"
     PDF = "PDF生成"
-    MIGRATION = "数据迁移"
     TASK_FAILURE = "任务失败"
 
 

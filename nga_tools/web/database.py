@@ -9,15 +9,25 @@ from typing import Literal, Optional, TypeAlias, TypedDict, cast
 from urllib.parse import quote
 
 from nga_tools.backup import audio_store, image_store
-from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
+from nga_tools.backup.archive_schema import require_current_archive_schema
+from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
 from nga_tools.backup.content_codec import decode_content
 from nga_tools.backup.thread_stores import (
     ARCHIVE_CACHE_DB_FILENAME,
     ARCHIVE_STATE_DB_FILENAME,
+    require_current_archive_cache_schema,
+    require_current_archive_state_schema,
 )
 from nga_tools.core.sqlite import configure_readonly_connection
-from nga_tools.forum.ankebak_state import BACKUP_STATE_DB_FILENAME
-from nga_tools.forum.thread_store import FORUM_THREAD_DB_FILENAME
+from nga_tools.forum.ankebak_state import (
+    BACKUP_STATE_DB_FILENAME,
+    require_current_backup_state_schema,
+)
+from nga_tools.forum.thread_store import (
+    FORUM_THREAD_DB_FILENAME,
+    require_current_forum_schema,
+)
+from nga_tools.storage import UnsupportedStorageFormatError
 from nga_tools.web.data import parse_thread_dir_name
 
 DatabaseKind: TypeAlias = Literal[
@@ -191,8 +201,33 @@ def _read_table_names(connection: sqlite3.Connection) -> list[tuple[str, TableKi
     return [(name, _table_kind(table_type)) for name, table_type in rows]
 
 
-def _read_table_count(db_path: Path) -> int:
-    with closing(_connect_readonly(db_path)) as connection:
+def _require_current_database_ref(
+    connection: sqlite3.Connection,
+    ref: DatabaseRef,
+) -> None:
+    if ref.kind == "forum_threads":
+        require_current_forum_schema(connection, ref.path)
+    elif ref.kind == "backup_state":
+        require_current_backup_state_schema(connection, ref.path)
+    elif ref.kind == "image_index":
+        image_store.require_current_image_index(connection, ref.path)
+    elif ref.kind == "image_cache":
+        image_store.require_current_image_cache(connection, ref.path)
+    elif ref.kind == "audio_index":
+        audio_store.require_current_audio_index(connection, ref.path)
+    elif ref.kind == "archive":
+        require_current_archive_schema(connection, ref.path)
+    else:
+        source_store_id = ThreadArchiveStore(ref.path.parent).archive_store_id()
+        if ref.kind == "archive_state":
+            require_current_archive_state_schema(connection, source_store_id)
+        else:
+            require_current_archive_cache_schema(connection, source_store_id)
+
+
+def _read_table_count(ref: DatabaseRef) -> int:
+    with closing(_connect_readonly(ref.path)) as connection:
+        _require_current_database_ref(connection, ref)
         return len(_read_table_names(connection))
 
 
@@ -201,10 +236,10 @@ def _database_summary_for_ref(output_dir: Path, ref: DatabaseRef) -> DatabaseSum
     status: DatabaseStatus = "ready"
     message: Optional[str] = None
     try:
-        table_count = _read_table_count(ref.path)
-    except sqlite3.Error as error:
+        table_count = _read_table_count(ref)
+    except (OSError, sqlite3.Error, ValueError) as error:
         status = "invalid"
-        message = f"SQLite数据库无法读取：{error}"
+        message = f"SQLite数据库格式无效或无法读取：{error}"
 
     return {
         "id": ref.id,
@@ -489,11 +524,12 @@ def read_database_schema(output_dir: Path, database_id: str) -> DatabaseSchema:
 
     try:
         with closing(_connect_readonly(ref.path)) as connection:
+            _require_current_database_ref(connection, ref)
             tables = [
                 _read_table_summary(connection, table_name, table_type)
                 for table_name, table_type in _read_table_names(connection)
             ]
-    except sqlite3.Error as error:
+    except (sqlite3.Error, UnsupportedStorageFormatError) as error:
         raise DatabaseUnavailableError(f"SQLite数据库无法读取：{error}") from error
 
     return {"database": database, "tables": tables}
@@ -634,6 +670,7 @@ def read_table_rows(
     ref = resolve_database(output_dir, database_id)
     try:
         with closing(_connect_readonly(ref.path)) as connection:
+            _require_current_database_ref(connection, ref)
             _table_type, columns = _require_columns(connection, table_name)
             column_names = [column["name"] for column in columns]
             if sort_by is not None and sort_by not in column_names:
@@ -690,7 +727,7 @@ def read_table_rows(
                     (*params, limit, offset),
                 ).fetchall(),
             )
-    except sqlite3.Error as error:
+    except (sqlite3.Error, UnsupportedStorageFormatError) as error:
         raise DatabaseUnavailableError(f"SQLite数据库无法读取：{error}") from error
 
     table_rows: list[TableRow] = []
@@ -735,6 +772,7 @@ def read_table_row_detail(
     ref = resolve_database(output_dir, database_id)
     try:
         with closing(_connect_readonly(ref.path)) as connection:
+            _require_current_database_ref(connection, ref)
             _table_type, columns = _require_columns(connection, table_name)
             if not _table_has_rowid(connection, table_name):
                 raise DatabaseUnavailableError("此表不支持rowid详情。")
@@ -766,7 +804,7 @@ def read_table_row_detail(
                     (row_id,),
                 ).fetchone(),
             )
-    except sqlite3.Error as error:
+    except (sqlite3.Error, UnsupportedStorageFormatError) as error:
         raise DatabaseUnavailableError(f"SQLite数据库无法读取：{error}") from error
 
     if row is None:

@@ -31,7 +31,6 @@ from nga_tools.backup.floor_models import (
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,
     FLOOR_MAP_VERSION,
-    PAGE_JSON_RE,
 )
 from nga_tools.backup.image_pipeline import (
     download_images_compact as _download_images,
@@ -153,46 +152,6 @@ def _upsert_archive_pages(
     page_data_by_page: dict[int, PageData],
 ) -> ArchivePagesUpsertResult:
     return store.upsert_pages(page_data_by_page)
-
-
-def _legacy_page_numbers(folder_json: Path) -> set[int]:
-    if not folder_json.is_dir():
-        return set()
-    page_numbers: set[int] = set()
-    for path in folder_json.iterdir():
-        if not path.is_file():
-            continue
-        match = PAGE_JSON_RE.fullmatch(path.name)
-        if match is not None:
-            page_numbers.add(int(match.group(1)))
-    return page_numbers
-
-
-def _archive_migration_command(tid: int, aid: Optional[int]) -> str:
-    command = f"backup migrate-store --tid {tid}"
-    if aid is not None:
-        command += f" --aid {aid}"
-    return command
-
-
-def _ensure_legacy_json_is_migrated(
-    tid: int,
-    aid: Optional[int],
-    archive_store: ThreadArchiveStore,
-    archive_page_numbers: set[int],
-) -> None:
-    folder_json = archive_store.thread_folder / "json"
-    legacy_page_numbers = _legacy_page_numbers(folder_json)
-    unmigrated_page_numbers = legacy_page_numbers - archive_page_numbers
-    if not unmigrated_page_numbers:
-        return
-
-    raise RuntimeError(
-        f"{archive_store.db_path} 未覆盖旧JSON页："
-        f"{', '.join(str(item) for item in sorted(unmigrated_page_numbers))}。"
-        "正常备份不再读取旧JSON；请先运行 "
-        f"{_archive_migration_command(tid, aid)}。"
-    )
 
 
 def _build_floor_map_for_post_refs(
@@ -1555,7 +1514,6 @@ def backup_thread_sub(
             archive_store.ensure_schema()
     with time_section("增量预检查"):
         existing_page_numbers = archive_store.read_page_numbers()
-        _ensure_legacy_json_is_migrated(tid, aid, archive_store, existing_page_numbers)
     if not archive_existed:
         with time_section("归档Schema初始化"):
             archive_store.ensure_schema()

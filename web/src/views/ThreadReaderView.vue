@@ -156,7 +156,6 @@ function titleFor(thread: ThreadSummary): string {
 function statusLabel(status: ThreadStatus): string {
   const labels: Record<ThreadStatus, string> = {
     ready: '可阅读',
-    needs_migration: '需迁移',
     invalid: '无效',
   }
   return labels[status]

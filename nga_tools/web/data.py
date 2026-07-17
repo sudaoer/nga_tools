@@ -49,7 +49,7 @@ from nga_tools.web.html_sanitize import sanitize_post_html
 from nga_tools.web.render import ImageSrcResolver, render_web_bbcode
 from nga_tools.word_count import DEFAULT_MIN_BODY_CHARS, WORD_COUNT_VERSION
 
-ThreadStatus = Literal["ready", "needs_migration", "invalid"]
+ThreadStatus = Literal["ready", "invalid"]
 ThreadSummaryDetail = Literal["light", "full"]
 PostEmptyReason = Literal["missing", "filtered"]
 PostDate = int | str
@@ -262,16 +262,6 @@ def _connect_readonly(db_path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _has_word_count_columns(connection: sqlite3.Connection) -> bool:
-    rows = connection.execute("PRAGMA table_info(post_versions)").fetchall()
-    columns = {row[1] for row in rows if isinstance(row[1], str)}
-    return {
-        "word_count_version",
-        "word_count_chinese_chars",
-        "word_count_chinese_with_punctuation",
-    } <= columns
-
-
 def _read_archive_stats(db_path: Path) -> ArchiveStats:
     latest_cte = """
         WITH latest AS (
@@ -329,10 +319,9 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
         body_word_count: Optional[int] = None
         body_chinese_char_count: Optional[int] = None
         body_word_post_count: Optional[int] = None
-        if _has_word_count_columns(connection):
-            word_row = cast(
-                tuple[int, int, int, int],
-                connection.execute(
+        word_row = cast(
+            tuple[int, int, int, int],
+            connection.execute(
                     """
                     WITH latest AS (
                         SELECT
@@ -401,12 +390,12 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
                         WORD_COUNT_VERSION,
                         DEFAULT_MIN_BODY_CHARS,
                     ),
-                ).fetchone(),
-            )
-            if word_row[0] == post_row[0]:
-                body_word_post_count = word_row[1]
-                body_chinese_char_count = word_row[2]
-                body_word_count = word_row[3]
+            ).fetchone(),
+        )
+        if word_row[0] == post_row[0]:
+            body_word_post_count = word_row[1]
+            body_chinese_char_count = word_row[2]
+            body_word_count = word_row[3]
 
     author_updated_at: Optional[PostDate] = None
     if latest_post_row is not None:
@@ -520,8 +509,7 @@ def _thread_summary_for_folder(
                 status = "invalid"
                 message = f"archive.sqlite3无法读取：{error}"
     elif (thread_folder / "json").is_dir():
-        status = "needs_migration"
-        message = "此目录只有旧分页JSON，请先运行 backup migrate-store。"
+        return None
     else:
         status = "invalid"
         message = "未找到archive.sqlite3。"
@@ -705,6 +693,7 @@ def _read_image_mappings_for_urls(
     mappings: dict[str, str] = {}
     try:
         with closing(_connect_readonly(db_path)) as connection:
+            image_store.require_current_image_index(connection, db_path)
             for start in range(0, len(normalized_urls), 900):
                 chunk = normalized_urls[start : start + 900]
                 placeholders = ",".join("?" for _ in chunk)

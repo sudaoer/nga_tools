@@ -126,35 +126,6 @@ def _validate_args(
                 + _format_arg_names(target_args)
             )
 
-    if (
-        command == "backup"
-        and action in ("migrate-store", "migrate-layout", "migrate-content")
-        and args.get("all")
-    ):
-        target_args = sorted(provided_args & {"aid", "name", "tid"})
-        if target_args:
-            parser.error(
-                "--all不能与以下单帖参数一起使用："
-                + _format_arg_names(target_args)
-            )
-
-    if (
-        command == "backup"
-        and action in ("migrate-layout", "migrate-content")
-        and args.get("rollback")
-    ):
-        target_args = sorted(provided_args & {"aid", "all", "name", "tid"})
-        if target_args:
-            parser.error(
-                "--rollback不能与以下迁移目标参数一起使用："
-                + _format_arg_names(target_args)
-            )
-
-    if command == "backup" and action == "migrate-content" and args.get(
-        "rollback"
-    ) and args.get("dry_run"):
-        parser.error("--rollback不能与--dry-run一起使用。")
-
     for arg_name, default_value in action_config.get("defaults", {}).items():
         if args.get(arg_name) is None:
             args[arg_name] = default_value

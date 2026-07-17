@@ -2,23 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import ExitStack, contextmanager
-from pathlib import Path
 from typing import Protocol
 
-from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.archive import backup_thread, backup_thread_sub
 from nga_tools.backup.image_validation import (
     ImageValidationCache,
     use_image_validation_cache,
 )
 from nga_tools.config import get_config, load_timing_log_enabled
-from nga_tools.console import (
-    WarningCategory,
-    report_info,
-    report_warning,
-    use_thread_warning_summary,
-    use_warning_log,
-)
+from nga_tools.console import use_thread_warning_summary, use_warning_log
 from nga_tools.backup.pdf import PdfRenderPool, generate_pdf
 from nga_tools.commands.network import configure_network_limits_from_args
 from nga_tools.commands.resolve import resolve_command_thread_target
@@ -27,12 +19,9 @@ from nga_tools.commands.types import (
     CommandArgs,
     optional_bool,
     optional_int,
-    optional_str,
     required_int,
 )
 from nga_tools.core.output_lock import (
-    use_output_folder_lock,
-    use_output_root_lock,
     use_thread_output_lock,
 )
 from nga_tools.core.paths import timing_log_path, warning_log_path
@@ -50,12 +39,7 @@ from nga_tools.core.image_download_runtime import (
 from nga_tools.backup.image_index_writer import use_image_index_writer
 from nga_tools.backup.image_store_metrics import use_image_store_metrics
 from nga_tools.backup.image_store import use_image_download_coordination
-from nga_tools.timing import time_section, use_timing_log
-from nga_tools.storage.layout_migration import migrate_layout, rollback_layout
-from nga_tools.storage.content_migration import (
-    migrate_content,
-    rollback_content,
-)
+from nga_tools.timing import use_timing_log
 
 
 class BackupFetchFunc(Protocol):
@@ -240,184 +224,6 @@ def backup_sub(args: CommandArgs) -> None:
             )
         else:
             backup_thread_sub(thread_tid, thread_aid, write_json=write_json)
-
-
-def _migrate_store_for_thread_folder(thread_folder: Path) -> None:
-    result = ThreadArchiveStore(thread_folder).migrate_json_pages()
-    report_info(
-        f"迁移完成：{thread_folder}，"
-        f"读取JSON页{result.page_files}个，"
-        f"新增帖子版本{result.post_versions_inserted}个。"
-    )
-
-
-def _backup_store_candidate_folders(output_dir: Path) -> list[Path]:
-    if not output_dir.exists():
-        return []
-    return sorted(
-        folder
-        for folder in output_dir.iterdir()
-        if folder.is_dir() and (folder / "json").is_dir()
-    )
-
-
-def backup_migrate_store(args: CommandArgs) -> None:
-    if optional_bool(args, "all"):
-        failures: list[tuple[Path, Exception]] = []
-        app_config = get_config()
-        folders = _backup_store_candidate_folders(Path(app_config.output_dir))
-        if not folders:
-            report_info("没有找到可迁移的备份目录。")
-            return
-
-        for folder in folders:
-            with (
-                use_thread_warning_summary(f"folder={folder.name}"),
-                use_warning_log(folder / "warnings.log"),
-            ):
-                try:
-                    with (
-                        use_output_folder_lock(folder),
-                        use_timing_log(
-                            folder / "timing.log",
-                            task_name="backup migrate-store --all",
-                            target=f"folder={folder.name}",
-                            enabled=app_config.timing_log_enabled,
-                        ),
-                    ):
-                        with time_section("归档迁移"):
-                            _migrate_store_for_thread_folder(folder)
-                except Exception as error:
-                    failures.append((folder, error))
-                    report_warning(
-                        WarningCategory.MIGRATION,
-                        f"迁移失败：{folder}：{error}",
-                    )
-
-        report_info(
-            f"批量迁移完成：成功{len(folders) - len(failures)}个，"
-            f"失败{len(failures)}个。"
-        )
-        if failures:
-            raise SystemExit(1)
-        return
-
-    thread_tid, thread_aid = resolve_command_thread_target(args)
-    log_path = warning_log_path(thread_tid, thread_aid)
-    thread_folder = log_path.parent
-    with _use_thread_output_logs(
-        task_name="backup migrate-store",
-        tid=thread_tid,
-        aid=thread_aid,
-        timing_log_enabled=load_timing_log_enabled(),
-    ):
-        with time_section("归档迁移"):
-            _migrate_store_for_thread_folder(thread_folder)
-
-
-def _layout_candidate_folders(output_dir: Path) -> list[Path]:
-    if not output_dir.is_dir():
-        return []
-    return sorted(
-        folder
-        for folder in output_dir.iterdir()
-        if folder.is_dir() and (folder / "archive.sqlite3").is_file()
-    )
-
-
-def backup_migrate_layout(args: CommandArgs) -> None:
-    app_config = get_config()
-    output_root = Path(app_config.output_dir)
-    rollback_run_id = optional_str(args, "rollback")
-    with use_output_root_lock(output_root):
-        if rollback_run_id is not None:
-            result = rollback_layout(output_root, rollback_run_id)
-            report_info(
-                f"布局迁移已回滚：run_id={result.run_id}，"
-                f"恢复{result.restored_count}个帖子目录。"
-            )
-            return
-
-        if optional_bool(args, "all"):
-            folders = _layout_candidate_folders(output_root)
-        else:
-            tid, aid = resolve_command_thread_target(args)
-            aid_text = "all" if aid is None else str(aid)
-            folders = [output_root / f"{tid}_{aid_text}"]
-        if not folders and not optional_bool(args, "all"):
-            report_info("没有找到需要迁移的archive.sqlite3。")
-            return
-
-        result = migrate_layout(
-            output_root,
-            folders,
-            include_global=optional_bool(args, "all"),
-        )
-
-    report_info(
-        f"布局迁移完成：run_id={result.run_id}，"
-        f"迁移{result.migrated_count}个，跳过{result.skipped_count}个，"
-        f"失败{len(result.failures)}个。"
-    )
-    for folder, error in result.failures:
-        report_warning(
-            WarningCategory.MIGRATION,
-            f"布局迁移失败：{folder}：{error}",
-        )
-    if result.failures:
-        raise SystemExit(1)
-
-
-def backup_migrate_content(args: CommandArgs) -> None:
-    app_config = get_config()
-    output_root = Path(app_config.output_dir)
-    rollback_run_id = optional_str(args, "rollback")
-    dry_run = optional_bool(args, "dry_run")
-    with use_output_root_lock(output_root):
-        if rollback_run_id is not None:
-            result = rollback_content(output_root, rollback_run_id)
-            report_info(
-                f"正文压缩迁移已回滚：run_id={result.run_id}，"
-                f"恢复{result.restored_count}个帖子目录。"
-            )
-            return
-
-        if optional_bool(args, "all"):
-            folders = _layout_candidate_folders(output_root)
-        else:
-            tid, aid = resolve_command_thread_target(args)
-            aid_text = "all" if aid is None else str(aid)
-            folders = [output_root / f"{tid}_{aid_text}"]
-        if not folders and not optional_bool(args, "all"):
-            report_info("没有找到需要迁移的archive.sqlite3。")
-            return
-
-        result = migrate_content(
-            output_root,
-            folders,
-            dry_run=dry_run,
-        )
-
-    raw_bytes = sum(item.raw_content_bytes for item in result.stats)
-    compressed_bytes = sum(
-        item.compressed_content_bytes for item in result.stats
-    )
-    saved_bytes = raw_bytes - compressed_bytes
-    mode = "正文压缩预估" if dry_run else "正文压缩迁移"
-    report_info(
-        f"{mode}完成：run_id={result.run_id or 'dry-run'}，"
-        f"迁移{result.migrated_count}个，跳过{result.skipped_count}个，"
-        f"失败{len(result.failures)}个，"
-        f"原始正文{raw_bytes}字节，压缩后{compressed_bytes}字节，"
-        f"预计节省{saved_bytes}字节。"
-    )
-    for folder, error in result.failures:
-        report_warning(
-            WarningCategory.MIGRATION,
-            f"正文压缩迁移失败：{folder}：{error}",
-        )
-    if result.failures:
-        raise SystemExit(1)
 
 
 def pdf_generate(args: CommandArgs) -> None:

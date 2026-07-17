@@ -396,11 +396,6 @@ select {
   color: var(--nga-success-text);
 }
 
-.status.needs_migration {
-  background: var(--nga-warning-bg);
-  color: var(--nga-warning-text);
-}
-
 .status.invalid {
   background: var(--nga-error-bg);
   color: var(--nga-error-text);

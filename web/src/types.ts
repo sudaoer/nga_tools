@@ -1,4 +1,4 @@
-export type ThreadStatus = 'ready' | 'needs_migration' | 'invalid'
+export type ThreadStatus = 'ready' | 'invalid'
 
 export interface ThreadSummary {
   tid: number
