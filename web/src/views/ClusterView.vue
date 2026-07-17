@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import PaginationControls from '../components/PaginationControls.vue'
 import {
   fetchClusterDetail,
@@ -14,6 +15,8 @@ import type {
 
 const LIST_PAGE_SIZE = 50
 const MEMBER_PAGE_SIZE = 60
+
+const router = useRouter()
 
 const result = ref<ClustersResult | null>(null)
 const stats = ref<ClusterStatsResult | null>(null)
@@ -102,6 +105,13 @@ function stripImagesUnique(relativePath: string): string {
     return relativePath.slice(IMAGES_UNIQUE_PREFIX.length)
   }
   return relativePath
+}
+
+function openImageUsage(relativePath: string): void {
+  router.push({
+    path: '/admin/image-usage',
+    query: { image: relativePath },
+  })
 }
 
 async function loadStats(): Promise<void> {
@@ -238,9 +248,14 @@ onMounted(() => {
                 v-if="member.isSourceCandidate"
                 class="cluster-source-badge"
               >源图</span>
-              <span class="cluster-detail-path" :title="member.relativePath">
+              <button
+                type="button"
+                class="cluster-detail-path cluster-detail-path-link"
+                :title="member.relativePath"
+                @click="openImageUsage(member.relativePath)"
+              >
                 {{ stripImagesUnique(member.relativePath) }}
-              </span>
+              </button>
             </div>
           </div>
         </div>

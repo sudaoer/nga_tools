@@ -2088,6 +2088,21 @@ select {
   min-width: 0;
 }
 
+.cluster-detail-path-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--nga-red);
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cluster-detail-path-link:hover {
+  opacity: 0.8;
+}
+
 .cluster-detail-card.is-source {
   border-color: var(--nga-red);
   box-shadow: 0 2px 8px rgb(89 24 4 / 18%);
