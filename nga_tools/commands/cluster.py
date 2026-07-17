@@ -17,7 +17,7 @@ def cluster_run(args: CommandArgs) -> None:
     force = optional_bool(args, "force")
 
     params = ClusterParams(
-        threshold=threshold if threshold is not None and threshold > 0 else 8,
+        threshold=threshold if threshold is not None and threshold > 0 else 5,
         min_cluster_size=(
             min_cluster_size
             if min_cluster_size is not None and min_cluster_size > 0
