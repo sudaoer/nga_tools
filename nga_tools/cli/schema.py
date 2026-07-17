@@ -575,7 +575,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "force",
             ],
             "defaults": {
-                "threshold": 5,
+                "threshold": 1,
                 "min_cluster_size": 2,
                 "lsh_bands": 4,
             },

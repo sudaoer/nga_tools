@@ -33,7 +33,7 @@ _PROGRESS_INTERVAL = 100
 
 @dataclass(frozen=True)
 class ClusterParams:
-    threshold: int = 5
+    threshold: int = 1
     min_cluster_size: int = 2
     lsh_bands: int = 4
     workers: int = 0

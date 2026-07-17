@@ -38,7 +38,7 @@ class ClusterCliTest:
 
         assert args["command"] == "cluster"
         assert args["action"] == "run"
-        assert args["threshold"] == 5
+        assert args["threshold"] == 1
         assert args["min_cluster_size"] == 2
         assert args["lsh_bands"] == 4
 
