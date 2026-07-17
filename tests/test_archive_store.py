@@ -286,9 +286,9 @@ class ThreadArchiveStoreTest:
             )
 
             first_changed = store.replace_floor_map(floor_map)
-            after_first = store.read_backup_processing_snapshot().change_state
+            after_first = store.state.read_backup_processing_snapshot().change_state
             repeated_changed = store.replace_floor_map(floor_map)
-            after_repeated = store.read_backup_processing_snapshot().change_state
+            after_repeated = store.state.read_backup_processing_snapshot().change_state
 
         assert first_changed
         assert not repeated_changed
@@ -375,12 +375,12 @@ class ThreadArchiveStoreTest:
                 pages,
                 observed_at="2026-07-11T01:00:00+00:00",
             )
-            after_first = store.read_backup_processing_snapshot().change_state
+            after_first = store.state.read_backup_processing_snapshot().change_state
             repeated = store.upsert_pages(
                 pages,
                 observed_at="2026-07-11T02:00:00+00:00",
             )
-            after_repeated = store.read_backup_processing_snapshot().change_state
+            after_repeated = store.state.read_backup_processing_snapshot().change_state
             records = store.read_effective_post_records()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 page_rows = connection.execute(
@@ -435,7 +435,7 @@ class ThreadArchiveStoreTest:
             }
             store.upsert_page(1, first_page)
             revision_before = (
-                store.read_backup_processing_snapshot()
+                store.state.read_backup_processing_snapshot()
                 .change_state.archive_revision
             )
 
@@ -457,7 +457,7 @@ class ThreadArchiveStoreTest:
                 changed_page,
             )
             revision_after = (
-                store.read_backup_processing_snapshot()
+                store.state.read_backup_processing_snapshot()
                 .change_state.archive_revision
             )
 
@@ -574,7 +574,7 @@ class ThreadArchiveStoreTest:
                     }
                 )
 
-            snapshot = store.read_backup_processing_snapshot()
+            snapshot = store.state.read_backup_processing_snapshot()
             page_numbers = store.read_page_numbers()
             records = store.read_latest_post_records()
 
@@ -1231,7 +1231,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
-            initial = store.read_backup_processing_snapshot()
+            initial = store.state.read_backup_processing_snapshot()
             floor_state = FloorProcessingState(
                 format_version=1,
                 processed_archive_revision=initial.change_state.archive_revision,
@@ -1254,7 +1254,7 @@ class ThreadArchiveStoreTest:
                 completed_at="2026-07-11T00:00:00+00:00",
             )
 
-            assert store.commit_floor_processing_state(floor_state)
+            assert store.state.commit_floor_processing_state(floor_state)
             manifest_posts = (
                 ImageReferenceManifestPost(
                     lou=1,
@@ -1284,7 +1284,7 @@ class ThreadArchiveStoreTest:
                     references=(),
                 ),
             )
-            assert store.commit_image_reference_state(
+            assert store.state.commit_image_reference_state(
                 image_state,
                 (
                     _pending_retry("https://example.invalid/b.png"),
@@ -1292,12 +1292,12 @@ class ThreadArchiveStoreTest:
                 ),
                 manifest_posts=manifest_posts,
             )
-            stored = store.read_backup_processing_snapshot()
-            stored_manifest = store.read_image_reference_manifest()
-            store.clear_backup_processing_state()
-            cleared = store.read_backup_processing_snapshot()
-            cleared_manifest = store.read_image_reference_manifest()
-            with closing(sqlite3.connect(store.state_store.db_path)) as connection:
+            stored = store.state.read_backup_processing_snapshot()
+            stored_manifest = store.state.read_image_reference_manifest()
+            store.state.clear_backup_processing_state()
+            cleared = store.state.read_backup_processing_snapshot()
+            cleared_manifest = store.state.read_image_reference_manifest()
+            with closing(sqlite3.connect(store.state.db_path)) as connection:
                 table_names = {
                     row[0]
                     for row in connection.execute(
@@ -1364,7 +1364,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
-            initial = store.read_backup_processing_snapshot()
+            initial = store.state.read_backup_processing_snapshot()
             image_state = ImageReferenceState(
                 format_version=1,
                 processed_archive_revision=initial.change_state.archive_revision,
@@ -1384,7 +1384,7 @@ class ThreadArchiveStoreTest:
                 connection.commit()
 
             with pytest.raises(UnsupportedStorageFormatError):
-                store.commit_image_reference_state(image_state, ())
+                store.state.commit_image_reference_state(image_state, ())
             with closing(sqlite3.connect(store.db_path)) as connection:
                 legacy_rows = connection.execute(
                     "SELECT url FROM backup_image_references"
@@ -1396,7 +1396,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
-            initial = store.read_backup_processing_snapshot()
+            initial = store.state.read_backup_processing_snapshot()
             image_state = ImageReferenceState(
                 format_version=1,
                 processed_archive_revision=initial.change_state.archive_revision,
@@ -1421,12 +1421,12 @@ class ThreadArchiveStoreTest:
                     ),
                 ),
             )
-            assert store.commit_image_reference_state(
+            assert store.state.commit_image_reference_state(
                 image_state,
                 (),
                 manifest_posts=manifest_posts,
             )
-            with closing(sqlite3.connect(store.state_store.db_path)) as connection:
+            with closing(sqlite3.connect(store.state.db_path)) as connection:
                 connection.execute(
                     """
                     UPDATE backup_image_reference_manifest_urls
@@ -1435,9 +1435,9 @@ class ThreadArchiveStoreTest:
                 )
                 connection.commit()
 
-            snapshot = store.read_backup_processing_snapshot()
+            snapshot = store.state.read_backup_processing_snapshot()
             with pytest.raises(ValueError, match="URL引用计数不一致"):
-                store.read_image_reference_manifest()
+                store.state.read_image_reference_manifest()
 
         assert snapshot.image_state == image_state
 
@@ -1447,7 +1447,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
-            initial = store.read_backup_processing_snapshot()
+            initial = store.state.read_backup_processing_snapshot()
             old_state = ImageReferenceState(
                 format_version=1,
                 processed_archive_revision=initial.change_state.archive_revision,
@@ -1480,7 +1480,7 @@ class ThreadArchiveStoreTest:
                     (ImageReferenceManifestEntry(1, shared_url, True),),
                 ),
             )
-            assert store.commit_image_reference_state(
+            assert store.state.commit_image_reference_state(
                 old_state,
                 (_pending_retry(old_url),),
                 manifest_posts=old_posts,
@@ -1492,7 +1492,7 @@ class ThreadArchiveStoreTest:
                     "result": [{"lou": 1, "pid": 1001, "content": "changed"}],
                 },
             )
-            current = store.read_backup_processing_snapshot()
+            current = store.state.read_backup_processing_snapshot()
             new_state = ImageReferenceState(
                 format_version=1,
                 processed_archive_revision=current.change_state.archive_revision,
@@ -1512,23 +1512,23 @@ class ThreadArchiveStoreTest:
                 ),
             )
 
-            assert store.read_image_reference_manifest_posts({1}) == {
+            assert store.state.read_image_reference_manifest_posts({1}) == {
                 1: old_posts[0]
             }
-            assert store.read_image_reference_manifest_url_counts(
+            assert store.state.read_image_reference_manifest_url_counts(
                 {old_url, shared_url, new_url}
             ) == {
                 old_url: (1, True),
                 shared_url: (1, True),
             }
-            assert store.commit_incremental_image_reference_state(
+            assert store.state.commit_incremental_image_reference_state(
                 old_state,
                 new_state,
                 (_pending_retry(new_url),),
                 changed_posts,
             )
-            manifest = store.read_image_reference_manifest()
-            assert not store.commit_incremental_image_reference_state(
+            manifest = store.state.read_image_reference_manifest()
+            assert not store.state.commit_incremental_image_reference_state(
                 old_state,
                 new_state,
                 (),
@@ -1546,7 +1546,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
-            initial = store.read_backup_processing_snapshot()
+            initial = store.state.read_backup_processing_snapshot()
             old_state = ImageReferenceState(
                 format_version=1,
                 processed_archive_revision=initial.change_state.archive_revision,
@@ -1555,7 +1555,7 @@ class ThreadArchiveStoreTest:
                 image_reference_extractor_version=1,
                 completed_at="2026-07-11T00:00:00+00:00",
             )
-            assert store.commit_image_reference_state(old_state, ())
+            assert store.state.commit_image_reference_state(old_state, ())
             store.upsert_page(
                 1,
                 {
@@ -1563,7 +1563,7 @@ class ThreadArchiveStoreTest:
                     "result": [{"lou": 1, "pid": 1001, "content": "new"}],
                 },
             )
-            current = store.read_backup_processing_snapshot()
+            current = store.state.read_backup_processing_snapshot()
             new_state = ImageReferenceState(
                 format_version=1,
                 processed_archive_revision=current.change_state.archive_revision,
@@ -1576,19 +1576,19 @@ class ThreadArchiveStoreTest:
                 ImageReferenceManifestPost(1, "cache-new", ()),
             )
 
-            assert store.commit_bootstrapped_image_reference_state(
+            assert store.state.commit_bootstrapped_image_reference_state(
                 old_state,
                 new_state,
                 (),
                 posts,
             )
-            assert not store.commit_bootstrapped_image_reference_state(
+            assert not store.state.commit_bootstrapped_image_reference_state(
                 old_state,
                 new_state,
                 (),
                 posts,
             )
-            manifest = store.read_image_reference_manifest()
+            manifest = store.state.read_image_reference_manifest()
 
         assert manifest is not None
         assert manifest.posts == posts
@@ -1638,7 +1638,7 @@ class ThreadArchiveStoreTest:
                 ).fetchone()
 
         assert legacy_exists == (1,)
-        assert not store.state_store.db_path.exists()
+        assert not store.state.db_path.exists()
 
     def test_legacy_pending_image_urls_are_not_read_by_runtime(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1656,9 +1656,10 @@ class ThreadArchiveStoreTest:
 
             store = ThreadArchiveStore(thread_folder)
             with pytest.raises(UnsupportedStorageFormatError):
-                store.ensure_backup_processing_schema()
+                store.state.ensure_schema()
+                store.cache.ensure_schema()
 
-        assert not store.state_store.db_path.exists()
+        assert not store.state.db_path.exists()
 
     def test_current_processing_schema_skips_full_schema_initialization(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -1671,9 +1672,10 @@ class ThreadArchiveStoreTest:
                 "_ensure_schema",
                 autospec=True,
             ) as ensure_schema:
-                store.ensure_backup_processing_schema()
-                snapshot = store.read_backup_processing_snapshot()
-                committed = store.commit_image_reference_state(
+                store.state.ensure_schema()
+                store.cache.ensure_schema()
+                snapshot = store.state.read_backup_processing_snapshot()
+                committed = store.state.commit_image_reference_state(
                     ImageReferenceState(
                         format_version=1,
                         processed_archive_revision=(
@@ -1711,13 +1713,13 @@ class ThreadArchiveStoreTest:
                 base_page,
                 observed_at="2026-07-11T01:00:00+00:00",
             )
-            after_first = store.read_backup_processing_snapshot().change_state
+            after_first = store.state.read_backup_processing_snapshot().change_state
             repeated = store.upsert_page(
                 1,
                 base_page,
                 observed_at="2026-07-11T02:00:00+00:00",
             )
-            after_repeated = store.read_backup_processing_snapshot().change_state
+            after_repeated = store.state.read_backup_processing_snapshot().change_state
             changed_attachments = store.upsert_page(
                 1,
                 {
@@ -1740,7 +1742,7 @@ class ThreadArchiveStoreTest:
                 observed_at="2026-07-11T03:00:00+00:00",
             )
             after_attachments = (
-                store.read_backup_processing_snapshot().change_state
+                store.state.read_backup_processing_snapshot().change_state
             )
             changed_author = store.upsert_page(
                 1,
@@ -1763,7 +1765,7 @@ class ThreadArchiveStoreTest:
                 },
                 observed_at="2026-07-11T04:00:00+00:00",
             )
-            after_author = store.read_backup_processing_snapshot().change_state
+            after_author = store.state.read_backup_processing_snapshot().change_state
 
         assert first.effective_processing_inputs_changed
         assert first.effective_changed_lous == frozenset({1})
@@ -1802,7 +1804,7 @@ class ThreadArchiveStoreTest:
                 )
                 assert result.effective_processing_inputs_changed
 
-            snapshot = store.read_backup_processing_snapshot()
+            snapshot = store.state.read_backup_processing_snapshot()
             records = store.read_latest_post_records()
 
         assert snapshot.change_state.archive_revision == 3
@@ -1817,7 +1819,7 @@ class ThreadArchiveStoreTest:
                     [{"pid": 1001, "author_lou": 1, "original_lou": 10}]
                 )
             )
-            after_floor_map = store.read_backup_processing_snapshot().change_state
+            after_floor_map = store.state.read_backup_processing_snapshot().change_state
             recovered: RecoveredMissingPost = {
                 "original_pid": 2002,
                 "original_lou": 11,
@@ -1831,9 +1833,9 @@ class ThreadArchiveStoreTest:
                 },
             }
             first_recovery = store.upsert_recovered_posts({2: recovered})
-            after_recovery = store.read_backup_processing_snapshot().change_state
+            after_recovery = store.state.read_backup_processing_snapshot().change_state
             repeated_recovery = store.upsert_recovered_posts({2: recovered})
-            after_repeat = store.read_backup_processing_snapshot().change_state
+            after_repeat = store.state.read_backup_processing_snapshot().change_state
 
         assert after_floor_map.floor_map_revision == 1
         assert after_floor_map.archive_revision == 0
@@ -1850,7 +1852,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
-            initial = store.read_backup_processing_snapshot()
+            initial = store.state.read_backup_processing_snapshot()
             stale_state = ImageReferenceState(
                 format_version=1,
                 processed_archive_revision=initial.change_state.archive_revision,
@@ -1867,11 +1869,11 @@ class ThreadArchiveStoreTest:
                 },
             )
 
-            committed = store.commit_image_reference_state(
+            committed = store.state.commit_image_reference_state(
                 stale_state,
                 (_pending_retry("https://example.invalid/stale.png"),),
             )
-            snapshot = store.read_backup_processing_snapshot()
+            snapshot = store.state.read_backup_processing_snapshot()
 
         assert not committed
         assert snapshot.image_state is None
@@ -1881,7 +1883,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
-            initial = store.read_backup_processing_snapshot()
+            initial = store.state.read_backup_processing_snapshot()
             image_state = ImageReferenceState(
                 format_version=1,
                 processed_archive_revision=initial.change_state.archive_revision,
@@ -1890,7 +1892,7 @@ class ThreadArchiveStoreTest:
                 image_reference_extractor_version=1,
                 completed_at="2026-07-11T00:00:00+00:00",
             )
-            assert store.commit_image_reference_state(
+            assert store.state.commit_image_reference_state(
                 image_state,
                 (_pending_retry("https://example.invalid/original.png"),),
             )
@@ -1902,11 +1904,11 @@ class ThreadArchiveStoreTest:
                 },
             )
 
-            replaced = store.replace_pending_images_for_image_state(
+            replaced = store.state.replace_pending_images_for_image_state(
                 image_state,
                 (_pending_retry("https://example.invalid/replacement.png"),),
             )
-            snapshot = store.read_backup_processing_snapshot()
+            snapshot = store.state.read_backup_processing_snapshot()
 
         assert not replaced
         assert snapshot.pending_image_retries == (

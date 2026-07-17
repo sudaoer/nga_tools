@@ -11,10 +11,8 @@ import pytest
 
 from nga_tools.backup import image_index, image_validation_store
 from nga_tools.backup.archive_schema import ARCHIVE_SCHEMA_VERSION
-from nga_tools.backup.archive_store import (
-    PostImageReferenceCacheEntry,
-    ThreadArchiveStore,
-)
+from nga_tools.backup.archive_cache_store import PostImageReferenceCacheEntry
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.processing_state import ArchiveChangeState, ImageReferenceState
 from nga_tools.storage import (
     STORAGE_LAYOUT_VERSION,
@@ -44,8 +42,8 @@ def test_thread_databases_have_disjoint_roles_and_source_binding(
 ) -> None:
     store = ThreadArchiveStore(tmp_path / "123_456")
     store.ensure_schema()
-    store.read_backup_processing_snapshot()
-    store.upsert_post_image_reference_cache(
+    store.state.read_backup_processing_snapshot()
+    store.cache.upsert_post_image_reference_cache(
         [
             PostImageReferenceCacheEntry(
                 cache_key="key",
@@ -57,8 +55,8 @@ def test_thread_databases_have_disjoint_roles_and_source_binding(
     )
 
     data_tables = _table_names(store.db_path)
-    state_tables = _table_names(store.state_store.db_path)
-    cache_tables = _table_names(store.cache_store.db_path)
+    state_tables = _table_names(store.state.db_path)
+    cache_tables = _table_names(store.cache.db_path)
     assert "archive_change_state" in data_tables
     assert "archive_pages" in data_tables
     assert "post_version_selections" in data_tables
@@ -72,8 +70,8 @@ def test_thread_databases_have_disjoint_roles_and_source_binding(
 
     with (
         closing(sqlite3.connect(store.db_path)) as data_connection,
-        closing(sqlite3.connect(store.state_store.db_path)) as state_connection,
-        closing(sqlite3.connect(store.cache_store.db_path)) as cache_connection,
+        closing(sqlite3.connect(store.state.db_path)) as state_connection,
+        closing(sqlite3.connect(store.cache.db_path)) as cache_connection,
     ):
         data_metadata = read_storage_metadata(data_connection)
         archive_schema_version = data_connection.execute(
@@ -99,7 +97,7 @@ def test_mismatched_state_store_is_rejected_without_mutation(
 ) -> None:
     store = ThreadArchiveStore(tmp_path / "123_456")
     store.ensure_schema()
-    snapshot = store.read_backup_processing_snapshot()
+    snapshot = store.state.read_backup_processing_snapshot()
     state = ImageReferenceState(
         format_version=1,
         processed_archive_revision=snapshot.change_state.archive_revision,
@@ -108,18 +106,18 @@ def test_mismatched_state_store_is_rejected_without_mutation(
         image_reference_extractor_version=1,
         completed_at="2026-07-15T00:00:00+00:00",
     )
-    assert store.commit_image_reference_state(state, ())
-    with closing(sqlite3.connect(store.state_store.db_path)) as connection:
+    assert store.state.commit_image_reference_state(state, ())
+    with closing(sqlite3.connect(store.state.db_path)) as connection:
         connection.execute(
             "UPDATE storage_metadata SET source_store_id = 'wrong' WHERE singleton = 1"
         )
         connection.commit()
 
     with pytest.raises(UnsupportedStorageFormatError):
-        store.read_backup_processing_snapshot()
+        store.state.read_backup_processing_snapshot()
 
     assert not list(store.thread_folder.glob("archive_state.sqlite3.corrupt-*"))
-    with closing(sqlite3.connect(store.state_store.db_path)) as connection:
+    with closing(sqlite3.connect(store.state.db_path)) as connection:
         metadata = read_storage_metadata(connection)
     assert metadata is not None
     assert metadata.source_store_id == "wrong"
@@ -130,16 +128,17 @@ def test_missing_state_index_is_rejected_without_recreation(
 ) -> None:
     store = ThreadArchiveStore(tmp_path / "123_456")
     store.ensure_schema()
-    store.ensure_backup_processing_schema()
-    with closing(sqlite3.connect(store.state_store.db_path)) as connection:
+    store.state.ensure_schema()
+    store.cache.ensure_schema()
+    with closing(sqlite3.connect(store.state.db_path)) as connection:
         connection.execute("DROP INDEX idx_image_reference_manifest_entries_url")
         connection.commit()
 
     reopened = ThreadArchiveStore(store.thread_folder)
     with pytest.raises(UnsupportedStorageFormatError):
-        reopened.read_backup_processing_snapshot()
+        reopened.state.read_backup_processing_snapshot()
 
-    with closing(sqlite3.connect(store.state_store.db_path)) as connection:
+    with closing(sqlite3.connect(store.state.db_path)) as connection:
         index_exists = connection.execute(
             """
             SELECT 1 FROM sqlite_schema
@@ -153,7 +152,7 @@ def test_missing_state_index_is_rejected_without_recreation(
 def test_state_commit_double_checks_archive_revision(tmp_path: Path) -> None:
     store = ThreadArchiveStore(tmp_path / "123_456")
     store.ensure_schema()
-    snapshot = store.read_backup_processing_snapshot()
+    snapshot = store.state.read_backup_processing_snapshot()
     state = ImageReferenceState(
         format_version=1,
         processed_archive_revision=snapshot.change_state.archive_revision,
@@ -168,14 +167,14 @@ def test_state_commit_double_checks_archive_revision(tmp_path: Path) -> None:
     )
 
     with patch.object(
-        store,
+        store.state,
         "_read_current_archive_change_state",
         side_effect=[snapshot.change_state, changed],
     ):
-        committed = store.commit_image_reference_state(state, ())
+        committed = store.state.commit_image_reference_state(state, ())
 
     assert not committed
-    reread = store.read_backup_processing_snapshot()
+    reread = store.state.read_backup_processing_snapshot()
     assert reread.image_state == state
     assert reread.image_state.processed_archive_revision != changed.archive_revision
 
@@ -195,8 +194,9 @@ def test_data_only_handoff_reads_without_state_or_cache_databases(
         },
         observed_at="2026-07-15T00:00:00+00:00",
     )
-    source_store.ensure_backup_processing_schema()
-    source_store.upsert_post_image_reference_cache(
+    source_store.state.ensure_schema()
+    source_store.cache.ensure_schema()
+    source_store.cache.upsert_post_image_reference_cache(
         [
             PostImageReferenceCacheEntry(
                 cache_key="drop-me",
@@ -236,9 +236,9 @@ def test_data_only_handoff_reads_without_state_or_cache_databases(
     target_post = target_store.read_effective_post_records()[0]["post"]
     assert target_post is not None
     assert target_post["content"] == "portable body"
-    assert not target_store.state_store.db_path.exists()
-    assert not target_store.cache_store.db_path.exists()
-    assert target_store.read_post_image_reference_cache({"drop-me"}) == {}
+    assert not target_store.state.db_path.exists()
+    assert not target_store.cache.db_path.exists()
+    assert target_store.cache.read_post_image_reference_cache({"drop-me"}) == {}
     with patch(
         "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(target_output)),

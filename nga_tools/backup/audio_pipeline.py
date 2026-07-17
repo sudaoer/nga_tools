@@ -123,7 +123,7 @@ def maintain_archived_audio(
 ) -> AudioArchiveMaintenanceResult:
     with time_section("音频处理状态读取"):
         snapshot = (
-            archive_store.read_backup_processing_snapshot()
+            archive_store.state.read_backup_processing_snapshot()
             if processing_snapshot is None
             else processing_snapshot
         )
@@ -214,7 +214,7 @@ def maintain_archived_audio(
         completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
     with time_section("音频处理状态提交"):
-        committed = archive_store.commit_audio_processing_state(
+        committed = archive_store.state.commit_audio_processing_state(
             new_state,
             retries_after,
         )

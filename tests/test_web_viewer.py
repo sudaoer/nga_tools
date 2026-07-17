@@ -1375,7 +1375,9 @@ class WebDatabaseViewerTest:
         AnkebakStateStore(output_dir / "backup_state.sqlite3").load_states()
         thread_dir = output_dir / "101_201"
         _write_archive(thread_dir, [_post(1, "hello")])
-        ThreadArchiveStore(thread_dir).ensure_backup_processing_schema()
+        _store = ThreadArchiveStore(thread_dir)
+        _store.state.ensure_schema()
+        _store.cache.ensure_schema()
         client = TestClient(
             create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
         )

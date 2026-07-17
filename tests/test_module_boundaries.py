@@ -15,6 +15,18 @@ def _imported_modules(module_path: Path) -> set[str]:
     return imported
 
 
+def _class_method_names(module_path: Path, class_name: str) -> set[str]:
+    tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return {
+                child.name
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+    raise AssertionError(f"未找到类：{class_name}")
+
+
 def test_download_runtime_depends_on_types_not_download_coordinator() -> None:
     imports = _imported_modules(
         Path("nga_tools/core/image_download_runtime.py")
@@ -46,3 +58,15 @@ def test_removed_compatibility_facades_are_not_reintroduced() -> None:
     )
 
     assert all(not path.exists() for path in removed_paths)
+
+
+def test_thread_archive_store_does_not_own_state_or_cache_sql() -> None:
+    archive_store_path = Path("nga_tools/backup/archive_store.py")
+    source = archive_store_path.read_text(encoding="utf-8")
+    method_names = _class_method_names(archive_store_path, "ThreadArchiveStore")
+
+    assert "read_backup_processing_snapshot" not in method_names
+    assert "read_post_image_reference_cache" not in method_names
+    assert "backup_pending_images" not in source
+    assert "image_reference_manifest_entries" not in source
+    assert "post_image_reference_cache" not in source

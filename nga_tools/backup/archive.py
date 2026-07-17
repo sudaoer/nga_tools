@@ -495,7 +495,7 @@ def _refresh_author_floor_state(
             recovered_result.effective_added_lous,
         )
     with time_section("处理状态快照重读"):
-        snapshot = archive_store.read_backup_processing_snapshot()
+        snapshot = archive_store.state.read_backup_processing_snapshot()
     if (
         not commit_even_if_unchanged
         and snapshot.change_state == expected_snapshot.change_state
@@ -507,7 +507,7 @@ def _refresh_author_floor_state(
             recovered_result.effective_added_lous,
         )
     with time_section("楼层状态提交"):
-        committed = archive_store.commit_floor_processing_state(
+        committed = archive_store.state.commit_floor_processing_state(
             _new_floor_state(
                 snapshot,
                 page_count=page_count,
@@ -562,7 +562,7 @@ def _rebuild_image_reference_state(
         post_version_selections_hash,
     ):
         return False
-    snapshot = archive_store.read_backup_processing_snapshot()
+    snapshot = archive_store.state.read_backup_processing_snapshot()
     state = ImageReferenceState(
         format_version=IMAGE_REFERENCE_STATE_VERSION,
         processed_archive_revision=snapshot.change_state.archive_revision,
@@ -571,7 +571,7 @@ def _rebuild_image_reference_state(
         image_reference_extractor_version=IMAGE_REFERENCE_EXTRACTOR_VERSION,
         completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
-    return archive_store.commit_image_reference_state(
+    return archive_store.state.commit_image_reference_state(
         state,
         image_processing.pending_image_retries,
         manifest_posts=image_processing.manifest_posts,
@@ -684,7 +684,7 @@ def _try_incremental_image_reference_update(
     assert expected_image_state is not None
 
     try:
-        manifest_state = archive_store.read_image_reference_manifest_state()
+        manifest_state = archive_store.state.read_image_reference_manifest_state()
         floor_labels = _image_floor_labels(archive_store, aid)
         if manifest_state is None:
             with time_section("图片引用清单懒初始化"):
@@ -745,7 +745,7 @@ def _try_incremental_image_reference_update(
                 archive_store.post_overlays_fingerprint(),
                 archive_store.post_version_selections_fingerprint(),
             )
-            latest_snapshot = archive_store.read_backup_processing_snapshot()
+            latest_snapshot = archive_store.state.read_backup_processing_snapshot()
             if (
                 fingerprints_after
                 != (post_overlays_hash, post_version_selections_hash)
@@ -757,7 +757,7 @@ def _try_incremental_image_reference_update(
                 post_overlays_hash=post_overlays_hash,
                 post_version_selections_hash=post_version_selections_hash,
             )
-            if not archive_store.commit_bootstrapped_image_reference_state(
+            if not archive_store.state.commit_bootstrapped_image_reference_state(
                 expected_image_state,
                 new_state,
                 download_result.pending_image_retries,
@@ -775,7 +775,7 @@ def _try_incremental_image_reference_update(
 
         with time_section("图片引用清单增量更新"):
             old_posts_by_lou = (
-                archive_store.read_image_reference_manifest_posts(
+                archive_store.state.read_image_reference_manifest_posts(
                     set(changes.changed_lous)
                 )
             )
@@ -826,7 +826,7 @@ def _try_incremental_image_reference_update(
                 | {retry.url for retry in snapshot.pending_image_retries}
             )
             stored_counts = (
-                archive_store.read_image_reference_manifest_url_counts(
+                archive_store.state.read_image_reference_manifest_url_counts(
                     queried_urls
                 )
             )
@@ -897,7 +897,7 @@ def _try_incremental_image_reference_update(
             archive_store.post_overlays_fingerprint(),
             archive_store.post_version_selections_fingerprint(),
         )
-        latest_snapshot = archive_store.read_backup_processing_snapshot()
+        latest_snapshot = archive_store.state.read_backup_processing_snapshot()
         if (
             fingerprints_after
             != (post_overlays_hash, post_version_selections_hash)
@@ -909,7 +909,7 @@ def _try_incremental_image_reference_update(
             post_overlays_hash=post_overlays_hash,
             post_version_selections_hash=post_version_selections_hash,
         )
-        if not archive_store.commit_incremental_image_reference_state(
+        if not archive_store.state.commit_incremental_image_reference_state(
             expected_image_state,
             new_state,
             download_result.pending_image_retries,
@@ -943,7 +943,7 @@ def _try_processing_state_reuse(
     try:
         if processing_snapshot is None:
             with time_section("处理状态元数据读取"):
-                snapshot = archive_store.read_backup_processing_snapshot()
+                snapshot = archive_store.state.read_backup_processing_snapshot()
         else:
             snapshot = processing_snapshot
     except ValueError as error:
@@ -951,7 +951,7 @@ def _try_processing_state_reuse(
             WarningCategory.PROCESSING_STATE,
             f"处理状态无效，改为完整处理：{error}",
         )
-        archive_store.clear_backup_processing_state()
+        archive_store.state.clear_backup_processing_state()
         return ProcessingStateReuseResult(False, "state_invalid")
     post_overlays_hash = archive_store.post_overlays_fingerprint()
     post_version_selections_hash = (
@@ -1079,7 +1079,7 @@ def _try_processing_state_reuse(
             snapshot.pending_image_retries,
             force=False,
         )
-    if archive_store.replace_pending_images_for_image_state(
+    if archive_store.state.replace_pending_images_for_image_state(
         snapshot.image_state,
         download_result.pending_image_retries,
     ):
@@ -1118,7 +1118,7 @@ def _commit_completed_processing_state(
         )
         return
 
-    snapshot = archive_store.read_backup_processing_snapshot()
+    snapshot = archive_store.state.read_backup_processing_snapshot()
     floor_state = _new_floor_state(
         snapshot,
         page_count=page_count,
@@ -1132,8 +1132,8 @@ def _commit_completed_processing_state(
         image_reference_extractor_version=IMAGE_REFERENCE_EXTRACTOR_VERSION,
         completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
-    floor_committed = archive_store.commit_floor_processing_state(floor_state)
-    image_committed = archive_store.commit_image_reference_state(
+    floor_committed = archive_store.state.commit_floor_processing_state(floor_state)
+    image_committed = archive_store.state.commit_image_reference_state(
         image_state,
         pending_image_retries,
         manifest_posts=manifest_posts,
@@ -1197,7 +1197,7 @@ def _run_full_processing(
             )
 
     with time_section("正文解析与图片处理"):
-        processing_snapshot = archive_store.read_backup_processing_snapshot()
+        processing_snapshot = archive_store.state.read_backup_processing_snapshot()
         image_processing = _download_images_for_records(
             tid,
             aid,
@@ -1273,10 +1273,11 @@ def backup_local_work_kind(
     archive_store = ThreadArchiveStore(thread_folder)
     if not archive_store.exists():
         return "refresh"
-    archive_store.ensure_backup_processing_schema()
+    archive_store.state.ensure_schema()
+    archive_store.cache.ensure_schema()
 
     try:
-        snapshot = archive_store.read_backup_processing_snapshot()
+        snapshot = archive_store.state.read_backup_processing_snapshot()
     except ValueError:
         return "refresh"
     if snapshot.floor_state is None or snapshot.image_state is None:
@@ -1338,7 +1339,7 @@ def _read_incremental_base_snapshot(
     archive_store: ThreadArchiveStore,
 ) -> BackupProcessingSnapshot | None:
     try:
-        return archive_store.read_backup_processing_snapshot()
+        return archive_store.state.read_backup_processing_snapshot()
     except ValueError:
         return None
 
@@ -1347,9 +1348,10 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
     thread_folder = Path(get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
     with time_section("处理状态Schema兼容检查"):
-        archive_store.ensure_backup_processing_schema()
+        archive_store.state.ensure_schema()
+        archive_store.cache.ensure_schema()
     with time_section("处理状态元数据读取"):
-        snapshot = archive_store.read_backup_processing_snapshot()
+        snapshot = archive_store.state.read_backup_processing_snapshot()
     if snapshot.floor_state is None or snapshot.image_state is None:
         raise RuntimeError("缺少线程级处理状态，必须先执行增量备份。")
     pagination = archive_store.read_latest_page_one_pagination()

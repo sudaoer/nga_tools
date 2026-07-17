@@ -74,7 +74,7 @@ def test_audio_pipeline_scans_all_versions_then_only_new_versions(
         first_url,
         second_url,
     }
-    first_snapshot = store.read_backup_processing_snapshot()
+    first_snapshot = store.state.read_backup_processing_snapshot()
     assert first_snapshot.audio_state is not None
     assert (
         first_snapshot.audio_state.processed_max_post_version_id
@@ -127,7 +127,7 @@ def test_audio_pipeline_persists_failure_and_force_retries_it(
     ):
         maintain_archived_audio(123, 456, store, force=False)
 
-    snapshot = store.read_backup_processing_snapshot()
+    snapshot = store.state.read_backup_processing_snapshot()
     assert len(snapshot.pending_audio_retries) == 1
     retry = snapshot.pending_audio_retries[0]
     assert retry.url == url
@@ -154,4 +154,4 @@ def test_audio_pipeline_persists_failure_and_force_retries_it(
         maintain_archived_audio(123, 456, store, force=True)
 
     assert download_mock.call_args.args[0] == [{"url": url}]
-    assert store.read_backup_processing_snapshot().pending_audio_retries == ()
+    assert store.state.read_backup_processing_snapshot().pending_audio_retries == ()

@@ -20,6 +20,7 @@ from nga_tools.backup.archive import (
     backup_thread_sub,
 )
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.archive_state_store import ArchiveStateRepository
 from nga_tools.backup.floor_map import FloorLabels, FloorMapBuildResult
 from nga_tools.backup.floor_models import RecoveredMissingPost
 from nga_tools.backup.image_pipeline import (
@@ -463,8 +464,8 @@ class BackupRawArchiveTest:
 
         assert (thread_dir / "archive.sqlite3").is_file()
         store = ThreadArchiveStore(thread_dir)
-        processing_snapshot = store.read_backup_processing_snapshot()
-        manifest = store.read_image_reference_manifest()
+        processing_snapshot = store.state.read_backup_processing_snapshot()
+        manifest = store.state.read_image_reference_manifest()
         assert manifest is not None
         assert processing_snapshot.image_state is not None
         assert manifest.state.processed_archive_revision == (
@@ -603,7 +604,7 @@ class BackupRawArchiveTest:
 
         manifest = ThreadArchiveStore(
             thread_dir
-        ).read_image_reference_manifest()
+        ).state.read_image_reference_manifest()
         assert downloaded_urls == [[old_url, shared_url], [new_url]]
         assert full_processing_calls == ["full"]
         assert manifest is not None
@@ -628,7 +629,7 @@ class BackupRawArchiveTest:
             full_processing_calls=full_processing_calls,
         )
         store = ThreadArchiveStore(thread_dir)
-        with closing(sqlite3.connect(store.state_store.db_path)) as connection:
+        with closing(sqlite3.connect(store.state.db_path)) as connection:
             connection.execute(
                 "DELETE FROM backup_image_reference_manifest_entries"
             )
@@ -649,7 +650,7 @@ class BackupRawArchiveTest:
                 full_processing_calls=full_processing_calls,
             )
 
-        manifest = store.read_image_reference_manifest()
+        manifest = store.state.read_image_reference_manifest()
         assert parsed_lous == [[1, 2], [2]]
         assert full_processing_calls == ["full"]
         assert ("图片引用处理模式", "bootstrap") in labels
@@ -665,7 +666,7 @@ class BackupRawArchiveTest:
         parsed_lous: list[list[int]] = []
         _run_backup(thread_dir, client, parsed_lous=parsed_lous)
         store = ThreadArchiveStore(thread_dir)
-        with closing(sqlite3.connect(store.state_store.db_path)) as connection:
+        with closing(sqlite3.connect(store.state.db_path)) as connection:
             connection.execute(
                 "DELETE FROM backup_image_reference_manifest_entries"
             )
@@ -677,7 +678,7 @@ class BackupRawArchiveTest:
         _run_backup(thread_dir, client, parsed_lous=parsed_lous)
 
         assert parsed_lous == [[1, 2]]
-        assert store.read_image_reference_manifest() is None
+        assert store.state.read_image_reference_manifest() is None
 
     def test_partial_image_manifest_falls_back_to_full_rebuild(
         self,
@@ -688,7 +689,7 @@ class BackupRawArchiveTest:
         labels: list[tuple[str, str]] = []
         _run_backup(thread_dir, client)
         store = ThreadArchiveStore(thread_dir)
-        with closing(sqlite3.connect(store.state_store.db_path)) as connection:
+        with closing(sqlite3.connect(store.state.db_path)) as connection:
             connection.execute(
                 "DELETE FROM backup_image_reference_manifest_entries WHERE lou = 2"
             )
@@ -704,7 +705,7 @@ class BackupRawArchiveTest:
         ):
             _run_backup(thread_dir, client)
 
-        manifest = store.read_image_reference_manifest()
+        manifest = store.state.read_image_reference_manifest()
         assert ("图片引用处理模式", "full") in labels
         assert manifest is not None
         assert [post.lou for post in manifest.posts] == [1, 2]
@@ -759,7 +760,7 @@ class BackupRawArchiveTest:
 
         snapshot = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
         assert full_processing_calls == ["full"]
         assert parsed_lous == [[1, 2]]
         assert snapshot.floor_state is not None
@@ -1034,7 +1035,7 @@ class BackupRawArchiveTest:
 
         snapshot = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
         assert full_processing_calls == ["full"]
         assert snapshot.floor_state is not None
         assert snapshot.image_state is not None
@@ -1059,16 +1060,16 @@ class BackupRawArchiveTest:
         thread_dir = tmp_path / "123_456"
         client = MutableFakeClient()
         _run_backup(thread_dir, client)
-        original_read = ThreadArchiveStore.read_backup_processing_snapshot
+        original_read = ArchiveStateRepository.read_backup_processing_snapshot
         read_count = 0
 
-        def capture_read(store: ThreadArchiveStore) -> BackupProcessingSnapshot:
+        def capture_read(store: ArchiveStateRepository) -> BackupProcessingSnapshot:
             nonlocal read_count
             read_count += 1
             return original_read(store)
 
         with patch.object(
-            ThreadArchiveStore,
+            ArchiveStateRepository,
             "read_backup_processing_snapshot",
             autospec=True,
             side_effect=capture_read,
@@ -1108,7 +1109,7 @@ class BackupRawArchiveTest:
         )
         after_success = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
         _run_backup(
             thread_dir,
             client,
@@ -1167,7 +1168,7 @@ class BackupRawArchiveTest:
         )
         deferred_snapshot = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
         with patch.object(
             archive_module,
             "get_folder",
@@ -1184,7 +1185,7 @@ class BackupRawArchiveTest:
         )
         forced_snapshot = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
 
         assert downloaded_urls == [[image_url], [], [image_url]]
         assert local_work is None
@@ -1243,7 +1244,7 @@ class BackupRawArchiveTest:
         )
         snapshot = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
 
         assert local_work == "maintenance"
         assert downloaded_urls == [[image_url], [image_url]]
@@ -1284,7 +1285,7 @@ class BackupRawArchiveTest:
         )
         snapshot = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
 
         assert downloaded_urls == [[image_url], []]
         assert snapshot.pending_image_retries == ()
@@ -1319,7 +1320,7 @@ class BackupRawArchiveTest:
         )
         first_snapshot = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
         _run_backup(
             thread_dir,
             client,
@@ -1356,7 +1357,7 @@ class BackupRawArchiveTest:
         )
         before_retry = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
         _run_backup(
             thread_dir,
             client,
@@ -1365,7 +1366,7 @@ class BackupRawArchiveTest:
         )
         after_retry = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
 
         assert before_retry.floor_state is not None
         assert before_retry.image_state is not None
@@ -1522,7 +1523,7 @@ class BackupRawArchiveTest:
 
         snapshot = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
         assert snapshot.floor_state is None
 
     def test_interrupted_full_processing_leaves_no_fast_path_state(
@@ -1540,7 +1541,7 @@ class BackupRawArchiveTest:
 
         snapshot = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
         assert snapshot.floor_state is None
         assert snapshot.image_state is None
         assert snapshot.pending_image_retries == ()
@@ -1579,7 +1580,7 @@ class BackupRawArchiveTest:
 
         snapshot = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
         assert full_processing_calls == ["full", "full"]
         assert snapshot.image_state is not None
         assert "处理状态无效，改为完整处理" in output.getvalue()
@@ -1611,7 +1612,7 @@ class BackupRawArchiveTest:
             )
         failed_snapshot = ThreadArchiveStore(
             thread_dir
-        ).read_backup_processing_snapshot()
+        ).state.read_backup_processing_snapshot()
         _run_backup(
             thread_dir,
             client,
@@ -1893,7 +1894,7 @@ class BackupRawArchiveTest:
 
         _run_backup(thread_dir, client, mode="maintenance")
 
-        state = store.read_backup_processing_snapshot().floor_state
+        state = store.state.read_backup_processing_snapshot().floor_state
         assert state is not None
         assert state.page_count == 2
         assert state.author_total_lou_count == 5

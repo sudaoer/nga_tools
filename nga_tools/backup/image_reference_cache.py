@@ -5,10 +5,8 @@ from dataclasses import dataclass
 from typing import cast
 
 from nga_tools.core.nga_images import NGA_img_link_verify
-from nga_tools.backup.archive_store import (
-    PostImageReferenceCacheEntry,
-    ThreadArchiveStore,
-)
+from nga_tools.backup.archive_cache_store import PostImageReferenceCacheEntry
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.backup.image_pipeline import (
     PostImageReference,
@@ -131,7 +129,7 @@ def _read_cached_references(
 ) -> tuple[dict[str, tuple[PostImageReference, ...]], bool]:
     with time_section("图片引用缓存批量查询"):
         try:
-            cached_entries = archive_store.read_post_image_reference_cache(
+            cached_entries = archive_store.cache.read_post_image_reference_cache(
                 {target.cache_key for target in targets}
             )
         except Exception as error:
@@ -312,7 +310,7 @@ def collect_image_download_tasks_for_records(
     with time_section("图片引用缓存写入"):
         if cache_read_succeeded and new_entries:
             try:
-                archive_store.upsert_post_image_reference_cache(new_entries)
+                archive_store.cache.upsert_post_image_reference_cache(new_entries)
             except Exception as error:
                 report_warning(
                     WarningCategory.CACHE,

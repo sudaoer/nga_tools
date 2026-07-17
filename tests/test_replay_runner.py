@@ -126,7 +126,8 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
             ],
         )
     )
-    store.ensure_backup_processing_schema()
+    store.state.ensure_schema()
+    store.cache.ensure_schema()
     with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
         version_id = connection.execute(
             """

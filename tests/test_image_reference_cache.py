@@ -131,7 +131,7 @@ def test_corrupt_cached_json_is_reparsed_and_overwritten(tmp_path: Path) -> None
         FloorLabels.plain(),
     )
     cache_key = image_reference_cache_key(record)
-    with closing(sqlite3.connect(store.cache_store.db_path)) as connection:
+    with closing(sqlite3.connect(store.cache.db_path)) as connection:
         connection.execute(
             """
             UPDATE post_image_reference_cache
@@ -156,7 +156,7 @@ def test_corrupt_cached_json_is_reparsed_and_overwritten(tmp_path: Path) -> None
             FloorLabels.plain(),
         )
 
-    cached_entry = store.read_post_image_reference_cache({cache_key})[cache_key]
+    cached_entry = store.cache.read_post_image_reference_cache({cache_key})[cache_key]
     references = deserialize_image_references(cached_entry.references_json)
     assert result.tasks == [{"url": image_url}]
     assert result.cache_miss_count == 1
