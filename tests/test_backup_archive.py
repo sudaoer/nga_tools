@@ -20,6 +20,7 @@ from nga_tools.backup.archive import (
     backup_thread_sub,
 )
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.archive_post_store import ArchivePostRepository
 from nga_tools.backup.archive_state_store import ArchiveStateRepository
 from nga_tools.backup.floor_map import FloorLabels, FloorMapBuildResult
 from nga_tools.backup.floor_models import RecoveredMissingPost
@@ -529,7 +530,7 @@ class BackupRawArchiveTest:
 
         assert (thread_dir / "archive.sqlite3").exists()
         assert (json_dir / "page_1.json").read_text(encoding="utf-8") == "{not json"
-        assert ThreadArchiveStore(thread_dir).read_page_numbers() == {1}
+        assert ThreadArchiveStore(thread_dir).posts.read_page_numbers() == {1}
 
     def test_sub_only_parses_changed_effective_records_after_cache_warmup(
         self,
@@ -947,7 +948,7 @@ class BackupRawArchiveTest:
         )
 
         if changed_input == "overlay":
-            ThreadArchiveStore(thread_dir).upsert_post_overlay(
+            ThreadArchiveStore(thread_dir).overlays.upsert_post_overlay(
                 1,
                 make_post_overlay("overlay replacement"),
             )
@@ -958,7 +959,7 @@ class BackupRawArchiveTest:
             )
         elif changed_input == "selection":
             store = ThreadArchiveStore(thread_dir)
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "currentPage": 1,
@@ -983,7 +984,7 @@ class BackupRawArchiveTest:
                     """,
                     (hash_text("historical first"),),
                 ).fetchone()[0]
-            store.upsert_post_version_selection(1, historical_version_id)
+            store.posts.upsert_post_version_selection(1, historical_version_id)
             _run_backup(
                 thread_dir,
                 client,
@@ -1428,7 +1429,7 @@ class BackupRawArchiveTest:
             full_processing_calls=full_processing_calls,
         )
 
-        records = ThreadArchiveStore(thread_dir).read_effective_post_records()
+        records = ThreadArchiveStore(thread_dir).posts.read_effective_post_records()
         assert full_processing_calls == ["full"]
         assert [record["lou"] for record in records] == [1, 2, 3]
         assert records[1]["post"]["content"] == "recovered body"
@@ -1438,11 +1439,11 @@ class BackupRawArchiveTest:
         tmp_path: Path,
     ) -> None:
         thread_dir = tmp_path / "123_456"
-        original_read = ThreadArchiveStore.read_effective_post_records
+        original_read = ArchivePostRepository.read_effective_post_records
         read_count = 0
 
         def capture_read(
-            store: ThreadArchiveStore,
+            store: ArchivePostRepository,
             lous: set[int] | None = None,
         ) -> list[PostRecord]:
             nonlocal read_count
@@ -1450,7 +1451,7 @@ class BackupRawArchiveTest:
             return original_read(store, lous)
 
         with patch.object(
-            ThreadArchiveStore,
+            ArchivePostRepository,
             "read_effective_post_records",
             autospec=True,
             side_effect=capture_read,
@@ -1491,11 +1492,11 @@ class BackupRawArchiveTest:
             ),
             {2: recovered},
         )
-        original_read = ThreadArchiveStore.read_effective_post_records
+        original_read = ArchivePostRepository.read_effective_post_records
         read_count = 0
 
         def capture_read(
-            store: ThreadArchiveStore,
+            store: ArchivePostRepository,
             lous: set[int] | None = None,
         ) -> list[PostRecord]:
             nonlocal read_count
@@ -1503,7 +1504,7 @@ class BackupRawArchiveTest:
             return original_read(store, lous)
 
         with patch.object(
-            ThreadArchiveStore,
+            ArchivePostRepository,
             "read_effective_post_records",
             autospec=True,
             side_effect=capture_read,
@@ -1639,7 +1640,7 @@ class BackupRawArchiveTest:
         client.vrows = 3
 
         _run_backup(thread_dir, client)
-        records = ThreadArchiveStore(thread_dir).read_effective_post_records()
+        records = ThreadArchiveStore(thread_dir).posts.read_effective_post_records()
 
         assert [record["lou"] for record in records] == [1, 2]
         assert [record["post"]["content"] for record in records] == [
@@ -1682,8 +1683,8 @@ class BackupRawArchiveTest:
 
         _run_backup(thread_dir, client, floor_map_result=floor_result)
         store = ThreadArchiveStore(thread_dir)
-        records = store.read_effective_post_records()
-        author_refs = store.read_latest_author_post_refs()
+        records = store.posts.read_effective_post_records()
+        author_refs = store.posts.read_latest_author_post_refs()
 
         assert [record["lou"] for record in records] == [1, 2, 3]
         assert records[1]["post"]["content"] == "anonymous body"
@@ -1841,7 +1842,7 @@ class BackupRawArchiveTest:
                 allow_unchanged_author_fast_path=True,
             )
 
-        records_after_failure = store.read_effective_post_records()
+        records_after_failure = store.posts.read_effective_post_records()
         assert [record["post"]["content"] for record in records_after_failure] == [
             "first",
             "second",
@@ -1856,7 +1857,7 @@ class BackupRawArchiveTest:
             allow_unchanged_author_fast_path=True,
         )
 
-        records_after_retry = store.read_effective_post_records()
+        records_after_retry = store.posts.read_effective_post_records()
         assert [record["post"]["content"] for record in records_after_retry] == [
             "first edited",
             "second edited",
@@ -1871,7 +1872,7 @@ class BackupRawArchiveTest:
         client = MutableFakeClient()
         _run_backup(thread_dir, client)
         store = ThreadArchiveStore(thread_dir)
-        store.upsert_pages(
+        store.ingest.upsert_pages(
             {
                 1: {
                     "currentPage": 1,
@@ -1904,7 +1905,7 @@ def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(
     tmp_path: Path,
 ) -> None:
     store = ThreadArchiveStore(tmp_path / "thread")
-    store.upsert_page(
+    store.ingest.upsert_page(
         1,
         {
             "totalPage": 1,
@@ -1931,9 +1932,9 @@ def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(
         },
     }
 
-    first_recovery = store.upsert_recovered_posts({2: recovered})
-    repeated_recovery = store.upsert_recovered_posts({2: recovered})
-    rows = store.read_effective_post_rows({2})
+    first_recovery = store.ingest.upsert_recovered_posts({2: recovered})
+    repeated_recovery = store.ingest.upsert_recovered_posts({2: recovered})
+    rows = store.posts.read_effective_post_rows({2})
     with closing(sqlite3.connect(store.db_path)) as connection:
         recovered_attachment_row = connection.execute(
             """
@@ -1955,6 +1956,6 @@ def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(
     assert rows[0].author_uid == -1
     assert rows[0].postdate_json == '"2026-07-11 10:00"'
     assert recovered_attachment_row == ("[]",)
-    assert store.read_latest_author_post_refs() == [
+    assert store.posts.read_latest_author_post_refs() == [
         {"pid": 1001, "author_lou": 1}
     ]

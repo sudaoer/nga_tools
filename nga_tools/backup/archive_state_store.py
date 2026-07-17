@@ -21,6 +21,7 @@ from nga_tools.backup.processing_state import (
     PendingAudioRetry,
     PendingImageRetry,
 )
+from nga_tools.backup.archive_post_store import ArchivePostRepository
 from nga_tools.backup.thread_stores import ThreadArchiveStateStore
 from nga_tools.core.download_types import DOWNLOAD_FAILURE_KINDS
 from nga_tools.core.sqlite import iter_in_clause_chunks
@@ -33,7 +34,6 @@ class ArchiveStateSource(Protocol):
     def ensure_schema(self) -> None: ...
     def archive_store_id(self) -> str: ...
     def read_current_archive_change_state(self) -> ArchiveChangeState: ...
-    def max_post_version_id(self) -> int: ...
 
 
 class ArchiveStateRepository:
@@ -41,9 +41,11 @@ class ArchiveStateRepository:
         self,
         source: ArchiveStateSource,
         state_store: ThreadArchiveStateStore,
+        posts: ArchivePostRepository,
     ) -> None:
         self._source = source
         self.state_store = state_store
+        self._posts = posts
 
     @property
     def db_path(self) -> Path:
@@ -62,7 +64,7 @@ class ArchiveStateRepository:
         return self._source.read_current_archive_change_state()
 
     def max_post_version_id(self) -> int:
-        return self._source.max_post_version_id()
+        return self._posts.max_post_version_id()
 
     def _connect_state_write(self) -> sqlite3.Connection:
         return self.state_store.connect_write(self.archive_store_id())

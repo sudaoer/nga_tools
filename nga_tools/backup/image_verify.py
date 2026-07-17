@@ -94,8 +94,8 @@ def _list_thread_referenced_image_paths(
     thread_folder: Path,
 ) -> list[Path]:
     archive_store = ThreadArchiveStore(thread_folder)
-    records = archive_store.read_effective_post_records()
-    overlays = archive_store.read_post_overlays()
+    records = archive_store.posts.read_effective_post_records()
+    overlays = archive_store.overlays.read_post_overlays()
     records = apply_post_overlays_to_records(
         overlays,
         records,

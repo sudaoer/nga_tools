@@ -553,7 +553,7 @@ def _scan_references(
             aid_key = parsed[1]
             try:
                 archive_store = ThreadArchiveStore(thread_folder)
-                rows = archive_store.read_effective_post_rows()
+                rows = archive_store.posts.read_effective_post_rows()
                 records: list[PostRecord] = [
                     {
                         "lou": row.lou,
@@ -568,7 +568,7 @@ def _scan_references(
                     }
                     for row in rows
                 ]
-                overlays = archive_store.read_post_overlays()
+                overlays = archive_store.overlays.read_post_overlays()
                 records = apply_post_overlays_to_records(
                     overlays,
                     records,

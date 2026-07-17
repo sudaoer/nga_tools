@@ -440,7 +440,7 @@ class ImageVerifyAllTest:
                 "https://img.nga.178.com/attachments/"
                 "mon_202607/11/abc.png"
             )
-            ThreadArchiveStore(thread_dir).upsert_page(
+            ThreadArchiveStore(thread_dir).ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -453,7 +453,7 @@ class ImageVerifyAllTest:
                     ],
                 },
             )
-            ThreadArchiveStore(thread_dir).upsert_post_overlay(
+            ThreadArchiveStore(thread_dir).overlays.upsert_post_overlay(
                 1,
                 make_post_overlay(f"[img]{image_url}[/img]"),
             )

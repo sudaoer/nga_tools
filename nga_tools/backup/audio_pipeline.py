@@ -127,7 +127,7 @@ def maintain_archived_audio(
             if processing_snapshot is None
             else processing_snapshot
         )
-        max_post_version_id = archive_store.max_post_version_id()
+        max_post_version_id = archive_store.posts.max_post_version_id()
     state_compatible = _audio_state_is_compatible(
         snapshot,
         max_post_version_id=max_post_version_id,
@@ -143,7 +143,7 @@ def maintain_archived_audio(
         after_id = 0
 
     with time_section("历史帖子版本音频引用扫描"):
-        version_contents = archive_store.read_post_version_contents(
+        version_contents = archive_store.posts.read_post_version_contents(
             after_id=after_id,
             through_id=max_post_version_id,
         )

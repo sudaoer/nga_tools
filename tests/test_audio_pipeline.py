@@ -50,12 +50,12 @@ def test_audio_pipeline_scans_all_versions_then_only_new_versions(
     first_url = _audio_url("first")
     second_url = _audio_url("second")
     third_url = _audio_url("third")
-    store.upsert_page(
+    store.ingest.upsert_page(
         1,
         _page(f'<audio src="{first_url}"></audio>'),
         observed_at="2026-07-15T00:00:00+00:00",
     )
-    store.upsert_page(
+    store.ingest.upsert_page(
         1,
         _page(f'<audio src="{second_url}"></audio>'),
         observed_at="2026-07-15T01:00:00+00:00",
@@ -78,10 +78,10 @@ def test_audio_pipeline_scans_all_versions_then_only_new_versions(
     assert first_snapshot.audio_state is not None
     assert (
         first_snapshot.audio_state.processed_max_post_version_id
-        == store.max_post_version_id()
+        == store.posts.max_post_version_id()
     )
 
-    store.upsert_page(
+    store.ingest.upsert_page(
         1,
         _page(f'<audio src="{third_url}"></audio>'),
         observed_at="2026-07-15T02:00:00+00:00",
@@ -103,7 +103,7 @@ def test_audio_pipeline_persists_failure_and_force_retries_it(
     output_root = tmp_path / "output"
     store = ThreadArchiveStore(output_root / "123_456")
     url = _audio_url("missing")
-    store.upsert_page(
+    store.ingest.upsert_page(
         1,
         _page(f'<audio src="{url}"></audio>'),
         observed_at="2026-07-15T00:00:00+00:00",

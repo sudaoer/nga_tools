@@ -49,7 +49,7 @@ def _write_avif_image(path: Path) -> None:
 
 
 def _write_pdf_archive(thread_dir: Path, content: str) -> None:
-    ThreadArchiveStore(thread_dir).upsert_page(
+    ThreadArchiveStore(thread_dir).ingest.upsert_page(
         1,
         {
             "totalPage": 1,
@@ -436,7 +436,7 @@ class PdfImageSourceTest:
             output_dir = Path(tmp_dir) / "output"
             thread_dir = output_dir / "101_all"
             store = ThreadArchiveStore(thread_dir)
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -446,7 +446,7 @@ class PdfImageSourceTest:
                 },
                 observed_at="2026-07-11T00:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -465,7 +465,7 @@ class PdfImageSourceTest:
                     """,
                     (hash_text("before edit"),),
                 ).fetchone()[0]
-            store.upsert_post_version_selection(1, version_id)
+            store.posts.upsert_post_version_selection(1, version_id)
 
             with patch(
                 "nga_tools.core.paths.get_config",
@@ -484,7 +484,7 @@ class PdfImageSourceTest:
             output_dir = Path(tmp_dir) / "output"
             thread_dir = output_dir / "101_all"
             relative_src = "./mon_202607/11/attachment.png"
-            ThreadArchiveStore(thread_dir).upsert_page(
+            ThreadArchiveStore(thread_dir).ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -677,7 +677,7 @@ class PdfImageSourceTest:
                 '<p class="legacy-overlay">legacy overlay</p>',
                 encoding="utf-8",
             )
-            ThreadArchiveStore(thread_dir).upsert_post_overlay(
+            ThreadArchiveStore(thread_dir).overlays.upsert_post_overlay(
                 1,
                 make_post_overlay("bbcode overlay"),
             )
@@ -726,7 +726,7 @@ class PdfImageSourceTest:
                     image_url, unique_image
                 )
                 store = ThreadArchiveStore(thread_dir)
-                store.upsert_post_overlay(
+                store.overlays.upsert_post_overlay(
                     1,
                     make_post_overlay(f"[img]{image_url}[/img]"),
                 )
@@ -734,7 +734,7 @@ class PdfImageSourceTest:
                     101,
                     None,
                 )
-                store.upsert_post_overlay(1, make_post_overlay(""))
+                store.overlays.upsert_post_overlay(1, make_post_overlay(""))
                 empty_html_by_lou, _folder_pdf, _floor_labels = _read_pdf_html(
                     101,
                     None,

@@ -13,6 +13,7 @@ from PIL import Image
 
 from nga_tools.backup import audio_store
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.archive_post_store import ArchivePostRepository
 from nga_tools.backup.thread_stores import (
     ARCHIVE_CACHE_DB_FILENAME,
     ARCHIVE_STATE_DB_FILENAME,
@@ -50,7 +51,7 @@ def _write_archive(
     posts: list[dict[str, object]],
 ) -> None:
     thread_dir.mkdir(parents=True, exist_ok=True)
-    ThreadArchiveStore(thread_dir).upsert_page(
+    ThreadArchiveStore(thread_dir).ingest.upsert_page(
         1,
         {"totalPage": 1, "result": posts},
         observed_at="2026-07-08T00:00:00+00:00",
@@ -315,7 +316,7 @@ class WebViewerDataTest:
     def test_scans_stored_word_count_summary(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
         thread_dir = output_dir / "101_201"
-        ThreadArchiveStore(thread_dir).upsert_page(
+        ThreadArchiveStore(thread_dir).ingest.upsert_page(
             1,
             {
                 "result": [
@@ -385,17 +386,17 @@ class WebViewerDataTest:
         thread_dir = output_dir / "101_201"
         _write_archive(thread_dir, [_post(1, "early"), _post(25, "target")])
         calls: list[set[int] | None] = []
-        original = ThreadArchiveStore.read_effective_post_rows
+        original = ArchivePostRepository.read_effective_post_rows
 
         def wrapped_read_effective_post_rows(
-            store: ThreadArchiveStore,
+            store: ArchivePostRepository,
             lous: set[int] | None = None,
         ):
             calls.append(None if lous is None else set(lous))
             return original(store, lous)
 
         monkeypatch.setattr(
-            ThreadArchiveStore,
+            ArchivePostRepository,
             "read_effective_post_rows",
             wrapped_read_effective_post_rows,
         )
@@ -419,17 +420,17 @@ class WebViewerDataTest:
             [_post(1, "needle early"), _post(25, "needle target")],
         )
         calls: list[set[int] | None] = []
-        original = ThreadArchiveStore.read_effective_post_rows
+        original = ArchivePostRepository.read_effective_post_rows
 
         def wrapped_read_effective_post_rows(
-            store: ThreadArchiveStore,
+            store: ArchivePostRepository,
             lous: set[int] | None = None,
         ):
             calls.append(None if lous is None else set(lous))
             return original(store, lous)
 
         monkeypatch.setattr(
-            ThreadArchiveStore,
+            ArchivePostRepository,
             "read_effective_post_rows",
             wrapped_read_effective_post_rows,
         )
@@ -528,7 +529,7 @@ class WebViewerDataTest:
         image_dir.mkdir(parents=True)
         (image_dir / "abc.png").write_bytes(b"image")
         _write_image_mapping(output_dir, image_url, "images_unique/abc.png")
-        ThreadArchiveStore(thread_dir).replace_floor_map(
+        ThreadArchiveStore(thread_dir).floor_maps.replace_floor_map(
             StoredFloorMap(
                 version=FLOOR_MAP_VERSION,
                 generation_version=FLOOR_MAP_GENERATION_VERSION,
@@ -1220,7 +1221,7 @@ class WebServerTest:
         assert save_payload["hasOverlay"] is True
         assert save_payload["bbcode"] == "[quote]覆盖[/quote]"
         assert '<blockquote class="nga-quote">覆盖</blockquote>' in save_payload["html"]
-        assert ThreadArchiveStore(thread_dir).read_post_overlays()[1]["bbcode"] == (
+        assert ThreadArchiveStore(thread_dir).overlays.read_post_overlays()[1]["bbcode"] == (
             "[quote]覆盖[/quote]"
         )
         assert not (thread_dir / "post_overlays.json").exists()
@@ -1256,7 +1257,7 @@ class WebServerTest:
         empty_post = empty_posts_response.json()["items"][0]
         assert empty_post["hasOverlay"] is True
         assert empty_post["html"] == ""
-        assert ThreadArchiveStore(thread_dir).read_post_overlays()[1]["bbcode"] == ""
+        assert ThreadArchiveStore(thread_dir).overlays.read_post_overlays()[1]["bbcode"] == ""
 
         clear_response = client.delete("/api/admin/threads/101/201/overlays/1")
         refreshed_posts_response = client.get(
@@ -2258,12 +2259,12 @@ class WebImageUsageTest:
         Image.new("RGB", (2, 2), color="white").save(image_path)
         thread_dir = output_dir / "101_201"
         store = ThreadArchiveStore(thread_dir)
-        store.upsert_page(
+        store.ingest.upsert_page(
             1,
             {"totalPage": 1, "result": [_post(1, f"[img]{image_url}[/img]")]},
             observed_at="2026-07-11T00:00:00+00:00",
         )
-        store.upsert_page(
+        store.ingest.upsert_page(
             1,
             {"totalPage": 1, "result": [_post(1, "当前正文无图片")]},
             observed_at="2026-07-11T01:00:00+00:00",
@@ -2481,7 +2482,7 @@ class WebImageUsageTest:
         assert cache._fingerprint == initial_fingerprint
         assert archive_path.read_bytes() == archive_before
 
-        ThreadArchiveStore(thread_dir).upsert_page(
+        ThreadArchiveStore(thread_dir).ingest.upsert_page(
             1,
             {"totalPage": 1, "result": [_post(1, "正文已真实更新")]},
             observed_at="2026-07-11T01:00:00+00:00",

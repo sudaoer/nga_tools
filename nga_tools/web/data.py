@@ -19,9 +19,9 @@ from nga_tools.backup.archive_posts import postdate_from_json
 from nga_tools.backup.archive_schema import require_current_archive_schema
 from nga_tools.backup.archive_store import (
     ARCHIVE_DB_FILENAME,
-    ArchivePostVersionRow,
     ThreadArchiveStore,
 )
+from nga_tools.backup.archive_store_models import ArchivePostVersionRow
 from nga_tools.backup.content_codec import decode_content
 from nga_tools.backup.floor_map import load_floor_labels_from_archive
 from nga_tools.backup.floor_models import (
@@ -953,14 +953,14 @@ def read_posts(
     if not db_path.is_file():
         raise ThreadUnavailableError("缺少archive.sqlite3。")
     archive_store = ThreadArchiveStore(thread_folder)
-    overlays = archive_store.read_post_overlays()
+    overlays = archive_store.overlays.read_post_overlays()
 
     page_size = ORIGINAL_POSTS_PER_PAGE
     stripped_query = query.strip()
     has_filter = bool(stripped_query) or lou_from is not None or lou_to is not None
     slot_end_lou = 0
     if has_filter:
-        effective_rows = archive_store.read_effective_post_rows()
+        effective_rows = archive_store.posts.read_effective_post_rows()
         post_count = len(effective_rows)
         max_lou = max((row.lou for row in effective_rows), default=None)
         matching_rows = [
@@ -977,7 +977,7 @@ def read_posts(
         page_start_lou = rows[0].lou if rows else 0
         page_end_lou = rows[-1].lou if rows else 0
     else:
-        stats = archive_store.read_effective_post_stats()
+        stats = archive_store.posts.read_effective_post_stats()
         post_count = stats.post_count
         max_lou = stats.max_lou
         total = max_lou + 1 if max_lou is not None and max_lou >= 0 else 0
@@ -995,7 +995,7 @@ def read_posts(
             if slot_end_lou >= page_start_lou
             else set[int]()
         )
-        rows = archive_store.read_effective_post_rows(page_lous)
+        rows = archive_store.posts.read_effective_post_rows(page_lous)
         matching_post_count = post_count
         result_offset = page_start_lou
         page_end_lou = max(page_start_lou, slot_end_lou)
@@ -1085,7 +1085,7 @@ def _read_effective_row_for_lou(
     archive_store: ThreadArchiveStore,
     lou: int,
 ) -> ArchivePostVersionRow:
-    rows = archive_store.read_effective_post_rows({lou})
+    rows = archive_store.posts.read_effective_post_rows({lou})
     if not rows:
         raise ValueError("未知楼层。")
     return rows[0]
@@ -1104,7 +1104,7 @@ def read_post_overlay(
     )
     row = _read_effective_row_for_lou(archive_store, lou)
     floor_labels = _load_floor_labels(archive_store, aid)
-    overlay = archive_store.read_post_overlays({lou}).get(lou)
+    overlay = archive_store.overlays.read_post_overlays({lou}).get(lou)
     if overlay is None:
         return {
             "lou": lou,
@@ -1163,7 +1163,7 @@ def save_thread_post_overlay(
         output_dir,
         require_all_images=True,
     )
-    archive_store.upsert_post_overlay(lou, make_post_overlay(bbcode))
+    archive_store.overlays.upsert_post_overlay(lou, make_post_overlay(bbcode))
     return read_post_overlay(output_dir, tid, raw_aid_key, lou)
 
 
@@ -1179,7 +1179,7 @@ def clear_thread_post_overlay(
         raw_aid_key,
     )
     _read_effective_row_for_lou(archive_store, lou)
-    archive_store.delete_post_overlay(lou)
+    archive_store.overlays.delete_post_overlay(lou)
     return read_post_overlay(output_dir, tid, raw_aid_key, lou)
 
 
@@ -1200,7 +1200,7 @@ def read_post_version_groups(
         tid,
         raw_aid_key,
     )
-    selected_by_lou = archive_store.read_valid_post_version_selections()
+    selected_by_lou = archive_store.posts.read_valid_post_version_selections()
     floor_labels = _load_floor_labels(archive_store, aid)
     with closing(_connect_readonly(archive_store.db_path)) as connection:
         rows = cast(
@@ -1308,7 +1308,7 @@ def read_post_version_preview(
         tid,
         raw_aid_key,
     )
-    row = archive_store.read_post_row_for_version(version_id)
+    row = archive_store.posts.read_post_row_for_version(version_id)
     if row is None:
         raise ValueError("未知帖子正文版本。")
 
@@ -1341,7 +1341,7 @@ def select_post_version(
         tid,
         raw_aid_key,
     )
-    archive_store.upsert_post_version_selection(lou, version_id)
+    archive_store.posts.upsert_post_version_selection(lou, version_id)
     return {
         "lou": lou,
         "selectedVersionId": version_id,
@@ -1360,7 +1360,7 @@ def clear_post_version_selection(
         tid,
         raw_aid_key,
     )
-    latest_version_id = archive_store.delete_post_version_selection(lou)
+    latest_version_id = archive_store.posts.delete_post_version_selection(lou)
     return {
         "lou": lou,
         "selectedVersionId": None,

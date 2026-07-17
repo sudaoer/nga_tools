@@ -8,10 +8,8 @@ from typing import Literal, Optional
 
 import nga_tools.config as config
 from nga_tools.core.paths import get_folder
-from nga_tools.backup.archive_store import (
-    ArchivePagesUpsertResult,
-    ThreadArchiveStore,
-)
+from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.archive_store_models import ArchivePagesUpsertResult
 from nga_tools.backup.audio_pipeline import (
     audio_state_is_current,
     maintain_archived_audio,
@@ -152,7 +150,7 @@ def _upsert_archive_pages(
     store: ThreadArchiveStore,
     page_data_by_page: dict[int, PageData],
 ) -> ArchivePagesUpsertResult:
-    return store.upsert_pages(page_data_by_page)
+    return store.ingest.upsert_pages(page_data_by_page)
 
 
 def _build_floor_map_for_post_refs(
@@ -214,7 +212,7 @@ def _author_post_refs_and_missing_lous(
     archive_store: ThreadArchiveStore,
     author_total_lou_count: int | None,
 ) -> tuple[list[AuthorPostRef], list[int]]:
-    inputs = archive_store.read_author_floor_refresh_inputs()
+    inputs = archive_store.posts.read_author_floor_refresh_inputs()
     post_refs = list(inputs.post_refs)
     present_lous = {post["author_lou"] for post in post_refs}
     missing_lous = find_missing_author_lous(
@@ -262,7 +260,7 @@ def _records_with_recovered_and_missing_posts(
     missing_lous: list[int],
     records: list[PostRecord],
 ) -> _RecordProcessingResult:
-    recovered_result = archive_store.upsert_recovered_posts(
+    recovered_result = archive_store.ingest.upsert_recovered_posts(
         floor_map_result.recovered_missing_posts_by_author_lou
     )
     record_timing_metric(
@@ -276,7 +274,7 @@ def _records_with_recovered_and_missing_posts(
     )
     if archive_reread_required:
         with time_section("恢复正文写入后重读完整归档"):
-            records = archive_store.read_effective_post_records()
+            records = archive_store.posts.read_effective_post_records()
     present_lous = {record["lou"] for record in records}
     unresolved_missing_lous = [
         lou for lou in missing_lous if lou not in present_lous
@@ -360,7 +358,7 @@ def _download_images_for_records(
 ) -> _ImageRecordProcessingResult:
     with time_section("Overlay应用"):
         effective_records = _apply_post_overlays_to_records(
-            archive_store.read_post_overlays(),
+            archive_store.overlays.read_post_overlays(),
             records,
             output_dir=archive_store.thread_folder.parent,
         )
@@ -480,7 +478,7 @@ def _refresh_author_floor_state(
             missing_lous,
         )
     with time_section("恢复正文事务写入"):
-        recovered_result = archive_store.upsert_recovered_posts(
+        recovered_result = archive_store.ingest.upsert_recovered_posts(
             floor_processing.build_result.recovered_missing_posts_by_author_lou
         )
     record_timing_metric(
@@ -532,7 +530,7 @@ def _rebuild_image_reference_state(
     pending_image_retries: tuple[PendingImageRetry, ...],
 ) -> bool:
     with time_section("图片引用集合重建"):
-        records = archive_store.read_effective_post_records()
+        records = archive_store.posts.read_effective_post_records()
         if aid is None:
             floor_labels = FloorLabels.plain()
         else:
@@ -554,8 +552,8 @@ def _rebuild_image_reference_state(
             force_image_retries=False,
         )
     fingerprints_after = (
-        archive_store.post_overlays_fingerprint(),
-        archive_store.post_version_selections_fingerprint(),
+        archive_store.overlays.post_overlays_fingerprint(),
+        archive_store.posts.post_version_selections_fingerprint(),
     )
     if fingerprints_after != (
         post_overlays_hash,
@@ -689,10 +687,10 @@ def _try_incremental_image_reference_update(
         if manifest_state is None:
             with time_section("图片引用清单懒初始化"):
                 with time_section("清单初始化归档读取"):
-                    records = archive_store.read_effective_post_records()
+                    records = archive_store.posts.read_effective_post_records()
                 with time_section("清单初始化Overlay应用"):
                     effective_records = _apply_post_overlays_to_records(
-                        archive_store.read_post_overlays(),
+                        archive_store.overlays.read_post_overlays(),
                         records,
                         output_dir=archive_store.thread_folder.parent,
                     )
@@ -742,8 +740,8 @@ def _try_incremental_image_reference_update(
                     force=False,
                 )
             fingerprints_after = (
-                archive_store.post_overlays_fingerprint(),
-                archive_store.post_version_selections_fingerprint(),
+                archive_store.overlays.post_overlays_fingerprint(),
+                archive_store.posts.post_version_selections_fingerprint(),
             )
             latest_snapshot = archive_store.state.read_backup_processing_snapshot()
             if (
@@ -792,12 +790,12 @@ def _try_incremental_image_reference_update(
                     f"unexpected={sorted(unexpected_old_lous)}"
                 )
             with time_section("增量图片引用归档读取"):
-                records = archive_store.read_effective_post_records(
+                records = archive_store.posts.read_effective_post_records(
                     set(changes.changed_lous)
                 )
             with time_section("增量图片引用Overlay应用"):
                 effective_records = _apply_post_overlays_to_records(
-                    archive_store.read_post_overlays(),
+                    archive_store.overlays.read_post_overlays(),
                     records,
                     output_dir=archive_store.thread_folder.parent,
                 )
@@ -894,8 +892,8 @@ def _try_incremental_image_reference_update(
             )
 
         fingerprints_after = (
-            archive_store.post_overlays_fingerprint(),
-            archive_store.post_version_selections_fingerprint(),
+            archive_store.overlays.post_overlays_fingerprint(),
+            archive_store.posts.post_version_selections_fingerprint(),
         )
         latest_snapshot = archive_store.state.read_backup_processing_snapshot()
         if (
@@ -953,9 +951,9 @@ def _try_processing_state_reuse(
         )
         archive_store.state.clear_backup_processing_state()
         return ProcessingStateReuseResult(False, "state_invalid")
-    post_overlays_hash = archive_store.post_overlays_fingerprint()
+    post_overlays_hash = archive_store.overlays.post_overlays_fingerprint()
     post_version_selections_hash = (
-        archive_store.post_version_selections_fingerprint()
+        archive_store.posts.post_version_selections_fingerprint()
     )
     changes = (
         _ArchiveIncrementalChanges(None, frozenset(), frozenset(), 0)
@@ -1108,8 +1106,8 @@ def _commit_completed_processing_state(
         report_info("楼层映射本次未形成可复用状态，下次继续完整处理。")
         return
     fingerprints_after = (
-        archive_store.post_overlays_fingerprint(),
-        archive_store.post_version_selections_fingerprint(),
+        archive_store.overlays.post_overlays_fingerprint(),
+        archive_store.posts.post_version_selections_fingerprint(),
     )
     if fingerprints_after != fingerprints_before:
         report_warning(
@@ -1162,15 +1160,15 @@ def _run_full_processing(
 ) -> None:
     record_timing_label("图片引用处理模式", "full")
     fingerprints_before = (
-        archive_store.post_overlays_fingerprint(),
-        archive_store.post_version_selections_fingerprint(),
+        archive_store.overlays.post_overlays_fingerprint(),
+        archive_store.posts.post_version_selections_fingerprint(),
     )
 
     report_info("开始处理")
 
     with time_section("读取归档与楼层映射"):
         with time_section("读取完整归档记录"):
-            records = archive_store.read_effective_post_records()
+            records = archive_store.posts.read_effective_post_records()
         with time_section("缺失楼读取与合并"):
             post_refs, missing_lous = _post_refs_and_missing_lous(
                 archive_store,
@@ -1284,7 +1282,7 @@ def backup_local_work_kind(
         return "refresh"
 
     try:
-        pagination = archive_store.read_latest_page_one_pagination()
+        pagination = archive_store.posts.read_latest_page_one_pagination()
     except ValueError:
         return "refresh"
     if pagination is None:
@@ -1298,16 +1296,16 @@ def backup_local_work_kind(
     )
     image_current = _image_state_is_current(
         snapshot,
-        post_overlays_hash=archive_store.post_overlays_fingerprint(),
+        post_overlays_hash=archive_store.overlays.post_overlays_fingerprint(),
         post_version_selections_hash=(
-            archive_store.post_version_selections_fingerprint()
+            archive_store.posts.post_version_selections_fingerprint()
         ),
     )
     if not floor_current or not image_current:
         return "maintenance"
     if not audio_state_is_current(
         snapshot,
-        max_post_version_id=archive_store.max_post_version_id(),
+        max_post_version_id=archive_store.posts.max_post_version_id(),
     ):
         return "maintenance"
     if snapshot.pending_audio_retries and pending_audio_retry_is_due(
@@ -1354,11 +1352,11 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
         snapshot = archive_store.state.read_backup_processing_snapshot()
     if snapshot.floor_state is None or snapshot.image_state is None:
         raise RuntimeError("缺少线程级处理状态，必须先执行增量备份。")
-    pagination = archive_store.read_latest_page_one_pagination()
+    pagination = archive_store.posts.read_latest_page_one_pagination()
     if pagination is None:
         raise RuntimeError("归档缺少第一页分页元数据，必须先执行增量备份。")
     author_total_lou_count = pagination.vrows if aid is not None else None
-    existing_page_numbers = archive_store.read_page_numbers()
+    existing_page_numbers = archive_store.posts.read_page_numbers()
     local_pages_cover_remote = set(
         range(1, pagination.page_count + 1)
     ) <= existing_page_numbers
@@ -1449,7 +1447,7 @@ def backup_thread(
         upsert_result = _upsert_archive_pages(archive_store, page_data_by_page)
     _record_archive_upsert_metrics(upsert_result)
     with time_section("归档字数回填"):
-        refreshed_word_counts = archive_store.refresh_stored_word_counts()
+        refreshed_word_counts = archive_store.ingest.refresh_stored_word_counts()
     record_timing_metric("归档字数回填版本数", refreshed_word_counts)
 
     local_pages_cover_remote = set(range(1, page_count + 1)) <= set(
@@ -1516,13 +1514,13 @@ def backup_thread_sub(
         with time_section("归档Schema初始化"):
             archive_store.ensure_schema()
     with time_section("增量预检查"):
-        existing_page_numbers = archive_store.read_page_numbers()
+        existing_page_numbers = archive_store.posts.read_page_numbers()
     if not archive_existed:
         with time_section("归档Schema初始化"):
             archive_store.ensure_schema()
 
     previous_author_total_lou_count = (
-        archive_store.read_latest_author_total_lou_count()
+        archive_store.posts.read_latest_author_total_lou_count()
         if aid is not None and existing_page_numbers
         else None
     )
@@ -1565,7 +1563,7 @@ def backup_thread_sub(
             report_progress("第一页校验完成", completed=1, total=1)
             with time_section("智能增量第一页变更预检"):
                 first_page_changed = (
-                    archive_store.page_effective_processing_inputs_changed(
+                    archive_store.ingest.page_effective_processing_inputs_changed(
                         1,
                         first_page_data,
                     )
@@ -1644,7 +1642,7 @@ def backup_thread_sub(
     _record_archive_upsert_metrics(upsert_result)
     record_timing_metric("增量有效变更页数", upsert_result.effective_changed_pages)
     with time_section("归档字数回填"):
-        refreshed_word_counts = archive_store.refresh_stored_word_counts()
+        refreshed_word_counts = archive_store.ingest.refresh_stored_word_counts()
     record_timing_metric("归档字数回填版本数", refreshed_word_counts)
 
     available_page_numbers = existing_page_numbers | set(page_data_by_page)

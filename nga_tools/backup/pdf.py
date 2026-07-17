@@ -460,10 +460,10 @@ def _read_pdf_html(
 ) -> tuple[dict[int, str], str, FloorLabels]:
     thread_folder = Path(get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
-    records = archive_store.read_effective_post_records()
+    records = archive_store.posts.read_effective_post_records()
     floor_labels = load_floor_labels_from_archive(archive_store, aid)
     author_total_lou_count = (
-        archive_store.read_latest_author_total_lou_count()
+        archive_store.posts.read_latest_author_total_lou_count()
         if aid is not None
         else None
     )
@@ -479,7 +479,7 @@ def _read_pdf_html(
     slice_output_dir = os.path.join(folder_pdf, "long_image_slices")
     os.makedirs(slice_output_dir, exist_ok=True)
 
-    overlays_by_lou = archive_store.read_post_overlays()
+    overlays_by_lou = archive_store.overlays.read_post_overlays()
     applied_overlay_lous = set(overlays_by_lou) & {
         record["lou"] for record in records
     }

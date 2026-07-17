@@ -175,21 +175,21 @@ def test_overlay_add_change_and_remove_select_distinct_cache_identity(
     record = _post_record("original")
     original_key = image_reference_cache_key(record)
 
-    store.upsert_post_overlay(1, make_post_overlay("first overlay"))
+    store.overlays.upsert_post_overlay(1, make_post_overlay("first overlay"))
     first_overlay_record = apply_post_overlays_to_records(
-        store.read_post_overlays(),
+        store.overlays.read_post_overlays(),
         [record],
     )[0]
     first_overlay_key = image_reference_cache_key(first_overlay_record)
-    store.upsert_post_overlay(1, make_post_overlay("second overlay"))
+    store.overlays.upsert_post_overlay(1, make_post_overlay("second overlay"))
     second_overlay_record = apply_post_overlays_to_records(
-        store.read_post_overlays(),
+        store.overlays.read_post_overlays(),
         [record],
     )[0]
     second_overlay_key = image_reference_cache_key(second_overlay_record)
-    store.delete_post_overlay(1)
+    store.overlays.delete_post_overlay(1)
     restored_record = apply_post_overlays_to_records(
-        store.read_post_overlays(),
+        store.overlays.read_post_overlays(),
         [record],
     )[0]
 

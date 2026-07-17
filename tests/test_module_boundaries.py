@@ -70,3 +70,50 @@ def test_thread_archive_store_does_not_own_state_or_cache_sql() -> None:
     assert "backup_pending_images" not in source
     assert "image_reference_manifest_entries" not in source
     assert "post_image_reference_cache" not in source
+
+
+def test_thread_archive_store_delegates_main_database_domains() -> None:
+    archive_store_path = Path("nga_tools/backup/archive_store.py")
+    method_names = _class_method_names(archive_store_path, "ThreadArchiveStore")
+    moved_methods = {
+        "read_post_overlays",
+        "replace_floor_map",
+        "upsert_pages",
+        "upsert_recovered_posts",
+        "read_effective_post_rows",
+        "upsert_post_version_selection",
+        "read_page_numbers",
+    }
+
+    assert method_names.isdisjoint(moved_methods)
+
+    source = archive_store_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(archive_store_path))
+    store_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ThreadArchiveStore"
+    )
+    allowed_sql_methods = {
+        "_create_archive_pages_table",
+        "_create_post_versions_table",
+        "_create_post_latest_metadata_table",
+        "_create_post_version_selections_table",
+        "_create_floor_map_tables",
+        "_create_post_overlays_table",
+        "_create_archive_change_state_table",
+        "_ensure_schema",
+        "_read_archive_change_state",
+        "increment_archive_revision",
+        "increment_floor_map_revision",
+    }
+    for node in store_class.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name in allowed_sql_methods:
+            continue
+        method_source = ast.get_source_segment(source, node) or ""
+        assert not any(
+            keyword in method_source
+            for keyword in ("SELECT ", "INSERT ", "UPDATE ", "DELETE ")
+        ), node.name

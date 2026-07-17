@@ -96,7 +96,7 @@ def read_unresolved_missing_author_lous_from_archive(
 ) -> list[int]:
     """Read unresolved missing lous; ``total_lou_count`` is NGA ``vrows`` count."""
     try:
-        stored_floor_map = archive_store.read_floor_map()
+        stored_floor_map = archive_store.floor_maps.read_floor_map()
     except ValueError as error:
         report_warning(
             WarningCategory.FLOOR_MAP,
@@ -168,7 +168,7 @@ def _write_floor_map(
     *,
     input_signature: str,
 ) -> None:
-    archive_store.replace_floor_map(
+    archive_store.floor_maps.replace_floor_map(
         StoredFloorMap(
             version=FLOOR_MAP_VERSION,
             generation_version=FLOOR_MAP_GENERATION_VERSION,
@@ -211,7 +211,7 @@ def load_floor_labels_from_archive(
     if aid is None:
         return FloorLabels.plain()
 
-    stored_floor_map = archive_store.read_floor_map()
+    stored_floor_map = archive_store.floor_maps.read_floor_map()
     if stored_floor_map is None:
         raise RuntimeError(
             f"archive.sqlite3缺少楼层映射：{archive_store.db_path}。"
@@ -275,7 +275,7 @@ def load_floor_map_build_result_if_current(
     missing_author_lous: Sequence[int],
 ) -> FloorMapBuildResult | None:
     try:
-        stored_floor_map = archive_store.read_floor_map()
+        stored_floor_map = archive_store.floor_maps.read_floor_map()
     except ValueError as error:
         report_warning(
             WarningCategory.FLOOR_MAP,
@@ -490,7 +490,7 @@ def _load_reusable_floor_map(
     author_lou_to_pid: dict[int, int],
     missing_author_lous: set[int],
 ) -> tuple[dict[int, int], dict[int, int], dict[int, list[int]]]:
-    stored_floor_map = archive_store.read_floor_map()
+    stored_floor_map = archive_store.floor_maps.read_floor_map()
     if stored_floor_map is None:
         return {}, {}, {}
 

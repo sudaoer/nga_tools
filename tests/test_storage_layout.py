@@ -185,7 +185,7 @@ def test_data_only_handoff_reads_without_state_or_cache_databases(
     source_output = tmp_path / "source"
     source_thread = source_output / "123_456"
     source_store = ThreadArchiveStore(source_thread)
-    source_store.upsert_page(
+    source_store.ingest.upsert_page(
         1,
         {
             "currentPage": 1,
@@ -233,7 +233,7 @@ def test_data_only_handoff_reads_without_state_or_cache_databases(
     )
 
     target_store = ThreadArchiveStore(target_thread)
-    target_post = target_store.read_effective_post_records()[0]["post"]
+    target_post = target_store.posts.read_effective_post_records()[0]["post"]
     assert target_post is not None
     assert target_post["content"] == "portable body"
     assert not target_store.state.db_path.exists()

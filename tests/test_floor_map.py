@@ -550,7 +550,7 @@ class FloorMapMissingInferenceTest:
                     author_posts,
                     missing_author_lous,
                 )
-            floor_map = store.read_floor_map()
+            floor_map = store.floor_maps.read_floor_map()
             assert floor_map is not None
 
         return floor_map, result
@@ -772,7 +772,7 @@ class FloorMapStoredMissingAuthorLousTest:
         with TemporaryDirectory() as temp_dir:
             store = ThreadArchiveStore(Path(temp_dir))
             store.ensure_schema()
-            store.replace_floor_map(
+            store.floor_maps.replace_floor_map(
                 StoredFloorMap(
                     version=FLOOR_MAP_VERSION,
                     generation_version=FLOOR_MAP_GENERATION_VERSION,

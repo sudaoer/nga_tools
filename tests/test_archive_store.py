@@ -10,10 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
-from nga_tools.backup.archive_store import (
-    _LATEST_AUTHOR_POST_REFS_QUERY,
-    ThreadArchiveStore,
-)
+from nga_tools.backup.archive_post_store import _LATEST_AUTHOR_POST_REFS_QUERY
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_models import (
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,
@@ -94,8 +92,8 @@ class ThreadArchiveStoreTest:
                 ]
             )
 
-            store.replace_floor_map(expected)
-            actual = store.read_floor_map()
+            store.floor_maps.replace_floor_map(expected)
+            actual = store.floor_maps.read_floor_map()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 table_names = {
                     row[0]
@@ -118,7 +116,7 @@ class ThreadArchiveStoreTest:
     def test_author_floor_refresh_inputs_share_one_read_connection(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -136,15 +134,15 @@ class ThreadArchiveStoreTest:
             expected_floor_map = _stored_floor_map(
                 [{"pid": 1001, "author_lou": 1, "original_lou": 3}]
             )
-            store.replace_floor_map(expected_floor_map)
+            store.floor_maps.replace_floor_map(expected_floor_map)
 
             reader = ThreadArchiveStore(store.thread_folder)
             with patch.object(
                 reader,
-                "_connect_read",
-                wraps=reader._connect_read,
+                "connect_read",
+                wraps=reader.connect_read,
             ) as connect_read:
-                inputs = reader.read_author_floor_refresh_inputs()
+                inputs = reader.posts.read_author_floor_refresh_inputs()
 
         assert connect_read.call_count == 1
         assert inputs.post_refs == ({"pid": 1001, "author_lou": 1},)
@@ -157,7 +155,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             observed_at = "2026-07-13T01:00:00+00:00"
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -178,7 +176,7 @@ class ThreadArchiveStoreTest:
                 },
                 observed_at=observed_at,
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -200,7 +198,7 @@ class ThreadArchiveStoreTest:
                 observed_at=observed_at,
             )
 
-            refs = store.read_latest_author_post_refs()
+            refs = store.posts.read_latest_author_post_refs()
 
         assert refs == [{"pid": 1002, "author_lou": 1}]
 
@@ -247,7 +245,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
-            store.replace_floor_map(
+            store.floor_maps.replace_floor_map(
                 _stored_floor_map(
                     [
                         {
@@ -264,8 +262,8 @@ class ThreadArchiveStoreTest:
                 input_signature="replacement",
             )
 
-            store.replace_floor_map(replacement)
-            actual = store.read_floor_map()
+            store.floor_maps.replace_floor_map(replacement)
+            actual = store.floor_maps.read_floor_map()
 
         assert actual == replacement
 
@@ -285,9 +283,9 @@ class ThreadArchiveStoreTest:
                 ]
             )
 
-            first_changed = store.replace_floor_map(floor_map)
+            first_changed = store.floor_maps.replace_floor_map(floor_map)
             after_first = store.state.read_backup_processing_snapshot().change_state
-            repeated_changed = store.replace_floor_map(floor_map)
+            repeated_changed = store.floor_maps.replace_floor_map(floor_map)
             after_repeated = store.state.read_backup_processing_snapshot().change_state
 
         assert first_changed
@@ -302,7 +300,7 @@ class ThreadArchiveStoreTest:
             existing = _stored_floor_map(
                 [{"pid": 1001, "author_lou": 1, "original_lou": 10}]
             )
-            store.replace_floor_map(existing)
+            store.floor_maps.replace_floor_map(existing)
             invalid = _stored_floor_map(
                 [
                     {
@@ -315,9 +313,9 @@ class ThreadArchiveStoreTest:
             )
 
             with pytest.raises(ValueError, match="original_pid"):
-                store.replace_floor_map(invalid)
+                store.floor_maps.replace_floor_map(invalid)
 
-            actual = store.read_floor_map()
+            actual = store.floor_maps.read_floor_map()
 
         assert actual == existing
 
@@ -325,7 +323,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
 
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -371,17 +369,17 @@ class ThreadArchiveStoreTest:
                 },
             }
 
-            first = store.upsert_pages(
+            first = store.ingest.upsert_pages(
                 pages,
                 observed_at="2026-07-11T01:00:00+00:00",
             )
             after_first = store.state.read_backup_processing_snapshot().change_state
-            repeated = store.upsert_pages(
+            repeated = store.ingest.upsert_pages(
                 pages,
                 observed_at="2026-07-11T02:00:00+00:00",
             )
             after_repeated = store.state.read_backup_processing_snapshot().change_state
-            records = store.read_effective_post_records()
+            records = store.posts.read_effective_post_records()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 page_rows = connection.execute(
                     """
@@ -433,13 +431,13 @@ class ThreadArchiveStoreTest:
                     }
                 ],
             }
-            store.upsert_page(1, first_page)
+            store.ingest.upsert_page(1, first_page)
             revision_before = (
                 store.state.read_backup_processing_snapshot()
                 .change_state.archive_revision
             )
 
-            unchanged = store.page_effective_processing_inputs_changed(
+            unchanged = store.ingest.page_effective_processing_inputs_changed(
                 1,
                 first_page,
             )
@@ -452,7 +450,7 @@ class ThreadArchiveStoreTest:
                     "author": {"uid": 456},
                 }
             ]
-            changed = store.page_effective_processing_inputs_changed(
+            changed = store.ingest.page_effective_processing_inputs_changed(
                 1,
                 changed_page,
             )
@@ -468,18 +466,18 @@ class ThreadArchiveStoreTest:
     def test_latest_page_one_pagination_uses_newest_state(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {"totalPage": 1, "vrows": 2, "result": []},
                 observed_at="2026-07-11T01:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {"totalPage": 3, "vrows": 8, "result": []},
                 observed_at="2026-07-11T02:00:00+00:00",
             )
 
-            pagination = store.read_latest_page_one_pagination()
+            pagination = store.posts.read_latest_page_one_pagination()
 
         assert pagination is not None
         assert pagination.page_count == 3
@@ -490,28 +488,28 @@ class ThreadArchiveStoreTest:
     ) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {"totalPage": 3, "vrows": 8, "result": []},
                 observed_at="2026-07-11T02:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {"totalPage": 1, "vrows": 2, "result": []},
                 observed_at="2026-07-11T01:00:00+00:00",
             )
-            after_stale = store.read_latest_page_one_pagination()
+            after_stale = store.posts.read_latest_page_one_pagination()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 stored_at = connection.execute(
                     "SELECT last_seen_at FROM archive_pages WHERE page_number = 1"
                 ).fetchone()
 
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {"totalPage": 2, "result": []},
                 observed_at="2026-07-11T03:00:00+00:00",
             )
-            after_newer = store.read_latest_page_one_pagination()
+            after_newer = store.posts.read_latest_page_one_pagination()
 
         assert after_stale is not None
         assert after_stale.page_count == 3
@@ -525,21 +523,21 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             thread_folder = Path(temp_dir_name)
             store = ThreadArchiveStore(thread_folder)
-            store.upsert_page(1, {"totalPage": 1, "result": []})
+            store.ingest.upsert_page(1, {"totalPage": 1, "result": []})
             with closing(sqlite3.connect(store.db_path)) as connection:
                 connection.execute("PRAGMA user_version = 0")
                 connection.commit()
 
             reader = ThreadArchiveStore(thread_folder)
             with pytest.raises(UnsupportedStorageFormatError, match="版本不受支持"):
-                reader.read_page_numbers()
+                reader.posts.read_page_numbers()
             with pytest.raises(UnsupportedStorageFormatError, match="版本不受支持"):
                 reader.ensure_schema()
 
     def test_upsert_pages_rolls_back_every_page_when_one_write_fails(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
-            original_upsert = store._upsert_post_latest_metadata
+            original_upsert = store.ingest._upsert_post_latest_metadata
             call_count = 0
 
             def fail_second_post(*args: object, **kwargs: object) -> None:
@@ -551,13 +549,13 @@ class ThreadArchiveStoreTest:
 
             with (
                 patch.object(
-                    store,
+                    store.ingest,
                     "_upsert_post_latest_metadata",
                     side_effect=fail_second_post,
                 ),
                 pytest.raises(RuntimeError, match="second page failed"),
             ):
-                store.upsert_pages(
+                store.ingest.upsert_pages(
                     {
                         1: {
                             "totalPage": 2,
@@ -575,8 +573,8 @@ class ThreadArchiveStoreTest:
                 )
 
             snapshot = store.state.read_backup_processing_snapshot()
-            page_numbers = store.read_page_numbers()
-            records = store.read_latest_post_records()
+            page_numbers = store.posts.read_page_numbers()
+            records = store.posts.read_latest_post_records()
 
         assert page_numbers == set()
         assert records == []
@@ -591,7 +589,7 @@ class ThreadArchiveStoreTest:
                 "_ensure_schema",
                 wraps=store._ensure_schema,
             ) as ensure_schema:
-                store.upsert_pages(
+                store.ingest.upsert_pages(
                     {
                         1: {
                             "totalPage": 1,
@@ -601,8 +599,8 @@ class ThreadArchiveStoreTest:
                         }
                     }
                 )
-                assert store.read_page_numbers() == {1}
-                assert store.refresh_stored_word_counts() == 0
+                assert store.posts.read_page_numbers() == {1}
+                assert store.ingest.refresh_stored_word_counts() == 0
             assert ensure_schema.call_count == 1
 
             reader = ThreadArchiveStore(thread_folder)
@@ -611,10 +609,10 @@ class ThreadArchiveStoreTest:
                 "_ensure_schema",
                 side_effect=AssertionError("read path initialized schema"),
             ) as ensure_schema_on_read:
-                assert reader.read_page_numbers() == {1}
-                assert len(reader.read_effective_post_records()) == 1
+                assert reader.posts.read_page_numbers() == {1}
+                assert len(reader.posts.read_effective_post_records()) == 1
             ensure_schema_on_read.assert_not_called()
-            with closing(reader._connect_read()) as connection:
+            with closing(reader.connect_read()) as connection:
                 with pytest.raises(sqlite3.OperationalError, match="readonly"):
                     connection.execute("DELETE FROM archive_change_state")
 
@@ -622,7 +620,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
 
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -632,7 +630,7 @@ class ThreadArchiveStoreTest:
                 },
                 observed_at="2026-07-07T01:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -643,7 +641,7 @@ class ThreadArchiveStoreTest:
                 observed_at="2026-07-07T02:00:00+00:00",
             )
 
-            records = store.read_latest_post_records()
+            records = store.posts.read_latest_post_records()
 
         assert [record['lou'] for record in records] == [1, 2]
         assert records[0]['post']['content'] == 'old visible'
@@ -653,7 +651,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
 
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -663,7 +661,7 @@ class ThreadArchiveStoreTest:
                 },
                 observed_at="2026-07-07T01:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -674,7 +672,7 @@ class ThreadArchiveStoreTest:
                 observed_at="2026-07-07T02:00:00+00:00",
             )
 
-            records = store.read_latest_post_records()
+            records = store.posts.read_latest_post_records()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 version_count = connection.execute(
                     "SELECT COUNT(*) FROM post_versions WHERE pid = 1001 AND lou = 1"
@@ -689,7 +687,7 @@ class ThreadArchiveStoreTest:
             thread_folder = Path(temp_dir_name)
             store = ThreadArchiveStore(thread_folder)
 
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -699,7 +697,7 @@ class ThreadArchiveStoreTest:
                 },
                 observed_at="2026-07-07T01:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -718,11 +716,11 @@ class ThreadArchiveStoreTest:
                     """,
                     (hash_text("before edit"),),
                 ).fetchone()
-            store.upsert_post_version_selection(1, old_version_id)
+            store.posts.upsert_post_version_selection(1, old_version_id)
 
-            latest_records = store.read_latest_post_records()
-            effective_records = store.read_effective_post_records()
-            summaries = store.read_effective_post_record_summaries()
+            latest_records = store.posts.read_latest_post_records()
+            effective_records = store.posts.read_effective_post_records()
+            summaries = store.posts.read_effective_post_record_summaries()
 
         assert latest_records[0]["post"]["content"] == "after edit"
         assert effective_records[0]["post"]["content"] == "before edit"
@@ -733,7 +731,7 @@ class ThreadArchiveStoreTest:
             thread_folder = Path(temp_dir_name)
             store = ThreadArchiveStore(thread_folder)
 
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -743,7 +741,7 @@ class ThreadArchiveStoreTest:
                 },
                 observed_at="2026-07-07T01:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -780,14 +778,14 @@ class ThreadArchiveStoreTest:
                 )
                 connection.commit()
 
-            records = store.read_effective_post_records()
+            records = store.posts.read_effective_post_records()
 
         assert records[0]["post"]["content"] == "after edit"
 
     def test_post_version_selection_crud_and_fingerprint(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -797,7 +795,7 @@ class ThreadArchiveStoreTest:
                 },
                 observed_at="2026-07-07T01:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -815,26 +813,26 @@ class ThreadArchiveStoreTest:
                     )
                 }
 
-            empty_fingerprint = store.post_version_selections_fingerprint()
+            empty_fingerprint = store.posts.post_version_selections_fingerprint()
             with pytest.raises(
                 ValueError,
                 match="不能手动选择当前最新版",
             ):
-                store.upsert_post_version_selection(
+                store.posts.upsert_post_version_selection(
                     1,
                     version_ids[hash_text("after edit")],
                 )
 
-            selection = store.upsert_post_version_selection(
+            selection = store.posts.upsert_post_version_selection(
                 1,
                 version_ids[hash_text("before edit")],
             )
-            selected_fingerprint = store.post_version_selections_fingerprint()
-            repeated = store.upsert_post_version_selection(
+            selected_fingerprint = store.posts.post_version_selections_fingerprint()
+            repeated = store.posts.upsert_post_version_selection(
                 1,
                 version_ids[hash_text("before edit")],
             )
-            repeated_fingerprint = store.post_version_selections_fingerprint()
+            repeated_fingerprint = store.posts.post_version_selections_fingerprint()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 stored_row = connection.execute(
                     """
@@ -843,9 +841,9 @@ class ThreadArchiveStoreTest:
                     """
                 ).fetchone()
 
-            latest_version_id = store.delete_post_version_selection(1)
-            cleared_selections = store.read_valid_post_version_selections()
-            cleared_fingerprint = store.post_version_selections_fingerprint()
+            latest_version_id = store.posts.delete_post_version_selection(1)
+            cleared_selections = store.posts.read_valid_post_version_selections()
+            cleared_fingerprint = store.posts.post_version_selections_fingerprint()
 
         assert selection["source_hash"]
         assert repeated["version_id"] == version_ids[hash_text("before edit")]
@@ -864,7 +862,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             thread_folder = Path(temp_dir_name)
             store = ThreadArchiveStore(thread_folder)
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -874,7 +872,7 @@ class ThreadArchiveStoreTest:
                 },
                 observed_at="2026-07-07T01:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -896,9 +894,9 @@ class ThreadArchiveStoreTest:
 
             reopened = ThreadArchiveStore(thread_folder)
             with pytest.raises(UnsupportedStorageFormatError):
-                reopened.read_valid_post_version_selections()
+                reopened.posts.read_valid_post_version_selections()
             with pytest.raises(UnsupportedStorageFormatError):
-                reopened.upsert_post_version_selection(1, old_version_id)
+                reopened.posts.upsert_post_version_selection(1, old_version_id)
             with closing(sqlite3.connect(store.db_path)) as connection:
                 table_exists = connection.execute(
                     """
@@ -914,7 +912,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
 
-            first = store.upsert_page(
+            first = store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -935,7 +933,7 @@ class ThreadArchiveStoreTest:
                 },
                 observed_at="2026-07-07T01:00:00+00:00",
             )
-            second = store.upsert_page(
+            second = store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1096,7 +1094,7 @@ class ThreadArchiveStoreTest:
     def test_read_latest_post_record_summaries_skip_post_json(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1108,7 +1106,7 @@ class ThreadArchiveStoreTest:
                 observed_at="2026-07-07T01:00:00+00:00",
             )
 
-            summaries = store.read_latest_post_record_summaries()
+            summaries = store.posts.read_latest_post_record_summaries()
 
         assert [record['lou'] for record in summaries] == [1, 2]
         assert [record['pid'] for record in summaries] == [1001, 1002]
@@ -1119,7 +1117,7 @@ class ThreadArchiveStoreTest:
     def test_read_latest_post_records_can_filter_lous(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1131,8 +1129,8 @@ class ThreadArchiveStoreTest:
                 observed_at="2026-07-07T01:00:00+00:00",
             )
 
-            records = store.read_latest_post_records({2})
-            empty_records = store.read_latest_post_records(set())
+            records = store.posts.read_latest_post_records({2})
+            empty_records = store.posts.read_latest_post_records(set())
 
         assert [record['lou'] for record in records] == [2]
         assert records[0]['post']['content'] == 'second'
@@ -1143,7 +1141,7 @@ class ThreadArchiveStoreTest:
     ) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1154,7 +1152,7 @@ class ThreadArchiveStoreTest:
                 },
                 observed_at="2026-07-07T01:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1167,14 +1165,14 @@ class ThreadArchiveStoreTest:
                 observed_at="2026-07-07T02:00:00+00:00",
             )
 
-            total_lou_count = store.read_latest_author_total_lou_count()
+            total_lou_count = store.posts.read_latest_author_total_lou_count()
 
         assert total_lou_count == 4
 
     def test_read_latest_author_total_lou_count_ignores_stale_vrows(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1185,7 +1183,7 @@ class ThreadArchiveStoreTest:
                 },
                 observed_at="2026-07-07T01:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1196,7 +1194,7 @@ class ThreadArchiveStoreTest:
                 observed_at="2026-07-07T02:00:00+00:00",
             )
 
-            total_lou_count = store.read_latest_author_total_lou_count()
+            total_lou_count = store.posts.read_latest_author_total_lou_count()
 
         assert total_lou_count is None
 
@@ -1222,7 +1220,7 @@ class ThreadArchiveStoreTest:
 
             store.ensure_schema()
             json_still_exists = page_path.is_file()
-            page_numbers = store.read_page_numbers()
+            page_numbers = store.posts.read_page_numbers()
 
         assert json_still_exists
         assert page_numbers == set()
@@ -1485,7 +1483,7 @@ class ThreadArchiveStoreTest:
                 (_pending_retry(old_url),),
                 manifest_posts=old_posts,
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1556,7 +1554,7 @@ class ThreadArchiveStoreTest:
                 completed_at="2026-07-11T00:00:00+00:00",
             )
             assert store.state.commit_image_reference_state(old_state, ())
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1708,19 +1706,19 @@ class ThreadArchiveStoreTest:
                 ],
             }
 
-            first = store.upsert_page(
+            first = store.ingest.upsert_page(
                 1,
                 base_page,
                 observed_at="2026-07-11T01:00:00+00:00",
             )
             after_first = store.state.read_backup_processing_snapshot().change_state
-            repeated = store.upsert_page(
+            repeated = store.ingest.upsert_page(
                 1,
                 base_page,
                 observed_at="2026-07-11T02:00:00+00:00",
             )
             after_repeated = store.state.read_backup_processing_snapshot().change_state
-            changed_attachments = store.upsert_page(
+            changed_attachments = store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1744,7 +1742,7 @@ class ThreadArchiveStoreTest:
             after_attachments = (
                 store.state.read_backup_processing_snapshot().change_state
             )
-            changed_author = store.upsert_page(
+            changed_author = store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1792,7 +1790,7 @@ class ThreadArchiveStoreTest:
                 ("2026-07-11T02:00:00+00:00", "version B"),
                 ("2026-07-11T03:00:00+00:00", "version A"),
             ):
-                result = store.upsert_page(
+                result = store.ingest.upsert_page(
                     1,
                     {
                         "totalPage": 1,
@@ -1805,7 +1803,7 @@ class ThreadArchiveStoreTest:
                 assert result.effective_processing_inputs_changed
 
             snapshot = store.state.read_backup_processing_snapshot()
-            records = store.read_latest_post_records()
+            records = store.posts.read_latest_post_records()
 
         assert snapshot.change_state.archive_revision == 3
         assert records[0]["post"]["content"] == "version A"
@@ -1814,7 +1812,7 @@ class ThreadArchiveStoreTest:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
             store.ensure_schema()
-            store.replace_floor_map(
+            store.floor_maps.replace_floor_map(
                 _stored_floor_map(
                     [{"pid": 1001, "author_lou": 1, "original_lou": 10}]
                 )
@@ -1832,9 +1830,9 @@ class ThreadArchiveStoreTest:
                     "attches": [],
                 },
             }
-            first_recovery = store.upsert_recovered_posts({2: recovered})
+            first_recovery = store.ingest.upsert_recovered_posts({2: recovered})
             after_recovery = store.state.read_backup_processing_snapshot().change_state
-            repeated_recovery = store.upsert_recovered_posts({2: recovered})
+            repeated_recovery = store.ingest.upsert_recovered_posts({2: recovered})
             after_repeat = store.state.read_backup_processing_snapshot().change_state
 
         assert after_floor_map.floor_map_revision == 1
@@ -1861,7 +1859,7 @@ class ThreadArchiveStoreTest:
                 image_reference_extractor_version=1,
                 completed_at="2026-07-11T00:00:00+00:00",
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,
@@ -1896,7 +1894,7 @@ class ThreadArchiveStoreTest:
                 image_state,
                 (_pending_retry("https://example.invalid/original.png"),),
             )
-            store.upsert_page(
+            store.ingest.upsert_page(
                 1,
                 {
                     "totalPage": 1,

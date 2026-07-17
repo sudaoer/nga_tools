@@ -100,13 +100,13 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
     historical_first = historical_result[0]
     assert isinstance(historical_first, dict)
     historical_first["content"] = "runner historical body"
-    store.upsert_page(
+    store.ingest.upsert_page(
         1,
         historical_page,
         observed_at="2026-07-12T00:00:00+00:00",
     )
-    store.upsert_page(1, _page(), observed_at="2026-07-13T00:00:00+00:00")
-    store.replace_floor_map(
+    store.ingest.upsert_page(1, _page(), observed_at="2026-07-13T00:00:00+00:00")
+    store.floor_maps.replace_floor_map(
         StoredFloorMap(
             version=FLOOR_MAP_VERSION,
             generation_version=FLOOR_MAP_GENERATION_VERSION,
@@ -138,7 +138,7 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
             (hash_text("runner historical body"),),
         ).fetchone()
     assert version_id is not None
-    store.upsert_post_version_selection(0, version_id[0])
+    store.posts.upsert_post_version_selection(0, version_id[0])
     (thread_dir / "warnings.log").write_text("do not copy", encoding="utf-8")
     (thread_dir / "pdf").mkdir()
     (thread_dir / "pdf" / "old.pdf").write_bytes(b"pdf")

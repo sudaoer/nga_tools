@@ -196,12 +196,12 @@ def _build_source(tmp_path: Path) -> tuple[Path, Path, Path]:
     output_dir = tmp_path / "output"
     thread_dir = output_dir / "123_456"
     store = ThreadArchiveStore(thread_dir)
-    store.upsert_page(
+    store.ingest.upsert_page(
         1,
         _page(1, 1, [_author_post(0, 100, "old")]),
         observed_at="2026-07-10T00:00:00+00:00",
     )
-    store.upsert_pages(
+    store.ingest.upsert_pages(
         {
             1: _page(
                 1,
@@ -212,7 +212,7 @@ def _build_source(tmp_path: Path) -> tuple[Path, Path, Path]:
         },
         observed_at="2026-07-12T00:00:00+00:00",
     )
-    store.replace_floor_map(
+    store.floor_maps.replace_floor_map(
         StoredFloorMap(
             version=FLOOR_MAP_VERSION,
             generation_version=FLOOR_MAP_GENERATION_VERSION,
@@ -239,7 +239,7 @@ def _build_source(tmp_path: Path) -> tuple[Path, Path, Path]:
             ],
         )
     )
-    store.upsert_recovered_posts(
+    store.ingest.upsert_recovered_posts(
         {
             10: {
                 "original_pid": 900,
@@ -459,7 +459,7 @@ class ReplayCorpusTest:
     ) -> None:
         output_dir, thread_config, _image_path = _build_source(tmp_path)
         original_store = ThreadArchiveStore(output_dir / "123_all")
-        original_store.upsert_pages(
+        original_store.ingest.upsert_pages(
             {
                 1: _page(
                     1,
