@@ -303,31 +303,6 @@ def audio_mappings_for_urls(
     return mappings
 
 
-def all_audio_mappings(output_root: Path) -> dict[str, AudioMapping]:
-    db_path = audio_index_path(output_root)
-    if not db_path.is_file():
-        return {}
-    with closing(_connect_readonly(db_path)) as connection:
-        rows = connection.execute(
-            """
-            SELECT
-                url,
-                unique_rel_path,
-                content_sha256,
-                content_bytes,
-                duration_seconds
-            FROM audio_mappings
-            ORDER BY url
-            """
-        ).fetchall()
-    mappings: dict[str, AudioMapping] = {}
-    for raw_row in rows:
-        mapping = _row_to_mapping(tuple(raw_row))
-        if mapping is not None:
-            mappings[mapping.url] = mapping
-    return mappings
-
-
 def _upsert_audio_mappings(
     output_root: Path,
     mappings: list[AudioMapping],

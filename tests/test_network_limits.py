@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from nga_tools import utils
+from nga_tools.core.downloads import effective_download_concurrency
 from nga_tools.network_limits import (
     configure_network_limits,
     get_api_concurrency,
@@ -178,8 +179,8 @@ class NetworkLimitsTest:
     def test_default_download_concurrency_uses_configured_image_limit(self) -> None:
         configure_network_limits(api_concurrency=4, image_concurrency=100)
 
-        assert utils._effective_download_concurrency(None) == 100
-        assert utils._effective_download_concurrency(50) == 50
+        assert effective_download_concurrency(None) == 100
+        assert effective_download_concurrency(50) == 50
 
     def test_final_download_failure_is_structured_without_bottom_layer_warning(
         self,

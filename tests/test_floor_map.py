@@ -14,7 +14,6 @@ from nga_tools.backup.floor_map import (
     build_and_save_floor_map,
     find_missing_author_lous,
     load_floor_map_build_result_if_current,
-    read_author_posts_from_archive,
     read_unresolved_missing_author_lous_from_archive,
     unresolved_missing_author_lous_from_stored_floor_map,
     _page_post_dicts,
@@ -132,35 +131,6 @@ class FloorMapPagePostRefsTest:
 
         assert refs == []
         assert '警告：原帖第2538页 缺少帖子列表' in output.getvalue()
-
-
-class FloorMapBackupSourceTest:
-    def test_read_author_posts_uses_archive_store(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            ThreadArchiveStore(Path(temp_dir)).upsert_page(
-                1,
-                {
-                    "totalPage": 1,
-                    "result": [
-                        {"pid": 1001, "lou": 1, "content": "from archive"},
-                    ],
-                },
-            )
-
-            with patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir):
-                author_posts = read_author_posts_from_archive(123, 456)
-
-        assert author_posts == [{'pid': 1001, 'author_lou': 1}]
-
-    def test_read_author_posts_requires_archive_store(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            json_dir = Path(temp_dir) / "json"
-            json_dir.mkdir()
-            (json_dir / "page_1.json").write_text("{not json", encoding="utf-8")
-
-            with patch("nga_tools.backup.floor_map.utils.get_folder", return_value=temp_dir):
-                with pytest.raises(RuntimeError, match='缺少archive.sqlite3'):
-                    read_author_posts_from_archive(123, 456)
 
 
 class FloorMapOriginalScanTest:

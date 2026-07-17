@@ -23,8 +23,6 @@ DEFAULT_MIN_AUTHOR_LOUS = 20
 
 JsonObject: TypeAlias = dict[str, object]
 SyncStatus: TypeAlias = Literal["added", "updated", "skipped", "conflict"]
-ForumScanProgressCallback: TypeAlias = Callable[["ForumScanProgress"], None]
-ForumPageCallback: TypeAlias = Callable[[int, list[ForumThread]], None]
 ForumDatabaseScanProgressCallback: TypeAlias = Callable[
     ["ForumDatabaseScanProgress"],
     None,
@@ -55,16 +53,6 @@ class MatchedForumThread:
 class _WatchMatchCandidate:
     match: MatchedForumThread
     needs_author_check: bool
-
-
-@dataclass(frozen=True)
-class ForumScanProgress:
-    watch_name: str
-    fid: int
-    page: int
-    pages: int
-    scanned_count: int
-    matched_count: int
 
 
 @dataclass(frozen=True)
@@ -235,25 +223,6 @@ def _author_lou_count_from_page_data(
     )
 
 
-def _author_lou_count_for_thread(
-    client: NGAClient,
-    thread: ForumThread,
-) -> int:
-    page_data = client.get_page(thread["tid"], thread["authorid"], 1)
-    return _author_lou_count_from_page_data(thread, page_data)
-
-
-def _thread_has_enough_author_lous(
-    client: NGAClient,
-    thread: ForumThread,
-    watch_config: ForumWatchConfig,
-) -> bool:
-    return (
-        _author_lou_count_for_thread(client, thread)
-        >= watch_config["min_author_lous"]
-    )
-
-
 def _template_values(
     watch_config: ForumWatchConfig,
     thread: ForumThread,
@@ -320,68 +289,6 @@ def _watch_match_candidate_or_none(
         matched_thread,
         not _thread_is_forced(thread, watch_config),
     )
-
-
-def _matching_thread_or_none(
-    client: NGAClient,
-    watch_config: ForumWatchConfig,
-    thread: ForumThread,
-    existing_thread_list: list[ThreadConfig] | None,
-) -> MatchedForumThread | None:
-    candidate = _watch_match_candidate_or_none(
-        watch_config,
-        thread,
-        existing_thread_list,
-    )
-    if candidate is None:
-        return None
-    if candidate.needs_author_check and not _thread_has_enough_author_lous(
-        client,
-        thread,
-        watch_config,
-    ):
-        return None
-    return candidate.match
-
-
-def collect_matching_threads(
-    client: NGAClient,
-    watch_configs: list[ForumWatchConfig],
-    progress_callback: ForumScanProgressCallback | None = None,
-    existing_thread_list: list[ThreadConfig] | None = None,
-    forum_page_callback: ForumPageCallback | None = None,
-) -> tuple[int, list[MatchedForumThread]]:
-    scanned_count = 0
-    matched_threads: list[MatchedForumThread] = []
-
-    for watch_config in watch_configs:
-        for page in range(1, watch_config["pages"] + 1):
-            page_threads = client.get_forum_threads(watch_config["fid"], page)
-            if forum_page_callback is not None:
-                forum_page_callback(watch_config["fid"], page_threads)
-            scanned_count += len(page_threads)
-            for thread in page_threads:
-                matched_thread = _matching_thread_or_none(
-                    client,
-                    watch_config,
-                    thread,
-                    existing_thread_list,
-                )
-                if matched_thread is not None:
-                    matched_threads.append(matched_thread)
-            if progress_callback is not None:
-                progress_callback(
-                    ForumScanProgress(
-                        watch_name=watch_config["watch_name"],
-                        fid=watch_config["fid"],
-                        page=page,
-                        pages=watch_config["pages"],
-                        scanned_count=scanned_count,
-                        matched_count=len(matched_threads),
-                    )
-                )
-
-    return scanned_count, matched_threads
 
 
 def collect_matching_threads_from_thread_source(

@@ -104,22 +104,6 @@ def collect_image_download_tasks_from_scans(
     return files_to_download
 
 
-def collect_image_download_tasks(
-    htmls: list[PostHtml],
-    floor_labels: FloorLabels,
-) -> list[image_store.ImageDownloadTask]:
-    return collect_image_download_tasks_from_parsed(
-        parse_post_htmls_for_images(htmls),
-        floor_labels,
-    )
-
-
-def pending_download_tasks(
-    files_to_download: list[image_store.ImageDownloadTask],
-) -> list[image_store.ImageDownloadTask]:
-    return image_store.pending_image_download_tasks(files_to_download)
-
-
 def _record_image_preparation_metrics(
     stats: image_store.ImagePreparationStats,
 ) -> None:
@@ -228,22 +212,6 @@ def _run_download_images(
             f"详情：{error_text}）"
         )
     return succeeded_count, succeeded, failed_results
-
-
-def download_images(
-    tid: int,
-    aid: Optional[int],
-    files_to_download: list[image_store.ImageDownloadTask],
-) -> utils.DownloadSummary:
-    succeeded_count, succeeded, failed = _run_download_images(
-        tid,
-        aid,
-        files_to_download,
-        collect_successes=True,
-    )
-    if succeeded_count != len(succeeded):
-        raise RuntimeError("图片下载成功结果收集不完整。")
-    return {"succeeded": succeeded, "failed": failed}
 
 
 def download_images_compact(

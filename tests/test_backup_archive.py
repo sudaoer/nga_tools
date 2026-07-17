@@ -24,16 +24,16 @@ from nga_tools.backup.floor_map import FloorLabels, FloorMapBuildResult
 from nga_tools.backup.floor_models import RecoveredMissingPost
 from nga_tools.backup.image_pipeline import (
     ImageDownloadOutcome,
-    collect_image_download_tasks,
     collect_image_download_tasks_from_parsed,
     parse_post_htmls_for_images,
 )
 from nga_tools.backup.models import ParsedPostHtml, PostHtml, PostRecord
 from nga_tools.backup.page_store import fetch_backup_page
 from nga_tools.backup.post_html import (
-    build_post_htmls,
     find_missing_lou,
+    load_post_htmls_for_records,
     merge_missing_lou,
+    prepare_post_records,
 )
 from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.backup.processing_state import BackupProcessingSnapshot
@@ -291,7 +291,10 @@ class ImageReferenceCollectionTest:
             {"lou": 1, "pid": 1001, "html": f'<img src="{raw_url}" />'}
         ]
 
-        tasks = collect_image_download_tasks(htmls, FloorLabels.plain())
+        tasks = collect_image_download_tasks_from_parsed(
+            parse_post_htmls_for_images(htmls),
+            FloorLabels.plain(),
+        )
 
         assert tasks == [{"url": raw_url.replace(",", "")}]
         assert raw_url in htmls[0]["html"]
@@ -340,7 +343,9 @@ class ImageReferenceCollectionTest:
             ]
         }
 
-        html = build_post_htmls({1: page_data})[0]["html"]
+        html = load_post_htmls_for_records(
+            prepare_post_records({1: page_data})
+        )[0]["html"]
 
         assert html == "[img]./mon_202506/06/example.png[/img]"
 

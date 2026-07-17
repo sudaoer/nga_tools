@@ -11,7 +11,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from nga_tools.backup import image_store
-from nga_tools.backup.image_pipeline import download_images
+from nga_tools.backup.image_pipeline import download_images_compact
 from nga_tools.backup.image_validation import (
     ImageValidationCache,
     canonical_image_path_key,
@@ -232,7 +232,7 @@ def test_image_preparation_writes_subphases_and_metrics(tmp_path: Path) -> None:
             task_name="image preparation",
         ) as timing_log:
             assert timing_log is not None
-            download_images(
+            download_images_compact(
                 123,
                 None,
                 [{"url": first_url}, {"url": second_url}],
@@ -292,16 +292,17 @@ def test_image_pipeline_reports_one_detailed_final_failure(tmp_path: Path) -> No
             ),
         ),
         patch(
-            "nga_tools.backup.image_pipeline.image_store.download_image_tasks",
-            return_value={"succeeded": [], "failed": [failure]},
+            "nga_tools.backup.image_pipeline.image_store."
+            "download_image_tasks_compact",
+            return_value={"succeeded_count": 0, "failed": [failure]},
         ),
         patch("nga_tools.backup.image_pipeline.report_warning") as warning_mock,
         use_timing_log(timing_path, task_name="image failure") as timing_log,
     ):
         assert timing_log is not None
-        result = download_images(123, None, [{"url": url}])
+        result = download_images_compact(123, None, [{"url": url}])
 
-    assert result["failed"] == [failure]
+    assert result.failed == [failure]
     warning_mock.assert_called_once()
     warning_text = warning_mock.call_args.args[1]
     assert warning_text.count(url) == 1

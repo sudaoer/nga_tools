@@ -45,10 +45,6 @@ def normalize_nga_audio_url(value: str) -> str | None:
     )
 
 
-def NGA_audio_link_verify(value: str) -> bool:
-    return normalize_nga_audio_url(value) is not None
-
-
 class _AudioSourceParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)

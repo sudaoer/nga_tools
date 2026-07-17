@@ -349,13 +349,6 @@ def image_cache_path() -> Path:
     return output_dir() / IMAGE_CACHE_FILENAME
 
 
-def unique_image_src_from_html_dir(url: str, html_dir: str | Path) -> str | None:
-    image_path = mapped_image_path_for_url(url)
-    if image_path is None:
-        return None
-    return os.path.relpath(image_path, html_dir).replace("\\", "/")
-
-
 def _now_utc_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 

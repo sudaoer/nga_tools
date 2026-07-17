@@ -14,7 +14,6 @@ from unittest.mock import patch
 from nga_tools.cli import args_parse
 from nga_tools.commands.forum import handle_forum_sync, sync_default_forum_watch
 from nga_tools.forum.export import (
-    scan_postdate_forum_threads,
     sync_default_forum_threads_to_db,
     sync_postdate_forum_threads_to_db,
 )
@@ -29,7 +28,6 @@ from nga_tools.forum.watch import (
     MatchedForumThread,
     build_thread_link,
     build_matched_thread,
-    collect_matching_threads,
     collect_matching_threads_from_thread_source,
     load_forum_watch_configs,
     sync_matches_to_thread_list,
@@ -570,34 +568,55 @@ class ForumWatchMatchTest:
 
 
 class ForumWatchCollectTest:
-    def test_collect_reports_page_progress(self) -> None:
+    def test_collect_reports_database_progress(self) -> None:
         watch = _watch(keywords=["安价"], pages=2)
-        client = _FakeForumClient(
+        client = _FakeForumClient({})
+        store = _FakeForumThreadStore(
             {
-                (784, 1): [
+                784: [
                     _thread(tid=101, subject="安价一号"),
                     _thread(tid=102, subject="闲聊"),
-                ],
-                (784, 2): [_thread(tid=103, subject="安价二号")],
+                    _thread(tid=103, subject="安价二号"),
+                ]
             }
         )
         progress_events = []
 
-        scanned_count, matches = collect_matching_threads(
+        scanned_count, matches = collect_matching_threads_from_thread_source(
             client,
             [watch],
+            lambda config: store.list_threads(
+                config["fid"], forumname=config["watch_name"]
+            ),
             progress_callback=progress_events.append,
         )
 
         assert scanned_count == 3
-        assert [match.thread['tid'] for match in matches] == [101, 103]
-        assert [(event.watch_name, event.fid, event.page, event.pages, event.scanned_count, event.matched_count) for event in progress_events] == [('rp784', 784, 1, 2, 2, 1), ('rp784', 784, 2, 2, 3, 2)]
+        assert [match.thread['tid'] for match in matches] == [103, 101]
+        assert [
+            (
+                event.watch_name,
+                event.fid,
+                event.scanned_count,
+                event.matched_count,
+            )
+            for event in progress_events
+        ] == [('rp784', 784, 3, 2)]
 
     def test_collect_keeps_callback_optional(self) -> None:
         watch = _watch(keywords=["安价"])
-        client = _FakeForumClient({(784, 1): [_thread(tid=101, subject="安价一号")]})
+        client = _FakeForumClient({})
+        store = _FakeForumThreadStore(
+            {784: [_thread(tid=101, subject="安价一号")]}
+        )
 
-        scanned_count, matches = collect_matching_threads(client, [watch])
+        scanned_count, matches = collect_matching_threads_from_thread_source(
+            client,
+            [watch],
+            lambda config: store.list_threads(
+                config["fid"], forumname=config["watch_name"]
+            ),
+        )
 
         assert scanned_count == 1
         assert [match.thread['tid'] for match in matches] == [101]
@@ -659,36 +678,52 @@ class ForumWatchCollectTest:
     def test_collect_filters_keyword_matches_by_min_author_lous(self) -> None:
         watch = _watch(keywords=["安价"], min_author_lous=20)
         client = _FakeForumClient(
-            {
-                (784, 1): [
-                    _thread(tid=101, subject="安价一号"),
-                    _thread(tid=102, subject="安价二号"),
-                ]
-            },
+            {},
             author_pages={
                 (101, 456): {"totalPage": 1, "vrows": 19},
                 (102, 456): {"totalPage": 1, "vrows": 20},
             },
         )
 
-        scanned_count, matches = collect_matching_threads(client, [watch])
+        store = _FakeForumThreadStore(
+            {
+                784: [
+                    _thread(tid=101, subject="安价一号"),
+                    _thread(tid=102, subject="安价二号"),
+                ]
+            }
+        )
+        scanned_count, matches = collect_matching_threads_from_thread_source(
+            client,
+            [watch],
+            lambda config: store.list_threads(
+                config["fid"], forumname=config["watch_name"]
+            ),
+        )
 
         assert scanned_count == 2
         assert [match.thread['tid'] for match in matches] == [102]
-        assert client.page_fetches == [(101, 456, 1), (102, 456, 1)]
+        assert client.page_fetches == [(102, 456, 1), (101, 456, 1)]
 
     def test_collect_only_fetches_author_page_after_listing_rules_match(self) -> None:
         watch = _watch(keywords=["安价"], min_replies=500)
-        client = _FakeForumClient(
+        client = _FakeForumClient({})
+        store = _FakeForumThreadStore(
             {
-                (784, 1): [
+                784: [
                     _thread(tid=101, subject="闲聊", replies=600),
                     _thread(tid=102, subject="安价低回复", replies=499),
                 ]
             }
         )
 
-        scanned_count, matches = collect_matching_threads(client, [watch])
+        scanned_count, matches = collect_matching_threads_from_thread_source(
+            client,
+            [watch],
+            lambda config: store.list_threads(
+                config["fid"], forumname=config["watch_name"]
+            ),
+        )
 
         assert scanned_count == 2
         assert matches == []
@@ -697,15 +732,24 @@ class ForumWatchCollectTest:
     def test_include_tid_bypasses_min_author_lous(self) -> None:
         watch = _watch(keywords=["安价"], include_tids=[101], min_author_lous=20)
         client = _FakeForumClient(
-            {
-                (784, 1): [
-                    _thread(tid=101, subject="[公告] 强制保存", replies=1),
-                ]
-            },
+            {},
             author_pages={(101, 456): {"totalPage": 1, "vrows": 1}},
         )
+        store = _FakeForumThreadStore(
+            {
+                784: [
+                    _thread(tid=101, subject="[公告] 强制保存", replies=1)
+                ]
+            }
+        )
 
-        scanned_count, matches = collect_matching_threads(client, [watch])
+        scanned_count, matches = collect_matching_threads_from_thread_source(
+            client,
+            [watch],
+            lambda config: store.list_threads(
+                config["fid"], forumname=config["watch_name"]
+            ),
+        )
 
         assert scanned_count == 1
         assert [match.thread['tid'] for match in matches] == [101]
@@ -720,24 +764,33 @@ class ForumWatchCollectTest:
         page_data: dict[str, object],
     ) -> None:
         watch = _watch(keywords=["安价"])
-        client = _FakeForumClient(
-            {(784, 1): [_thread(tid=101, subject="安价一号")]},
-            author_pages={(101, 456): page_data},
+        client = _FakeForumClient({}, author_pages={(101, 456): page_data})
+        store = _FakeForumThreadStore(
+            {784: [_thread(tid=101, subject="安价一号")]}
         )
 
         with pytest.raises(ValueError, match='tid=101.*vrows'):
-            collect_matching_threads(client, [watch])
+            collect_matching_threads_from_thread_source(
+                client,
+                [watch],
+                lambda config: store.list_threads(
+                    config["fid"], forumname=config["watch_name"]
+                ),
+            )
 
     def test_collect_skips_author_page_for_existing_thread_configs(self) -> None:
         watch = _watch(keywords=["安价"])
         client = _FakeForumClient(
+            {},
+            author_pages={(102, 789): {"totalPage": 1, "vrows": 20}},
+        )
+        store = _FakeForumThreadStore(
             {
-                (784, 1): [
+                784: [
                     _thread(tid=101, subject="安价已保存", authorid=456),
                     _thread(tid=102, subject="安价新主题", authorid=789),
                 ]
-            },
-            author_pages={(102, 789): {"totalPage": 1, "vrows": 20}},
+            }
         )
         thread_list: list[ThreadConfig] = [
             {
@@ -748,21 +801,26 @@ class ForumWatchCollectTest:
             }
         ]
 
-        scanned_count, matches = collect_matching_threads(
+        scanned_count, matches = collect_matching_threads_from_thread_source(
             client,
             [watch],
+            lambda config: store.list_threads(
+                config["fid"], forumname=config["watch_name"]
+            ),
             existing_thread_list=thread_list,
         )
 
         assert scanned_count == 2
-        assert [match.thread['tid'] for match in matches] == [101, 102]
+        assert [match.thread['tid'] for match in matches] == [102, 101]
         assert client.page_fetches == [(102, 789, 1)]
 
     def test_collect_skips_author_page_for_name_conflicts(self) -> None:
         watch: ForumWatchConfig = {**_watch(keywords=["安价"]), "name_template": "same"}
         client = _FakeForumClient(
-            {(784, 1): [_thread(tid=101, subject="安价冲突", authorid=456)]},
-            author_pages={(101, 456): {"totalPage": 1, "vrows": 20}},
+            {}, author_pages={(101, 456): {"totalPage": 1, "vrows": 20}}
+        )
+        store = _FakeForumThreadStore(
+            {784: [_thread(tid=101, subject="安价冲突", authorid=456)]}
         )
         thread_list: list[ThreadConfig] = [
             {
@@ -773,9 +831,12 @@ class ForumWatchCollectTest:
             }
         ]
 
-        scanned_count, matches = collect_matching_threads(
+        scanned_count, matches = collect_matching_threads_from_thread_source(
             client,
             [watch],
+            lambda config: store.list_threads(
+                config["fid"], forumname=config["watch_name"]
+            ),
             existing_thread_list=thread_list,
         )
 
@@ -976,193 +1037,6 @@ class ForumThreadStoreTest:
         assert threads[0]['forumname'] == 'rp784'
         assert threads[0]['authorid'] == 202
         assert threads[0]['subject'] == '较新回复'
-
-
-class ForumPostdateScanTest:
-    def test_scan_writes_jsonl_without_thread_page_fetches(self) -> None:
-        client = _FakePostdateClient(
-            {
-                (784, 1): _forum_page(
-                    page=1,
-                    total_page=2,
-                    threads=[_thread(tid=101, subject="旧帖一号", authorid=201)],
-                ),
-                (784, 2): _forum_page(
-                    page=2,
-                    total_page=2,
-                    threads=[_thread(tid=102, subject="旧帖二号", authorid=202)],
-                ),
-            }
-        )
-        sleeps: list[float] = []
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            output_path = Path(tmp_dir) / "threads.jsonl"
-            result = scan_postdate_forum_threads(
-                client,
-                fids=[784],
-                output_path=output_path,
-                page_delay_seconds=3,
-                sleep_func=sleeps.append,
-            )
-            records = [
-                json.loads(line)
-                for line in output_path.read_text(encoding="utf-8").splitlines()
-            ]
-
-        assert result.page_count == 2
-        assert result.thread_count == 2
-        assert client.thread_page_fetches == [(784, 1, 'postdatedesc'), (784, 2, 'postdatedesc')]
-        assert sleeps == [3]
-        assert records[0]['tid'] == 101
-        assert records[0]['aid'] == 201
-        assert records[0]['subject'] == '旧帖一号'
-        assert records[0]['page'] == 1
-        assert records[0]['page_index'] == 1
-        assert records[0]['postdate'] == 1000
-        assert isinstance(records[0]['postdate_text'], str)
-
-    def test_scan_starts_from_requested_page(self) -> None:
-        client = _FakePostdateClient(
-            {
-                (784, 2): _forum_page(
-                    page=2,
-                    total_page=3,
-                    threads=[_thread(tid=102, subject="第二页", authorid=202)],
-                ),
-                (784, 3): _forum_page(
-                    page=3,
-                    total_page=3,
-                    threads=[_thread(tid=103, subject="第三页", authorid=203)],
-                ),
-            }
-        )
-        sleeps: list[float] = []
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            result = scan_postdate_forum_threads(
-                client,
-                fids=[784],
-                output_path=Path(tmp_dir) / "threads.jsonl",
-                start_page=2,
-                page_delay_seconds=3,
-                sleep_func=sleeps.append,
-            )
-
-        assert result.page_count == 2
-        assert result.thread_count == 2
-        assert client.thread_page_fetches == [(784, 2, 'postdatedesc'), (784, 3, 'postdatedesc')]
-        assert sleeps == [3]
-
-    def test_scan_deduplicates_fids_in_order(self) -> None:
-        client = _FakePostdateClient(
-            {
-                (784, 1): _forum_page(fid=784, threads=[]),
-                (785, 1): _forum_page(fid=785, threads=[]),
-            }
-        )
-        sleeps: list[float] = []
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            result = scan_postdate_forum_threads(
-                client,
-                fids=[784, 784, 785],
-                output_path=Path(tmp_dir) / "threads.jsonl",
-                page_delay_seconds=3,
-                sleep_func=sleeps.append,
-            )
-
-        assert result.fids == [784, 785]
-        assert client.thread_page_fetches == [(784, 1, 'postdatedesc'), (785, 1, 'postdatedesc')]
-        assert sleeps == [3]
-
-    def test_scan_retries_refresh_too_fast_errors(self) -> None:
-        client = _FakePostdateClient(
-            {
-                (784, 1): _forum_page(threads=[]),
-            },
-            failures={
-                (784, 1): [
-                    NGAForumPageError(2048, "刷新过快 请等候数秒再行访问")
-                ]
-            },
-        )
-        sleeps: list[float] = []
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            result = scan_postdate_forum_threads(
-                client,
-                fids=[784],
-                output_path=Path(tmp_dir) / "threads.jsonl",
-                page_delay_seconds=3,
-                sleep_func=sleeps.append,
-            )
-
-        assert result.page_count == 1
-        assert client.thread_page_fetches == [(784, 1, 'postdatedesc'), (784, 1, 'postdatedesc')]
-        assert sleeps == [10]
-
-    def test_scan_does_not_retry_over_limit_errors(self) -> None:
-        client = _FakePostdateClient(
-            {
-                (784, 1): _forum_page(threads=[]),
-            },
-            failures={
-                (784, 1): [
-                    NGAForumPageError(
-                        2048,
-                        "超过限制,只有在使用 [单一版面主题发布时间排序] 时可翻阅超过100页",
-                    )
-                ]
-            },
-        )
-        sleeps: list[float] = []
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            with pytest.raises(NGAForumPageError, match='超过限制'):
-                scan_postdate_forum_threads(
-                    client,
-                    fids=[784],
-                    output_path=Path(tmp_dir) / "threads.jsonl",
-                    page_delay_seconds=3,
-                    sleep_func=sleeps.append,
-                )
-
-        assert client.thread_page_fetches == [(784, 1, 'postdatedesc')]
-        assert sleeps == []
-
-    def test_scan_failure_keeps_previous_jsonl_output(self) -> None:
-        client = _FakePostdateClient(
-            {
-                (784, 1): _forum_page(
-                    page=1,
-                    total_page=2,
-                    threads=[_thread(tid=101, subject="第一页", authorid=201)],
-                ),
-            },
-            failures={
-                (784, 2): [NGAForumPageError(500, "server error")],
-            },
-        )
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            output_path = Path(tmp_dir) / "threads.jsonl"
-            output_path.write_text("old\n", encoding="utf-8")
-
-            with pytest.raises(NGAForumPageError, match="server error"):
-                scan_postdate_forum_threads(
-                    client,
-                    fids=[784],
-                    output_path=output_path,
-                    page_delay_seconds=3,
-                    sleep_func=lambda _seconds: None,
-                )
-
-            output_text = output_path.read_text(encoding="utf-8")
-            temp_paths = list(Path(tmp_dir).glob(".threads.jsonl.*.tmp"))
-
-        assert output_text == "old\n"
-        assert temp_paths == []
 
 
 class ForumPostdateDbSyncTest:

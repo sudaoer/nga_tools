@@ -4,12 +4,10 @@ import json
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional, cast
 
 import requests
 
-from nga_tools import utils
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.console import (
     WarningCategory,
@@ -88,11 +86,6 @@ def _post_content(post: dict[str, object]) -> str:
     if isinstance(content, str):
         return content
     return ""
-
-
-def read_author_posts_from_archive(tid: int, aid: int) -> list[AuthorPostRef]:
-    thread_folder = Path(utils.get_folder(tid, aid, create=False))
-    return ThreadArchiveStore(thread_folder).read_latest_author_post_refs()
 
 
 def read_unresolved_missing_author_lous_from_archive(

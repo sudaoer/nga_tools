@@ -65,11 +65,6 @@ def load_post_htmls_for_records(records: list[PostRecord]) -> list[PostHtml]:
     return htmls
 
 
-def build_post_htmls(page_data_by_page: dict[int, PageData]) -> list[PostHtml]:
-    records = prepare_post_records(page_data_by_page)
-    return load_post_htmls_for_records(records)
-
-
 def find_missing_lou(
     posts: Sequence[PostHtml] | Sequence[PostRecord],
     total_lou_count: int | None = None,
@@ -101,29 +96,6 @@ def merge_missing_lou(*missing_lou_groups: list[int]) -> list[int]:
             for lou in missing_lou_group
         }
     )
-
-
-def fill_missing_lou(
-    htmls: list[PostHtml],
-    missing_lou: list[int],
-    floor_labels: FloorLabels,
-) -> None:
-    for lou in missing_lou:
-        report_warning(
-            WarningCategory.POST_CONTENT,
-            f"缺失{floor_labels.label(lou)}！",
-        )
-
-    for lou in missing_lou:
-        htmls.append(
-            {
-                "lou": lou,
-                "pid": None,
-                "html": MISSING_POST_HTML,
-            }
-        )
-
-    htmls.sort(key=lambda item: item["lou"])
 
 
 def fill_missing_post_records(
@@ -162,7 +134,3 @@ def post_refs_from_posts(
             continue
         post_refs.append({"pid": pid, "author_lou": item["lou"]})
     return post_refs
-
-
-def post_refs_from_htmls(htmls: list[PostHtml]) -> list[AuthorPostRef]:
-    return post_refs_from_posts(htmls)
