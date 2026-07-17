@@ -106,37 +106,29 @@ def _write_image_index(output_dir: Path, *, unsafe: bool = False) -> Path:
             """
             CREATE TABLE image_mappings (
                 url TEXT PRIMARY KEY,
-                unique_rel_path TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                unique_rel_path TEXT NOT NULL
             )
             """
         )
         connection.execute(
             """
-            INSERT INTO image_mappings (
-                url, unique_rel_path, created_at, updated_at
-            ) VALUES (?, ?, ?, ?)
+            INSERT INTO image_mappings (url, unique_rel_path)
+            VALUES (?, ?)
             """,
             (
                 IMAGE_URL,
                 "../outside.png" if unsafe else "images_unique/stored.png",
-                "2026-07-12T00:00:00+00:00",
-                "2026-07-12T00:00:00+00:00",
             ),
         )
         if not unsafe:
             connection.execute(
                 """
-                INSERT INTO image_mappings (
-                    url, unique_rel_path, created_at, updated_at
-                ) VALUES (?, ?, ?, ?)
+                INSERT INTO image_mappings (url, unique_rel_path)
+                VALUES (?, ?)
                 """,
                 (
                     MISSING_IMAGE_URL,
                     "images_unique/missing.png",
-                    "2026-07-12T00:00:00+00:00",
-                    "2026-07-12T00:00:00+00:00",
                 ),
             )
         connection.commit()

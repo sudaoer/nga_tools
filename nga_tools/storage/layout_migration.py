@@ -31,7 +31,11 @@ from nga_tools.backup.image_reference_cache import (
     IMAGE_REFERENCE_EXTRACTOR_VERSION,
     deserialize_image_references,
 )
-from nga_tools.backup.image_store import IMAGE_CACHE_FILENAME, IMAGE_INDEX_FILENAME
+from nga_tools.backup.image_store import (
+    IMAGE_CACHE_FILENAME,
+    IMAGE_INDEX_FILENAME,
+    ensure_image_mappings_schema,
+)
 from nga_tools.backup.audio_store import AUDIO_INDEX_FILENAME
 from nga_tools.backup.processing_state import (
     FLOOR_PROCESSING_STATE_VERSION,
@@ -743,6 +747,7 @@ def _copy_image_validation_cache(
 def _prepare_image_index(source_path: Path, destination_path: Path) -> None:
     _snapshot_sqlite(source_path, destination_path)
     with closing(sqlite3.connect(destination_path)) as connection:
+        ensure_image_mappings_schema(connection)
         fingerprint_before = _table_fingerprint(connection, "image_mappings")
         ensure_storage_metadata(connection, role="image_index")
         with connection:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import io
+import sqlite3
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -218,6 +219,71 @@ class ImageStoreTest:
         assert (output_dir / "image_index.sqlite3").is_file()
         assert writable_config_mock.call_count == 1
         assert readonly_config_mock.call_count == 2
+        with sqlite3.connect(output_dir / "image_index.sqlite3") as connection:
+            assert [
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(image_mappings)"
+                )
+            ] == ["url", "unique_rel_path"]
+
+    def test_legacy_image_index_schema_is_migrated_before_writes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        image_index_path = output_dir / "image_index.sqlite3"
+        image_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+        )
+        old_relative_path = "images_unique/old.png"
+        new_relative_path = "images_unique/new.png"
+        with sqlite3.connect(image_index_path) as connection:
+            image_store.ensure_storage_metadata(connection, role="image_index")
+            connection.execute(
+                """
+                CREATE TABLE image_mappings (
+                    url TEXT PRIMARY KEY,
+                    unique_rel_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO image_mappings (
+                    url, unique_rel_path, created_at, updated_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    image_url,
+                    old_relative_path,
+                    "2026-07-01T00:00:00+00:00",
+                    "2026-07-02T00:00:00+00:00",
+                ),
+            )
+
+        with patch(
+            "nga_tools.backup.image_store.get_config",
+            return_value=SimpleNamespace(output_dir=str(output_dir)),
+        ):
+            mapping = image_store.upsert_image_mapping(
+                image_url,
+                output_dir / new_relative_path,
+            )
+
+        assert mapping.unique_rel_path == new_relative_path
+        with sqlite3.connect(image_index_path) as connection:
+            assert [
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(image_mappings)"
+                )
+            ] == ["url", "unique_rel_path"]
+            assert connection.execute(
+                "SELECT url, unique_rel_path FROM image_mappings"
+            ).fetchall() == [(image_url, new_relative_path)]
 
     def test_pending_image_download_tasks_retries_invalid_mapped_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:

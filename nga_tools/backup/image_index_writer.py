@@ -13,7 +13,7 @@ from time import monotonic
 from nga_tools.core.sqlite import SQLITE_BUSY_TIMEOUT_SECONDS, configure_connection
 
 
-type ImageMappingRow = tuple[str, str, str, str]
+type ImageMappingRow = tuple[str, str]
 
 _QUEUE_CAPACITY = 1024
 _MAX_TRANSACTION_ROWS = 256
@@ -183,14 +183,11 @@ class ImageIndexWriter:
                             """
                             INSERT INTO image_mappings (
                                 url,
-                                unique_rel_path,
-                                created_at,
-                                updated_at
+                                unique_rel_path
                             )
-                            VALUES (?, ?, ?, ?)
+                            VALUES (?, ?)
                             ON CONFLICT(url) DO UPDATE SET
-                                unique_rel_path = excluded.unique_rel_path,
-                                updated_at = excluded.updated_at
+                                unique_rel_path = excluded.unique_rel_path
                             """,
                             chunk,
                         )

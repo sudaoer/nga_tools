@@ -520,6 +520,12 @@ def test_layout_migration_splits_global_data_state_and_cache(
     assert result.failures == ()
     assert "ankebak_thread_state" not in _table_names(forum_path)
     assert "image_validation_cache" not in _table_names(image_index_path)
+    with closing(sqlite3.connect(image_index_path)) as connection:
+        assert [
+            row[1] for row in connection.execute(
+                "PRAGMA table_info(image_mappings)"
+            )
+        ] == ["url", "unique_rel_path"]
     state_store = AnkebakStateStore(output_root / "backup_state.sqlite3")
     assert state_store.load_states()["123:456"].tid == 123
     with closing(sqlite3.connect(output_root / "image_cache.sqlite3")) as connection:

@@ -159,14 +159,12 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
             """
             CREATE TABLE image_mappings (
                 url TEXT PRIMARY KEY,
-                unique_rel_path TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                unique_rel_path TEXT NOT NULL
             );
             """
         )
         connection.execute(
-            "INSERT INTO image_mappings VALUES (?, ?, '', '')",
+            "INSERT INTO image_mappings VALUES (?, ?)",
             (IMAGE_URL, f"images_unique/{image_path.name}"),
         )
         connection.commit()

@@ -83,23 +83,16 @@ def _write_image_mapping(output_dir: Path, url: str, unique_rel_path: str) -> No
             """
             CREATE TABLE IF NOT EXISTS image_mappings (
                 url TEXT PRIMARY KEY,
-                unique_rel_path TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                unique_rel_path TEXT NOT NULL
             )
             """
         )
         connection.execute(
             """
-            INSERT INTO image_mappings (
-                url,
-                unique_rel_path,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?)
+            INSERT INTO image_mappings (url, unique_rel_path)
+            VALUES (?, ?)
             """,
-            (url, unique_rel_path, "2026-07-08T00:00:00+00:00", "2026-07-08T00:00:00+00:00"),
+            (url, unique_rel_path),
         )
         connection.commit()
     finally:

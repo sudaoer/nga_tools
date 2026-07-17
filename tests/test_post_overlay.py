@@ -28,24 +28,18 @@ def _write_existing_image(output_dir: Path, image_url: str) -> Path:
             """
             CREATE TABLE image_mappings (
                 url TEXT PRIMARY KEY,
-                unique_rel_path TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                unique_rel_path TEXT NOT NULL
             )
             """
         )
         connection.execute(
             """
-            INSERT INTO image_mappings (
-                url, unique_rel_path, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?)
+            INSERT INTO image_mappings (url, unique_rel_path)
+            VALUES (?, ?)
             """,
             (
                 image_url,
                 "images_unique/existing.png",
-                "2026-07-12T00:00:00+00:00",
-                "2026-07-12T00:00:00+00:00",
             ),
         )
     return image_path

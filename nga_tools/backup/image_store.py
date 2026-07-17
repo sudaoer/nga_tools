@@ -359,6 +359,68 @@ def _now_utc_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+_IMAGE_MAPPINGS_COLUMNS = ("url", "unique_rel_path")
+_LEGACY_IMAGE_MAPPINGS_COLUMNS = (
+    "url",
+    "unique_rel_path",
+    "created_at",
+    "updated_at",
+)
+
+
+def _image_mappings_columns(connection: sqlite3.Connection) -> tuple[str, ...]:
+    return tuple(
+        row[1]
+        for row in connection.execute("PRAGMA table_info(image_mappings)")
+        if len(row) > 1 and isinstance(row[1], str)
+    )
+
+
+def ensure_image_mappings_schema(connection: sqlite3.Connection) -> None:
+    """Create or normalize the persistent URL-to-file mapping table."""
+    columns = _image_mappings_columns(connection)
+    if not columns:
+        connection.execute(
+            """
+            CREATE TABLE image_mappings (
+                url TEXT PRIMARY KEY,
+                unique_rel_path TEXT NOT NULL
+            )
+            """
+        )
+        return
+
+    if columns == _IMAGE_MAPPINGS_COLUMNS:
+        return
+
+    if columns != _LEGACY_IMAGE_MAPPINGS_COLUMNS:
+        raise ValueError(
+            "image_mappings表结构不受支持："
+            f"期望{_IMAGE_MAPPINGS_COLUMNS!r}或旧结构，实际{columns!r}。"
+        )
+
+    connection.execute("DROP TABLE IF EXISTS image_mappings__new")
+    connection.execute(
+        """
+        CREATE TABLE image_mappings__new (
+            url TEXT PRIMARY KEY,
+            unique_rel_path TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO image_mappings__new (url, unique_rel_path)
+        SELECT url, unique_rel_path
+        FROM image_mappings
+        """
+    )
+    connection.execute("DROP TABLE image_mappings")
+    connection.execute(
+        "ALTER TABLE image_mappings__new RENAME TO image_mappings"
+    )
+
+
 def _initialize_image_index() -> Path:
     db_path = image_index_path().resolve()
     with _IMAGE_STORE_LOCK:
@@ -384,16 +446,7 @@ def _initialize_image_index() -> Path:
                         "请先运行 backup migrate-layout --all。"
                     )
             ensure_storage_metadata(connection, role="image_index")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS image_mappings (
-                    url TEXT PRIMARY KEY,
-                    unique_rel_path TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
+            ensure_image_mappings_schema(connection)
             connection.commit()
         _INITIALIZED_IMAGE_INDEX_PATHS.add(db_path)
     return db_path
@@ -504,13 +557,12 @@ def enqueue_image_mappings(
 
     record_image_mapping_submission(len(mappings))
     with time_image_store_phase("mapping_submit"):
-        now = _now_utc_iso()
         image_mappings = [
             ImageMapping(url=url, unique_rel_path=_unique_rel_path(unique_path))
             for url, unique_path in mappings
         ]
         rows: list[ImageMappingRow] = [
-            (mapping.url, mapping.unique_rel_path, now, now)
+            (mapping.url, mapping.unique_rel_path)
             for mapping in image_mappings
         ]
         db_path = _initialize_image_index()
@@ -527,14 +579,11 @@ def enqueue_image_mappings(
                             """
                             INSERT INTO image_mappings (
                                 url,
-                                unique_rel_path,
-                                created_at,
-                                updated_at
+                                unique_rel_path
                             )
-                            VALUES (?, ?, ?, ?)
+                            VALUES (?, ?)
                             ON CONFLICT(url) DO UPDATE SET
-                                unique_rel_path = excluded.unique_rel_path,
-                                updated_at = excluded.updated_at
+                                unique_rel_path = excluded.unique_rel_path
                             """,
                             rows,
                         )
