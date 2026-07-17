@@ -86,7 +86,7 @@ class ImageStoreTest:
             output_dir = Path(temp_dir_name) / "output"
 
             with patch(
-                "nga_tools.backup.image_store.get_config",
+                "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
                 placeholder_path = image_store.placeholder_image_path()
@@ -111,7 +111,7 @@ class ImageStoreTest:
             )
 
             with patch(
-                "nga_tools.backup.image_store.get_config",
+                "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
                 result = image_store.store_downloaded_image(
@@ -141,7 +141,7 @@ class ImageStoreTest:
             )
 
             with patch(
-                "nga_tools.backup.image_store.get_config",
+                "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
                 result = image_store.store_existing_image(legacy_image, image_url)
@@ -176,7 +176,7 @@ class ImageStoreTest:
             invalid_url = "https://example.com/not-nga.png"
 
             with patch(
-                "nga_tools.backup.image_store.get_config",
+                "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
                 image_store.upsert_image_mapping(existing_url, existing_path)
@@ -202,7 +202,7 @@ class ImageStoreTest:
 
         with (
             patch(
-                "nga_tools.backup.image_store.get_config",
+                "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ),
             patch(
@@ -266,7 +266,7 @@ class ImageStoreTest:
             )
 
         with patch(
-            "nga_tools.backup.image_store.get_config",
+            "nga_tools.config.get_config",
             return_value=SimpleNamespace(output_dir=str(output_dir)),
         ):
             with pytest.raises(UnsupportedStorageFormatError):
@@ -298,7 +298,7 @@ class ImageStoreTest:
             )
 
             with patch(
-                "nga_tools.backup.image_store.get_config",
+                "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
                 image_store.upsert_image_mapping(image_url, invalid_path)
@@ -323,7 +323,7 @@ class ImageStoreTest:
             )
 
             with patch(
-                "nga_tools.backup.image_store.get_config",
+                "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
                 image_store.upsert_image_mapping(image_url, avif_path)
@@ -344,7 +344,7 @@ class ImageStoreTest:
             )
 
             with patch(
-                "nga_tools.backup.image_store.get_config",
+                "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
                 result = image_store.store_downloaded_image(
@@ -379,7 +379,7 @@ class ImageStoreTest:
 
             with (
                 patch(
-                    "nga_tools.backup.image_store.get_config",
+                    "nga_tools.config.get_config",
                     return_value=SimpleNamespace(output_dir=str(output_dir)),
                 ),
                 patch("nga_tools.backup.image_store.utils.sha256", return_value=image_hash),
@@ -408,7 +408,7 @@ class ImageStoreTest:
 
             with (
                 patch(
-                    "nga_tools.backup.image_store.get_config",
+                    "nga_tools.config.get_config",
                     return_value=SimpleNamespace(output_dir=str(output_dir)),
                 ),
                 patch("nga_tools.backup.image_store.utils.sha256", return_value="a" * 64),
@@ -576,7 +576,7 @@ def test_prepare_image_download_tasks_uses_persistent_cache(tmp_path: Path) -> N
     from nga_tools.core.image_formats import image_file_is_valid as real_validate
 
     with patch(
-        "nga_tools.backup.image_store.get_config",
+        "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
         image_store.upsert_image_mappings([(url, image_path)])
@@ -624,7 +624,7 @@ def test_shared_validation_cache_reports_batch_local_persistent_hits(
     )
 
     with patch(
-        "nga_tools.backup.image_store.get_config",
+        "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
         image_store.upsert_image_mapping(url, image_path)

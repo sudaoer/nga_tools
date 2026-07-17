@@ -8,10 +8,10 @@ from time import perf_counter
 from typing import cast
 
 from nga_tools.backup.image_store import (
-    IMAGE_CACHE_FILENAME,
     IMAGE_INDEX_FILENAME,
     require_current_image_index,
 )
+from nga_tools.backup.image_validation_store import IMAGE_CACHE_FILENAME
 from nga_tools.backup.archive_schema import require_current_archive_schema
 from nga_tools.backup.audio_store import (
     AUDIO_INDEX_FILENAME,

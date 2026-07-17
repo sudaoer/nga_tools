@@ -21,7 +21,7 @@ from PIL import Image
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.content_codec import decode_content
-from nga_tools.backup.image_store import IMAGE_CACHE_FILENAME
+from nga_tools.backup.image_validation_store import IMAGE_CACHE_FILENAME
 from nga_tools.backup.floor_models import (
     FLOOR_MAP_GENERATION_VERSION,
     FLOOR_MAP_HASH_ALGORITHM,

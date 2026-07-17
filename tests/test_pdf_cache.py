@@ -537,7 +537,7 @@ class PdfImageSourceTest:
                     "nga_tools.core.paths.get_config",
                     return_value=config,
                 ),
-                patch("nga_tools.backup.image_store.get_config", return_value=config),
+                patch("nga_tools.config.get_config", return_value=config),
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),
                 patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
             ):
@@ -579,7 +579,7 @@ class PdfImageSourceTest:
                     "nga_tools.core.paths.get_config",
                     return_value=config,
                 ),
-                patch("nga_tools.backup.image_store.get_config", return_value=config),
+                patch("nga_tools.config.get_config", return_value=config),
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),
                 patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
             ):
@@ -618,7 +618,7 @@ class PdfImageSourceTest:
                     "nga_tools.core.paths.get_config",
                     return_value=config,
                 ),
-                patch("nga_tools.backup.image_store.get_config", return_value=config),
+                patch("nga_tools.config.get_config", return_value=config),
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),
                 patch("nga_tools.backup.pdf._is_speaker_portrait", return_value=False),
             ):
@@ -709,7 +709,7 @@ class PdfImageSourceTest:
             with (
                 patch("nga_tools.core.paths.get_config", return_value=config),
                 patch(
-                    "nga_tools.backup.image_store.get_config",
+                    "nga_tools.config.get_config",
                     return_value=config,
                 ),
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),
@@ -764,7 +764,7 @@ class PdfImageSourceTest:
                     return_value=SimpleNamespace(output_dir=str(output_dir)),
                 ),
                 patch(
-                    "nga_tools.backup.image_store.get_config",
+                    "nga_tools.config.get_config",
                     return_value=SimpleNamespace(output_dir=str(output_dir)),
                 ),
                 patch("nga_tools.backup.pdf._is_long_image", return_value=False),

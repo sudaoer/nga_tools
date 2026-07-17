@@ -17,7 +17,7 @@ import aiohttp
 
 from nga_tools.console import WarningCategory, report_warning
 from nga_tools.core.atomic import replace_temp_file, temporary_sibling_path
-from nga_tools.core.downloads import (
+from nga_tools.core.download_types import (
     DownloadFailureKind,
     DownloadFileResult,
     DownloadProgressCallback,

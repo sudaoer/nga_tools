@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from nga_tools.backup import image_store
+from nga_tools.backup import image_store, image_validation_store
 from nga_tools.backup.archive_schema import ARCHIVE_SCHEMA_VERSION
 from nga_tools.backup.archive_store import (
     PostImageReferenceCacheEntry,
@@ -240,11 +240,13 @@ def test_data_only_handoff_reads_without_state_or_cache_databases(
     assert not target_store.cache_store.db_path.exists()
     assert target_store.read_post_image_reference_cache({"drop-me"}) == {}
     with patch(
-        "nga_tools.backup.image_store.get_config",
+        "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(target_output)),
     ):
         mappings = image_store.image_mappings_by_url()
     assert mappings["https://img.nga.178.com/portable.png"].unique_rel_path == (
         "images_unique/image.png"
     )
-    assert not (target_output / image_store.IMAGE_CACHE_FILENAME).exists()
+    assert not (
+        target_output / image_validation_store.IMAGE_CACHE_FILENAME
+    ).exists()

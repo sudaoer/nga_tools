@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from nga_tools.backup.processing_state import PendingAudioRetry
-from nga_tools.core.downloads import DownloadFileResult
+from nga_tools.core.download_types import DownloadFileResult
 from nga_tools.core.retry_schedule import retry_schedule_decision
 
 

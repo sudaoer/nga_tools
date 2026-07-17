@@ -421,7 +421,7 @@ class ImageVerifyAllTest:
             )
 
             with patch(
-                "nga_tools.backup.image_store.get_config",
+                "nga_tools.config.get_config",
                 return_value=SimpleNamespace(output_dir=str(output_dir)),
             ):
                 resolved_path = image_store.link_path_for_image_src(image_url)
@@ -460,7 +460,7 @@ class ImageVerifyAllTest:
             config = SimpleNamespace(output_dir=str(output_dir))
 
             with patch(
-                "nga_tools.backup.image_store.get_config",
+                "nga_tools.config.get_config",
                 return_value=config,
             ):
                 image_store.upsert_image_mapping(image_url, unique_image)

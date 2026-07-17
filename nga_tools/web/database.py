@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal, Optional, TypeAlias, TypedDict, cast
 from urllib.parse import quote
 
-from nga_tools.backup import audio_store, image_store
+from nga_tools.backup import audio_store, image_store, image_validation_store
 from nga_tools.backup.archive_schema import require_current_archive_schema
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
 from nga_tools.backup.content_codec import decode_content
@@ -212,7 +212,7 @@ def _require_current_database_ref(
     elif ref.kind == "image_index":
         image_store.require_current_image_index(connection, ref.path)
     elif ref.kind == "image_cache":
-        image_store.require_current_image_cache(connection, ref.path)
+        image_validation_store.require_current_image_cache(connection, ref.path)
     elif ref.kind == "audio_index":
         audio_store.require_current_audio_index(connection, ref.path)
     elif ref.kind == "archive":
@@ -316,8 +316,8 @@ def list_database_refs(output_dir: Path) -> list[DatabaseRef]:
         DatabaseRef(
             id=_DATABASE_ID_IMAGE_CACHE,
             kind="image_cache",
-            label=image_store.IMAGE_CACHE_FILENAME,
-            path=output_dir / image_store.IMAGE_CACHE_FILENAME,
+            label=image_validation_store.IMAGE_CACHE_FILENAME,
+            path=output_dir / image_validation_store.IMAGE_CACHE_FILENAME,
         ),
         DatabaseRef(
             id=_DATABASE_ID_AUDIO_INDEX,
@@ -376,8 +376,8 @@ def _ref_for_database_id(output_dir: Path, database_id: str) -> DatabaseRef:
         return DatabaseRef(
             id=database_id,
             kind="image_cache",
-            label=image_store.IMAGE_CACHE_FILENAME,
-            path=output_dir / image_store.IMAGE_CACHE_FILENAME,
+            label=image_validation_store.IMAGE_CACHE_FILENAME,
+            path=output_dir / image_validation_store.IMAGE_CACHE_FILENAME,
         )
     if database_id == _DATABASE_ID_AUDIO_INDEX:
         return DatabaseRef(

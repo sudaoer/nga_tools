@@ -52,7 +52,7 @@ from nga_tools.backup.thread_stores import (
     ThreadArchiveCacheStore,
     ThreadArchiveStateStore,
 )
-from nga_tools.core.downloads import DOWNLOAD_FAILURE_KINDS
+from nga_tools.core.download_types import DOWNLOAD_FAILURE_KINDS
 from nga_tools.core.sqlite import (
     SQLITE_BUSY_TIMEOUT_SECONDS,
     configure_connection,

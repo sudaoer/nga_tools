@@ -348,7 +348,7 @@ class ImageIndexWriterTest:
             for index in range(1000)
         ]
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             use_image_index_writer(),
         ):
             _image_mappings, future = image_store.enqueue_image_mappings(mappings)
@@ -372,7 +372,7 @@ class ImageIndexWriterTest:
     def test_transaction_failure_never_reports_success(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
         config = SimpleNamespace(output_dir=str(output_dir))
-        with patch("nga_tools.backup.image_store.get_config", return_value=config):
+        with patch("nga_tools.config.get_config", return_value=config):
             image_store.upsert_image_mapping(
                 _image_url("seed"),
                 output_dir / "images_unique" / "seed.png",
@@ -442,7 +442,7 @@ class ImageStoreMetricsTest:
         Image.new("RGB", (2, 2), color="white").save(source)
 
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             use_image_index_writer(),
             use_image_store_metrics(),
         ):
@@ -515,7 +515,7 @@ class ImageStoreMetricsTest:
             return {"succeeded": [result], "failed": []}
 
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             patch(
                 "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
@@ -564,7 +564,7 @@ class ImageStoreMetricsTest:
             return {"succeeded": [result], "failed": []}
 
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             patch(
                 "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
@@ -631,7 +631,7 @@ class ImageMappingBatchTest:
 
         real_enqueue = image_store.enqueue_image_mappings
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             patch(
                 "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
@@ -721,7 +721,7 @@ class ImageMappingBatchTest:
 
         real_enqueue = image_store.enqueue_image_mappings
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             patch(
                 "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
@@ -779,7 +779,7 @@ class ImageMappingBatchTest:
                     on_progress(current, len(download_tasks), result)
             return {"succeeded": results, "failed": []}
 
-        with patch("nga_tools.backup.image_store.get_config", return_value=config):
+        with patch("nga_tools.config.get_config", return_value=config):
             image_store.upsert_image_mapping(
                 _image_url("mapping-failure-seed"),
                 output_dir / "images_unique" / "seed.png",
@@ -875,7 +875,7 @@ class ImageMappingBatchTest:
             raise asyncio.CancelledError
 
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             patch(
                 "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=cancelled_download,
@@ -921,7 +921,7 @@ class ImageSingleFlightTest:
             done.set()
 
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             use_image_store_metrics(),
         ):
             first_key, first_claim, first_owner = image_store._claim_image_url(
@@ -1007,7 +1007,7 @@ class ImageSingleFlightTest:
             return {"succeeded": [result], "failed": []}
 
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             patch(
                 "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
@@ -1074,7 +1074,7 @@ class ImageSingleFlightTest:
             return {"succeeded": [result], "failed": []}
 
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             patch(
                 "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
@@ -1122,7 +1122,7 @@ class ImageSingleFlightTest:
             return {"succeeded": [], "failed": [result]}
 
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             patch(
                 "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
@@ -1186,7 +1186,7 @@ class ImageSingleFlightTest:
             return {"succeeded": [result], "failed": []}
 
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             patch(
                 "nga_tools.backup.image_store.utils.download_files_streaming",
                 side_effect=fake_download,
@@ -1234,7 +1234,7 @@ class ImageHashStripeTest:
             return real_target(temp_path, image_hash, extension)
 
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             patch(
                 "nga_tools.backup.image_store.utils.sha256",
                 side_effect=lambda path: hashes[path],
@@ -1284,7 +1284,7 @@ class ImageHashStripeTest:
                     active -= 1
 
         with (
-            patch("nga_tools.backup.image_store.get_config", return_value=config),
+            patch("nga_tools.config.get_config", return_value=config),
             patch(
                 "nga_tools.backup.image_store.utils.sha256",
                 return_value="aa" + "c" * 62,

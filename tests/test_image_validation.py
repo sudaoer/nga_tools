@@ -36,7 +36,7 @@ def test_preparation_deep_validates_alias_mappings_once(tmp_path: Path) -> None:
     second_url = _image_url("second")
 
     with patch(
-        "nga_tools.backup.image_store.get_config",
+        "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
         image_store.upsert_image_mappings(
@@ -158,7 +158,8 @@ def test_persistent_preload_queries_only_unseen_paths(tmp_path: Path) -> None:
     cache = ImageValidationCache()
 
     with patch(
-        "nga_tools.backup.image_store.load_persistent_validation_cache",
+        "nga_tools.backup.image_validation_store."
+        "load_persistent_validation_cache",
         return_value={},
     ) as load_mock:
         first_query_count = cache.preload({first_path, second_path})
@@ -196,7 +197,8 @@ def test_persistent_preload_single_flights_concurrent_paths(
 
     with (
         patch(
-            "nga_tools.backup.image_store.load_persistent_validation_cache",
+            "nga_tools.backup.image_validation_store."
+            "load_persistent_validation_cache",
             side_effect=slow_load,
         ) as load_mock,
         ThreadPoolExecutor(max_workers=2) as executor,
@@ -221,7 +223,7 @@ def test_image_preparation_writes_subphases_and_metrics(tmp_path: Path) -> None:
     timing_path = tmp_path / "timing.log"
 
     with patch(
-        "nga_tools.backup.image_store.get_config",
+        "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
         image_store.upsert_image_mappings(
@@ -329,7 +331,7 @@ def test_persistent_cache_survives_new_cache_instance(tmp_path: Path) -> None:
     Image.new("RGB", (1, 1), color="white").save(image_path)
 
     with patch(
-        "nga_tools.backup.image_store.get_config",
+        "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
         cache_a = ImageValidationCache()
@@ -362,7 +364,7 @@ def test_persistent_cache_invalidates_on_file_change(tmp_path: Path) -> None:
     Image.new("RGB", (1, 1), color="white").save(image_path)
 
     with patch(
-        "nga_tools.backup.image_store.get_config",
+        "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
         cache_a = ImageValidationCache()
@@ -391,7 +393,7 @@ def test_persistent_cache_invalidates_on_invalidate_call(tmp_path: Path) -> None
     Image.new("RGB", (1, 1), color="white").save(image_path)
 
     with patch(
-        "nga_tools.backup.image_store.get_config",
+        "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
         cache_a = ImageValidationCache()
@@ -421,7 +423,7 @@ def test_persistent_cache_preload_skips_unknown_paths(tmp_path: Path) -> None:
     unknown_path = output_dir / "images_unique" / "unknown.png"
 
     with patch(
-        "nga_tools.backup.image_store.get_config",
+        "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
         cache_a = ImageValidationCache()
@@ -453,7 +455,7 @@ def test_persistent_cache_flush_writes_only_new_entries(tmp_path: Path) -> None:
     Image.new("RGB", (2, 2), color="black").save(new_path)
 
     with patch(
-        "nga_tools.backup.image_store.get_config",
+        "nga_tools.config.get_config",
         return_value=SimpleNamespace(output_dir=str(output_dir)),
     ):
         cache_a = ImageValidationCache()
@@ -467,7 +469,7 @@ def test_persistent_cache_flush_writes_only_new_entries(tmp_path: Path) -> None:
         cache_b.flush_new_entries()
 
         import sqlite3
-        from nga_tools.backup.image_store import image_cache_path
+        from nga_tools.backup.image_validation_store import image_cache_path
         with closing(sqlite3.connect(image_cache_path())) as conn:
             rows = conn.execute(
                 "SELECT relative_path FROM image_validation_cache ORDER BY relative_path"

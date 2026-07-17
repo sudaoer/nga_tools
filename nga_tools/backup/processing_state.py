@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from nga_tools.core.downloads import DownloadFailureKind
+from nga_tools.core.download_types import DownloadFailureKind
 
 
 FLOOR_PROCESSING_STATE_VERSION = 1
