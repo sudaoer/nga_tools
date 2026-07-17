@@ -2028,9 +2028,15 @@ select {
   }
 
 .cluster-view {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.cluster-inner {
+  padding: 18px 22px 28px;
+  max-width: 1400px;
+  margin: 0 auto;
 }
 
 .cluster-header {
@@ -2059,7 +2065,7 @@ select {
 
 .cluster-list-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 12px;
 }
 
@@ -2112,25 +2118,25 @@ select {
 }
 
 .cluster-detail-title {
-  margin: 0;
+  margin: 0 0 8px;
   font-size: 1.1rem;
 }
 
 .cluster-detail-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
 }
 
 .cluster-detail-card {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   border: 1px solid var(--nga-border-muted);
   border-radius: 5px;
   overflow: hidden;
   background: var(--nga-surface);
-  padding-bottom: 8px;
+  padding-bottom: 6px;
 }
 
 .cluster-detail-card.is-source {
@@ -2154,18 +2160,19 @@ select {
 .cluster-detail-card-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  font-size: 0.75rem;
+  gap: 6px;
+  padding: 0 8px;
+  font-size: 0.72rem;
+  min-width: 0;
 }
 
 .cluster-source-badge {
   flex: 0 0 auto;
-  padding: 2px 6px;
+  padding: 1px 5px;
   border-radius: 3px;
   background: var(--nga-red);
   color: #fff;
-  font-size: 0.7rem;
+  font-size: 0.68rem;
 }
 
 .cluster-detail-path {
@@ -2178,7 +2185,7 @@ select {
 @media (max-width: 720px) {
   .cluster-list-grid,
   .cluster-detail-grid {
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
   }
 }
 
