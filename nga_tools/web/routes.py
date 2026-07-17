@@ -46,6 +46,14 @@ from nga_tools.web.image_usage import (
     image_usage_detail,
     image_usage_result,
 )
+from nga_tools.web.cluster_data import (
+    ClusterDetailResult,
+    ClustersResult,
+    ClusterStatsResult,
+    read_cluster_detail,
+    read_clusters,
+    read_cluster_stats,
+)
 from nga_tools.web.output_files import safe_output_file
 from nga_tools.web.post_data import (
     PostOverlayDetail,
@@ -83,6 +91,7 @@ from nga_tools.web.thread_data import (
 _MAX_POST_LIMIT = 200
 _MAX_DATABASE_ROW_LIMIT = 200
 _MAX_IMAGE_USAGE_LIMIT = 200
+_MAX_CLUSTER_LIMIT = 200
 
 
 def _context(request: Request) -> ViewerContext:
@@ -945,6 +954,51 @@ async def database_row_detail(
         raise HTTPException(status_code=404, detail=str(error)) from error
     except DatabaseUnavailableError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+
+async def list_clusters(
+    request: Request,
+    run_id: Annotated[Optional[int], Query()] = None,
+    min_size: Annotated[int, Query(ge=1)] = 1,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(gt=0, le=_MAX_CLUSTER_LIMIT)] = 100,
+) -> ClustersResult:
+    context = _context(request)
+    return await run_in_threadpool(
+        read_clusters,
+        context.output_dir,
+        run_id,
+        min_size,
+        offset,
+        limit,
+    )
+
+
+async def cluster_detail(
+    request: Request,
+    cluster_id: int,
+    run_id: Annotated[Optional[int], Query()] = None,
+) -> ClusterDetailResult:
+    context = _context(request)
+    return await run_in_threadpool(
+        read_cluster_detail,
+        context.output_dir,
+        run_id,
+        cluster_id,
+    )
+
+
+async def cluster_stats(
+    request: Request,
+    run_id: Annotated[Optional[int], Query()] = None,
+) -> ClusterStatsResult:
+    context = _context(request)
+    return await run_in_threadpool(
+        read_cluster_stats,
+        context.output_dir,
+        run_id,
+    )
 
 
 

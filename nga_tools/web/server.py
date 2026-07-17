@@ -11,6 +11,8 @@ from nga_tools.config import get_config
 from nga_tools.console import report_info
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 from nga_tools.web.routes import (
+    cluster_detail,
+    cluster_stats,
     database_row_detail,
     database_schema,
     database_table_rows,
@@ -20,6 +22,7 @@ from nga_tools.web.routes import (
     http_exception_handler,
     image_usage_detail_route,
     image_usage_replies_route,
+    list_clusters,
     list_databases,
     list_image_problems,
     list_image_usage,
@@ -139,6 +142,13 @@ def create_app(
         "/api/admin/image-problems",
         list_image_problems,
         methods=["GET"],
+    )
+    app.add_api_route("/api/clusters", list_clusters, methods=["GET"])
+    app.add_api_route(
+        "/api/clusters/stats", cluster_stats, methods=["GET"]
+    )
+    app.add_api_route(
+        "/api/clusters/{cluster_id}", cluster_detail, methods=["GET"]
     )
     app.add_api_route("/api/databases/{db_id}/schema", database_schema, methods=["GET"])
     app.add_api_route(
