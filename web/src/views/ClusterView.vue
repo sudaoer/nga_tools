@@ -180,109 +180,110 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="cluster-view">
-    <div class="cluster-inner">
-      <header class="cluster-header">
+  <main class="image-usage-shell cluster-shell">
+    <header class="image-usage-header cluster-header">
+      <div>
         <h1>图片聚类</h1>
         <div v-if="stats" class="cluster-stats">
           <span>聚类数量：<strong>{{ formatNumber(stats.totalClusters) }}</strong></span>
           <span>聚类图片：<strong>{{ formatNumber(stats.totalImages) }}</strong></span>
           <span>最大簇：<strong>{{ formatNumber(stats.maxClusterSize) }}</strong></span>
         </div>
+      </div>
+    </header>
+
+    <div v-if="error" class="error-box">{{ error }}</div>
+
+    <template v-if="selectedClusterId !== null">
+      <header class="image-detail-toolbar">
+        <button type="button" @click="closeDetail">← 返回聚类列表</button>
       </header>
+      <div v-if="detailError" class="error-box">{{ detailError }}</div>
+      <div v-else-if="loadingDetail || detail === null" class="empty-state">
+        正在读取聚类详情...
+      </div>
+      <template v-else-if="detail.cluster !== null">
+        <h2 class="cluster-detail-title">
+          聚类 #{{ detail.cluster.clusterId }}（{{ formatNumber(detail.cluster.members.length) }} 张）
+        </h2>
 
-      <div v-if="error" class="error-box">{{ error }}</div>
-
-      <template v-if="selectedClusterId !== null">
-        <header class="cluster-detail-toolbar">
-          <button type="button" @click="closeDetail">← 返回聚类列表</button>
-        </header>
-        <div v-if="detailError" class="error-box">{{ detailError }}</div>
-        <div v-else-if="loadingDetail || detail === null" class="empty-state">
-          正在读取聚类详情...
-        </div>
-        <template v-else-if="detail.cluster !== null">
-          <h2 class="cluster-detail-title">
-            聚类 #{{ detail.cluster.clusterId }}（{{ formatNumber(detail.cluster.members.length) }} 张）
-          </h2>
-
-          <PaginationControls
-            :current-page="memberCurrentPage"
-            :total-pages="memberTotalPages"
-            :disabled="loadingDetail"
-            top
-            @change="goToMemberPage"
-          />
-          <div class="cluster-detail-grid">
-            <div
-              v-for="member in memberPage"
-              :key="member.relativePath"
-              class="cluster-detail-card"
-              :class="{ 'is-source': member.isSourceCandidate }"
-            >
-              <a :href="member.fileUrl" target="_blank" rel="noreferrer">
-                <img :src="member.fileUrl" :alt="member.relativePath" loading="lazy" />
-              </a>
-              <div class="cluster-detail-card-meta">
-                <span
-                  v-if="member.isSourceCandidate"
-                  class="cluster-source-badge"
-                >建议源图</span>
-                <span class="cluster-detail-path" :title="member.relativePath">
-                  {{ member.relativePath }}
-                </span>
-              </div>
+        <PaginationControls
+          :current-page="memberCurrentPage"
+          :total-pages="memberTotalPages"
+          :disabled="loadingDetail"
+          top
+          @change="goToMemberPage"
+        />
+        <div class="image-usage-grid cluster-detail-grid">
+          <div
+            v-for="member in memberPage"
+            :key="member.relativePath"
+            class="image-usage-card cluster-detail-card"
+            :class="{ 'is-source': member.isSourceCandidate }"
+          >
+            <a class="image-usage-card-preview" :href="member.fileUrl" target="_blank" rel="noreferrer">
+              <img :src="member.fileUrl" :alt="member.relativePath" loading="lazy" />
+            </a>
+            <div class="image-usage-card-stats cluster-detail-card-meta">
+              <span
+                v-if="member.isSourceCandidate"
+                class="cluster-source-badge"
+              >源图</span>
+              <strong class="cluster-detail-path" :title="member.relativePath">
+                {{ member.relativePath }}
+              </strong>
             </div>
           </div>
-          <PaginationControls
-            :current-page="memberCurrentPage"
-            :total-pages="memberTotalPages"
-            :disabled="loadingDetail"
-            @change="goToMemberPage"
-          />
-        </template>
-        <div v-else class="empty-state">未找到该聚类。</div>
-      </template>
-
-      <template v-else>
-        <PaginationControls
-          :current-page="listCurrentPage"
-          :total-pages="listTotalPages"
-          :disabled="loading"
-          top
-          @change="goToListPage"
-        />
-
-        <div v-if="result === null && loading" class="empty-state">正在加载聚类...</div>
-        <div v-else-if="result !== null && result.items.length === 0" class="empty-state">
-          暂无聚类结果。请先运行 <code>python main.py cluster run</code>。
         </div>
-        <div v-else-if="result !== null" class="cluster-list-grid">
-          <button
-            v-for="item in result.items"
-            :key="item.clusterId"
-            type="button"
-            class="cluster-list-card"
-            :title="item.sourceRelativePath"
-            @click="openCluster(item.clusterId)"
-          >
-            <span class="cluster-list-card-preview">
-              <img :src="item.sourceFileUrl" :alt="item.sourceRelativePath" loading="lazy" />
-            </span>
-            <span class="cluster-list-card-stats">
-              <strong>聚类 #{{ item.clusterId }}</strong>
-              <span>{{ formatNumber(item.memberCount) }} 张</span>
-            </span>
-          </button>
-        </div>
-
         <PaginationControls
-          :current-page="listCurrentPage"
-          :total-pages="listTotalPages"
-          :disabled="loading"
-          @change="goToListPage"
+          :current-page="memberCurrentPage"
+          :total-pages="memberTotalPages"
+          :disabled="loadingDetail"
+          @change="goToMemberPage"
         />
       </template>
-    </div>
-  </div>
+      <div v-else class="empty-state">未找到该聚类。</div>
+    </template>
+
+    <template v-else>
+      <PaginationControls
+        :current-page="listCurrentPage"
+        :total-pages="listTotalPages"
+        :disabled="loading"
+        top
+        @change="goToListPage"
+      />
+
+      <div v-if="result === null && loading" class="empty-state">正在加载聚类...</div>
+      <div v-else-if="result !== null && result.items.length === 0" class="empty-state">
+        暂无聚类结果。请先运行 <code>python main.py cluster run</code>。
+      </div>
+      <div v-else-if="result !== null" class="image-usage-grid">
+        <button
+          v-for="item in result.items"
+          :key="item.clusterId"
+          type="button"
+          class="image-usage-card"
+          :title="item.sourceRelativePath"
+          @click="openCluster(item.clusterId)"
+        >
+          <span class="image-usage-card-preview">
+            <img :src="item.sourceFileUrl" :alt="item.sourceRelativePath" loading="lazy" />
+          </span>
+          <span class="image-usage-card-stats">
+            <strong>聚类 #{{ item.clusterId }}</strong>
+            <span>{{ formatNumber(item.memberCount) }} 张</span>
+          </span>
+        </button>
+      </div>
+
+      <PaginationControls
+        :current-page="listCurrentPage"
+        :total-pages="listTotalPages"
+        :disabled="loading"
+        @change="goToListPage"
+      />
+      <div v-if="loading" class="image-usage-loading">正在更新...</div>
+    </template>
+  </main>
 </template>
