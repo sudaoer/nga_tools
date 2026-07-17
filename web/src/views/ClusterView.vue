@@ -95,6 +95,15 @@ function formatNumber(value: number): string {
   return value.toLocaleString()
 }
 
+const IMAGES_UNIQUE_PREFIX = 'images_unique/'
+
+function stripImagesUnique(relativePath: string): string {
+  if (relativePath.startsWith(IMAGES_UNIQUE_PREFIX)) {
+    return relativePath.slice(IMAGES_UNIQUE_PREFIX.length)
+  }
+  return relativePath
+}
+
 async function loadStats(): Promise<void> {
   try {
     stats.value = await fetchClusterStats()
@@ -229,9 +238,9 @@ onMounted(() => {
                 v-if="member.isSourceCandidate"
                 class="cluster-source-badge"
               >源图</span>
-              <strong class="cluster-detail-path" :title="member.relativePath">
-                {{ member.relativePath }}
-              </strong>
+              <span class="cluster-detail-path" :title="member.relativePath">
+                {{ stripImagesUnique(member.relativePath) }}
+              </span>
             </div>
           </div>
         </div>

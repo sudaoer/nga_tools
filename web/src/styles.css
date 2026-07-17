@@ -2062,6 +2062,10 @@ select {
 
 .cluster-detail-card-meta {
   gap: 6px;
+  align-items: flex-start;
+  white-space: normal;
+  word-break: break-all;
+  line-height: 1.3;
 }
 
 .cluster-source-badge {
@@ -2072,14 +2076,15 @@ select {
   color: #fff;
   font-size: 0.68rem;
   font-weight: 700;
+  align-self: center;
 }
 
 .cluster-detail-path {
   font-size: 0.72rem;
   font-weight: 400;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--nga-text-muted);
+  overflow-wrap: anywhere;
+  word-break: break-all;
   min-width: 0;
 }
 
