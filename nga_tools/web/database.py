@@ -28,7 +28,7 @@ from nga_tools.forum.thread_store import (
     require_current_forum_schema,
 )
 from nga_tools.storage import UnsupportedStorageFormatError
-from nga_tools.web.data import parse_thread_dir_name
+from nga_tools.web.thread_data import parse_thread_dir_name
 
 DatabaseKind: TypeAlias = Literal[
     "forum_threads",

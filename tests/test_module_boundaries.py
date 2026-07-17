@@ -64,6 +64,7 @@ def test_removed_compatibility_facades_are_not_reintroduced() -> None:
         Path("nga_tools/backup/files.py"),
         Path("nga_tools/web/render.py"),
         Path("nga_tools/web/html_sanitize.py"),
+        Path("nga_tools/web/data.py"),
     )
 
     assert all(not path.exists() for path in removed_paths)
@@ -145,3 +146,35 @@ def test_archive_entry_flow_does_not_reabsorb_derived_processing() -> None:
     ).read_text(encoding="utf-8")
     assert "archive_image_processing" in processing_source
     assert "nga_tools.backup.image_pipeline" not in processing_source
+
+
+def test_web_app_assembly_does_not_own_routes_or_data_queries() -> None:
+    server_path = Path("nga_tools/web/server.py")
+    assert _module_function_names(server_path) == {"create_app", "serve_app"}
+
+    server_source = server_path.read_text(encoding="utf-8")
+    assert "nga_tools.web.routes" in server_source
+    assert "SELECT " not in server_source
+
+    thread_data_source = Path("nga_tools/web/thread_data.py").read_text(
+        encoding="utf-8"
+    )
+    post_data_source = Path("nga_tools/web/post_data.py").read_text(
+        encoding="utf-8"
+    )
+    assert "BeautifulSoup" not in thread_data_source
+    assert "scan_thread_summaries" not in post_data_source
+
+
+def test_web_tests_are_grouped_by_surface() -> None:
+    assert not Path("tests/test_web_viewer.py").exists()
+    assert all(
+        path.is_file()
+        for path in (
+            Path("tests/test_web_data.py"),
+            Path("tests/test_web_server.py"),
+            Path("tests/test_web_database.py"),
+            Path("tests/test_web_image_usage.py"),
+            Path("tests/test_web_cli.py"),
+        )
+    )
