@@ -8,6 +8,7 @@ from nga_tools.commands.backup import (
     pdf_generate,
 )
 from nga_tools.commands.ankebak import backup_auto
+from nga_tools.commands.cluster import cluster_run
 from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
 from nga_tools.commands.image import image_add, image_verify
 from nga_tools.commands.replay import replay_run, replay_serve, replay_test
@@ -218,6 +219,35 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": str,
         "metavar": "PATH",
         "help": "重放延迟、带宽与最大并发配置JSON路径",
+    },
+    "threshold": {
+        "flags": ("--threshold",),
+        "type": int,
+        "metavar": "N",
+        "help": "图片聚类 pHash Hamming 距离阈值",
+    },
+    "min_cluster_size": {
+        "flags": ("--min-cluster-size", "--min_cluster_size"),
+        "type": int,
+        "metavar": "N",
+        "help": "图片聚类最小簇大小",
+    },
+    "lsh_bands": {
+        "flags": ("--lsh-bands", "--lsh_bands"),
+        "type": int,
+        "metavar": "N",
+        "help": "LSH 分 band 数（必须整除64）",
+    },
+    "limit": {
+        "flags": ("--limit",),
+        "type": int,
+        "metavar": "N",
+        "help": "限制处理的图片数量（调试用）",
+    },
+    "force": {
+        "flags": ("--force",),
+        "action": "store_true",
+        "help": "忽略特征缓存强制重新计算",
     },
 }
 
@@ -510,6 +540,53 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "static_dir": DEFAULT_WEB_STATIC_DIR,
             },
             "positive": ["port"],
+        },
+    },
+    "cluster": {
+        "run": {
+            "handler": cluster_run,
+            "summary": "对已下载图片执行相似度聚类",
+            "usage": (
+                f"{PROGRAM_USAGE} cluster run "
+                "[--threshold N] [--min-cluster-size N] "
+                "[--lsh-bands N] [--workers N] [--limit N] [--force]"
+            ),
+            "examples": [
+                f"{PROGRAM_USAGE} cluster run",
+                f"{PROGRAM_USAGE} cluster run --threshold 10 --min-cluster-size 3",
+                f"{PROGRAM_USAGE} cluster run --workers 8",
+                f"{PROGRAM_USAGE} cluster run --limit 100",
+                f"{PROGRAM_USAGE} cluster run --force",
+            ],
+            "notes": [
+                "扫描 output_dir/images_unique 下所有图片，计算感知哈希并聚类。",
+                "透明底/黑底/白底会归一化为白底后比较，自动遮罩 NGA 水印区域。",
+                "特征按 (size, mtime_ns) 指纹缓存增量更新，--force 强制重算。",
+                "聚类结果写入 output_dir/image_clusters.sqlite3，供 web 界面查看。",
+                "聚类过程在本地计算，不访问 NGA；web 界面只读展示结果不触发计算。",
+                "--workers 控制特征计算并行进程数，0 或省略时使用 CPU 核数。",
+            ],
+            "args": [
+                "threshold",
+                "min_cluster_size",
+                "lsh_bands",
+                "workers",
+                "limit",
+                "force",
+            ],
+            "defaults": {
+                "threshold": 8,
+                "min_cluster_size": 2,
+                "lsh_bands": 4,
+            },
+            "positive": [
+                "threshold",
+                "min_cluster_size",
+                "lsh_bands",
+                "workers",
+                "limit",
+            ],
+            "output_root_lock": True,
         },
     },
     "replay": {
