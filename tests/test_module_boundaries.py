@@ -27,6 +27,15 @@ def _class_method_names(module_path: Path, class_name: str) -> set[str]:
     raise AssertionError(f"未找到类：{class_name}")
 
 
+def _module_function_names(module_path: Path) -> set[str]:
+    tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+    return {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
 def test_download_runtime_depends_on_types_not_download_coordinator() -> None:
     imports = _imported_modules(
         Path("nga_tools/core/image_download_runtime.py")
@@ -117,3 +126,22 @@ def test_thread_archive_store_delegates_main_database_domains() -> None:
             keyword in method_source
             for keyword in ("SELECT ", "INSERT ", "UPDATE ", "DELETE ")
         ), node.name
+
+
+def test_archive_entry_flow_does_not_reabsorb_derived_processing() -> None:
+    archive_path = Path("nga_tools/backup/archive.py")
+    function_names = _module_function_names(archive_path)
+    source = archive_path.read_text(encoding="utf-8")
+
+    assert "_try_incremental_image_reference_update" not in function_names
+    assert "_try_processing_state_reuse" not in function_names
+    assert "run_full_processing" not in function_names
+    assert "archive_processing" in source
+    assert "archive_image_processing" in source
+    assert "nga_tools.backup.image_pipeline" not in source
+
+    processing_source = Path(
+        "nga_tools/backup/archive_processing.py"
+    ).read_text(encoding="utf-8")
+    assert "archive_image_processing" in processing_source
+    assert "nga_tools.backup.image_pipeline" not in processing_source

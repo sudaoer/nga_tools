@@ -12,13 +12,14 @@ from unittest.mock import patch
 import pytest
 
 from nga_tools.backup import archive as archive_module
+from nga_tools.backup import archive_processing as archive_processing_module
 from nga_tools.backup.archive import (
-    FloorMapProcessingResult,
     backup_local_work_kind,
     maintain_thread_backup,
     backup_thread,
     backup_thread_sub,
 )
+from nga_tools.backup.archive_processing import FloorMapProcessingResult
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.archive_post_store import ArchivePostRepository
 from nga_tools.backup.archive_state_store import ArchiveStateRepository
@@ -175,7 +176,7 @@ def _run_backup(
     )
 
     original_parse = parse_post_htmls_for_images
-    original_run_full_processing = archive_module._run_full_processing
+    original_run_full_processing = archive_processing_module.run_full_processing
 
     def capture_parse(htmls: list[PostHtml]) -> list[ParsedPostHtml]:
         if parsed_lous is not None:
@@ -232,13 +233,13 @@ def _run_backup(
         )
         stack.enter_context(
             patch(
-                "nga_tools.backup.archive._build_floor_map_for_post_refs",
+                "nga_tools.backup.archive_processing._build_floor_map_for_post_refs",
                 side_effect=capture_floor_map,
             )
         )
         stack.enter_context(
             patch(
-                "nga_tools.backup.archive._run_full_processing",
+                "nga_tools.backup.archive_processing.run_full_processing",
                 side_effect=capture_full_processing,
             )
         )
@@ -251,7 +252,7 @@ def _run_backup(
         )
         stack.enter_context(
             patch(
-                "nga_tools.backup.archive._download_images",
+                "nga_tools.backup.archive_image_processing._download_images",
                 side_effect=capture_download,
             )
         )
@@ -550,7 +551,7 @@ class BackupRawArchiveTest:
         client.posts[1]["content"] = "second changed"
 
         with patch(
-            "nga_tools.backup.archive.record_timing_label",
+            "nga_tools.backup.archive_processing.record_timing_label",
             side_effect=lambda name, value: labels.append((name, value)),
         ):
             _run_backup(
@@ -641,7 +642,7 @@ class BackupRawArchiveTest:
         client.posts[1]["content"] = "second changed for bootstrap"
 
         with patch(
-            "nga_tools.backup.archive.record_timing_label",
+            "nga_tools.backup.archive_processing.record_timing_label",
             side_effect=lambda name, value: labels.append((name, value)),
         ):
             _run_backup(
@@ -701,7 +702,7 @@ class BackupRawArchiveTest:
         client.posts[1]["content"] = "changed after manifest corruption"
 
         with patch(
-            "nga_tools.backup.archive.record_timing_label",
+            "nga_tools.backup.archive_processing.record_timing_label",
             side_effect=lambda name, value: labels.append((name, value)),
         ):
             _run_backup(thread_dir, client)
@@ -992,7 +993,7 @@ class BackupRawArchiveTest:
             )
         elif changed_input == "algorithm":
             with patch(
-                "nga_tools.backup.archive.FLOOR_MAP_GENERATION_VERSION",
+                "nga_tools.backup.archive_processing.FLOOR_MAP_GENERATION_VERSION",
                 999,
             ):
                 _run_backup(
@@ -1002,7 +1003,7 @@ class BackupRawArchiveTest:
                 )
         else:
             with patch(
-                "nga_tools.backup.archive.IMAGE_REFERENCE_EXTRACTOR_VERSION",
+                "nga_tools.backup.archive_image_processing.IMAGE_REFERENCE_EXTRACTOR_VERSION",
                 999,
             ):
                 _run_backup(
