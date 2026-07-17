@@ -12,7 +12,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup, Tag
 
-from nga_tools import utils
+import nga_tools.config as config
 from nga_tools.backup import audio_store, image_store
 from nga_tools.backup.audio_store import AudioMapping
 from nga_tools.backup.archive_posts import postdate_from_json
@@ -38,6 +38,7 @@ from nga_tools.backup.post_overlay import (
 )
 from nga_tools.core.sqlite import configure_readonly_connection
 from nga_tools.core.nga_audio import extract_nga_audio_urls, normalize_nga_audio_url
+from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.forum.thread_configs import (
     NGAThreadConfigs,
     ThreadConfig,
@@ -45,8 +46,8 @@ from nga_tools.forum.thread_configs import (
     thread_config_name,
     thread_config_tid,
 )
-from nga_tools.web.html_sanitize import sanitize_post_html
-from nga_tools.web.render import ImageSrcResolver, render_web_bbcode
+from nga_tools.bbcode_render import ImageSrcResolver, render_web_bbcode
+from nga_tools.html_sanitize import sanitize_post_html
 from nga_tools.word_count import DEFAULT_MIN_BODY_CHARS, WORD_COUNT_VERSION
 
 ThreadStatus = Literal["ready", "invalid"]
@@ -454,7 +455,7 @@ def _thread_link(
     link = _optional_str_metadata(metadata, "link")
     if link is None:
         try:
-            base_url = utils.get_config().base_url
+            base_url = config.get_config().base_url
         except (FileNotFoundError, ValueError):
             base_url = "https://bbs.nga.cn"
         link = f"{base_url.rstrip('/')}/read.php?tid={tid}"
@@ -678,7 +679,7 @@ def _read_image_mappings_for_urls(
         {
             normalized_url
             for url in urls
-            if utils.NGA_img_link_verify(
+            if NGA_img_link_verify(
                 normalized_url := image_store.normalize_nga_image_url(url)
             )
         }

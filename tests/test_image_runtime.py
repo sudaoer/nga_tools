@@ -29,9 +29,10 @@ from nga_tools.core.image_download_runtime import (
     ImageDownloadRuntime,
     _AttemptFailure,
 )
+from nga_tools.core.download_types import DownloadFileResult, DownloadTask
 
 
-def _download_task(name: str, tmp_path: Path) -> image_store.utils.DownloadTask:
+def _download_task(name: str, tmp_path: Path) -> DownloadTask:
     return {
         "url": f"https://example.com/{name}.png",
         "save_path": str(tmp_path / name),
@@ -39,8 +40,8 @@ def _download_task(name: str, tmp_path: Path) -> image_store.utils.DownloadTask:
 
 
 def _success_result(
-    item: image_store.utils.DownloadTask,
-) -> image_store.utils.DownloadFileResult:
+    item: DownloadTask,
+) -> DownloadFileResult:
     return {
         "url": item["url"],
         "save_path": item["save_path"],
@@ -63,9 +64,9 @@ class ImageDownloadRuntimeTest:
         async def fake_attempt(
             _runtime: ImageDownloadRuntime,
             _session: object,
-            item: image_store.utils.DownloadTask,
+            item: DownloadTask,
             _retry_statuses: tuple[int, ...],
-        ) -> image_store.utils.DownloadFileResult:
+        ) -> DownloadFileResult:
             return _success_result(item)
 
         runtime = ImageDownloadRuntime(2)
@@ -95,15 +96,15 @@ class ImageDownloadRuntimeTest:
         async def fake_attempt(
             _runtime: ImageDownloadRuntime,
             _session: object,
-            item: image_store.utils.DownloadTask,
+            item: DownloadTask,
             _retry_statuses: tuple[int, ...],
-        ) -> image_store.utils.DownloadFileResult:
+        ) -> DownloadFileResult:
             return _success_result(item)
 
         def fail_callback(
             _current: int,
             _total: int,
-            _result: image_store.utils.DownloadFileResult,
+            _result: DownloadFileResult,
         ) -> None:
             raise RuntimeError("stop consuming")
 
@@ -138,9 +139,9 @@ class ImageDownloadRuntimeTest:
         async def fake_attempt(
             _runtime: ImageDownloadRuntime,
             _session: object,
-            item: image_store.utils.DownloadTask,
+            item: DownloadTask,
             _retry_statuses: tuple[int, ...],
-        ) -> image_store.utils.DownloadFileResult:
+        ) -> DownloadFileResult:
             return _success_result(item)
 
         with patch(
@@ -176,9 +177,9 @@ class ImageDownloadRuntimeTest:
         async def fake_attempt(
             _runtime: ImageDownloadRuntime,
             _session: object,
-            item: image_store.utils.DownloadTask,
+            item: DownloadTask,
             _retry_statuses: tuple[int, ...],
-        ) -> image_store.utils.DownloadFileResult:
+        ) -> DownloadFileResult:
             return _success_result(item)
 
         completed = 0
@@ -186,7 +187,7 @@ class ImageDownloadRuntimeTest:
         def on_progress(
             current: int,
             total: int,
-            _result: image_store.utils.DownloadFileResult,
+            _result: DownloadFileResult,
         ) -> None:
             nonlocal completed
             completed = current
@@ -218,9 +219,9 @@ class ImageDownloadRuntimeTest:
         async def fake_attempt(
             _runtime: ImageDownloadRuntime,
             _session: object,
-            item: image_store.utils.DownloadTask,
+            item: DownloadTask,
             _retry_statuses: tuple[int, ...],
-        ) -> image_store.utils.DownloadFileResult:
+        ) -> DownloadFileResult:
             with start_lock:
                 starts.append(item["url"])
                 if len(starts) >= 4:
@@ -278,9 +279,9 @@ class ImageDownloadRuntimeTest:
         async def fake_attempt(
             _runtime: ImageDownloadRuntime,
             _session: object,
-            item: image_store.utils.DownloadTask,
+            item: DownloadTask,
             _retry_statuses: tuple[int, ...],
-        ) -> image_store.utils.DownloadFileResult | _AttemptFailure:
+        ) -> DownloadFileResult | _AttemptFailure:
             name = item["url"]
             attempts[name] = attempts.get(name, 0) + 1
             starts.append(name)
@@ -503,7 +504,7 @@ class ImageStoreMetricsTest:
                 format="PNG",
             )
             payload = Path(task["save_path"]).read_bytes()
-            result: image_store.utils.DownloadFileResult = {
+            result: DownloadFileResult = {
                 "url": task["url"],
                 "save_path": task["save_path"],
                 "success": True,
@@ -517,11 +518,11 @@ class ImageStoreMetricsTest:
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files_streaming",
+                "nga_tools.backup.image_store.downloads.download_files_streaming",
                 side_effect=fake_download,
             ),
             patch(
-                "nga_tools.backup.image_store.utils.sha256",
+                "nga_tools.backup.image_store.sha256",
                 side_effect=AssertionError("unexpected fallback hash"),
             ),
             use_image_index_writer(),
@@ -543,7 +544,7 @@ class ImageStoreMetricsTest:
         output_dir = tmp_path / "output"
         config = SimpleNamespace(output_dir=str(output_dir))
         url = _image_url("fallback-hash")
-        real_sha256 = image_store.utils.sha256
+        real_sha256 = image_store.sha256
 
         def fake_download(tasks, on_progress=None, **_kwargs):
             task = tasks[0]
@@ -552,7 +553,7 @@ class ImageStoreMetricsTest:
                 format="PNG",
             )
             payload = Path(task["save_path"]).read_bytes()
-            result: image_store.utils.DownloadFileResult = {
+            result: DownloadFileResult = {
                 "url": task["url"],
                 "save_path": task["save_path"],
                 "success": True,
@@ -566,11 +567,11 @@ class ImageStoreMetricsTest:
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files_streaming",
+                "nga_tools.backup.image_store.downloads.download_files_streaming",
                 side_effect=fake_download,
             ),
             patch(
-                "nga_tools.backup.image_store.utils.sha256",
+                "nga_tools.backup.image_store.sha256",
                 wraps=real_sha256,
             ) as fallback_hash,
             use_image_index_writer(),
@@ -614,10 +615,10 @@ class ImageMappingBatchTest:
         progress: list[tuple[int, str]] = []
 
         def fake_download(download_tasks, on_progress=None, **_kwargs):
-            results: list[image_store.utils.DownloadFileResult] = []
+            results: list[DownloadFileResult] = []
             for current, download_task in enumerate(download_tasks, start=1):
                 Path(download_task["save_path"]).write_bytes(payload)
-                result: image_store.utils.DownloadFileResult = {
+                result: DownloadFileResult = {
                     "url": download_task["url"],
                     "save_path": download_task["save_path"],
                     "success": True,
@@ -633,7 +634,7 @@ class ImageMappingBatchTest:
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files_streaming",
+                "nga_tools.backup.image_store.downloads.download_files_streaming",
                 side_effect=fake_download,
             ),
             patch(
@@ -692,10 +693,10 @@ class ImageMappingBatchTest:
         progress_urls: list[str] = []
 
         def fake_download(download_tasks, on_progress=None, **_kwargs):
-            results: list[image_store.utils.DownloadFileResult] = []
+            results: list[DownloadFileResult] = []
             for current, download_task in enumerate(download_tasks, start=1):
                 if current == 2:
-                    result: image_store.utils.DownloadFileResult = {
+                    result: DownloadFileResult = {
                         "url": download_task["url"],
                         "save_path": download_task["save_path"],
                         "success": False,
@@ -723,7 +724,7 @@ class ImageMappingBatchTest:
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files_streaming",
+                "nga_tools.backup.image_store.downloads.download_files_streaming",
                 side_effect=fake_download,
             ),
             patch(
@@ -764,10 +765,10 @@ class ImageMappingBatchTest:
         ]
 
         def fake_download(download_tasks, on_progress=None, **_kwargs):
-            results: list[image_store.utils.DownloadFileResult] = []
+            results: list[DownloadFileResult] = []
             for current, download_task in enumerate(download_tasks, start=1):
                 Path(download_task["save_path"]).write_bytes(payload)
-                result: image_store.utils.DownloadFileResult = {
+                result: DownloadFileResult = {
                     "url": download_task["url"],
                     "save_path": download_task["save_path"],
                     "success": True,
@@ -798,7 +799,7 @@ class ImageMappingBatchTest:
 
             with (
                 patch(
-                    "nga_tools.backup.image_store.utils.download_files_streaming",
+                    "nga_tools.backup.image_store.downloads.download_files_streaming",
                     side_effect=fake_download,
                 ),
                 use_image_index_writer(),
@@ -817,7 +818,7 @@ class ImageMappingBatchTest:
 
             with (
                 patch(
-                    "nga_tools.backup.image_store.utils.download_files_streaming",
+                    "nga_tools.backup.image_store.downloads.download_files_streaming",
                     side_effect=fake_download,
                 ),
                 use_image_index_writer(),
@@ -858,12 +859,12 @@ class ImageMappingBatchTest:
             {"url": _image_url(f"cancelled-tail-{index}")}
             for index in range(4)
         ]
-        progress: list[image_store.utils.DownloadFileResult] = []
+        progress: list[DownloadFileResult] = []
 
         def cancelled_download(download_tasks, on_progress=None, **_kwargs):
             for current, download_task in enumerate(download_tasks[:3], start=1):
                 Path(download_task["save_path"]).write_bytes(payload)
-                result: image_store.utils.DownloadFileResult = {
+                result: DownloadFileResult = {
                     "url": download_task["url"],
                     "save_path": download_task["save_path"],
                     "success": True,
@@ -877,7 +878,7 @@ class ImageMappingBatchTest:
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files_streaming",
+                "nga_tools.backup.image_store.downloads.download_files_streaming",
                 side_effect=cancelled_download,
             ),
             use_image_index_writer(),
@@ -1009,7 +1010,7 @@ class ImageSingleFlightTest:
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files_streaming",
+                "nga_tools.backup.image_store.downloads.download_files_streaming",
                 side_effect=fake_download,
             ),
             patch(
@@ -1076,7 +1077,7 @@ class ImageSingleFlightTest:
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files_streaming",
+                "nga_tools.backup.image_store.downloads.download_files_streaming",
                 side_effect=fake_download,
             ),
             use_image_index_writer(),
@@ -1124,7 +1125,7 @@ class ImageSingleFlightTest:
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files_streaming",
+                "nga_tools.backup.image_store.downloads.download_files_streaming",
                 side_effect=fake_download,
             ),
             patch(
@@ -1188,7 +1189,7 @@ class ImageSingleFlightTest:
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.download_files_streaming",
+                "nga_tools.backup.image_store.downloads.download_files_streaming",
                 side_effect=fake_download,
             ),
             patch(
@@ -1236,7 +1237,7 @@ class ImageHashStripeTest:
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.sha256",
+                "nga_tools.backup.image_store.sha256",
                 side_effect=lambda path: hashes[path],
             ),
             patch(
@@ -1286,7 +1287,7 @@ class ImageHashStripeTest:
         with (
             patch("nga_tools.config.get_config", return_value=config),
             patch(
-                "nga_tools.backup.image_store.utils.sha256",
+                "nga_tools.backup.image_store.sha256",
                 return_value="aa" + "c" * 62,
             ),
             patch(

@@ -7,7 +7,8 @@ from typing import Optional, cast
 
 from bs4 import BeautifulSoup, Tag
 
-from nga_tools import utils
+from nga_tools.core.download_types import DownloadFileResult
+from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.backup import image_store
 from nga_tools.backup.floor_map import FloorLabels
 from nga_tools.backup.html_images import effective_image_src
@@ -37,7 +38,7 @@ class PostImageReferenceScan:
 @dataclass(frozen=True)
 class ImageDownloadOutcome:
     succeeded_count: int
-    failed: list[utils.DownloadFileResult]
+    failed: list[DownloadFileResult]
 
 
 def parse_post_htmls_for_images(htmls: Sequence[PostHtml]) -> list[ParsedPostHtml]:
@@ -71,7 +72,7 @@ def scan_post_image_references(
             PostImageReference(
                 image_index=index,
                 url=normalized_image_url,
-                valid=utils.NGA_img_link_verify(normalized_image_url),
+                valid=NGA_img_link_verify(normalized_image_url),
             )
         )
     return PostImageReferenceScan(
@@ -140,8 +141,8 @@ def _run_download_images(
     collect_successes: bool,
 ) -> tuple[
     int,
-    list[utils.DownloadFileResult],
-    list[utils.DownloadFileResult],
+    list[DownloadFileResult],
+    list[DownloadFileResult],
 ]:
     del tid, aid
     with time_section("图片下载准备"):
@@ -159,13 +160,13 @@ def _run_download_images(
     )
 
     succeeded_count = 0
-    succeeded: list[utils.DownloadFileResult] = []
-    failed_results: list[utils.DownloadFileResult] = []
+    succeeded: list[DownloadFileResult] = []
+    failed_results: list[DownloadFileResult] = []
 
     def update_progress(
         completed: int,
         total: int,
-        _result: utils.DownloadFileResult,
+        _result: DownloadFileResult,
     ) -> None:
         report_progress(
             "图片下载进度",

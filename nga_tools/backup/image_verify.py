@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from nga_tools import utils
+from nga_tools.core.nga_images import NGA_img_link_verify
+from nga_tools.core.paths import get_folder, list_files_in_folder
 from nga_tools.backup import image_store
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_map import FloorLabels, load_floor_labels_from_archive
@@ -41,7 +42,7 @@ class ImageFileVerifyResult:
 
 def verify_downloaded_images(tid: int, aid: Optional[int]) -> None:
     with time_section("图片引用读取"):
-        thread_folder = Path(utils.get_folder(tid, aid, create=False))
+        thread_folder = Path(get_folder(tid, aid, create=False))
         image_paths = _list_thread_referenced_image_paths(tid, aid, thread_folder)
     with time_section("图片校验"):
         result = _verify_image_paths(str(thread_folder), image_paths)
@@ -119,7 +120,7 @@ def _list_thread_referenced_image_paths(
         for image_src in overlay_image_sources(overlay["bbcode"]):
             normalized_url = image_store.normalize_nga_image_url(image_src)
             if (
-                utils.NGA_img_link_verify(normalized_url)
+                NGA_img_link_verify(normalized_url)
                 and normalized_url not in task_urls
             ):
                 task_urls.add(normalized_url)
@@ -148,7 +149,7 @@ def _list_thread_referenced_image_paths(
 
 
 def _verify_images_in_folder(folder_images: str) -> ImageVerifyResult:
-    image_files = utils.list_files_in_folder(folder_images)
+    image_files = list_files_in_folder(folder_images)
     report_info(f"已下载图片文件数：{len(image_files)}")
     if not image_files:
         return ImageVerifyResult(folder=folder_images, total=0, removed=0)

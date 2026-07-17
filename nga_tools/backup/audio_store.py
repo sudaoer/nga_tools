@@ -12,7 +12,14 @@ from typing import Iterable, TypedDict
 
 from tinytag import TinyTag, TinyTagException
 
-from nga_tools import utils
+from nga_tools.core import downloads
+from nga_tools.core.download_types import (
+    DownloadFileResult,
+    DownloadProgressCallback,
+    DownloadSummary,
+    DownloadTask,
+)
+from nga_tools.core.hashing import sha256
 from nga_tools.config import get_config
 from nga_tools.console import WarningCategory, report_warning
 from nga_tools.core.atomic import replace_file_atomically
@@ -60,7 +67,7 @@ class StoredAudio:
 @dataclass(slots=True)
 class _AudioURLClaim:
     completed: threading.Event
-    result: utils.DownloadFileResult | None = None
+    result: DownloadFileResult | None = None
     error: BaseException | None = None
 
 
@@ -233,7 +240,7 @@ def _mapping_path_is_valid(output_root: Path, mapping: AudioMapping) -> bool:
             return cached[3] == mapping.content_sha256
 
     try:
-        content_hash = utils.sha256(str(path))
+        content_hash = sha256(str(path))
         after = path.stat()
     except OSError:
         return False
@@ -366,7 +373,7 @@ def _audio_duration(path: Path) -> float:
 
 def _download_identity(
     source_path: Path,
-    download_result: utils.DownloadFileResult,
+    download_result: DownloadFileResult,
 ) -> tuple[str, int]:
     content_hash = download_result.get("content_sha256")
     content_bytes = download_result.get("content_bytes")
@@ -384,7 +391,7 @@ def _download_identity(
             pass
         else:
             return content_hash.lower(), content_bytes
-    return utils.sha256(str(source_path)), source_path.stat().st_size
+    return sha256(str(source_path)), source_path.stat().st_size
 
 
 def _hash_lock(content_hash: str) -> threading.Lock:
@@ -435,7 +442,7 @@ def _select_target_path(
 def store_downloaded_audio(
     source_path: Path,
     url: str,
-    download_result: utils.DownloadFileResult,
+    download_result: DownloadFileResult,
     *,
     output_root: Path | None = None,
 ) -> StoredAudio:
@@ -487,7 +494,7 @@ def _release_audio_claim(
     key: tuple[str, str],
     claim: _AudioURLClaim,
     *,
-    result: utils.DownloadFileResult | None = None,
+    result: DownloadFileResult | None = None,
     error: BaseException | None = None,
 ) -> None:
     with _AUDIO_CLAIMS_LOCK:
@@ -499,10 +506,10 @@ def _release_audio_claim(
 
 
 def _failure_from_download(
-    result: utils.DownloadFileResult,
+    result: DownloadFileResult,
     output_root: Path,
-) -> utils.DownloadFileResult:
-    failure: utils.DownloadFileResult = {
+) -> DownloadFileResult:
+    failure: DownloadFileResult = {
         "url": result["url"],
         "save_path": str(audio_unique_dir(output_root)),
         "success": False,
@@ -518,12 +525,12 @@ def download_audio_tasks(
     audio_tasks: list[AudioDownloadTask],
     *,
     output_root: Path | None = None,
-    on_progress: utils.DownloadProgressCallback | None = None,
-    on_download_progress: utils.DownloadProgressCallback | None = None,
-) -> utils.DownloadSummary:
+    on_progress: DownloadProgressCallback | None = None,
+    on_download_progress: DownloadProgressCallback | None = None,
+) -> DownloadSummary:
     root = configured_output_root() if output_root is None else output_root
     normalized_tasks: list[AudioDownloadTask] = []
-    invalid_results: list[utils.DownloadFileResult] = []
+    invalid_results: list[DownloadFileResult] = []
     for task in audio_tasks:
         normalized_url = normalize_nga_audio_url(task["url"])
         if normalized_url is None:
@@ -562,7 +569,7 @@ def download_audio_tasks(
         else:
             waiters.append((task, claim))
 
-    result_by_url: dict[str, utils.DownloadFileResult] = {}
+    result_by_url: dict[str, DownloadFileResult] = {}
     for task in already_complete:
         mapping = existing[task["url"]]
         result_by_url[task["url"]] = {
@@ -578,7 +585,7 @@ def download_audio_tasks(
             dir=root,
         ) as temp_dir:
             temp_root = Path(temp_dir)
-            download_tasks: list[utils.DownloadTask] = []
+            download_tasks: list[DownloadTask] = []
             temp_by_url: dict[str, Path] = {}
             for index, url in enumerate(owner_by_url):
                 temp_path = temp_root / f"audio_{index}.mp3"
@@ -591,12 +598,12 @@ def download_audio_tasks(
                 )
 
             if on_download_progress is None:
-                downloaded = utils.download_files(
+                downloaded = downloads.download_files(
                     download_tasks,
                     resource_kind="audio",
                 )
             else:
-                downloaded = utils.download_files(
+                downloaded = downloads.download_files(
                     download_tasks,
                     resource_kind="audio",
                     on_progress=on_download_progress,
@@ -665,7 +672,7 @@ def download_audio_tasks(
                 _release_audio_claim(key, claim, error=error)
         raise
 
-    waiter_results: list[utils.DownloadFileResult] = []
+    waiter_results: list[DownloadFileResult] = []
     for task, claim in waiters:
         claim.completed.wait()
         if claim.error is not None:
@@ -676,7 +683,7 @@ def download_audio_tasks(
         copied["url"] = task["url"]
         waiter_results.append(copied)
 
-    ordered_results: list[utils.DownloadFileResult] = []
+    ordered_results: list[DownloadFileResult] = []
     waiter_iter = iter(waiter_results)
     owner_emitted: set[str] = set()
     for task in normalized_tasks:

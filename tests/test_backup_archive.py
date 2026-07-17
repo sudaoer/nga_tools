@@ -224,7 +224,7 @@ def _run_backup(
         stack.enter_context(patch("nga_tools.backup.archive.NGAClient", return_value=client))
         stack.enter_context(
             patch(
-                "nga_tools.backup.archive.utils.get_folder",
+                "nga_tools.backup.archive.get_folder",
                 side_effect=_fake_get_folder(thread_dir),
             )
         )
@@ -439,7 +439,7 @@ class BackupRawArchiveTest:
             connection.commit()
 
         with patch.object(
-            archive_module.utils,
+            archive_module,
             "get_folder",
             side_effect=_fake_get_folder(thread_dir),
         ):
@@ -1169,7 +1169,7 @@ class BackupRawArchiveTest:
             thread_dir
         ).read_backup_processing_snapshot()
         with patch.object(
-            archive_module.utils,
+            archive_module,
             "get_folder",
             side_effect=_fake_get_folder(thread_dir),
         ):
@@ -1229,7 +1229,7 @@ class BackupRawArchiveTest:
             )
             connection.commit()
         with patch.object(
-            archive_module.utils,
+            archive_module,
             "get_folder",
             side_effect=_fake_get_folder(thread_dir),
         ):

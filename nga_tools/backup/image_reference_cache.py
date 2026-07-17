@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import cast
 
-from nga_tools import utils
+from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.backup.archive_store import (
     PostImageReferenceCacheEntry,
     ThreadArchiveStore,
@@ -111,7 +111,7 @@ def deserialize_image_references(value: str) -> tuple[PostImageReference, ...]:
             or image_index <= previous_image_index
             or not isinstance(url, str)
             or type(valid) is not bool
-            or valid != utils.NGA_img_link_verify(url)
+            or valid != NGA_img_link_verify(url)
         ):
             raise ValueError("图片引用缓存项字段无效")
         references.append(

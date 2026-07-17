@@ -35,3 +35,14 @@ def test_image_validation_does_not_import_image_store() -> None:
 
     assert "nga_tools.backup.image_store" not in validation_imports
     assert "nga_tools.backup.image_store" not in persistence_imports
+
+
+def test_removed_compatibility_facades_are_not_reintroduced() -> None:
+    removed_paths = (
+        Path("nga_tools/utils.py"),
+        Path("nga_tools/backup/files.py"),
+        Path("nga_tools/web/render.py"),
+        Path("nga_tools/web/html_sanitize.py"),
+    )
+
+    assert all(not path.exists() for path in removed_paths)

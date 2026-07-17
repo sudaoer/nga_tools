@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal, Optional, TypedDict, cast
 from urllib.parse import quote
 
-from nga_tools import utils
+from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.backup import image_store
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME, ThreadArchiveStore
 from nga_tools.backup.image_reference_cache import (
@@ -413,7 +413,7 @@ def _invalid_image_sources(content: str) -> tuple[_InvalidImageSource, ...]:
             cursor = value_start
 
         normalized_source = image_store.normalize_nga_image_url(raw_source)
-        if not well_formed or not utils.NGA_img_link_verify(normalized_source):
+        if not well_formed or not NGA_img_link_verify(normalized_source):
             invalid_sources.append(
                 _InvalidImageSource(
                     source_index=source_index,

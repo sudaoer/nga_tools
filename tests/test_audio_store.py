@@ -6,6 +6,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from nga_tools.backup import audio_store
+from nga_tools.core.download_types import (
+    DownloadFileResult,
+    DownloadSummary,
+    DownloadTask,
+)
 from nga_tools.core.nga_audio import (
     extract_nga_audio_urls,
     normalize_nga_audio_url,
@@ -64,11 +69,11 @@ def test_download_audio_tasks_deduplicates_identical_content(
     content_hash = hashlib.sha256(content).hexdigest()
 
     def fake_download_files(
-        tasks: list[audio_store.utils.DownloadTask],
+        tasks: list[DownloadTask],
         **kwargs: object,
-    ) -> audio_store.utils.DownloadSummary:
+    ) -> DownloadSummary:
         assert kwargs == {"resource_kind": "audio"}
-        succeeded: list[audio_store.utils.DownloadFileResult] = []
+        succeeded: list[DownloadFileResult] = []
         for task in tasks:
             path = Path(task["save_path"])
             path.write_bytes(content)
@@ -84,7 +89,7 @@ def test_download_audio_tasks_deduplicates_identical_content(
         return {"succeeded": succeeded, "failed": []}
 
     with patch(
-        "nga_tools.backup.audio_store.utils.download_files",
+        "nga_tools.backup.audio_store.downloads.download_files",
         side_effect=fake_download_files,
     ):
         summary = audio_store.download_audio_tasks(
@@ -120,9 +125,9 @@ def test_download_audio_tasks_rejects_invalid_payload(tmp_path: Path) -> None:
     content = b"<html>not an mp3</html>"
 
     def fake_download_files(
-        tasks: list[audio_store.utils.DownloadTask],
+        tasks: list[DownloadTask],
         **_kwargs: object,
-    ) -> audio_store.utils.DownloadSummary:
+    ) -> DownloadSummary:
         task = tasks[0]
         path = Path(task["save_path"])
         path.write_bytes(content)
@@ -140,7 +145,7 @@ def test_download_audio_tasks_rejects_invalid_payload(tmp_path: Path) -> None:
         }
 
     with patch(
-        "nga_tools.backup.audio_store.utils.download_files",
+        "nga_tools.backup.audio_store.downloads.download_files",
         side_effect=fake_download_files,
     ):
         summary = audio_store.download_audio_tasks(
@@ -162,7 +167,7 @@ def test_audio_mapping_lookup_rejects_missing_or_corrupt_file(
     source_path = tmp_path / "source.mp3"
     content = _mp3_bytes()
     source_path.write_bytes(content)
-    result: audio_store.utils.DownloadFileResult = {
+    result: DownloadFileResult = {
         "url": url,
         "save_path": str(source_path),
         "success": True,

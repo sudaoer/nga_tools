@@ -4,7 +4,7 @@ import datetime
 from dataclasses import dataclass
 from pathlib import Path
 
-from nga_tools import utils
+import nga_tools.config as config
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.audio_retry import (
     pending_audio_retries_after_attempt,
@@ -24,6 +24,7 @@ from nga_tools.backup.processing_state import (
 )
 from nga_tools.console import WarningCategory, report_info, report_progress, report_warning
 from nga_tools.core.nga_audio import extract_nga_audio_urls
+from nga_tools.core.download_types import DownloadFileResult
 from nga_tools.timing import record_timing_label, record_timing_metric, time_section
 
 
@@ -76,7 +77,7 @@ def _select_pending_audio_retries(
         thread_target_key=f"{tid}:{'all' if aid is None else aid}",
         now=now,
         max_interval=datetime.timedelta(
-            hours=utils.get_config().backup_audio_retry_max_interval_hours
+            hours=config.get_config().backup_audio_retry_max_interval_hours
         ),
         force=force,
     )
@@ -103,7 +104,7 @@ def pending_audio_retry_is_due(
 def _audio_download_progress(
     current: int,
     total: int,
-    _result: utils.DownloadFileResult,
+    _result: DownloadFileResult,
 ) -> None:
     report_progress(
         "正在保存帖子音频",
@@ -164,7 +165,7 @@ def maintain_archived_audio(
     with time_section("音频本地映射校验"):
         mapped_urls = set(
             audio_mappings_for_urls(
-                Path(utils.get_config().output_dir),
+                Path(config.get_config().output_dir),
                 candidate_urls,
             )
         )
@@ -196,7 +197,7 @@ def maintain_archived_audio(
     with time_section("音频下载与内容寻址存储"):
         download_summary = download_audio_tasks(
             tasks,
-            output_root=Path(utils.get_config().output_dir),
+            output_root=Path(config.get_config().output_dir),
             on_download_progress=_audio_download_progress,
         )
     retries_after = pending_audio_retries_after_attempt(

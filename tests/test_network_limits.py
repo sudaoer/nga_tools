@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from nga_tools import utils
+from nga_tools.core import downloads
 from nga_tools.core.downloads import effective_download_concurrency
 from nga_tools.network_limits import (
     configure_network_limits,
@@ -151,7 +151,7 @@ class NetworkLimitsTest:
                 "nga_tools.core.image_download_runtime.aiohttp.ClientSession",
                 _ClientSession,
             ):
-                result = utils.download_files(
+                result = downloads.download_files(
                     [
                         {
                             "url": "https://example.com/image.png",
@@ -195,7 +195,7 @@ class NetworkLimitsTest:
                 "nga_tools.core.image_download_runtime.report_warning"
             ) as warning_mock,
         ):
-            result = utils.download_files(
+            result = downloads.download_files(
                 [
                     {
                         "url": "https://example.com/missing.png",

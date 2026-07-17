@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Optional, TypeAlias, cast
 
-from nga_tools.backup.files import write_text_atomically
+from nga_tools.core import atomic
 from nga_tools.config import get_config
 
 
@@ -127,7 +127,7 @@ class NGAThreadConfigs:
 
     def save_configs(self) -> None:
         data = {"ThreadList": self.ThreadList}
-        write_text_atomically(
+        atomic.write_text_atomically(
             Path(self.config_file_path),
             json.dumps(data, ensure_ascii=False, indent=4),
         )

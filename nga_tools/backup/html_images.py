@@ -5,7 +5,7 @@ from typing import Optional
 
 from bs4 import Tag
 
-from nga_tools import utils
+from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.backup import image_store
 
 ABOUT_BLANK_IMAGE_SRC = "about:blank"
@@ -33,7 +33,7 @@ def _normalized_src(value: str) -> str:
 
 def valid_nga_image_src(value: str) -> Optional[str]:
     normalized_src = _normalized_src(value)
-    return normalized_src if utils.NGA_img_link_verify(normalized_src) else None
+    return normalized_src if NGA_img_link_verify(normalized_src) else None
 
 
 def _is_windows_drive_path(value: str) -> bool:
@@ -64,7 +64,7 @@ def _lazy_nga_image_src(tag: Tag) -> Optional[str]:
         if value is None:
             continue
         normalized_value = _normalized_src(value)
-        if utils.NGA_img_link_verify(normalized_value):
+        if NGA_img_link_verify(normalized_value):
             return normalized_value
     return None
 
@@ -82,7 +82,7 @@ def effective_image_src(tag: Tag) -> Optional[str]:
         return None
 
     normalized_src = _normalized_src(src)
-    if utils.NGA_img_link_verify(normalized_src):
+    if NGA_img_link_verify(normalized_src):
         return normalized_src
 
     if normalized_src.lower() == ABOUT_BLANK_IMAGE_SRC:

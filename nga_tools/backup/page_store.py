@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from nga_tools import utils
+from nga_tools.core.paths import get_folder
 from nga_tools.console import WarningCategory, report_progress, report_warning
 from nga_tools.core.atomic import write_json_atomically
 from nga_tools.ngaclient import NGAClient
@@ -71,7 +71,7 @@ def fetch_backup_pages(
     *,
     write_json: bool = False,
 ) -> dict[int, PageData]:
-    folder_json = Path(utils.get_folder(tid, aid, "debug_json")) if write_json else None
+    folder_json = Path(get_folder(tid, aid, "debug_json")) if write_json else None
     page_data_by_page: dict[int, PageData] = {}
     for page_number in range(1, page_count + 1):
         report_progress(

@@ -15,7 +15,9 @@ from bs4 import BeautifulSoup, Tag
 from bs4.element import NavigableString
 from PIL import Image
 
-from nga_tools import utils
+from nga_tools.core.hashing import sha256
+from nga_tools.core.nga_images import NGA_img_link_verify
+from nga_tools.core.paths import get_folder
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_map import (
     FloorLabels,
@@ -305,7 +307,7 @@ def _converted_pdf_image_path(image_path: Path, folder_pdf: str) -> Path:
         extension = "png" if "A" in image.getbands() else "jpg"
         converted_dir = Path(folder_pdf) / PDF_CONVERTED_IMAGE_DIRNAME
         converted_dir.mkdir(parents=True, exist_ok=True)
-        converted_path = converted_dir / f"{utils.sha256(str(image_path))}.{extension}"
+        converted_path = converted_dir / f"{sha256(str(image_path))}.{extension}"
         if converted_path.exists() and _slice_image_file_is_valid(str(converted_path)):
             return converted_path
         _save_slice_image(image, str(converted_path))
@@ -435,7 +437,7 @@ def _image_path_for_pdf(
     image_lookup: image_store.ImageLookupCache | None = None,
 ) -> Path:
     normalized_src = image_store.normalize_nga_image_url(image_src)
-    if utils.NGA_img_link_verify(normalized_src):
+    if NGA_img_link_verify(normalized_src):
         lookup = (
             image_store.ImageLookupCache.for_urls([normalized_src])
             if image_lookup is None
@@ -459,7 +461,7 @@ def _read_pdf_html(
     tid: int,
     aid: Optional[int],
 ) -> tuple[dict[int, str], str, FloorLabels]:
-    thread_folder = Path(utils.get_folder(tid, aid, create=False))
+    thread_folder = Path(get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
     records = archive_store.read_effective_post_records()
     floor_labels = load_floor_labels_from_archive(archive_store, aid)
@@ -476,7 +478,7 @@ def _read_pdf_html(
         floor_labels,
     )
 
-    folder_pdf = utils.get_folder(tid, aid, "pdf")
+    folder_pdf = get_folder(tid, aid, "pdf")
     slice_output_dir = os.path.join(folder_pdf, "long_image_slices")
     os.makedirs(slice_output_dir, exist_ok=True)
 
@@ -537,7 +539,7 @@ def _read_pdf_html(
         soups_by_lou[lou] = soup
         for image in cast(list[Tag], soup.find_all("img")):
             image_src = effective_image_src(image)
-            if image_src is not None and utils.NGA_img_link_verify(image_src):
+            if image_src is not None and NGA_img_link_verify(image_src):
                 image_urls.add(image_src)
     image_lookup = image_store.ImageLookupCache.for_urls(image_urls)
 

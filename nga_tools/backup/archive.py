@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
 
-from nga_tools import utils
+import nga_tools.config as config
+from nga_tools.core.paths import get_folder
 from nga_tools.backup.archive_store import (
     ArchivePagesUpsertResult,
     ThreadArchiveStore,
@@ -305,7 +306,7 @@ def _select_pending_image_retries(
         thread_target_key=_thread_retry_target_key(tid, aid),
         now=now,
         max_interval=datetime.timedelta(
-            hours=utils.get_config().backup_image_retry_max_interval_hours
+            hours=config.get_config().backup_image_retry_max_interval_hours
         ),
         force=force,
     )
@@ -1268,7 +1269,7 @@ def backup_local_work_kind(
     tid: int,
     aid: Optional[int],
 ) -> BackupLocalWorkKind | None:
-    thread_folder = Path(utils.get_folder(tid, aid, create=False))
+    thread_folder = Path(get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
     if not archive_store.exists():
         return "refresh"
@@ -1343,7 +1344,7 @@ def _read_incremental_base_snapshot(
 
 
 def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
-    thread_folder = Path(utils.get_folder(tid, aid, create=False))
+    thread_folder = Path(get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
     with time_section("处理状态Schema兼容检查"):
         archive_store.ensure_backup_processing_schema()
@@ -1408,7 +1409,7 @@ def backup_thread(
     with time_section("客户端初始化"):
         client = NGAClient()
 
-    thread_folder = Path(utils.get_folder(tid, aid))
+    thread_folder = Path(get_folder(tid, aid))
     archive_store = ThreadArchiveStore(thread_folder)
     with time_section("远端页面抓取"):
         first_page_data = client.get_page(tid, aid, 1)
@@ -1429,7 +1430,7 @@ def backup_thread(
 
     with time_section("分页JSON导出"):
         if write_json:
-            folder_json = Path(utils.get_folder(tid, aid, "debug_json"))
+            folder_json = Path(get_folder(tid, aid, "debug_json"))
             for page_number, page_data in sorted(page_data_by_page.items()):
                 _write_page_json(folder_json, page_number, page_data)
     record_timing_metric(
@@ -1506,7 +1507,7 @@ def backup_thread_sub(
     with time_section("客户端初始化"):
         client = NGAClient()
 
-    thread_folder = Path(utils.get_folder(tid, aid))
+    thread_folder = Path(get_folder(tid, aid))
     archive_store = ThreadArchiveStore(thread_folder)
     archive_existed = archive_store.exists()
     if archive_existed:
@@ -1628,7 +1629,7 @@ def backup_thread_sub(
 
     with time_section("分页JSON导出"):
         if write_json:
-            folder_json = Path(utils.get_folder(tid, aid, "debug_json"))
+            folder_json = Path(get_folder(tid, aid, "debug_json"))
             for page_number, page_data in sorted(page_data_by_page.items()):
                 _write_page_json(folder_json, page_number, page_data)
     record_timing_metric(

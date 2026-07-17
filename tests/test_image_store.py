@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from nga_tools import utils
+from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.backup import image_store
 from nga_tools.core import image_formats
 from nga_tools.storage import UnsupportedStorageFormatError
@@ -45,7 +45,7 @@ class NgaImageLinkVerifyTest:
         ],
     )
     def test_accepts_current_nga_image_filename_formats(self, url: str) -> None:
-        assert utils.NGA_img_link_verify(url)
+        assert NGA_img_link_verify(url)
 
     @pytest.mark.parametrize(
         "url",
@@ -60,7 +60,7 @@ class NgaImageLinkVerifyTest:
         ],
     )
     def test_rejects_non_image_or_malformed_nga_links(self, url: str) -> None:
-        assert not utils.NGA_img_link_verify(url)
+        assert not NGA_img_link_verify(url)
 
 
 class ImageStoreTest:
@@ -382,7 +382,7 @@ class ImageStoreTest:
                     "nga_tools.config.get_config",
                     return_value=SimpleNamespace(output_dir=str(output_dir)),
                 ),
-                patch("nga_tools.backup.image_store.utils.sha256", return_value=image_hash),
+                patch("nga_tools.backup.image_store.sha256", return_value=image_hash),
             ):
                 result = image_store.store_downloaded_image(
                     temp_image,
@@ -411,7 +411,7 @@ class ImageStoreTest:
                     "nga_tools.config.get_config",
                     return_value=SimpleNamespace(output_dir=str(output_dir)),
                 ),
-                patch("nga_tools.backup.image_store.utils.sha256", return_value="a" * 64),
+                patch("nga_tools.backup.image_store.sha256", return_value="a" * 64),
                 patch("builtins.print"),
                 patch("sys.stdout", new_callable=io.StringIO),
             ):

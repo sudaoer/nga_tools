@@ -17,6 +17,7 @@ from nga_tools.backup.image_validation import (
     canonical_image_path_key,
 )
 from nga_tools.core.image_formats import image_file_is_valid
+from nga_tools.core.download_types import DownloadFileResult
 from nga_tools.timing import use_timing_log
 
 
@@ -276,7 +277,7 @@ def test_image_pipeline_reports_one_detailed_final_failure(tmp_path: Path) -> No
         pending_download_url_count=1,
     )
     timing_path = tmp_path / "timing.log"
-    failure: image_store.utils.DownloadFileResult = {
+    failure: DownloadFileResult = {
         "url": url,
         "save_path": str(tmp_path / "missing.png"),
         "success": False,

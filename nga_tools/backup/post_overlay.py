@@ -8,7 +8,7 @@ from typing import Literal, TypedDict
 
 from bs4 import BeautifulSoup
 
-from nga_tools import utils
+from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.backup import image_store
 from nga_tools.backup.models import PostRecord
 from nga_tools.bbcode_render import ImageSrcResolver, render_web_bbcode
@@ -97,7 +97,7 @@ def make_existing_overlay_image_src_resolver(
     normalized_by_source: dict[str, str] = {}
     for raw_source in raw_sources:
         normalized_source = image_store.normalize_nga_image_url(raw_source)
-        if not utils.NGA_img_link_verify(normalized_source):
+        if not NGA_img_link_verify(normalized_source):
             if require_all:
                 raise ValueError(
                     "overlay图片链接必须是完整的NGA图片URL："
@@ -130,7 +130,7 @@ def make_existing_overlay_image_src_resolver(
     def resolve_image_src(image_src: str) -> str | None:
         raw_source = image_src.strip()
         normalized_source = image_store.normalize_nga_image_url(raw_source)
-        if not utils.NGA_img_link_verify(normalized_source):
+        if not NGA_img_link_verify(normalized_source):
             return None
         return resolved_src_by_url.get(normalized_source)
 

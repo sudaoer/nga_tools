@@ -16,7 +16,6 @@ from urllib.parse import urlsplit
 
 from PIL import Image, ImageDraw
 
-from nga_tools import utils
 import nga_tools.config as config
 from nga_tools.console import WarningCategory, report_warning
 from nga_tools.core.atomic import (
@@ -24,6 +23,15 @@ from nga_tools.core.atomic import (
     replace_temp_file,
     temporary_sibling_path,
 )
+from nga_tools.core import downloads
+from nga_tools.core.download_types import (
+    DownloadFileResult,
+    DownloadProgressCallback,
+    DownloadSummary,
+    DownloadTask,
+)
+from nga_tools.core.hashing import sha256
+from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.core.image_formats import (
     image_extension_from_file as detect_image_extension_from_file,
     image_file_is_valid,
@@ -73,7 +81,7 @@ class StoredImageResult(TypedDict):
 
 class CompactImageDownloadSummary(TypedDict):
     succeeded_count: int
-    failed: list[utils.DownloadFileResult]
+    failed: list[DownloadFileResult]
 
 
 @dataclass(frozen=True)
@@ -117,7 +125,7 @@ class ImageLookupCache:
 
     def mapped_image_path_for_url(self, url: str) -> Path | None:
         normalized_url = normalize_nga_image_url(url)
-        if not utils.NGA_img_link_verify(normalized_url):
+        if not NGA_img_link_verify(normalized_url):
             return None
 
         mapping = self.mappings_by_url.get(normalized_url)
@@ -173,7 +181,7 @@ _INITIALIZED_IMAGE_INDEX_PATHS: set[Path] = set()
 
 @dataclass(slots=True)
 class _ImageURLClaim:
-    result: utils.DownloadFileResult | None = None
+    result: DownloadFileResult | None = None
     error: BaseException | None = None
     completed: bool = False
 
@@ -183,7 +191,7 @@ type _ImageClaimKey = tuple[str, str]
 
 @dataclass(frozen=True)
 class _PendingImageMapping:
-    result: utils.DownloadFileResult
+    result: DownloadFileResult
     mapping: tuple[str, Path]
     claim_key: _ImageClaimKey
     claim: _ImageURLClaim
@@ -229,7 +237,7 @@ def existing_image_paths_for_urls(
         {
             normalized_url
             for url in urls
-            if utils.NGA_img_link_verify(
+            if NGA_img_link_verify(
                 normalized_url := normalize_nga_image_url(url.strip())
             )
         }
@@ -288,7 +296,7 @@ def existing_image_paths_for_urls(
 
 
 def parse_nga_image_url(url: str) -> NgaImageUrl:
-    if not utils.NGA_img_link_verify(url):
+    if not NGA_img_link_verify(url):
         raise ValueError(f"NGA图片链接无效：{url}")
 
     parts = urlsplit(url)
@@ -490,7 +498,7 @@ def _wait_image_mapping(future: Future[None]) -> None:
 
 def image_mapping_for_url(url: str) -> ImageMapping | None:
     normalized_url = normalize_nga_image_url(url)
-    if not utils.NGA_img_link_verify(normalized_url):
+    if not NGA_img_link_verify(normalized_url):
         return None
 
     with closing(_connect_image_index_readonly()) as connection:
@@ -525,7 +533,7 @@ def image_mappings_for_urls(urls: Iterable[str]) -> dict[str, ImageMapping]:
         {
             normalized_url
             for url in urls
-            if utils.NGA_img_link_verify(
+            if NGA_img_link_verify(
                 normalized_url := normalize_nga_image_url(url)
             )
         }
@@ -661,7 +669,7 @@ def _prepare_image_download_tasks_uncoordinated(
 
 def link_path_for_image_src(image_src: str) -> Path | None:
     normalized_url = normalize_nga_image_url(image_src)
-    if not utils.NGA_img_link_verify(normalized_url):
+    if not NGA_img_link_verify(normalized_url):
         return None
     return mapped_image_path_for_url(normalized_url)
 
@@ -764,7 +772,7 @@ def _hash_lock(image_hash: str) -> threading.Lock:
 
 def _precomputed_content_hash(
     source_path: Path,
-    download_result: utils.DownloadFileResult | None,
+    download_result: DownloadFileResult | None,
 ) -> tuple[str | None, bool]:
     if download_result is None:
         return None, False
@@ -795,7 +803,7 @@ def _precomputed_content_hash(
 
 def _content_hash_for_store(
     source_path: Path,
-    download_result: utils.DownloadFileResult | None,
+    download_result: DownloadFileResult | None,
 ) -> str:
     precomputed_hash, rejected = _precomputed_content_hash(
         source_path,
@@ -806,7 +814,7 @@ def _content_hash_for_store(
         return precomputed_hash
     record_image_hash_source(precomputed=False, rejected=rejected)
     with time_image_store_phase("fallback_hash"):
-        return utils.sha256(str(source_path))
+        return sha256(str(source_path))
 
 
 def _store_image_file_deferred_mapping(
@@ -814,7 +822,7 @@ def _store_image_file_deferred_mapping(
     task: ImageDownloadTask,
     *,
     move_source: bool,
-    download_result: utils.DownloadFileResult | None = None,
+    download_result: DownloadFileResult | None = None,
 ) -> tuple[StoredImageResult, Future[None]]:
     result = _store_image_file_without_mapping(
         source_path,
@@ -833,7 +841,7 @@ def _store_image_file_without_mapping(
     task: ImageDownloadTask,
     *,
     move_source: bool,
-    download_result: utils.DownloadFileResult | None = None,
+    download_result: DownloadFileResult | None = None,
 ) -> StoredImageResult:
     record_image_store_attempt()
     try:
@@ -927,7 +935,7 @@ def _release_image_url_claim(
     claim_key: _ImageClaimKey,
     claim: _ImageURLClaim,
     *,
-    result: utils.DownloadFileResult | None = None,
+    result: DownloadFileResult | None = None,
     error: BaseException | None = None,
 ) -> None:
     with _IMAGE_URL_CLAIMS_CONDITION:
@@ -956,8 +964,8 @@ def _wait_image_url_claim(claim: _ImageURLClaim) -> None:
 
 def _copy_claim_result(
     url: str,
-    result: utils.DownloadFileResult,
-) -> utils.DownloadFileResult:
+    result: DownloadFileResult,
+) -> DownloadFileResult:
     copied = result.copy()
     copied["url"] = url
     return copied
@@ -965,20 +973,20 @@ def _copy_claim_result(
 
 def _run_download_image_tasks(
     image_tasks: list[ImageDownloadTask],
-    on_progress: utils.DownloadProgressCallback | None,
+    on_progress: DownloadProgressCallback | None,
     *,
     collect_successes: bool,
 ) -> tuple[
     int,
-    list[utils.DownloadFileResult],
-    list[utils.DownloadFileResult],
+    list[DownloadFileResult],
+    list[DownloadFileResult],
 ]:
     if not image_tasks:
         return 0, [], []
 
     succeeded_count = 0
-    succeeded: list[utils.DownloadFileResult] = []
-    failed: list[utils.DownloadFileResult] = []
+    succeeded: list[DownloadFileResult] = []
+    failed: list[DownloadFileResult] = []
     owners: list[tuple[ImageDownloadTask, _ImageClaimKey, _ImageURLClaim]] = []
     waiters: list[tuple[ImageDownloadTask, _ImageURLClaim]] = []
     for image_task in image_tasks:
@@ -990,7 +998,7 @@ def _run_download_image_tasks(
 
     completed = 0
 
-    def emit_result(result: utils.DownloadFileResult) -> None:
+    def emit_result(result: DownloadFileResult) -> None:
         nonlocal completed, succeeded_count
         completed += 1
         if result["success"]:
@@ -1007,7 +1015,7 @@ def _run_download_image_tasks(
     def release_owner(
         claim_key: _ImageClaimKey,
         claim: _ImageURLClaim,
-        result: utils.DownloadFileResult,
+        result: DownloadFileResult,
     ) -> None:
         _release_image_url_claim(claim_key, claim, result=result)
         emit_result(result)
@@ -1015,7 +1023,7 @@ def _run_download_image_tasks(
     def mapping_failure_result(
         pending: _PendingImageMapping,
         error: BaseException,
-    ) -> utils.DownloadFileResult:
+    ) -> DownloadFileResult:
         return {
             "url": pending.result["url"],
             "save_path": str(unique_images_dir()),
@@ -1027,7 +1035,7 @@ def _run_download_image_tasks(
     def release_remaining_without_progress(
         pending_batch: tuple[_PendingImageMapping, ...],
         *,
-        results: tuple[utils.DownloadFileResult, ...] | None = None,
+        results: tuple[DownloadFileResult, ...] | None = None,
         error: BaseException | None = None,
     ) -> None:
         for index, pending in enumerate(pending_batch):
@@ -1109,7 +1117,7 @@ def _run_download_image_tasks(
 
     with tempfile.TemporaryDirectory(prefix="nga_image_download_") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
-        download_tasks: list[utils.DownloadTask] = []
+        download_tasks: list[DownloadTask] = []
         owner_by_temp_path: dict[
             str,
             tuple[ImageDownloadTask, _ImageClaimKey, _ImageURLClaim],
@@ -1130,12 +1138,12 @@ def _run_download_image_tasks(
         def handle_progress(
             _completed: int,
             _total: int,
-            download_result: utils.DownloadFileResult,
+            download_result: DownloadFileResult,
         ) -> None:
             image_task, claim_key, claim = owner_by_temp_path[
                 download_result["save_path"]
             ]
-            result: utils.DownloadFileResult
+            result: DownloadFileResult
             if download_result["success"]:
                 try:
                     stored_image = _store_image_file_without_mapping(
@@ -1196,7 +1204,7 @@ def _run_download_image_tasks(
 
         try:
             if download_tasks:
-                utils.download_files_streaming(
+                downloads.download_files_streaming(
                     download_tasks,
                     on_progress=handle_progress,
                 )
@@ -1225,8 +1233,8 @@ def _run_download_image_tasks(
 
 def download_image_tasks(
     image_tasks: list[ImageDownloadTask],
-    on_progress: utils.DownloadProgressCallback | None = None,
-) -> utils.DownloadSummary:
+    on_progress: DownloadProgressCallback | None = None,
+) -> DownloadSummary:
     succeeded_count, succeeded, failed = _run_download_image_tasks(
         image_tasks,
         on_progress,
@@ -1239,7 +1247,7 @@ def download_image_tasks(
 
 def download_image_tasks_compact(
     image_tasks: list[ImageDownloadTask],
-    on_progress: utils.DownloadProgressCallback | None = None,
+    on_progress: DownloadProgressCallback | None = None,
 ) -> CompactImageDownloadSummary:
     succeeded_count, _succeeded, failed = _run_download_image_tasks(
         image_tasks,
