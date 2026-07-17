@@ -4,6 +4,7 @@ from typing import Literal, NotRequired, TypedDict
 
 from nga_tools.commands.backup import (
     backup_all,
+    backup_migrate_content,
     backup_migrate_layout,
     backup_migrate_store,
     backup_sub,
@@ -162,6 +163,11 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": str,
         "metavar": "RUN_ID",
         "help": "按迁移运行ID恢复保留的旧布局",
+    },
+    "dry_run": {
+        "flags": ("--dry-run", "--dry_run"),
+        "action": "store_true",
+        "help": "只统计正文压缩空间，不修改数据库",
     },
     "all_threads": {
         "flags": ("--all-threads", "--all_threads"),
@@ -465,6 +471,31 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "只迁移与当前修订和格式匹配的状态及可解析缓存。",
             ],
             "args": ["name", "tid", "aid", "all", "rollback"],
+            "required_any": ["name", "tid", "all", "rollback"],
+        },
+        "migrate-content": {
+            "handler": backup_migrate_content,
+            "summary": "将post_versions正文迁移为zstd压缩BLOB",
+            "usage": (
+                f"{PROGRAM_USAGE} backup migrate-content "
+                "((--name NAME | --tid TID [--aid AID]) | --all | "
+                "--rollback RUN_ID)"
+            ),
+            "examples": [
+                f"{PROGRAM_USAGE} backup migrate-content --all --dry-run",
+                f"{PROGRAM_USAGE} backup migrate-content --all",
+                (
+                    f"{PROGRAM_USAGE} backup migrate-content "
+                    "--rollback 20260717T120000Z-1234abcd"
+                ),
+            ],
+            "notes": [
+                "新写入的post_versions.content使用Python 3.14标准库zstd level 3。",
+                "迁移会保留正文版本ID、手动选择和其他archive表。",
+                "迁移会保留可回滚SQLite快照，并支持中断后续跑。",
+                "--dry-run只读取archive.sqlite3并统计预计节省空间。",
+            ],
+            "args": ["name", "tid", "aid", "all", "rollback", "dry_run"],
             "required_any": ["name", "tid", "all", "rollback"],
         },
         "pdf": {

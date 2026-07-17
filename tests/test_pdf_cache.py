@@ -39,6 +39,7 @@ from nga_tools.backup.pdf_plan import (
 )
 from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.console import ConsoleReporter, use_reporter, use_warning_log
+from nga_tools.core.hashing import hash_text
 
 
 def _write_avif_image(path: Path) -> None:
@@ -460,8 +461,9 @@ class PdfImageSourceTest:
                     """
                     SELECT id
                     FROM post_versions
-                    WHERE content = 'before edit'
-                    """
+                    WHERE source_hash = ?
+                    """,
+                    (hash_text("before edit"),),
                 ).fetchone()[0]
             store.upsert_post_version_selection(1, version_id)
 

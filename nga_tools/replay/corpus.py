@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional, Protocol, TypeAlias, cast
 
 from nga_tools.backup.archive_schema import require_current_archive_schema
+from nga_tools.backup.content_codec import decode_content
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.backup.audio_store import AUDIO_INDEX_FILENAME, AUDIO_UNIQUE_DIRNAME
 from nga_tools.core.hashing import hash_text, sha256
@@ -466,9 +467,18 @@ def _read_archive_content(path: Path) -> _ArchiveContent:
             raise ReplayCorpusError(f"重放归档内容lou无效：{path}: {raw_lou!r}")
         if type(raw_pid) is not int or raw_pid < 0:
             raise ReplayCorpusError(f"重放归档内容pid无效：{path}: {raw_pid!r}")
-        if not isinstance(raw_content, str) or not isinstance(raw_source_hash, str):
+        if not isinstance(raw_source_hash, str):
             raise ReplayCorpusError(f"重放归档正文或source_hash无效：{path}")
-        if hash_text(raw_content) != raw_source_hash:
+        try:
+            content = decode_content(
+                raw_content,
+                source=f"重放归档第{raw_lou}楼正文",
+            )
+        except ValueError as error:
+            raise ReplayCorpusError(
+                f"重放归档正文或source_hash无效：{path}"
+            ) from error
+        if hash_text(content) != raw_source_hash:
             raise ReplayCorpusError(
                 f"重放归档第{raw_lou}楼source_hash与正文不匹配：{path}"
             )
@@ -482,7 +492,7 @@ def _read_archive_content(path: Path) -> _ArchiveContent:
         post = _ReplayPost(
             pid=raw_pid,
             lou=raw_lou,
-            content=raw_content,
+            content=content,
             author_name=raw_author_name,
             author_uid=raw_author_uid,
             postdate=_postdate_from_json(raw_postdate_json, source=source),

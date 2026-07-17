@@ -13,6 +13,7 @@ from nga_tools.backup.archive_posts import (
     ArchivePostMetadata,
     metadata_from_raw_post,
 )
+from nga_tools.backup.content_codec import decode_content, encode_content
 from nga_tools.backup.archive_schema import (
     ARCHIVE_SCHEMA_VERSION,
     read_archive_schema_version,
@@ -561,7 +562,7 @@ class ThreadArchiveStore:
                 pid INTEGER NOT NULL,
                 lou INTEGER NOT NULL,
                 source_hash TEXT NOT NULL,
-                content TEXT NOT NULL,
+                content BLOB NOT NULL CHECK(typeof(content) = 'blob'),
                 word_count_version INTEGER NOT NULL DEFAULT 0,
                 word_count_chinese_chars INTEGER NOT NULL DEFAULT 0,
                 word_count_chinese_with_punctuation INTEGER NOT NULL DEFAULT 0,
@@ -966,10 +967,15 @@ class ThreadArchiveStore:
             if (
                 len(row) != 2
                 or type(row[0]) is not int
-                or not isinstance(row[1], str)
+                or not isinstance(row[1], (str, bytes))
             ):
                 raise ValueError(f"archive帖子版本正文行无效：{row!r}")
-            result.append((row[0], row[1]))
+            result.append(
+                (
+                    row[0],
+                    decode_content(row[1], source=f"archive帖子版本{row[0]}正文"),
+                )
+            )
         return result
 
     def read_backup_processing_snapshot(self) -> BackupProcessingSnapshot:
@@ -2601,7 +2607,7 @@ class ThreadArchiveStore:
                 type(old_id) is not int
                 or type(pid) is not int
                 or type(lou) is not int
-                or not isinstance(content, str)
+                or not isinstance(content, (str, bytes))
                 or not isinstance(first_seen_at, str)
                 or not isinstance(last_seen_at, str)
                 or type(seen_count) is not int
@@ -2615,7 +2621,7 @@ class ThreadArchiveStore:
                     old_id,
                     pid,
                     lou,
-                    content,
+                    decode_content(content, source=f"archive旧帖子版本{old_id}正文"),
                     first_seen_at,
                     last_seen_at,
                     seen_count,
@@ -2772,7 +2778,7 @@ class ThreadArchiveStore:
                     merged.pid,
                     merged.lou,
                     merged.source_hash,
-                    merged.content,
+                    encode_content(merged.content),
                     WORD_COUNT_VERSION,
                     word_count.chinese_chars,
                     word_count.chinese_with_punctuation,
@@ -2926,7 +2932,7 @@ class ThreadArchiveStore:
                 post["pid"],
                 post["lou"],
                 source_hash,
-                post["content"],
+                encode_content(post["content"]),
                 WORD_COUNT_VERSION,
                 word_count.chinese_chars,
                 word_count.chinese_with_punctuation,
@@ -3321,7 +3327,7 @@ class ThreadArchiveStore:
         with closing(self._connect_write()) as connection:
             with connection:
                 rows = cast(
-                    list[tuple[int, str]],
+                    list[tuple[int, object]],
                     connection.execute(
                         """
                         SELECT id, content
@@ -3331,7 +3337,11 @@ class ThreadArchiveStore:
                         (WORD_COUNT_VERSION,),
                     ).fetchall(),
                 )
-                for row_id, content in rows:
+                for row_id, raw_content in rows:
+                    content = decode_content(
+                        raw_content,
+                        source=f"archive帖子版本{row_id}正文",
+                    )
                     word_count = count_post_content(content)
                     connection.execute(
                         """
@@ -3627,7 +3637,7 @@ class ThreadArchiveStore:
             int,
             int,
             int,
-            str,
+            object,
             str,
             Optional[str],
             Optional[int],
@@ -3650,7 +3660,10 @@ class ThreadArchiveStore:
             version_id=version_id,
             lou=lou,
             pid=pid,
-            content=content,
+            content=decode_content(
+                content,
+                source=f"archive帖子版本{version_id}正文",
+            ),
             source_hash=source_hash,
             author_name=author_name,
             author_uid=author_uid,
@@ -3681,7 +3694,7 @@ class ThreadArchiveStore:
                         int,
                         int,
                         int,
-                        str,
+                        object,
                         str,
                         Optional[str],
                         Optional[int],
@@ -3712,7 +3725,7 @@ class ThreadArchiveStore:
                             int,
                             int,
                             int,
-                            str,
+                            object,
                             str,
                             Optional[str],
                             Optional[int],
@@ -3760,7 +3773,7 @@ class ThreadArchiveStore:
                         int,
                         int,
                         int,
-                        str,
+                        object,
                         str,
                         Optional[str],
                         Optional[int],
@@ -3809,7 +3822,7 @@ class ThreadArchiveStore:
 
         with closing(self._connect_read()) as connection:
             rows = cast(
-                list[tuple[int, int, int, str, str]],
+                list[tuple[int, int, int, object, str]],
                 connection.execute(
                     _LATEST_POST_RECORDS_QUERY.format(where_lous=where_lous),
                     params,
@@ -3817,7 +3830,11 @@ class ThreadArchiveStore:
             )
 
         records: list[PostRecord] = []
-        for _version_id, lou, pid, content, source_hash in rows:
+        for _version_id, lou, pid, raw_content, source_hash in rows:
+            content = decode_content(
+                raw_content,
+                source=f"archive帖子版本{_version_id}正文",
+            )
             records.append(
                 {
                     "lou": lou,

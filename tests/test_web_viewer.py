@@ -24,6 +24,7 @@ from nga_tools.backup.floor_models import (
     StoredFloorMap,
 )
 from nga_tools.cli.parser import args_parse
+from nga_tools.core.hashing import hash_text
 from nga_tools.core.output_lock import use_output_root_lock
 from nga_tools.forum.ankebak_state import AnkebakStateStore
 from nga_tools.storage import ensure_storage_metadata
@@ -587,7 +588,8 @@ class WebViewerDataTest:
         )
         with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
             old_version_id = connection.execute(
-                "SELECT id FROM post_versions WHERE content LIKE 'old %'"
+                "SELECT id FROM post_versions WHERE source_hash = ?",
+                (hash_text(f"old [img]{relative_src}[/img]"),),
             ).fetchone()[0]
 
         current_html = read_posts(
@@ -621,7 +623,8 @@ class WebViewerDataTest:
         )
         with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
             old_version_id = connection.execute(
-                "SELECT id FROM post_versions WHERE content LIKE 'old%'"
+                "SELECT id FROM post_versions WHERE source_hash = ?",
+                (hash_text("old&amp;#160;decimal"),),
             ).fetchone()[0]
 
         current_html = read_posts(output_dir, 101, "201", page=1)["items"][0][
@@ -761,7 +764,8 @@ class WebViewerDataTest:
         audio_path = _write_audio_mapping(output_dir, audio_url)
         with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
             historical_version_id = connection.execute(
-                "SELECT id FROM post_versions WHERE content LIKE '<audio%'"
+                "SELECT id FROM post_versions WHERE source_hash = ?",
+                (hash_text(f'<audio src="{audio_url}"></audio>'),),
             ).fetchone()[0]
 
         result = read_post_version_preview(
@@ -1105,13 +1109,13 @@ class WebServerTest:
         _write_archive(thread_dir, [_post(1, "after edit")])
         with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
             version_rows = {
-                content: version_id
-                for version_id, content in connection.execute(
-                    "SELECT id, content FROM post_versions"
+                source_hash: version_id
+                for version_id, source_hash in connection.execute(
+                    "SELECT id, source_hash FROM post_versions"
                 ).fetchall()
             }
-        old_version_id = version_rows["before edit"]
-        latest_version_id = version_rows["after edit"]
+        old_version_id = version_rows[hash_text("before edit")]
+        latest_version_id = version_rows[hash_text("after edit")]
         client = TestClient(
             create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
         )
@@ -2256,7 +2260,8 @@ class WebImageUsageTest:
         )
         with closing(sqlite3.connect(store.db_path)) as connection:
             old_version_id = connection.execute(
-                "SELECT id FROM post_versions WHERE content LIKE '[img]%'"
+                "SELECT id FROM post_versions WHERE source_hash = ?",
+                (hash_text(f"[img]{image_url}[/img]"),),
             ).fetchone()[0]
         client = TestClient(
             create_app(output_dir=output_dir, static_dir=tmp_path / "dist")

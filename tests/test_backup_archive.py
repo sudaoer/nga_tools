@@ -38,6 +38,7 @@ from nga_tools.backup.post_html import (
 from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.backup.processing_state import BackupProcessingSnapshot
 from nga_tools.core.downloads import DownloadFailureKind, DownloadFileResult
+from nga_tools.core.hashing import hash_text
 from nga_tools.ngaclient.client import NGAPageError
 from nga_tools.timing import use_timing_log
 
@@ -969,8 +970,9 @@ class BackupRawArchiveTest:
                     """
                     SELECT id
                     FROM post_versions
-                    WHERE lou = 1 AND content = 'historical first'
-                    """
+                    WHERE lou = 1 AND source_hash = ?
+                    """,
+                    (hash_text("historical first"),),
                 ).fetchone()[0]
             store.upsert_post_version_selection(1, historical_version_id)
             _run_backup(

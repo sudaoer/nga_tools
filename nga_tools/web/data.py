@@ -22,6 +22,7 @@ from nga_tools.backup.archive_store import (
     ArchivePostVersionRow,
     ThreadArchiveStore,
 )
+from nga_tools.backup.content_codec import decode_content
 from nga_tools.backup.floor_map import load_floor_labels_from_archive
 from nga_tools.backup.floor_models import (
     MISSING_POST_HTML,
@@ -1242,7 +1243,7 @@ def read_post_version_groups(
     floor_labels = _load_floor_labels(archive_store, aid)
     with closing(_connect_readonly(archive_store.db_path)) as connection:
         rows = cast(
-            list[tuple[int, int, str, str, str, str, int, int]],
+            list[tuple[int, int, str, object, str, str, int, int]],
             connection.execute(
                 """
                 WITH ranked AS (
@@ -1283,12 +1284,16 @@ def read_post_version_groups(
         version_id,
         lou,
         source_hash,
-        content,
+        raw_content,
         first_seen_at,
         last_seen_at,
         seen_count,
         row_number,
     ) in rows:
+        content = decode_content(
+            raw_content,
+            source=f"archive帖子版本{version_id}正文",
+        )
         is_latest = row_number == 1
         if is_latest:
             latest_version_by_lou[lou] = version_id

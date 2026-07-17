@@ -270,6 +270,32 @@ class BackupCliTest:
 
         assert context.value.code == 2
 
+    def test_backup_migrate_content_parses_dry_run_and_rollback(self) -> None:
+        dry_run_args = args_parse(
+            ["backup", "migrate-content", "--all", "--dry-run"]
+        )
+        rollback_args = args_parse(
+            ["backup", "migrate-content", "--rollback", "run-123"]
+        )
+
+        assert dry_run_args["dry_run"] is True
+        assert rollback_args["rollback"] == "run-123"
+
+    def test_backup_migrate_content_rejects_rollback_with_dry_run(self) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as context:
+                args_parse(
+                    [
+                        "backup",
+                        "migrate-content",
+                        "--rollback",
+                        "run-123",
+                        "--dry-run",
+                    ]
+                )
+
+        assert context.value.code == 2
+
 
 def _backup_config_app_config(
     workers: int = 4,

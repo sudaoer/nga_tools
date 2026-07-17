@@ -351,6 +351,24 @@ pixi run python main.py backup migrate-layout --rollback <run_id>
 回滚后的旧布局仅用于撤销和排障；当前程序会拒绝把它当作正常运行库，重新使用前
 仍需完成迁移。确认新布局及交付副本可读前，不要删除 `.migration-backups/`。
 
+`post_versions.content` 可单独迁移为 Python 3.14 标准库 `compression.zstd`、固定
+level 3 的压缩 BLOB。先用 dry-run 汇总原始正文、压缩后正文和预计节省空间：
+
+```powershell
+pixi run python main.py backup migrate-content --all --dry-run
+```
+
+确认结果后执行迁移；命令会保留正文版本 ID、手动版本选择和其他 archive 表，使用
+`output/.migration-backups/<run_id>/` 中的 SQLite 快照支持中断续跑和回滚：
+
+```powershell
+pixi run python main.py backup migrate-content --all
+pixi run python main.py backup migrate-content --rollback <run_id>
+```
+
+旧的 TEXT 正文仍可被读取；正常新写入和迁移后的 `post_versions.content` 都是 zstd
+BLOB。迁移完成后不要删除对应的 `.migration-backups/<run_id>/`，直到验收结束。
+
 更早期只有 `json/page_*.json` 的备份目录可先显式迁移到每帖 SQLite 存储。
 该迁移不会删除或改写旧 JSON：
 
@@ -474,7 +492,8 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `json/`：加 `--write-json` 时输出的接口最近响应分页数据
 - `archive.sqlite3`：每帖持久数据。保存每页最新的紧凑分页状态、正文版本、最新
   展示元数据、用户正文版本选择、楼层映射与候选原楼层、归档修订和管理页
-  BBCode overlay；不保存 NGA 原始分页响应，Web、PDF 和 replay 的正文来源都在此库
+  BBCode overlay；不保存 NGA 原始分页响应。完成 `backup migrate-content` 后，
+  `post_versions.content` 以 zstd BLOB 保存，Web、PDF 和 replay 仍从此库读取解压后的正文
 - `archive_state.sqlite3`：每帖运行状态。保存楼层/图片引用处理水位、逐楼引用
   清单、URL 引用计数、音频历史版本扫描水位以及失败图片/音频待重试队列；删除后可从 `archive.sqlite3`
   重建，但会丢失尚未完成工作的历史状态
@@ -493,6 +512,8 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `audio_unique/`：按 SHA-256 内容 hash 保存的实际 MP3 文件
 - `audio_index.sqlite3`：持久的原始 NGA 音频 URL 到 `audio_unique` 文件映射及内容元数据
 - `.migration-backups/<run_id>/`：布局迁移的原库快照、恢复清单和验收指纹
+- `output/.migration-backups/<run_id>/files/<thread>/archive.sqlite3`：
+  `post_versions.content` 压缩迁移的原库快照和清单
 
 旧版本生成的 `html_modified/`、`backup_state.json`、`floor_map.json`、
 `post_overlays.json` 和 `overlay/post_*.html` 不再读取，

@@ -801,8 +801,9 @@ class ThreadArchiveStoreTest:
                     """
                     SELECT id, source_hash
                     FROM post_versions
-                    WHERE content = 'before edit'
-                    """
+                    WHERE source_hash = ?
+                    """,
+                    (hash_text("before edit"),),
                 ).fetchone()
             store.upsert_post_version_selection(1, old_version_id)
 
@@ -844,8 +845,9 @@ class ThreadArchiveStoreTest:
                     """
                     SELECT id
                     FROM post_versions
-                    WHERE content = 'after edit'
-                    """
+                    WHERE source_hash = ?
+                    """,
+                    (hash_text("after edit"),),
                 ).fetchone()[0]
             with closing(sqlite3.connect(store.db_path)) as connection:
                 connection.execute(
@@ -894,9 +896,9 @@ class ThreadArchiveStoreTest:
             )
             with closing(sqlite3.connect(store.db_path)) as connection:
                 version_ids = {
-                    content: version_id
-                    for version_id, content in connection.execute(
-                        "SELECT id, content FROM post_versions"
+                    source_hash: version_id
+                    for version_id, source_hash in connection.execute(
+                        "SELECT id, source_hash FROM post_versions"
                     )
                 }
 
@@ -907,17 +909,17 @@ class ThreadArchiveStoreTest:
             ):
                 store.upsert_post_version_selection(
                     1,
-                    version_ids["after edit"],
+                    version_ids[hash_text("after edit")],
                 )
 
             selection = store.upsert_post_version_selection(
                 1,
-                version_ids["before edit"],
+                version_ids[hash_text("before edit")],
             )
             selected_fingerprint = store.post_version_selections_fingerprint()
             repeated = store.upsert_post_version_selection(
                 1,
-                version_ids["before edit"],
+                version_ids[hash_text("before edit")],
             )
             repeated_fingerprint = store.post_version_selections_fingerprint()
             with closing(sqlite3.connect(store.db_path)) as connection:
@@ -933,15 +935,15 @@ class ThreadArchiveStoreTest:
             cleared_fingerprint = store.post_version_selections_fingerprint()
 
         assert selection["source_hash"]
-        assert repeated["version_id"] == version_ids["before edit"]
+        assert repeated["version_id"] == version_ids[hash_text("before edit")]
         assert stored_row == (
             1,
-            version_ids["before edit"],
+            version_ids[hash_text("before edit")],
             repeated["selected_at"],
         )
         assert selected_fingerprint != empty_fingerprint
         assert repeated_fingerprint == selected_fingerprint
-        assert latest_version_id == version_ids["after edit"]
+        assert latest_version_id == version_ids[hash_text("after edit")]
         assert cleared_selections == {}
         assert cleared_fingerprint == empty_fingerprint
 
@@ -972,8 +974,9 @@ class ThreadArchiveStoreTest:
             with closing(sqlite3.connect(store.db_path)) as connection:
                 old_version_id = connection.execute(
                     """
-                    SELECT id FROM post_versions WHERE content = 'before edit'
-                    """
+                    SELECT id FROM post_versions WHERE source_hash = ?
+                    """,
+                    (hash_text("before edit"),),
                 ).fetchone()[0]
                 connection.execute("DROP TABLE post_version_selections")
                 connection.commit()

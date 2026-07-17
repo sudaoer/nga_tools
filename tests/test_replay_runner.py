@@ -20,6 +20,7 @@ import uvicorn
 from PIL import Image
 
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.content_codec import decode_content
 from nga_tools.backup.image_store import IMAGE_CACHE_FILENAME
 from nga_tools.backup.floor_models import (
     FLOOR_MAP_GENERATION_VERSION,
@@ -30,6 +31,7 @@ from nga_tools.backup.floor_models import (
 from nga_tools.cli import args_parse, dispatch_command
 from nga_tools.commands.thread_batch import ThreadBatchResult
 from nga_tools.core.downloads import download_files
+from nga_tools.core.hashing import hash_text
 from nga_tools.ngaclient.session import create_api_session
 from nga_tools.replay.offline import (
     ReplayOfflineError,
@@ -130,8 +132,9 @@ def _build_warm_source(tmp_path: Path) -> tuple[Path, Path]:
             """
             SELECT id
             FROM post_versions
-            WHERE content = 'runner historical body'
-            """
+            WHERE source_hash = ?
+            """,
+            (hash_text("runner historical body"),),
         ).fetchone()
     assert version_id is not None
     store.upsert_post_version_selection(0, version_id[0])
@@ -357,7 +360,10 @@ class ReplayStateTest:
                     ON versions.id = selections.version_id
                 """
             ).fetchall()
-        assert selection_rows == [(0, "runner historical body")]
+        assert [
+            (lou, decode_content(content))
+            for lou, content in selection_rows
+        ] == [(0, "runner historical body")]
         assert not (
             target / "123_456" / "post_version_overrides.json"
         ).exists()

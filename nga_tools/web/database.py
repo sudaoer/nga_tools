@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from nga_tools.backup import audio_store, image_store
 from nga_tools.backup.archive_store import ARCHIVE_DB_FILENAME
+from nga_tools.backup.content_codec import decode_content
 from nga_tools.backup.thread_stores import (
     ARCHIVE_CACHE_DB_FILENAME,
     ARCHIVE_STATE_DB_FILENAME,
@@ -45,6 +46,11 @@ _ARCHIVE_STATE_DATABASE_PREFIX = "archive_state:"
 _ARCHIVE_CACHE_DATABASE_PREFIX = "archive_cache:"
 _ROW_PREVIEW_TEXT_LIMIT = 240
 _ROW_PREVIEW_BLOB_BYTES = 64
+_POST_CONTENT_DECODE_FUNCTION = "nga_decode_post_content"
+
+
+def _decode_database_content(value: object) -> str:
+    return decode_content(value, source="数据库浏览器帖子正文")
 
 
 class DatabaseSummary(TypedDict):
@@ -134,6 +140,11 @@ def _connect_readonly(db_path: Path) -> sqlite3.Connection:
     uri = f"file:{quote(str(resolved_path), safe='/:')}?mode=ro"
     connection = sqlite3.connect(uri, uri=True)
     configure_readonly_connection(connection)
+    connection.create_function(
+        _POST_CONTENT_DECODE_FUNCTION,
+        1,
+        _decode_database_content,
+    )
     return connection
 
 
@@ -500,18 +511,27 @@ def _escaped_like_pattern(query: str) -> str:
 def _search_sql(
     columns: list[ColumnInfo],
     query: str,
+    *,
+    decoded_columns: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[str, list[object]]:
     normalized_query = query.strip()
     if not normalized_query:
         return "", []
     if not columns:
         return " WHERE 0", []
-    clauses = [
-        f"CAST({_quote_identifier(column['name'])} AS TEXT) LIKE ? ESCAPE '\\'"
-        for column in columns
-    ]
+    clauses: list[str] = []
+    for column in columns:
+        column_name = column["name"]
+        expression = (
+            f"{_POST_CONTENT_DECODE_FUNCTION}({_quote_identifier(column_name)})"
+            if column_name in decoded_columns
+            else f"CAST({_quote_identifier(column_name)} AS TEXT)"
+        )
+        clauses.append(f"{expression} LIKE ? ESCAPE '\\'")
     pattern = _escaped_like_pattern(normalized_query)
-    return " WHERE (" + " OR ".join(clauses) + ")", [pattern for _ in columns]
+    return " WHERE (" + " OR ".join(clauses) + ")", [
+        pattern for _column in columns
+    ]
 
 
 def _table_has_rowid(connection: sqlite3.Connection, table_name: str) -> bool:
@@ -619,17 +639,39 @@ def read_table_rows(
             if sort_by is not None and sort_by not in column_names:
                 raise ValueError("sort_by必须是当前表字段。")
 
-            where_sql, params = _search_sql(columns, query)
+            decoded_columns: frozenset[str] = (
+                frozenset({"content"})
+                if ref.kind == "archive"
+                and table_name == "post_versions"
+                and "content" in column_names
+                else frozenset()
+            )
+            where_sql, params = _search_sql(
+                columns,
+                query,
+                decoded_columns=decoded_columns,
+            )
             total = _read_filtered_count(connection, table_name, where_sql, params)
             has_rowid = _table_has_rowid(connection, table_name)
             select_columns = ", ".join(
-                _quote_identifier(column_name) for column_name in column_names
+                (
+                    f"{_POST_CONTENT_DECODE_FUNCTION}({_quote_identifier(column_name)}) "
+                    f"AS {_quote_identifier(column_name)}"
+                    if column_name in decoded_columns
+                    else _quote_identifier(column_name)
+                )
+                for column_name in column_names
             )
             rowid_select = "rowid, " if has_rowid else ""
             order_sql = ""
             direction_sql = sort_direction.upper()
             if sort_by is not None:
-                order_sql = f" ORDER BY {_quote_identifier(sort_by)} {direction_sql}"
+                sort_expression = (
+                    f"{_POST_CONTENT_DECODE_FUNCTION}({_quote_identifier(sort_by)})"
+                    if sort_by in decoded_columns
+                    else _quote_identifier(sort_by)
+                )
+                order_sql = f" ORDER BY {sort_expression} {direction_sql}"
                 if has_rowid:
                     order_sql += ", rowid ASC"
             elif has_rowid:
@@ -697,11 +739,27 @@ def read_table_row_detail(
             if not _table_has_rowid(connection, table_name):
                 raise DatabaseUnavailableError("此表不支持rowid详情。")
             column_names = [column["name"] for column in columns]
+            decoded_columns: frozenset[str] = (
+                frozenset({"content"})
+                if ref.kind == "archive"
+                and table_name == "post_versions"
+                and "content" in column_names
+                else frozenset()
+            )
+            select_columns = ", ".join(
+                (
+                    f"{_POST_CONTENT_DECODE_FUNCTION}({_quote_identifier(column_name)}) "
+                    f"AS {_quote_identifier(column_name)}"
+                    if column_name in decoded_columns
+                    else _quote_identifier(column_name)
+                )
+                for column_name in column_names
+            )
             row = cast(
                 Optional[tuple[object, ...]],
                 connection.execute(
                     f"""
-                    SELECT {", ".join(_quote_identifier(name) for name in column_names)}
+                    SELECT {select_columns}
                     FROM {_quote_identifier(table_name)}
                     WHERE rowid = ?
                     """,

@@ -52,6 +52,10 @@ from nga_tools.backup.image_store_metrics import use_image_store_metrics
 from nga_tools.backup.image_store import use_image_download_coordination
 from nga_tools.timing import time_section, use_timing_log
 from nga_tools.storage.layout_migration import migrate_layout, rollback_layout
+from nga_tools.storage.content_migration import (
+    migrate_content,
+    rollback_content,
+)
 
 
 class BackupFetchFunc(Protocol):
@@ -359,6 +363,58 @@ def backup_migrate_layout(args: CommandArgs) -> None:
         report_warning(
             WarningCategory.MIGRATION,
             f"布局迁移失败：{folder}：{error}",
+        )
+    if result.failures:
+        raise SystemExit(1)
+
+
+def backup_migrate_content(args: CommandArgs) -> None:
+    app_config = get_config()
+    output_root = Path(app_config.output_dir)
+    rollback_run_id = optional_str(args, "rollback")
+    dry_run = optional_bool(args, "dry_run")
+    with use_output_root_lock(output_root):
+        if rollback_run_id is not None:
+            result = rollback_content(output_root, rollback_run_id)
+            report_info(
+                f"正文压缩迁移已回滚：run_id={result.run_id}，"
+                f"恢复{result.restored_count}个帖子目录。"
+            )
+            return
+
+        if optional_bool(args, "all"):
+            folders = _layout_candidate_folders(output_root)
+        else:
+            tid, aid = resolve_command_thread_target(args)
+            aid_text = "all" if aid is None else str(aid)
+            folders = [output_root / f"{tid}_{aid_text}"]
+        if not folders and not optional_bool(args, "all"):
+            report_info("没有找到需要迁移的archive.sqlite3。")
+            return
+
+        result = migrate_content(
+            output_root,
+            folders,
+            dry_run=dry_run,
+        )
+
+    raw_bytes = sum(item.raw_content_bytes for item in result.stats)
+    compressed_bytes = sum(
+        item.compressed_content_bytes for item in result.stats
+    )
+    saved_bytes = raw_bytes - compressed_bytes
+    mode = "正文压缩预估" if dry_run else "正文压缩迁移"
+    report_info(
+        f"{mode}完成：run_id={result.run_id or 'dry-run'}，"
+        f"迁移{result.migrated_count}个，跳过{result.skipped_count}个，"
+        f"失败{len(result.failures)}个，"
+        f"原始正文{raw_bytes}字节，压缩后{compressed_bytes}字节，"
+        f"预计节省{saved_bytes}字节。"
+    )
+    for folder, error in result.failures:
+        report_warning(
+            WarningCategory.MIGRATION,
+            f"正文压缩迁移失败：{folder}：{error}",
         )
     if result.failures:
         raise SystemExit(1)
