@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import datetime
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, Optional
 
+import nga_tools.config as config
 from nga_tools.backup import archive_image_processing
 from nga_tools.backup.archive_processing_models import ArchiveIncrementalChanges
 from nga_tools.backup.archive_store import ThreadArchiveStore
@@ -27,6 +29,12 @@ from nga_tools.backup.image_reference_cache import (
 )
 from nga_tools.backup.image_store import ImageDownloadTask
 from nga_tools.backup.models import PostRecord
+from nga_tools.backup.missing_floor_retry import (
+    MissingFloorRetrySelection,
+    consecutive_missing_floor_groups,
+    pending_missing_floor_retries_after_attempt,
+    select_missing_floor_retries,
+)
 from nga_tools.backup.post_html import (
     fill_missing_post_records as _fill_missing_post_records,
     find_missing_lou as _find_missing_lou,
@@ -41,6 +49,7 @@ from nga_tools.backup.processing_state import (
     ImageReferenceManifestPost,
     ImageReferenceState,
     PendingImageRetry,
+    PendingMissingFloorRetry,
 )
 from nga_tools.console import WarningCategory, report_info, report_warning
 from nga_tools.ngaclient import NGAClient
@@ -63,6 +72,7 @@ ProcessingStateReuseReason = Literal[
     "missing_floor_recovered",
     "state_changed_during_image_retry",
 ]
+MissingFloorRetryMode = Literal["immediate", "scheduled"]
 
 
 @dataclass(frozen=True)
@@ -101,6 +111,73 @@ class ProcessingStateReuseResult:
     reason: ProcessingStateReuseReason
 
 
+def _thread_retry_target_key(tid: int, aid: int) -> str:
+    return f"{tid}:{aid}"
+
+
+def select_missing_floor_retries_for_archive(
+    archive_store: ThreadArchiveStore,
+    tid: int,
+    aid: int,
+    missing_lous: list[int],
+    retries: Sequence[PendingMissingFloorRetry],
+    *,
+    now: datetime.datetime,
+    mode: MissingFloorRetryMode,
+) -> MissingFloorRetrySelection:
+    groups = consecutive_missing_floor_groups(missing_lous)
+    next_postdates = (
+        archive_store.posts.read_next_postdates_after_lous(
+            [group[-1] for group in groups]
+        )
+        if mode == "scheduled"
+        else {}
+    )
+    app_config = config.get_config()
+    selection = select_missing_floor_retries(
+        missing_lous,
+        next_postdates_by_gap_end=next_postdates,
+        retries=retries,
+        thread_target_key=_thread_retry_target_key(tid, aid),
+        now=now,
+        immediate_window=datetime.timedelta(
+            hours=app_config.ankebak_missing_floor_immediate_retry_hours
+        ),
+        max_interval=datetime.timedelta(
+            hours=app_config.ankebak_missing_floor_retry_max_interval_hours
+        ),
+        force=mode == "immediate",
+    )
+    record_timing_metric("缺失楼连续缺口组数", len(selection.gaps))
+    record_timing_metric("本次重试缺失楼数", len(selection.due_lous))
+    record_timing_metric("本次重试缺口组数", len(selection.due_gaps))
+    record_timing_metric("概率延后缺失楼数", len(selection.deferred_lous))
+    record_timing_metric("概率延后缺口组数", len(selection.deferred_gaps))
+    record_timing_metric("缺失楼重试共享调度组数", int(bool(selection.gaps)))
+    record_timing_metric(
+        "缺失楼重试共享调度放行组数",
+        int(bool(selection.due_gaps)),
+    )
+    return selection
+
+
+def _store_missing_floor_attempt_result(
+    archive_store: ThreadArchiveStore,
+    snapshot: BackupProcessingSnapshot,
+    *,
+    unresolved_lous: list[int],
+    attempted_lous: tuple[int, ...],
+    attempted_at: datetime.datetime,
+) -> None:
+    retries_after = pending_missing_floor_retries_after_attempt(
+        snapshot.pending_missing_floor_retries,
+        unresolved_lous=unresolved_lous,
+        attempted_lous=attempted_lous,
+        attempted_at=attempted_at,
+    )
+    archive_store.state.replace_pending_missing_floor_retries(retries_after)
+
+
 
 def _build_floor_map_for_post_refs(
     client: NGAClient,
@@ -109,6 +186,7 @@ def _build_floor_map_for_post_refs(
     aid: Optional[int],
     post_refs: list[AuthorPostRef],
     missing_lou: list[int],
+    retry_missing_lou: tuple[int, ...] | None = None,
 ) -> FloorMapProcessingResult:
     if aid is None:
         return FloorMapProcessingResult(
@@ -134,6 +212,7 @@ def _build_floor_map_for_post_refs(
                 aid,
                 post_refs,
                 missing_lou,
+                retry_missing_author_lous=retry_missing_lou,
                 strict=False,
             ),
             cacheable=True,
@@ -185,6 +264,33 @@ def _author_post_refs_and_missing_lous(
             total_lou_count=author_total_lou_count,
         )
     return post_refs, _merge_missing_lou(missing_lous, previous_missing_lous)
+
+
+def _unresolved_missing_lous_from_archive_records(
+    archive_store: ThreadArchiveStore,
+    missing_lous: Sequence[int],
+) -> list[int]:
+    if not missing_lous:
+        return []
+    present_lous = {
+        record["lou"]
+        for record in archive_store.posts.read_latest_post_record_summaries()
+    }
+    return [lou for lou in missing_lous if lou not in present_lous]
+
+
+def read_unresolved_missing_floor_lous(
+    archive_store: ThreadArchiveStore,
+    author_total_lou_count: int | None,
+) -> list[int]:
+    _post_refs, missing_lous = _author_post_refs_and_missing_lous(
+        archive_store,
+        author_total_lou_count,
+    )
+    return _unresolved_missing_lous_from_archive_records(
+        archive_store,
+        missing_lous,
+    )
 
 
 
@@ -288,15 +394,37 @@ def _refresh_author_floor_state(
     page_count: int,
     author_total_lou_count: int | None,
     expected_snapshot: BackupProcessingSnapshot,
+    missing_floor_retry_mode: MissingFloorRetryMode,
     commit_even_if_unchanged: bool = True,
 ) -> _FloorStateRefreshResult:
     post_refs, missing_lous = _author_post_refs_and_missing_lous(
         archive_store,
         author_total_lou_count,
     )
-    record_timing_metric("待恢复缺失楼数", len(missing_lous))
-    if not missing_lous and not commit_even_if_unchanged:
+    unresolved_missing_lous = _unresolved_missing_lous_from_archive_records(
+        archive_store,
+        missing_lous,
+    )
+    record_timing_metric("待恢复缺失楼数", len(unresolved_missing_lous))
+    attempted_at = datetime.datetime.now(datetime.timezone.utc)
+    retry_selection = select_missing_floor_retries_for_archive(
+        archive_store,
+        tid,
+        aid,
+        unresolved_missing_lous,
+        expected_snapshot.pending_missing_floor_retries,
+        now=attempted_at,
+        mode=missing_floor_retry_mode,
+    )
+    if not unresolved_missing_lous and not commit_even_if_unchanged:
         record_timing_metric("本次恢复缺失楼数", 0)
+        _store_missing_floor_attempt_result(
+            archive_store,
+            expected_snapshot,
+            unresolved_lous=[],
+            attempted_lous=(),
+            attempted_at=attempted_at,
+        )
         return _FloorStateRefreshResult(
             True,
             expected_snapshot,
@@ -312,6 +440,7 @@ def _refresh_author_floor_state(
             aid,
             post_refs,
             missing_lous,
+            retry_selection.due_lous,
         )
     with time_section("恢复正文事务写入"):
         recovered_result = archive_store.ingest.upsert_recovered_posts(
@@ -328,6 +457,19 @@ def _refresh_author_floor_state(
             recovered_result.effective_changed_lous,
             recovered_result.effective_added_lous,
         )
+    recovered_lous = set(
+        floor_processing.build_result.recovered_missing_posts_by_author_lou
+    )
+    unresolved_after = [
+        lou for lou in unresolved_missing_lous if lou not in recovered_lous
+    ]
+    _store_missing_floor_attempt_result(
+        archive_store,
+        expected_snapshot,
+        unresolved_lous=unresolved_after,
+        attempted_lous=retry_selection.due_lous,
+        attempted_at=attempted_at,
+    )
     with time_section("处理状态快照重读"):
         snapshot = archive_store.state.read_backup_processing_snapshot()
     if (
@@ -365,6 +507,7 @@ def _try_processing_state_reuse(
     page_count: int,
     author_total_lou_count: int | None,
     local_pages_cover_remote: bool,
+    missing_floor_retry_mode: MissingFloorRetryMode,
     processing_snapshot: BackupProcessingSnapshot | None = None,
     incremental_changes: ArchiveIncrementalChanges | None = None,
 ) -> ProcessingStateReuseResult:
@@ -412,6 +555,7 @@ def _try_processing_state_reuse(
                 page_count=page_count,
                 author_total_lou_count=author_total_lou_count,
                 expected_snapshot=snapshot,
+                missing_floor_retry_mode=missing_floor_retry_mode,
             )
             snapshot = floor_refresh.snapshot
             if not floor_refresh.succeeded:
@@ -437,6 +581,7 @@ def _try_processing_state_reuse(
                     page_count=page_count,
                     author_total_lou_count=author_total_lou_count,
                     expected_snapshot=snapshot,
+                    missing_floor_retry_mode=missing_floor_retry_mode,
                     commit_even_if_unchanged=False,
                 )
                 snapshot = floor_refresh.snapshot
@@ -592,6 +737,7 @@ def run_full_processing(
     page_count: int,
     author_total_lou_count: int | None,
     force_image_retries: bool,
+    missing_floor_retry_mode: MissingFloorRetryMode = "immediate",
 ) -> None:
     record_timing_label("图片引用处理模式", "full")
     fingerprints_before = (
@@ -611,7 +757,29 @@ def run_full_processing(
                 author_total_lou_count,
                 records,
             )
-            record_timing_metric("待恢复缺失楼数", len(missing_lous))
+            present_lous = {record["lou"] for record in records}
+            unresolved_missing_lous = [
+                lou for lou in missing_lous if lou not in present_lous
+            ]
+            record_timing_metric(
+                "待恢复缺失楼数",
+                len(unresolved_missing_lous),
+            )
+        retry_snapshot = archive_store.state.read_backup_processing_snapshot()
+        attempted_at = datetime.datetime.now(datetime.timezone.utc)
+        if aid is None:
+            retry_missing_lous: tuple[int, ...] | None = None
+        else:
+            retry_selection = select_missing_floor_retries_for_archive(
+                archive_store,
+                tid,
+                aid,
+                unresolved_missing_lous,
+                retry_snapshot.pending_missing_floor_retries,
+                now=attempted_at,
+                mode=missing_floor_retry_mode,
+            )
+            retry_missing_lous = retry_selection.due_lous
         with time_section("楼层映射生成/复用"):
             floor_map_processing = _build_floor_map_for_post_refs(
                 client,
@@ -620,6 +788,7 @@ def run_full_processing(
                 aid,
                 post_refs,
                 missing_lous,
+                retry_missing_lous,
             )
         with time_section("恢复正文写入与缺失楼合并"):
             record_processing = _records_with_recovered_and_missing_posts(
@@ -627,6 +796,14 @@ def run_full_processing(
                 floor_map_processing.build_result,
                 missing_lous,
                 records,
+            )
+        if aid is not None and floor_map_processing.cacheable:
+            _store_missing_floor_attempt_result(
+                archive_store,
+                retry_snapshot,
+                unresolved_lous=record_processing.unresolved_missing_lous,
+                attempted_lous=retry_missing_lous or (),
+                attempted_at=attempted_at,
             )
 
     with time_section("正文解析与图片处理"):
@@ -665,6 +842,7 @@ def reuse_processing_state_after_page_refresh(
     author_total_lou_count: int | None,
     local_pages_cover_remote: bool,
     force_processing: bool,
+    missing_floor_retry_mode: MissingFloorRetryMode = "immediate",
     processing_snapshot: BackupProcessingSnapshot | None = None,
     incremental_changes: ArchiveIncrementalChanges | None = None,
 ) -> ProcessingStateReuseResult:
@@ -681,6 +859,7 @@ def reuse_processing_state_after_page_refresh(
                 page_count=page_count,
                 author_total_lou_count=author_total_lou_count,
                 local_pages_cover_remote=local_pages_cover_remote,
+                missing_floor_retry_mode=missing_floor_retry_mode,
                 processing_snapshot=processing_snapshot,
                 incremental_changes=incremental_changes,
             )

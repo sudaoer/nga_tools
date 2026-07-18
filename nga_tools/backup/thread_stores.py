@@ -57,6 +57,9 @@ _STATE_COLUMNS = {
         ("url", "TEXT"), ("last_attempt_at", "TEXT"),
         ("failure_kind", "TEXT"), ("http_status", "INTEGER"),
     ),
+    "backup_pending_missing_floors": (
+        ("author_lou", "INTEGER"), ("last_attempt_at", "TEXT"),
+    ),
     "backup_audio_processing_state": (
         ("singleton", "INTEGER"), ("format_version", "INTEGER"),
         ("extractor_version", "INTEGER"),
@@ -305,6 +308,14 @@ class ThreadArchiveStateStore:
                 last_attempt_at TEXT,
                 failure_kind TEXT,
                 http_status INTEGER
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backup_pending_missing_floors (
+                author_lou INTEGER PRIMARY KEY CHECK(author_lou >= 0),
+                last_attempt_at TEXT NOT NULL CHECK(last_attempt_at != '')
             )
             """
         )

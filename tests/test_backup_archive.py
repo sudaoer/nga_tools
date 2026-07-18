@@ -5,6 +5,7 @@ import json
 import sqlite3
 from collections.abc import Sequence
 from contextlib import ExitStack, closing, redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 from unittest.mock import patch
@@ -165,10 +166,12 @@ def _run_backup(
     aid: int | None = 456,
     full_processing_calls: list[str] | None = None,
     floor_map_calls: list[str] | None = None,
+    retry_missing_lou_calls: list[tuple[int, ...] | None] | None = None,
     captured_output: io.StringIO | None = None,
     download_error: Exception | None = None,
     force_processing: bool = False,
     allow_unchanged_author_fast_path: bool = False,
+    schedule_missing_floor_retries: bool = False,
 ) -> None:
     floor_map_result = floor_map_result or FloorMapBuildResult(
         FloorLabels.plain(),
@@ -215,7 +218,17 @@ def _run_backup(
         original_run_full_processing(*args, **kwargs)  # type: ignore[arg-type]
 
     def capture_floor_map(*args: object, **kwargs: object) -> FloorMapProcessingResult:
-        del args, kwargs
+        retry_missing_lous = (
+            args[6]
+            if len(args) > 6
+            else kwargs.get("retry_missing_lou")
+        )
+        if retry_missing_lou_calls is not None:
+            assert retry_missing_lous is None or isinstance(
+                retry_missing_lous,
+                tuple,
+            )
+            retry_missing_lou_calls.append(retry_missing_lous)
         if floor_map_calls is not None:
             floor_map_calls.append("build")
         return FloorMapProcessingResult(
@@ -269,9 +282,14 @@ def _run_backup(
                 aid,
                 write_json=write_json,
                 force_processing=force_processing,
+                schedule_missing_floor_retries=schedule_missing_floor_retries,
             )
         elif mode == "maintenance":
-            maintain_thread_backup(123, aid)
+            maintain_thread_backup(
+                123,
+                aid,
+                schedule_missing_floor_retries=schedule_missing_floor_retries,
+            )
         else:
             backup_thread_sub(
                 123,
@@ -281,6 +299,7 @@ def _run_backup(
                 allow_unchanged_author_fast_path=(
                     allow_unchanged_author_fast_path
                 ),
+                schedule_missing_floor_retries=schedule_missing_floor_retries,
             )
 
 
@@ -1390,6 +1409,137 @@ class BackupRawArchiveTest:
         assert downloaded_urls == [[image_url], [image_url]]
         assert full_processing_calls == ["full"]
 
+    def test_ankebak_defers_old_missing_floor_after_initial_attempt(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        old_postdate = int(
+            (datetime.now(timezone.utc) - timedelta(days=400)).timestamp()
+        )
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": "first"},
+            {
+                "lou": 3,
+                "pid": 1003,
+                "content": "third",
+                "postdate": old_postdate,
+            },
+        ]
+        client.vrows = 4
+        retry_missing_lou_calls: list[tuple[int, ...] | None] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            retry_missing_lou_calls=retry_missing_lou_calls,
+        )
+        first_snapshot = ThreadArchiveStore(
+            thread_dir
+        ).state.read_backup_processing_snapshot()
+
+        with patch(
+            "nga_tools.backup.missing_floor_retry.stable_retry_ticket",
+            return_value=0.9,
+        ):
+            _run_backup(
+                thread_dir,
+                client,
+                retry_missing_lou_calls=retry_missing_lou_calls,
+                schedule_missing_floor_retries=True,
+            )
+            with patch.object(
+                archive_module,
+                "get_folder",
+                side_effect=_fake_get_folder(thread_dir),
+            ):
+                local_work = backup_local_work_kind(123, 456)
+
+        deferred_snapshot = ThreadArchiveStore(
+            thread_dir
+        ).state.read_backup_processing_snapshot()
+        _run_backup(
+            thread_dir,
+            client,
+            retry_missing_lou_calls=retry_missing_lou_calls,
+        )
+
+        assert retry_missing_lou_calls == [(2,), (), (2,)]
+        assert local_work is None
+        assert first_snapshot.pending_missing_floor_retries
+        assert (
+            deferred_snapshot.pending_missing_floor_retries
+            == first_snapshot.pending_missing_floor_retries
+        )
+
+    def test_ankebak_retries_recent_missing_floor_every_run(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        recent_postdate = int(
+            (datetime.now(timezone.utc) - timedelta(days=3)).timestamp()
+        )
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": "first"},
+            {
+                "lou": 3,
+                "pid": 1003,
+                "content": "third",
+                "postdate": recent_postdate,
+            },
+        ]
+        client.vrows = 4
+        retry_missing_lou_calls: list[tuple[int, ...] | None] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            retry_missing_lou_calls=retry_missing_lou_calls,
+        )
+        with patch(
+            "nga_tools.backup.missing_floor_retry.stable_retry_ticket",
+            return_value=0.999,
+        ):
+            _run_backup(
+                thread_dir,
+                client,
+                retry_missing_lou_calls=retry_missing_lou_calls,
+                schedule_missing_floor_retries=True,
+            )
+            with patch.object(
+                archive_module,
+                "get_folder",
+                side_effect=_fake_get_folder(thread_dir),
+            ):
+                local_work = backup_local_work_kind(123, 456)
+
+        assert retry_missing_lou_calls == [(2,), (2,)]
+        assert local_work == "maintenance"
+
+    def test_ankebak_treats_tail_gap_without_next_post_as_local_work(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        client.posts = [
+            {"lou": 1, "pid": 1001, "content": "first"},
+        ]
+        client.vrows = 3
+
+        _run_backup(thread_dir, client)
+        with patch.object(
+            archive_module,
+            "get_folder",
+            side_effect=_fake_get_folder(thread_dir),
+        ):
+            local_work = backup_local_work_kind(123, 456)
+
+        assert local_work == "maintenance"
+
     def test_failed_missing_floor_retry_preserves_existing_state(
         self,
         tmp_path: Path,
@@ -1461,30 +1611,39 @@ class BackupRawArchiveTest:
             {2: recovered},
         )
         full_processing_calls: list[str] = []
+        retry_missing_lou_calls: list[tuple[int, ...] | None] = []
 
         _run_backup(
             thread_dir,
             client,
             floor_map_result=unresolved_result,
             full_processing_calls=full_processing_calls,
+            retry_missing_lou_calls=retry_missing_lou_calls,
         )
         _run_backup(
             thread_dir,
             client,
             floor_map_result=recovered_result,
             full_processing_calls=full_processing_calls,
+            retry_missing_lou_calls=retry_missing_lou_calls,
         )
         _run_backup(
             thread_dir,
             client,
             floor_map_result=recovered_result,
             full_processing_calls=full_processing_calls,
+            retry_missing_lou_calls=retry_missing_lou_calls,
         )
 
         records = ThreadArchiveStore(thread_dir).posts.read_effective_post_records()
+        retry_snapshot = ThreadArchiveStore(
+            thread_dir
+        ).state.read_backup_processing_snapshot()
         assert full_processing_calls == ["full"]
         assert [record["lou"] for record in records] == [1, 2, 3]
         assert records[1]["post"]["content"] == "recovered body"
+        assert retry_snapshot.pending_missing_floor_retries == ()
+        assert retry_missing_lou_calls == [(2,), (2,)]
 
     def test_full_processing_reuses_initial_records_without_recovery_write(
         self,

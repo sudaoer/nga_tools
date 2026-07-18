@@ -21,6 +21,8 @@ DEFAULT_AUDIO_CONCURRENCY = 8
 DEFAULT_BACKUP_CONFIGS_WORKERS = 4
 DEFAULT_TIMING_LOG_ENABLED = True
 DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS = 168
+DEFAULT_ANKEBAK_MISSING_FLOOR_IMMEDIATE_RETRY_HOURS = 168
+DEFAULT_ANKEBAK_MISSING_FLOOR_RETRY_MAX_INTERVAL_HOURS = 720
 DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS = 168
 DEFAULT_BACKUP_AUDIO_RETRY_MAX_INTERVAL_HOURS = 168
 
@@ -50,6 +52,8 @@ class AppConfig:
     backup_configs_workers: int
     timing_log_enabled: bool
     ankebak_full_backup_interval_hours: int
+    ankebak_missing_floor_immediate_retry_hours: int
+    ankebak_missing_floor_retry_max_interval_hours: int
     backup_image_retry_max_interval_hours: int
     backup_audio_retry_max_interval_hours: int
 
@@ -337,6 +341,18 @@ def load_config(
             "ankebak_full_backup_interval_hours",
             resolved_config_path,
             DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS,
+        ),
+        ankebak_missing_floor_immediate_retry_hours=_optional_positive_int(
+            config_data,
+            "ankebak_missing_floor_immediate_retry_hours",
+            resolved_config_path,
+            DEFAULT_ANKEBAK_MISSING_FLOOR_IMMEDIATE_RETRY_HOURS,
+        ),
+        ankebak_missing_floor_retry_max_interval_hours=_optional_positive_int(
+            config_data,
+            "ankebak_missing_floor_retry_max_interval_hours",
+            resolved_config_path,
+            DEFAULT_ANKEBAK_MISSING_FLOOR_RETRY_MAX_INTERVAL_HOURS,
         ),
         backup_image_retry_max_interval_hours=_optional_positive_int(
             config_data,

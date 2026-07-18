@@ -41,6 +41,12 @@ def isolate_default_output_dir(
         ankebak_full_backup_interval_hours=(
             config.DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS
         ),
+        ankebak_missing_floor_immediate_retry_hours=(
+            config.DEFAULT_ANKEBAK_MISSING_FLOOR_IMMEDIATE_RETRY_HOURS
+        ),
+        ankebak_missing_floor_retry_max_interval_hours=(
+            config.DEFAULT_ANKEBAK_MISSING_FLOOR_RETRY_MAX_INTERVAL_HOURS
+        ),
         backup_image_retry_max_interval_hours=(
             config.DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS
         ),

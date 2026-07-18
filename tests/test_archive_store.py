@@ -202,6 +202,42 @@ class ThreadArchiveStoreTest:
 
         assert refs == [{"pid": 1002, "author_lou": 1}]
 
+    def test_reads_first_valid_postdate_after_missing_gap_end(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ingest.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [
+                        {"lou": 1, "pid": 1001, "content": "first"},
+                        {
+                            "lou": 3,
+                            "pid": 1003,
+                            "content": "third",
+                            "postdate": 123456,
+                        },
+                        {
+                            "lou": 5,
+                            "pid": 1005,
+                            "content": "fifth",
+                            "postdate": "2026-07-18T08:00:00+08:00",
+                        },
+                    ],
+                },
+            )
+
+            postdates = store.posts.read_next_postdates_after_lous(
+                [1, 2, 3, 5]
+            )
+
+        assert postdates == {
+            1: 123456,
+            2: 123456,
+            3: "2026-07-18T08:00:00+08:00",
+            5: None,
+        }
+
     def test_schema_rejects_legacy_latest_post_index_without_mutating_it(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
@@ -1314,7 +1350,8 @@ class ThreadArchiveStoreTest:
                             'backup_image_reference_manifest_posts',
                             'backup_image_reference_manifest_entries',
                             'backup_image_reference_manifest_urls',
-                            'backup_pending_images'
+                            'backup_pending_images',
+                            'backup_pending_missing_floors'
                         )
                         """
                     )
@@ -1361,6 +1398,7 @@ class ThreadArchiveStoreTest:
             "backup_image_reference_manifest_entries",
             "backup_image_reference_manifest_urls",
             "backup_pending_images",
+            "backup_pending_missing_floors",
         }
 
     def test_unexpected_archive_table_is_rejected_without_mutation(self) -> None:

@@ -97,7 +97,7 @@ def _jobs_for_threads(
             continue
 
         try:
-            local_work = backup_local_work_kind(tid, aid)
+            local_work = backup_local_work_kind(tid, aid, now=now)
         except Exception as error:
             jobs.append(
                 AnkebakJob(
@@ -197,16 +197,26 @@ def backup_auto(args: CommandArgs) -> None:
             use_image_validation_cache(validation_cache),
         ):
             if job.mode == "full":
-                backup_thread(tid, aid, write_json=write_json)
+                backup_thread(
+                    tid,
+                    aid,
+                    write_json=write_json,
+                    schedule_missing_floor_retries=True,
+                )
             elif job.mode == "sub":
                 backup_thread_sub(
                     tid,
                     aid,
                     write_json=write_json,
                     allow_unchanged_author_fast_path=True,
+                    schedule_missing_floor_retries=True,
                 )
             else:
-                maintain_thread_backup(tid, aid)
+                maintain_thread_backup(
+                    tid,
+                    aid,
+                    schedule_missing_floor_retries=True,
+                )
 
         state_store.record_success(
             tid=tid,

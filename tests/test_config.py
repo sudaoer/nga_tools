@@ -10,6 +10,8 @@ from nga_tools.config import (
     DEFAULT_AUDIO_CONCURRENCY,
     DEFAULT_BACKUP_CONFIGS_WORKERS,
     DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS,
+    DEFAULT_ANKEBAK_MISSING_FLOOR_IMMEDIATE_RETRY_HOURS,
+    DEFAULT_ANKEBAK_MISSING_FLOOR_RETRY_MAX_INTERVAL_HOURS,
     DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS,
     DEFAULT_BACKUP_AUDIO_RETRY_MAX_INTERVAL_HOURS,
     DEFAULT_IMAGE_CONCURRENCY,
@@ -79,6 +81,14 @@ class ConfigConcurrencyTest:
             == DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS
         )
         assert (
+            app_config.ankebak_missing_floor_immediate_retry_hours
+            == DEFAULT_ANKEBAK_MISSING_FLOOR_IMMEDIATE_RETRY_HOURS
+        )
+        assert (
+            app_config.ankebak_missing_floor_retry_max_interval_hours
+            == DEFAULT_ANKEBAK_MISSING_FLOOR_RETRY_MAX_INTERVAL_HOURS
+        )
+        assert (
             app_config.backup_image_retry_max_interval_hours
             == DEFAULT_BACKUP_IMAGE_RETRY_MAX_INTERVAL_HOURS
         )
@@ -98,6 +108,8 @@ class ConfigConcurrencyTest:
                     "backup_configs_workers": 3,
                     "timing_log_enabled": False,
                     "ankebak_full_backup_interval_hours": 36,
+                    "ankebak_missing_floor_immediate_retry_hours": 24,
+                    "ankebak_missing_floor_retry_max_interval_hours": 240,
                     "backup_image_retry_max_interval_hours": 72,
                     "backup_audio_retry_max_interval_hours": 48,
                 },
@@ -111,6 +123,8 @@ class ConfigConcurrencyTest:
         assert app_config.backup_configs_workers == 3
         assert app_config.timing_log_enabled is False
         assert app_config.ankebak_full_backup_interval_hours == 36
+        assert app_config.ankebak_missing_floor_immediate_retry_hours == 24
+        assert app_config.ankebak_missing_floor_retry_max_interval_hours == 240
         assert app_config.backup_image_retry_max_interval_hours == 72
         assert app_config.backup_audio_retry_max_interval_hours == 48
 
@@ -123,6 +137,8 @@ class ConfigConcurrencyTest:
             {"backup_configs_workers": 0},
             {"timing_log_enabled": "yes"},
             {"ankebak_full_backup_interval_hours": 0},
+            {"ankebak_missing_floor_immediate_retry_hours": 0},
+            {"ankebak_missing_floor_retry_max_interval_hours": 0},
             {"backup_image_retry_max_interval_hours": 0},
             {"backup_audio_retry_max_interval_hours": 0},
         ],

@@ -377,8 +377,13 @@ def test_backup_auto_isolates_planning_failure_and_omits_success_detail(
             full_backup=True,
         )
 
-    def local_work_side_effect(tid: int, aid: int | None) -> str:
-        del aid
+    def local_work_side_effect(
+        tid: int,
+        aid: int | None,
+        *,
+        now: datetime,
+    ) -> str:
+        del aid, now
         if tid == 101:
             raise sqlite3.DatabaseError("corrupt archive")
         return "maintenance"
@@ -421,7 +426,11 @@ def test_backup_auto_isolates_planning_failure_and_omits_success_detail(
             backup_auto({"workers": 1})
 
     assert context.value.code == 1
-    maintain.assert_called_once_with(102, 202)
+    maintain.assert_called_once_with(
+        102,
+        202,
+        schedule_missing_floor_retries=True,
+    )
     states = store.load_states()
     assert states[ankebak_target_key(101, 201)].last_backup_success_at == completed_at
     assert states[ankebak_target_key(102, 202)].last_backup_success_at > completed_at

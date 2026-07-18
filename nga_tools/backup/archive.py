@@ -14,7 +14,6 @@ from nga_tools.backup.audio_pipeline import (
     maintain_archived_audio,
     pending_audio_retry_is_due,
 )
-from nga_tools.backup.floor_map import read_unresolved_missing_author_lous_from_archive
 from nga_tools.backup.page_store import (
     author_total_lou_count_from_page_data as _author_total_lou_count_from_page_data,
     fetch_backup_pages as _fetch_backup_pages,
@@ -52,7 +51,12 @@ def _record_archive_upsert_metrics(result: ArchivePagesUpsertResult) -> None:
 def backup_local_work_kind(
     tid: int,
     aid: Optional[int],
+    *,
+    now: datetime.datetime | None = None,
 ) -> BackupLocalWorkKind | None:
+    schedule_now = (
+        datetime.datetime.now(datetime.timezone.utc) if now is None else now
+    )
     thread_folder = Path(get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
     if not archive_store.exists():
@@ -98,7 +102,7 @@ def backup_local_work_kind(
         tid,
         aid,
         snapshot.pending_audio_retries,
-        now=datetime.datetime.now(datetime.timezone.utc),
+        now=schedule_now,
     ):
         return "maintenance"
     if snapshot.pending_image_retries:
@@ -106,16 +110,30 @@ def backup_local_work_kind(
             tid,
             aid,
             snapshot.pending_image_retries,
-            now=datetime.datetime.now(datetime.timezone.utc),
+            now=schedule_now,
             force=False,
         )
         if retry_selection.due:
             return "maintenance"
-    if aid is not None and read_unresolved_missing_author_lous_from_archive(
-        archive_store,
-        total_lou_count=author_total_lou_count,
-    ):
-        return "maintenance"
+    if aid is not None:
+        missing_lous = archive_processing.read_unresolved_missing_floor_lous(
+            archive_store,
+            author_total_lou_count,
+        )
+        if missing_lous:
+            retry_selection = (
+                archive_processing.select_missing_floor_retries_for_archive(
+                    archive_store,
+                    tid,
+                    aid,
+                    missing_lous,
+                    snapshot.pending_missing_floor_retries,
+                    now=schedule_now,
+                    mode="scheduled",
+                )
+            )
+            if retry_selection.due_lous:
+                return "maintenance"
     return None
 
 
@@ -128,7 +146,12 @@ def _read_incremental_base_snapshot(
         return None
 
 
-def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
+def maintain_thread_backup(
+    tid: int,
+    aid: Optional[int],
+    *,
+    schedule_missing_floor_retries: bool = False,
+) -> None:
     thread_folder = Path(get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
     with time_section("处理状态Schema兼容检查"):
@@ -158,6 +181,9 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
         author_total_lou_count=author_total_lou_count,
         local_pages_cover_remote=local_pages_cover_remote,
         force_processing=False,
+        missing_floor_retry_mode=(
+            "scheduled" if schedule_missing_floor_retries else "immediate"
+        ),
         processing_snapshot=snapshot,
         incremental_changes=ArchiveIncrementalChanges(
             snapshot,
@@ -175,6 +201,9 @@ def maintain_thread_backup(tid: int, aid: Optional[int]) -> None:
             page_count=pagination.page_count,
             author_total_lou_count=author_total_lou_count,
             force_image_retries=False,
+            missing_floor_retry_mode=(
+                "scheduled" if schedule_missing_floor_retries else "immediate"
+            ),
         )
     maintain_archived_audio(
         tid,
@@ -191,6 +220,7 @@ def backup_thread(
     *,
     write_json: bool = False,
     force_processing: bool = False,
+    schedule_missing_floor_retries: bool = False,
 ) -> None:
     with time_section("客户端初始化"):
         client = NGAClient()
@@ -257,6 +287,11 @@ def backup_thread(
         author_total_lou_count=author_total_lou_count,
         local_pages_cover_remote=local_pages_cover_remote,
         force_processing=force_processing,
+        missing_floor_retry_mode=(
+            "scheduled"
+            if schedule_missing_floor_retries and not force_processing
+            else "immediate"
+        ),
         incremental_changes=ArchiveIncrementalChanges(
             previous_processing_snapshot,
             upsert_result.effective_changed_lous,
@@ -273,6 +308,11 @@ def backup_thread(
             page_count=page_count,
             author_total_lou_count=author_total_lou_count,
             force_image_retries=force_processing,
+            missing_floor_retry_mode=(
+                "scheduled"
+                if schedule_missing_floor_retries and not force_processing
+                else "immediate"
+            ),
         )
     maintain_archived_audio(
         tid,
@@ -289,6 +329,7 @@ def backup_thread_sub(
     write_json: bool = False,
     force_processing: bool = False,
     allow_unchanged_author_fast_path: bool = False,
+    schedule_missing_floor_retries: bool = False,
 ) -> None:
     with time_section("客户端初始化"):
         client = NGAClient()
@@ -451,6 +492,11 @@ def backup_thread_sub(
             set(range(1, page_count + 1)) <= available_page_numbers
         ),
         force_processing=force_processing,
+        missing_floor_retry_mode=(
+            "scheduled"
+            if schedule_missing_floor_retries and not force_processing
+            else "immediate"
+        ),
         incremental_changes=ArchiveIncrementalChanges(
             previous_processing_snapshot,
             upsert_result.effective_changed_lous,
@@ -467,6 +513,11 @@ def backup_thread_sub(
             page_count=page_count,
             author_total_lou_count=author_total_lou_count,
             force_image_retries=force_processing,
+            missing_floor_retry_mode=(
+                "scheduled"
+                if schedule_missing_floor_retries and not force_processing
+                else "immediate"
+            ),
         )
     maintain_archived_audio(
         tid,

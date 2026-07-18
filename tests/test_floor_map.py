@@ -655,6 +655,98 @@ class FloorMapMissingInferenceTest:
         assert 2 not in result.floor_labels.original_lou_by_author_lou
         assert result.floor_labels.candidate_original_lous_by_author_lou[2] == [11, 12]
 
+    def test_deferred_missing_floor_does_not_fetch_an_original_page(self) -> None:
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 1001, "author_lou": 1},
+            {"pid": 1003, "author_lou": 3},
+        ]
+        page_data: PageData = {
+            "result": [
+                {"pid": 1001, "lou": 10, "author": {"uid": 42}},
+                {"pid": 1003, "lou": 12, "author": {"uid": 42}},
+            ]
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            store = ThreadArchiveStore(Path(temp_dir))
+            store.ensure_schema()
+            initial_client = FakeClient({1: page_data}, page_count=1)
+            deferred_client = FakeClient({1: page_data}, page_count=1)
+            with (
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                initial = build_and_save_floor_map(
+                    initial_client,
+                    store,
+                    123,
+                    456,
+                    author_posts,
+                    [2],
+                )
+                deferred = build_and_save_floor_map(
+                    deferred_client,
+                    store,
+                    123,
+                    456,
+                    author_posts,
+                    [2],
+                    retry_missing_author_lous=(),
+                )
+
+        assert initial.floor_labels.original_lou_by_author_lou[2] == 11
+        assert deferred.floor_labels.original_lou_by_author_lou[2] == 11
+        assert deferred_client.page_count_calls == 0
+        assert deferred_client.page_calls == []
+
+    def test_already_fetched_page_can_recover_deferred_missing_floor(self) -> None:
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 1001, "author_lou": 1},
+            {"pid": 1003, "author_lou": 3},
+            {"pid": 1005, "author_lou": 5},
+        ]
+        client = FakeClient(
+            pages={
+                1: {
+                    "result": [
+                        {"pid": 1001, "lou": 10, "author": {"uid": 42}},
+                        {
+                            "pid": 2002,
+                            "lou": 11,
+                            "author": {"uid": -1},
+                            "content": "deferred anonymous body",
+                        },
+                        {"pid": 1003, "lou": 12, "author": {"uid": 42}},
+                        {"pid": 1005, "lou": 14, "author": {"uid": 42}},
+                    ]
+                }
+            },
+            page_count=1,
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            store = ThreadArchiveStore(Path(temp_dir))
+            store.ensure_schema()
+            with (
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                result = build_and_save_floor_map(
+                    client,
+                    store,
+                    123,
+                    456,
+                    author_posts,
+                    [2, 4],
+                    retry_missing_author_lous=(4,),
+                )
+
+        assert result.floor_labels.original_lou_by_author_lou[2] == 11
+        assert result.recovered_missing_posts_by_author_lou[2]["content"] == (
+            "deferred anonymous body"
+        )
+        assert client.page_calls == [1]
+
 
 class FloorMapSignatureCacheTest:
     def test_missing_cache_check_does_not_create_thread_folder(self) -> None:

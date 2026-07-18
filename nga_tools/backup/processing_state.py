@@ -78,6 +78,12 @@ class PendingImageRetry:
 
 
 @dataclass(frozen=True)
+class PendingMissingFloorRetry:
+    author_lou: int
+    last_attempt_at: datetime
+
+
+@dataclass(frozen=True)
 class AudioProcessingState:
     format_version: int
     extractor_version: int
@@ -101,3 +107,4 @@ class BackupProcessingSnapshot:
     image_state: ImageReferenceState | None = None
     audio_state: AudioProcessingState | None = None
     pending_audio_retries: tuple[PendingAudioRetry, ...] = ()
+    pending_missing_floor_retries: tuple[PendingMissingFloorRetry, ...] = ()

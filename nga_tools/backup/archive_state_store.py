@@ -20,6 +20,7 @@ from nga_tools.backup.processing_state import (
     ImageReferenceState,
     PendingAudioRetry,
     PendingImageRetry,
+    PendingMissingFloorRetry,
 )
 from nga_tools.backup.archive_post_store import ArchivePostRepository
 from nga_tools.backup.thread_stores import ThreadArchiveStateStore
@@ -107,6 +108,16 @@ class ArchiveStateRepository:
                     SELECT url, last_attempt_at, failure_kind, http_status
                     FROM backup_pending_audio
                     ORDER BY url
+                    """
+                ).fetchall(),
+            )
+            pending_missing_floor_rows = cast(
+                list[tuple[object, object]],
+                connection.execute(
+                    """
+                    SELECT author_lou, last_attempt_at
+                    FROM backup_pending_missing_floors
+                    ORDER BY author_lou
                     """
                 ).fetchall(),
             )
@@ -209,6 +220,36 @@ class ArchiveStateRepository:
                 raise ValueError(f"backup图片引用状态文本列无效：{image_row!r}")
             image_state = ImageReferenceState(*image_row)
 
+        pending_missing_floor_retries: list[PendingMissingFloorRetry] = []
+        for author_lou, last_attempt_at in pending_missing_floor_rows:
+            if type(author_lou) is not int or author_lou < 0:
+                raise ValueError(
+                    f"backup待重试缺失楼楼层无效：{author_lou!r}"
+                )
+            if not isinstance(last_attempt_at, str):
+                raise ValueError(
+                    f"backup待重试缺失楼时间无效：{last_attempt_at!r}"
+                )
+            try:
+                parsed_last_attempt_at = datetime.datetime.fromisoformat(
+                    last_attempt_at
+                )
+            except ValueError as error:
+                raise ValueError(
+                    f"backup待重试缺失楼时间无效：{last_attempt_at!r}"
+                ) from error
+            if (
+                parsed_last_attempt_at.tzinfo is None
+                or parsed_last_attempt_at.utcoffset() is None
+            ):
+                raise ValueError(
+                    "backup待重试缺失楼时间缺少时区："
+                    f"{last_attempt_at!r}"
+                )
+            pending_missing_floor_retries.append(
+                PendingMissingFloorRetry(author_lou, parsed_last_attempt_at)
+            )
+
         pending_audio_retries: list[PendingAudioRetry] = []
         for url, last_attempt_at, failure_kind, http_status in pending_audio_rows:
             if not isinstance(url, str) or not url:
@@ -290,6 +331,9 @@ class ArchiveStateRepository:
             image_state=image_state,
             audio_state=audio_state,
             pending_audio_retries=tuple(pending_audio_retries),
+            pending_missing_floor_retries=tuple(
+                pending_missing_floor_retries
+            ),
         )
     @staticmethod
     def _replace_pending_images(
@@ -351,6 +395,48 @@ class ArchiveStateRepository:
                 http_status
             )
             VALUES (?, ?, ?, ?)
+            """,
+            rows,
+        )
+    @staticmethod
+    def _replace_pending_missing_floors(
+        connection: sqlite3.Connection,
+        retries: tuple[PendingMissingFloorRetry, ...],
+    ) -> None:
+        rows: list[tuple[int, str]] = []
+        seen_lous: set[int] = set()
+        for retry in sorted(retries, key=lambda item: item.author_lou):
+            if type(retry.author_lou) is not int or retry.author_lou < 0:
+                raise ValueError(
+                    f"backup待重试缺失楼楼层无效：{retry.author_lou!r}"
+                )
+            if retry.author_lou in seen_lous:
+                raise ValueError(
+                    f"backup待重试缺失楼重复：{retry.author_lou}"
+                )
+            seen_lous.add(retry.author_lou)
+            if (
+                retry.last_attempt_at.tzinfo is None
+                or retry.last_attempt_at.utcoffset() is None
+            ):
+                raise ValueError(
+                    f"backup待重试缺失楼时间缺少时区：{retry.author_lou}"
+                )
+            rows.append(
+                (
+                    retry.author_lou,
+                    retry.last_attempt_at.astimezone(
+                        datetime.timezone.utc
+                    ).isoformat(timespec="microseconds"),
+                )
+            )
+        connection.execute("DELETE FROM backup_pending_missing_floors")
+        connection.executemany(
+            """
+            INSERT INTO backup_pending_missing_floors (
+                author_lou,
+                last_attempt_at
+            ) VALUES (?, ?)
             """,
             rows,
         )
@@ -813,6 +899,7 @@ class ArchiveStateRepository:
         with closing(self._connect_state_write()) as connection:
             with connection:
                 connection.execute("DELETE FROM backup_pending_images")
+                connection.execute("DELETE FROM backup_pending_missing_floors")
                 connection.execute("DELETE FROM backup_floor_processing_state")
                 connection.execute("DELETE FROM backup_image_reference_state")
                 connection.execute("DELETE FROM backup_pending_audio")
@@ -827,6 +914,14 @@ class ArchiveStateRepository:
         with closing(self._connect_state_write()) as connection:
             with connection:
                 self._replace_pending_images(connection, pending_image_retries)
+    def replace_pending_missing_floor_retries(
+        self,
+        retries: tuple[PendingMissingFloorRetry, ...],
+    ) -> None:
+        self.require_exists()
+        with closing(self._connect_state_write()) as connection:
+            with connection:
+                self._replace_pending_missing_floors(connection, retries)
     def commit_audio_processing_state(
         self,
         state: AudioProcessingState,

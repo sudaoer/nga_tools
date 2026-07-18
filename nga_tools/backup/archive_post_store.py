@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
+from collections.abc import Sequence
 from contextlib import closing
 from typing import Optional, cast
 
 from nga_tools.backup.archive_floor_store import ArchiveFloorMapRepository
+from nga_tools.backup.archive_posts import PostDate, postdate_from_json
 from nga_tools.backup.archive_repository import ArchiveRepository, ArchiveRepositorySource
 from nga_tools.backup.archive_store_models import (
     ArchiveEffectivePostStats,
@@ -665,6 +667,63 @@ class ArchivePostRepository(ArchiveRepository):
         self.require_exists()
         with closing(self._connect_read()) as connection:
             return self._read_latest_author_post_refs(connection)
+
+    def read_next_postdates_after_lous(
+        self,
+        after_lous: Sequence[int],
+    ) -> dict[int, Optional[PostDate]]:
+        """Read the first archived post date after each requested author lou."""
+        ordered_lous = sorted(set(after_lous))
+        if not ordered_lous:
+            return {}
+        self.require_exists()
+        result: dict[int, Optional[PostDate]] = {}
+        with closing(self._connect_read()) as connection:
+            for after_lou in ordered_lous:
+                row = cast(
+                    Optional[tuple[object, object]],
+                    connection.execute(
+                        """
+                        SELECT latest.lou, metadata.postdate_json
+                        FROM (
+                            SELECT id, lou, pid
+                            FROM (
+                                SELECT id, lou, pid,
+                                    ROW_NUMBER() OVER (
+                                        PARTITION BY lou
+                                        ORDER BY last_seen_at DESC, id DESC
+                                    ) AS row_number
+                                FROM post_versions
+                                WHERE lou > ?
+                            )
+                            WHERE row_number = 1
+                            ORDER BY lou
+                            LIMIT 1
+                        ) AS latest
+                        LEFT JOIN post_latest_metadata AS metadata
+                            ON metadata.pid = latest.pid
+                            AND metadata.lou = latest.lou
+                        """,
+                        (after_lou,),
+                    ).fetchone(),
+                )
+                if row is None:
+                    result[after_lou] = None
+                    continue
+                next_lou, postdate_json = row
+                if type(next_lou) is not int or next_lou <= after_lou:
+                    raise ValueError(
+                        f"archive下一有效楼无效：{(after_lou, row)!r}"
+                    )
+                if postdate_json is not None and not isinstance(
+                    postdate_json,
+                    str,
+                ):
+                    raise ValueError(
+                        f"archive下一有效楼发帖时间无效：{row!r}"
+                    )
+                result[after_lou] = postdate_from_json(postdate_json)
+        return result
 
     def read_author_floor_refresh_inputs(self) -> AuthorFloorRefreshInputs:
         """Read author refs and the prior floor map from one SQLite snapshot."""

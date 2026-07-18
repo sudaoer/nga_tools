@@ -9,6 +9,8 @@
   "backup_configs_workers": 4,
   "timing_log_enabled": true,
   "ankebak_full_backup_interval_hours": 168,
+  "ankebak_missing_floor_immediate_retry_hours": 168,
+  "ankebak_missing_floor_retry_max_interval_hours": 720,
   "backup_image_retry_max_interval_hours": 168,
   "backup_audio_retry_max_interval_hours": 168,
   "pdf_page_size": "A4",

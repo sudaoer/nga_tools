@@ -46,6 +46,8 @@ Copy-Item secrets.example.json secrets.json
   "image_concurrency": 50,
   "audio_concurrency": 8,
   "ankebak_full_backup_interval_hours": 168,
+  "ankebak_missing_floor_immediate_retry_hours": 168,
+  "ankebak_missing_floor_retry_max_interval_hours": 720,
   "backup_image_retry_max_interval_hours": 168,
   "backup_audio_retry_max_interval_hours": 168
 }
@@ -53,6 +55,10 @@ Copy-Item secrets.example.json secrets.json
 
 `ankebak_full_backup_interval_hours` 控制智能备份执行 `backup all` 的
 最长等待时间，单位为小时，默认 168 小时（7 天），必须大于 0。
+`ankebak_missing_floor_immediate_retry_hours` 控制缺失楼的积极重试窗口，
+默认 168 小时（7 天）；窗口内每次运行 ankebak 都会重试。
+`ankebak_missing_floor_retry_max_interval_hours` 控制较旧缺失楼的最长重试间隔，
+默认 720 小时（30 天）。两个缺失楼配置都以小时为单位且必须大于 0。
 `backup_image_retry_max_interval_hours` 控制长期失败图片的最长重试等待时间，
 单位为小时，默认 168 小时（7 天），必须大于 0。
 `backup_audio_retry_max_interval_hours` 对 BGM 音频采用相同的重试上限，
@@ -137,7 +143,11 @@ pixi run python main.py backup sub --name 帖子名
 
 完整或增量备份会复用 `archive_state.sqlite3` 中的楼层处理状态和图片引用集合状态。页数、`vrows` 或楼层映射输入变化时只刷新楼层派生状态；归档正文、overlay、手动版本选择和图片引用解析版本未变化时，不再读取完整归档或批量展开全部帖子图片引用，只重试上次未完成的图片 URL。该状态同时适用于只看作者和没有 `aid` 的原帖备份；`backup all` 的状态复用判定发生在完整网络抓取及归档写入之后，不会跳过远端刷新。
 
-正文来源实际变化后才会重建图片引用集合，并复用 `archive_cache.sqlite3` 中的帖子级图片引用派生缓存，只重新解析新增或正文、overlay、手动版本选择发生变化的楼层。下载失败的图片待重试队列保存在 `archive_state.sqlite3`：新 URL、HTTP 429、5xx、网络、payload 和本地存储失败会在下一次相关备份继续尝试；已知 HTTP 3xx 和除 429 外的 4xx 会根据距上次尝试的时间概率重试。累计触发概率为 `x^3`（`x` 是已等待时间占最大间隔的比例），同一 URL 在一个重试周期内使用稳定票据，不会因为频繁运行而反复抽签；达到 `backup_image_retry_max_interval_hours` 后必定重试。音频失败使用同样的稳定概率规则，并以 `backup_audio_retry_max_interval_hours` 为最长间隔。概率延后的 URL 不会单独触发 `backup auto` 本地维护，新 URL 始终立即尝试，不再被正文引用的图片 URL 会移出图片队列；音频队列覆盖所有历史正文版本，因此历史引用仍会保留。状态复用不会重新校验已成功的历史图片，本地文件后续被删除或损坏时请运行 `image verify` 检测。只看作者备份还会重试恢复缺失楼内容；恢复出的匿名正文会提升归档修订并使图片集合按需更新。需要忽略所有派生状态并强制重新处理时，可给 `backup all` 或 `backup sub` 加 `--force-processing`（兼容 `--force_processing`）；此选项会立即重试全部仍被引用的失败图片并重扫、重试全部历史 BGM，但不会禁用帖子级图片引用缓存。
+正文来源实际变化后才会重建图片引用集合，并复用 `archive_cache.sqlite3` 中的帖子级图片引用派生缓存，只重新解析新增或正文、overlay、手动版本选择发生变化的楼层。下载失败的图片待重试队列保存在 `archive_state.sqlite3`：新 URL、HTTP 429、5xx、网络、payload 和本地存储失败会在下一次相关备份继续尝试；已知 HTTP 3xx 和除 429 外的 4xx 会根据距上次尝试的时间概率重试。累计触发概率为 `x^3`（`x` 是已等待时间占最大间隔的比例），同一 URL 在一个重试周期内使用稳定票据，不会因为频繁运行而反复抽签；达到 `backup_image_retry_max_interval_hours` 后必定重试。音频失败使用同样的稳定概率规则，并以 `backup_audio_retry_max_interval_hours` 为最长间隔。概率延后的 URL 不会单独触发 `backup auto` 本地维护，新 URL 始终立即尝试，不再被正文引用的图片 URL 会移出图片队列；音频队列覆盖所有历史正文版本，因此历史引用仍会保留。状态复用不会重新校验已成功的历史图片，本地文件后续被删除或损坏时请运行 `image verify` 检测。
+
+只看作者备份还会重试恢复缺失楼内容；恢复出的匿名正文会提升归档修订并使图片集合按需更新。ankebak 会把连续缺失楼组成一个缺口，并用缺口后第一个有效楼的发帖时间估算缺失时间；尾部缺口没有下一个有效楼时按当前时间处理。默认 7 天内的缺口每次运行都重试；更旧的缺口使用稳定的 `x^3` 累计概率，并随缺失楼年龄把最长等待逐步增加到 30 天。同一帖的所有缺口共享一张稳定票据，不会因缺口数量或频繁运行增加抽中概率；达到当前最长间隔后必定重试。首次出现或旧状态没有重试记录的缺失楼会立即尝试一次，逐楼重试时间保存在该帖 `archive_state.sqlite3` 的 `backup_pending_missing_floors` 表中。概率延后的缺口不会额外请求原帖页面，但本轮因其他工作已经取得的页面仍可顺带恢复它们。手工 `backup all/sub` 始终立即重试全部缺失楼，不应用 ankebak 延后策略。
+
+需要忽略所有派生状态并强制重新处理时，可给 `backup all` 或 `backup sub` 加 `--force-processing`（兼容 `--force_processing`）；此选项会立即重试全部仍被引用的失败图片并重扫、重试全部历史 BGM，但不会禁用帖子级图片引用缓存。
 增量刷新到的新页会合并进历史楼层库；同一页新响应中消失的旧楼不会从库中删除。历史 `json/page_*.json` 不会被读取、导入或改写；不存在 `archive.sqlite3` 时，正常备份会直接创建当前格式数据库。
 
 也可以不使用保存的名称，直接指定 `tid` 和可选的 `aid`：
@@ -458,7 +468,7 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
   BBCode overlay；不保存 NGA 原始分页响应。`post_versions.content` 始终以 zstd
   BLOB 保存，Web、PDF 和 replay 从此库读取解压后的正文
 - `archive_state.sqlite3`：每帖运行状态。保存楼层/图片引用处理水位、逐楼引用
-  清单、URL 引用计数、音频历史版本扫描水位以及失败图片/音频待重试队列；删除后可从 `archive.sqlite3`
+  清单、URL 引用计数、缺失楼逐楼重试时间、音频历史版本扫描水位以及失败图片/音频待重试队列；删除后可从 `archive.sqlite3`
   重建，但会丢失尚未完成工作的历史状态
 - `archive_cache.sqlite3`：每帖可重建缓存。当前保存帖子级图片引用解析结果；
   缺失时按当前格式创建；格式或 `archive.sqlite3` 存储 ID 不匹配时拒绝读取

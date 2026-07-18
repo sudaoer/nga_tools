@@ -310,6 +310,7 @@ def build_and_save_floor_map(
     author_posts: Sequence[AuthorPostRef],
     missing_author_lous: Sequence[int],
     *,
+    retry_missing_author_lous: Sequence[int] | None = None,
     strict: bool = True,
 ) -> FloorMapBuildResult:
     if not author_posts:
@@ -317,6 +318,18 @@ def build_and_save_floor_map(
 
     report_progress(f"准备生成楼层映射：只看作者{len(author_posts)}楼")
     input_signature = floor_map_input_signature(author_posts, missing_author_lous)
+    missing_author_lou_set = set(missing_author_lous)
+    retry_missing_author_lou_set = (
+        missing_author_lou_set
+        if retry_missing_author_lous is None
+        else set(retry_missing_author_lous)
+    )
+    unexpected_retry_lous = retry_missing_author_lou_set - missing_author_lou_set
+    if unexpected_retry_lous:
+        raise ValueError(
+            "待重试缺失楼不属于当前缺失楼集合："
+            f"{sorted(unexpected_retry_lous)}"
+        )
 
     author_lou_to_pid: dict[int, int] = {}
     for post in author_posts:
@@ -328,7 +341,7 @@ def build_and_save_floor_map(
         _load_reusable_floor_map(
             archive_store,
             author_lou_to_pid,
-            set(missing_author_lous),
+            missing_author_lou_set,
         )
     )
     original_lou_by_author_lou = {
@@ -403,6 +416,7 @@ def build_and_save_floor_map(
         scanned_pages,
         missing_author_lous,
         existing_candidates,
+        retry_missing_author_lou_set,
     )
     inferred_missing_originals = missing_inference.exact_original_by_author_lou
     candidate_missing_originals = missing_inference.candidate_originals_by_author_lou
@@ -426,10 +440,18 @@ def build_and_save_floor_map(
         if author_lou not in author_lou_to_pid
         and author_lou in all_original_by_author_lou
     }
+    retry_exact_missing_originals = {
+        author_lou: original_lou
+        for author_lou, original_lou in exact_missing_originals.items()
+        if (
+            author_lou in retry_missing_author_lou_set
+            or _original_page_for_lou(original_lou) in scanned_pages
+        )
+    }
     recovered_missing_posts = _recover_missing_posts_from_original_pages(
         client,
         tid,
-        exact_missing_originals,
+        retry_exact_missing_originals,
         scanned_pages,
         seen_original_lous,
         original_posts_by_lou,
@@ -1113,6 +1135,7 @@ def _infer_missing_original_lous(
     scanned_pages: set[int],
     missing_author_lous: Sequence[int],
     existing_candidates: dict[int, list[int]],
+    retry_missing_author_lous: set[int],
 ) -> MissingOriginalInference:
     inferred: dict[int, int] = {}
     candidates: dict[int, list[int]] = {}
@@ -1125,7 +1148,11 @@ def _infer_missing_original_lous(
         return MissingOriginalInference(inferred, existing_candidates)
 
     missing_lous = sorted(set(missing_author_lous))
-    for missing_lou in missing_lous:
+    ordered_missing_lous = sorted(
+        missing_lous,
+        key=lambda lou: (lou not in retry_missing_author_lous, lou),
+    )
+    for missing_lou in ordered_missing_lous:
         if missing_lou in original_lou_by_author_lou or missing_lou in inferred:
             continue
 
@@ -1135,10 +1162,11 @@ def _infer_missing_original_lous(
             existing_candidate_lous = existing_candidates.get(missing_lou)
             if existing_candidate_lous:
                 candidates[missing_lou] = existing_candidate_lous
-            report_warning(
-                WarningCategory.FLOOR_MAP,
-                f"无法推断第{missing_lou}楼的原帖楼层。",
-            )
+            if missing_lou in retry_missing_author_lous:
+                report_warning(
+                    WarningCategory.FLOOR_MAP,
+                    f"无法推断第{missing_lou}楼的原帖楼层。",
+                )
             continue
 
         prev_author_lou = prev_candidates[-1]
@@ -1150,7 +1178,7 @@ def _infer_missing_original_lous(
         ]
         if not author_gap_lous:
             continue
-        processed_missing_lous.update(author_gap_lous)
+        retry_gap = not retry_missing_author_lous.isdisjoint(author_gap_lous)
 
         prev_original_lou = original_lou_by_author_lou[prev_author_lou]
         next_original_lou = original_lou_by_author_lou[next_author_lou]
@@ -1159,6 +1187,9 @@ def _infer_missing_original_lous(
             for page in _pages_for_original_interval(prev_original_lou, next_original_lou)
             if page not in scanned_pages
         ]
+        if pages_to_scan and not retry_gap:
+            continue
+        processed_missing_lous.update(author_gap_lous)
         if pages_to_scan:
             _scan_original_pages(
                 client,
@@ -1194,13 +1225,14 @@ def _infer_missing_original_lous(
                 author_gap_lous,
                 possible_original_lous,
             )
-            report_warning(
-                WarningCategory.FLOOR_MAP,
-                f"无法唯一推断第{missing_lou}楼的原帖楼层，"
-                f"只看作者缺失{len(author_gap_lous)}楼，"
-                f"原帖区间缺失{len(original_gap_lous)}楼，"
-                f"匿名候选{len(anonymous_original_lous)}楼。"
-            )
+            if retry_gap:
+                report_warning(
+                    WarningCategory.FLOOR_MAP,
+                    f"无法唯一推断第{missing_lou}楼的原帖楼层，"
+                    f"只看作者缺失{len(author_gap_lous)}楼，"
+                    f"原帖区间缺失{len(original_gap_lous)}楼，"
+                    f"匿名候选{len(anonymous_original_lous)}楼。"
+                )
             for author_lou, candidate_lous in possible_candidates.items():
                 if candidate_lous:
                     candidates[author_lou] = candidate_lous
