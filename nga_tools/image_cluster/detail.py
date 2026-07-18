@@ -9,8 +9,8 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
-from scipy import ndimage
-from scipy.cluster import hierarchy as scipy_hierarchy
+from scipy import ndimage # pyright: ignore[reportMissingTypeStubs]
+from scipy.cluster import hierarchy as scipy_hierarchy # pyright: ignore[reportMissingTypeStubs]
 
 from nga_tools.image_cluster.normalize import normalize_image
 
