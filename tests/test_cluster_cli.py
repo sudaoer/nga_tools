@@ -41,6 +41,7 @@ class ClusterCliTest:
         assert args["threshold"] == 1
         assert args["dhash_threshold"] == 2
         assert args["color_threshold"] == 0.05
+        assert args["detail_threshold"] == 0.18
         assert args["min_cluster_size"] == 2
         assert args["lsh_bands"] == 4
 
@@ -55,6 +56,8 @@ class ClusterCliTest:
                 "0",
                 "--color-threshold",
                 "0.05",
+                "--detail-threshold",
+                "0.12",
                 "--min-cluster-size",
                 "3",
                 "--lsh-bands",
@@ -70,6 +73,7 @@ class ClusterCliTest:
         assert args["threshold"] == 12
         assert args["dhash_threshold"] == 0
         assert args["color_threshold"] == 0.05
+        assert args["detail_threshold"] == 0.12
         assert args["min_cluster_size"] == 3
         assert args["lsh_bands"] == 8
         assert args["workers"] == 2

@@ -3,7 +3,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from nga_tools.image_cluster.features import ImageFeatures, color_distance, hamming_distance
+from nga_tools.image_cluster.features import (
+    ImageFeatures,
+    color_distance,
+    hamming_distance,
+)
 from nga_tools.image_cluster.lsh import CandidatePair
 
 
@@ -91,6 +95,23 @@ def build_clusters(
     dhash_threshold: int = 2,
     color_threshold: float = 0.05,
 ) -> list[Cluster]:
+    groups = build_coarse_groups(
+        features,
+        pairs,
+        threshold,
+        dhash_threshold,
+        color_threshold,
+    )
+    return clusters_from_groups(groups, features, min_cluster_size)
+
+
+def build_coarse_groups(
+    features: dict[str, ImageFeatures],
+    pairs: list[CandidatePair],
+    threshold: int,
+    dhash_threshold: int = 2,
+    color_threshold: float = 0.05,
+) -> list[list[str]]:
     if not features:
         return []
 
@@ -112,10 +133,19 @@ def build_clusters(
             continue
         uf.union(pair.a, pair.b)
 
-    raw_groups = uf.groups()
+    groups = [sorted(members) for members in uf.groups().values()]
+    groups.sort(key=lambda group: (-len(group), group[0]))
+    return groups
+
+
+def clusters_from_groups(
+    groups: list[list[str]],
+    features: dict[str, ImageFeatures],
+    min_cluster_size: int,
+) -> list[Cluster]:
     filtered = [
         sorted(members)
-        for members in raw_groups.values()
+        for members in groups
         if len(members) >= min_cluster_size
     ]
     filtered.sort(key=lambda g: (-len(g), g[0]))

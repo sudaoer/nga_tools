@@ -238,6 +238,12 @@ ARG_DEFS: dict[str, ArgDef] = {
         "metavar": "F",
         "help": "图片聚类颜色直方图 L1 距离阈值（0=完全相同）",
     },
+    "detail_threshold": {
+        "flags": ("--detail-threshold", "--detail_threshold"),
+        "type": float,
+        "metavar": "F",
+        "help": "图片聚类中心区域局部差异阈值（越低越严格）",
+    },
     "min_cluster_size": {
         "flags": ("--min-cluster-size", "--min_cluster_size"),
         "type": int,
@@ -561,7 +567,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "usage": (
                 f"{PROGRAM_USAGE} cluster run "
                 "[--threshold N] [--dhash-threshold N] "
-                "[--color-threshold F] [--min-cluster-size N] "
+                "[--color-threshold F] [--detail-threshold F] "
+                "[--min-cluster-size N] "
                 "[--lsh-bands N] [--workers N] [--limit N] [--force]"
             ),
             "examples": [
@@ -569,6 +576,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 f"{PROGRAM_USAGE} cluster run --threshold 10 --min-cluster-size 3",
                 f"{PROGRAM_USAGE} cluster run --dhash-threshold 0",
                 f"{PROGRAM_USAGE} cluster run --color-threshold 0.05",
+                f"{PROGRAM_USAGE} cluster run --detail-threshold 0.18",
                 f"{PROGRAM_USAGE} cluster run --workers 8",
                 f"{PROGRAM_USAGE} cluster run --limit 100",
                 f"{PROGRAM_USAGE} cluster run --force",
@@ -576,9 +584,9 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "notes": [
                 "扫描 output_dir/images_unique 下所有图片，计算感知哈希并聚类。",
                 "透明底/黑底/白底会归一化为白底后比较。",
-                "合并条件：pHash 距离 ≤ threshold 且 dHash 距离 ≤ dhash-threshold 且颜色直方图 L1 距离 ≤ color-threshold。",
-                "dHash 对表情/动作等结构变化更敏感，颜色直方图对瞳色/发色等纯颜色变化更敏感。",
-                "特征按 (size, mtime_ns) 指纹缓存增量更新，--force 强制重算。",
+                "pHash、dHash 和颜色直方图先形成粗簇，再按中心60%区域的局部RGB差异执行 complete-linkage 细分。",
+                "局部差异可区分瞳色、睁闭眼和嘴型变化；忽略四周20%以容忍水印与轻微裁剪。",
+                "特征和细分配对分数均按 (size, mtime_ns) 指纹缓存，--force 强制重算。",
                 "聚类结果写入 output_dir/image_clusters.sqlite3，供 web 界面查看。",
                 "聚类过程在本地计算，不访问 NGA；web 界面只读展示结果不触发计算。",
                 "--workers 控制特征计算并行进程数，0 或省略时使用 CPU 核数。",
@@ -587,6 +595,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "threshold",
                 "dhash_threshold",
                 "color_threshold",
+                "detail_threshold",
                 "min_cluster_size",
                 "lsh_bands",
                 "workers",
@@ -597,6 +606,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "threshold": 1,
                 "dhash_threshold": 2,
                 "color_threshold": 0.05,
+                "detail_threshold": 0.18,
                 "min_cluster_size": 2,
                 "lsh_bands": 4,
             },

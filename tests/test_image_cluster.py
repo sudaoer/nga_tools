@@ -56,6 +56,20 @@ def _make_unrelated_image(path: Path, seed: int = 100) -> None:
     Image.fromarray(arr, mode="RGB").save(path)
 
 
+def _make_face_detail_variants(images_dir: Path) -> None:
+    rng = np.random.default_rng(7)
+    base = rng.integers(20, 236, size=(256, 256, 3), dtype=np.uint8)
+    Image.fromarray(base, mode="RGB").save(images_dir / "version-a.png")
+    Image.fromarray(base, mode="RGB").save(images_dir / "version-b.png")
+    different_pupil = base.copy()
+    different_pupil[120:137, 120:137] = np.array(
+        [180, 0, 255], dtype=np.uint8
+    )
+    Image.fromarray(different_pupil, mode="RGB").save(
+        images_dir / "purple-pupil.png"
+    )
+
+
 def test_run_image_cluster_clusters_variants(tmp_path: Path) -> None:
     images_dir = tmp_path / "images_unique"
     images_dir.mkdir()
@@ -105,6 +119,42 @@ def test_run_image_cluster_incremental_reuses_cache(tmp_path: Path) -> None:
     )
     assert second.features_computed == 0
     assert second.features_reused == 2
+
+
+def test_run_image_cluster_refines_pupil_variant_and_reuses_scores(
+    tmp_path: Path,
+) -> None:
+    images_dir = tmp_path / "images_unique"
+    images_dir.mkdir()
+    _make_face_detail_variants(images_dir)
+    params = ClusterParams(
+        threshold=64,
+        dhash_threshold=64,
+        color_threshold=2.0,
+        detail_threshold=0.18,
+        workers=1,
+    )
+
+    first = run_image_cluster(tmp_path, params)
+
+    assert first.coarse_cluster_count == 1
+    assert first.detail_pairs == 3
+    assert first.detail_scores_computed == 3
+    assert first.detail_scores_reused == 0
+    assert first.cluster_count == 1
+    store = ImageClusterStore(tmp_path)
+    clusters = store.load_clusters(first.run_id)
+    assert {
+        member.relative_path for member in clusters[0].members
+    } == {
+        "images_unique/version-a.png",
+        "images_unique/version-b.png",
+    }
+
+    second = run_image_cluster(tmp_path, params)
+
+    assert second.detail_scores_computed == 0
+    assert second.detail_scores_reused == 3
 
 
 def test_run_image_cluster_invalidates_changed_hash_algorithm(

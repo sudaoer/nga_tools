@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import sqlite3
 import threading
 from contextlib import closing
@@ -15,9 +16,14 @@ from nga_tools.core.sqlite import (
     iter_in_clause_chunks,
 )
 from nga_tools.image_cluster.cluster import Cluster, ClusterMember
+from nga_tools.image_cluster.detail import DetailPairScore, PairKey
 from nga_tools.image_cluster.features import ImageFeatures
 from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
-from nga_tools.storage.schema import require_exact_columns, require_table_names
+from nga_tools.storage.schema import (
+    require_exact_columns,
+    require_table_names,
+    table_names,
+)
 
 IMAGE_CLUSTERS_FILENAME = "image_clusters.sqlite3"
 
@@ -50,6 +56,26 @@ _MEMBERS_COLUMNS = (
     ("is_source_candidate", "INTEGER"),
 )
 
+_DETAIL_PAIR_SCORES_COLUMNS = (
+    ("path_a", "TEXT"),
+    ("path_b", "TEXT"),
+    ("size_a", "INTEGER"),
+    ("mtime_ns_a", "INTEGER"),
+    ("size_b", "INTEGER"),
+    ("mtime_ns_b", "INTEGER"),
+    ("algorithm", "TEXT"),
+    ("score", "REAL"),
+    ("updated_at", "TEXT"),
+)
+
+_BASE_TABLES = {
+    "storage_metadata",
+    "image_features",
+    "cluster_runs",
+    "cluster_members",
+}
+_CURRENT_TABLES = _BASE_TABLES | {"detail_pair_scores"}
+
 _LOCK = threading.RLock()
 
 
@@ -75,6 +101,29 @@ def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+def _create_detail_pair_scores_table(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE detail_pair_scores (
+            path_a TEXT NOT NULL,
+            path_b TEXT NOT NULL,
+            size_a INTEGER NOT NULL,
+            mtime_ns_a INTEGER NOT NULL,
+            size_b INTEGER NOT NULL,
+            mtime_ns_b INTEGER NOT NULL,
+            algorithm TEXT NOT NULL,
+            score REAL NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (path_a, path_b),
+            CHECK (path_a < path_b),
+            CHECK (score >= 0.0 AND score <= 1.0)
+        )
+        """
+    )
+
+
 class ImageClusterStore:
     def __init__(self, output_dir: Path) -> None:
         self._output_dir = output_dir
@@ -84,17 +133,17 @@ class ImageClusterStore:
     def db_path(self) -> Path:
         return self._db_path
 
-    def _require_current(self, connection: sqlite3.Connection) -> None:
+    def _require_base(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        expected_tables: set[str],
+    ) -> None:
         source = f"image_cluster {self._db_path}"
         require_storage_metadata(connection, role="image_cluster")
         require_table_names(
             connection,
-            expected={
-                "storage_metadata",
-                "image_features",
-                "cluster_runs",
-                "cluster_members",
-            },
+            expected=expected_tables,
             source=source,
         )
         require_exact_columns(
@@ -105,6 +154,15 @@ class ImageClusterStore:
         )
         require_exact_columns(
             connection, "cluster_members", _MEMBERS_COLUMNS, source=source
+        )
+
+    def _require_current(self, connection: sqlite3.Connection) -> None:
+        self._require_base(connection, expected_tables=_CURRENT_TABLES)
+        require_exact_columns(
+            connection,
+            "detail_pair_scores",
+            _DETAIL_PAIR_SCORES_COLUMNS,
+            source=f"image_cluster {self._db_path}",
         )
 
     def ensure_store(self) -> Path:
@@ -162,7 +220,14 @@ class ImageClusterStore:
                         ON cluster_members(run_id, cluster_id)
                         """
                     )
+                    _create_detail_pair_scores_table(connection)
                 else:
+                    if table_names(connection) == _BASE_TABLES:
+                        self._require_base(
+                            connection,
+                            expected_tables=_BASE_TABLES,
+                        )
+                        _create_detail_pair_scores_table(connection)
                     self._require_current(connection)
                 connection.commit()
             return self._db_path
@@ -298,6 +363,104 @@ class ImageClusterStore:
                 result[features.relative_path] = features
         return result
 
+    def load_detail_pair_scores(
+        self,
+        algorithm: str,
+        features: dict[str, ImageFeatures],
+    ) -> dict[PairKey, float]:
+        try:
+            with closing(self._connect_readonly()) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT path_a, path_b, size_a, mtime_ns_a,
+                           size_b, mtime_ns_b, score
+                    FROM detail_pair_scores
+                    WHERE algorithm = ?
+                    """,
+                    (algorithm,),
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            return {}
+
+        result: dict[PairKey, float] = {}
+        for row in rows:
+            if len(row) != 7:
+                continue
+            (
+                path_a,
+                path_b,
+                size_a,
+                mtime_ns_a,
+                size_b,
+                mtime_ns_b,
+                score,
+            ) = row
+            if not isinstance(path_a, str) or not isinstance(path_b, str):
+                continue
+            if not all(
+                type(value) is int
+                for value in (size_a, mtime_ns_a, size_b, mtime_ns_b)
+            ):
+                continue
+            if not isinstance(score, (int, float)):
+                continue
+            feature_a = features.get(path_a)
+            feature_b = features.get(path_b)
+            if feature_a is None or feature_b is None:
+                continue
+            if (feature_a.size, feature_a.mtime_ns) != (size_a, mtime_ns_a):
+                continue
+            if (feature_b.size, feature_b.mtime_ns) != (size_b, mtime_ns_b):
+                continue
+            score_value = float(score)
+            if not math.isfinite(score_value) or not 0.0 <= score_value <= 1.0:
+                continue
+            result[(path_a, path_b)] = score_value
+        return result
+
+    def upsert_detail_pair_scores(
+        self,
+        scores: list[DetailPairScore],
+    ) -> None:
+        if not scores:
+            return
+        now = _now_iso()
+        rows = [
+            (
+                score.path_a,
+                score.path_b,
+                score.size_a,
+                score.mtime_ns_a,
+                score.size_b,
+                score.mtime_ns_b,
+                score.algorithm,
+                score.score,
+                now,
+            )
+            for score in scores
+        ]
+        with _LOCK:
+            with closing(self._connect_writable()) as connection:
+                with connection:
+                    connection.executemany(
+                        """
+                        INSERT INTO detail_pair_scores (
+                            path_a, path_b, size_a, mtime_ns_a,
+                            size_b, mtime_ns_b, algorithm, score, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(path_a, path_b) DO UPDATE SET
+                            size_a = excluded.size_a,
+                            mtime_ns_a = excluded.mtime_ns_a,
+                            size_b = excluded.size_b,
+                            mtime_ns_b = excluded.mtime_ns_b,
+                            algorithm = excluded.algorithm,
+                            score = excluded.score,
+                            updated_at = excluded.updated_at
+                        """,
+                        rows,
+                    )
+
     def delete_features(self, paths: set[str]) -> None:
         if not paths:
             return
@@ -310,6 +473,16 @@ class ImageClusterStore:
                             connection.execute(
                                 f"DELETE FROM image_features "
                                 f"WHERE relative_path IN ({placeholders})",
+                                chunk,
+                            )
+                            connection.execute(
+                                "DELETE FROM detail_pair_scores "
+                                f"WHERE path_a IN ({placeholders})",
+                                chunk,
+                            )
+                            connection.execute(
+                                "DELETE FROM detail_pair_scores "
+                                f"WHERE path_b IN ({placeholders})",
                                 chunk,
                             )
             except (OSError, sqlite3.Error):

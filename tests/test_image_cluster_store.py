@@ -7,6 +7,10 @@ from pathlib import Path
 import pytest
 
 from nga_tools.image_cluster.cluster import Cluster, ClusterMember
+from nga_tools.image_cluster.detail import (
+    DETAIL_SCORE_ALGORITHM,
+    DetailPairScore,
+)
 from nga_tools.image_cluster.features import ImageFeatures
 from nga_tools.image_cluster.store import (
     IMAGE_CLUSTERS_FILENAME,
@@ -57,6 +61,7 @@ def test_ensure_store_creates_tables(tmp_path: Path) -> None:
         "image_features",
         "cluster_runs",
         "cluster_members",
+        "detail_pair_scores",
     } <= tables
 
 
@@ -121,6 +126,96 @@ def test_delete_features(tmp_path: Path) -> None:
 
     loaded = store.load_all_features()
     assert set(loaded.keys()) == {"b.png"}
+
+
+def test_detail_pair_score_cache_validates_fingerprints_and_algorithm(
+    tmp_path: Path,
+) -> None:
+    store = ImageClusterStore(tmp_path)
+    features = {
+        "a.png": _make_features("a.png", size=100, mtime_ns=111),
+        "b.png": _make_features("b.png", size=200, mtime_ns=222),
+    }
+    store.upsert_features(list(features.values()))
+    store.upsert_detail_pair_scores(
+        [
+            DetailPairScore(
+                path_a="a.png",
+                path_b="b.png",
+                size_a=100,
+                mtime_ns_a=111,
+                size_b=200,
+                mtime_ns_b=222,
+                algorithm=DETAIL_SCORE_ALGORITHM,
+                score=0.125,
+            )
+        ]
+    )
+
+    assert store.load_detail_pair_scores(
+        DETAIL_SCORE_ALGORITHM, features
+    ) == {("a.png", "b.png"): 0.125}
+    assert store.load_detail_pair_scores("other-algorithm", features) == {}
+
+    changed = dict(features)
+    changed["a.png"] = _make_features("a.png", size=101, mtime_ns=111)
+    assert store.load_detail_pair_scores(
+        DETAIL_SCORE_ALGORITHM, changed
+    ) == {}
+
+
+def test_delete_features_also_deletes_detail_pair_scores(
+    tmp_path: Path,
+) -> None:
+    store = ImageClusterStore(tmp_path)
+    features = {
+        "a.png": _make_features("a.png", size=100, mtime_ns=111),
+        "b.png": _make_features("b.png", size=200, mtime_ns=222),
+    }
+    store.upsert_features(list(features.values()))
+    store.upsert_detail_pair_scores(
+        [
+            DetailPairScore(
+                path_a="a.png",
+                path_b="b.png",
+                size_a=100,
+                mtime_ns_a=111,
+                size_b=200,
+                mtime_ns_b=222,
+                algorithm=DETAIL_SCORE_ALGORITHM,
+                score=0.1,
+            )
+        ]
+    )
+
+    store.delete_features({"a.png"})
+
+    assert store.load_detail_pair_scores(
+        DETAIL_SCORE_ALGORITHM, features
+    ) == {}
+
+
+def test_ensure_store_additively_migrates_legacy_database(
+    tmp_path: Path,
+) -> None:
+    store = ImageClusterStore(tmp_path)
+    store.ensure_store()
+    store.upsert_features([_make_features("a.png")])
+    run_id = store.save_run({"threshold": 1}, [])
+    with closing(sqlite3.connect(store.db_path)) as connection:
+        connection.execute("DROP TABLE detail_pair_scores")
+        connection.commit()
+
+    store.ensure_store()
+
+    assert store.load_all_features()["a.png"].size == 1000
+    assert store.latest_run_id() == run_id
+    with closing(sqlite3.connect(store.db_path)) as connection:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_schema "
+            "WHERE type = 'table' AND name = 'detail_pair_scores'"
+        ).fetchone()
+    assert table == (1,)
 
 
 def test_save_run_and_load_clusters(tmp_path: Path) -> None:
