@@ -39,6 +39,7 @@ class ClusterCliTest:
         assert args["command"] == "cluster"
         assert args["action"] == "run"
         assert args["threshold"] == 1
+        assert args["dhash_threshold"] == 2
         assert args["min_cluster_size"] == 2
         assert args["lsh_bands"] == 4
 
@@ -49,6 +50,8 @@ class ClusterCliTest:
                 "run",
                 "--threshold",
                 "12",
+                "--dhash-threshold",
+                "0",
                 "--min-cluster-size",
                 "3",
                 "--lsh-bands",
@@ -62,6 +65,7 @@ class ClusterCliTest:
         )
 
         assert args["threshold"] == 12
+        assert args["dhash_threshold"] == 0
         assert args["min_cluster_size"] == 3
         assert args["lsh_bands"] == 8
         assert args["workers"] == 2

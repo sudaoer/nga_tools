@@ -81,6 +81,39 @@ def test_build_clusters_respects_threshold() -> None:
     assert clusters == []
 
 
+def test_build_clusters_respects_dhash_threshold() -> None:
+    features = {
+        "a.png": _make_features(
+            "a.png", phash="ffff0000ffff0000", dhash="ffffffffffffffff"
+        ),
+        "b.png": _make_features(
+            "b.png", phash="ffff0000ffff0000", dhash="0000000000000000"
+        ),
+    }
+    pairs = [CandidatePair(a="a.png", b="b.png")]
+    clusters = build_clusters(
+        features, pairs, threshold=8, min_cluster_size=2, dhash_threshold=2
+    )
+    assert clusters == []
+
+
+def test_build_clusters_merges_when_dhash_within_threshold() -> None:
+    features = {
+        "a.png": _make_features(
+            "a.png", phash="ffff0000ffff0000", dhash="ffff0000ffff0000"
+        ),
+        "b.png": _make_features(
+            "b.png", phash="ffff0000ffff0000", dhash="ffff0000ffff0001"
+        ),
+    }
+    pairs = [CandidatePair(a="a.png", b="b.png")]
+    clusters = build_clusters(
+        features, pairs, threshold=8, min_cluster_size=2, dhash_threshold=2
+    )
+    assert len(clusters) == 1
+    assert len(clusters[0].members) == 2
+
+
 def test_build_clusters_min_size_filter() -> None:
     features = {
         "a.png": _make_features("a.png", phash="ffff0000ffff0000"),

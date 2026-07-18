@@ -10,6 +10,7 @@ from nga_tools.image_cluster import ClusterParams, default_workers, run_image_cl
 
 def cluster_run(args: CommandArgs) -> None:
     threshold = optional_int(args, "threshold")
+    dhash_threshold = optional_int(args, "dhash_threshold")
     min_cluster_size = optional_int(args, "min_cluster_size")
     lsh_bands = optional_int(args, "lsh_bands")
     workers = optional_int(args, "workers")
@@ -17,7 +18,12 @@ def cluster_run(args: CommandArgs) -> None:
     force = optional_bool(args, "force")
 
     params = ClusterParams(
-        threshold=threshold if threshold is not None and threshold > 0 else 5,
+        threshold=threshold if threshold is not None and threshold > 0 else 1,
+        dhash_threshold=(
+            dhash_threshold
+            if dhash_threshold is not None and dhash_threshold > 0
+            else 2
+        ),
         min_cluster_size=(
             min_cluster_size
             if min_cluster_size is not None and min_cluster_size > 0

@@ -88,6 +88,7 @@ def build_clusters(
     pairs: list[CandidatePair],
     threshold: int,
     min_cluster_size: int,
+    dhash_threshold: int = 2,
 ) -> list[Cluster]:
     if not features:
         return []
@@ -99,9 +100,13 @@ def build_clusters(
         fb = features.get(pair.b)
         if fa is None or fb is None:
             continue
-        distance = hamming_distance(fa.phash, fb.phash)
-        if distance <= threshold:
-            uf.union(pair.a, pair.b)
+        phash_dist = hamming_distance(fa.phash, fb.phash)
+        if phash_dist > threshold:
+            continue
+        dhash_dist = hamming_distance(fa.dhash, fb.dhash)
+        if dhash_dist > dhash_threshold:
+            continue
+        uf.union(pair.a, pair.b)
 
     raw_groups = uf.groups()
     filtered = [

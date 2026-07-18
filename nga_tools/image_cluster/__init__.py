@@ -34,6 +34,7 @@ _PROGRESS_INTERVAL = 100
 @dataclass(frozen=True)
 class ClusterParams:
     threshold: int = 1
+    dhash_threshold: int = 2
     min_cluster_size: int = 2
     lsh_bands: int = 4
     workers: int = 0
@@ -165,17 +166,20 @@ def run_image_cluster(
     pairs = generate_candidate_pairs(hashes, config)
 
     report_info(
-        f"聚类（{len(pairs)} 候选对，阈值 {params.threshold}）..."
+        f"聚类（{len(pairs)} 候选对，pHash阈值 {params.threshold}，"
+        f"dHash阈值 {params.dhash_threshold}）..."
     )
     clusters: list[Cluster] = build_clusters(
         all_features,
         pairs,
         params.threshold,
         params.min_cluster_size,
+        params.dhash_threshold,
     )
 
     params_dict: dict[str, object] = {
         "threshold": params.threshold,
+        "dhash_threshold": params.dhash_threshold,
         "min_cluster_size": params.min_cluster_size,
         "lsh_bands": params.lsh_bands,
         "force": params.force,
