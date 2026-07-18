@@ -76,8 +76,6 @@ def source_score(features: ImageFeatures) -> float:
     score = 0.0
     if features.has_alpha:
         score += 100.0
-    if features.watermark_masked:
-        score -= 50.0
     pixels = max(features.width * features.height, 1)
     score += math.log10(pixels)
     score += math.log10(max(features.size, 1))

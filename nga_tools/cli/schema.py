@@ -560,7 +560,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             ],
             "notes": [
                 "扫描 output_dir/images_unique 下所有图片，计算感知哈希并聚类。",
-                "透明底/黑底/白底会归一化为白底后比较，自动遮罩 NGA 水印区域。",
+                "透明底/黑底/白底会归一化为白底后比较。",
                 "特征按 (size, mtime_ns) 指纹缓存增量更新，--force 强制重算。",
                 "聚类结果写入 output_dir/image_clusters.sqlite3，供 web 界面查看。",
                 "聚类过程在本地计算，不访问 NGA；web 界面只读展示结果不触发计算。",

@@ -16,7 +16,6 @@ def _make_features(
     phash: str = "0000000000000000",
     dhash: str = "0000000000000000",
     has_alpha: bool = False,
-    watermark_masked: bool = False,
     size: int = 1000,
     width: int = 100,
     height: int = 100,
@@ -30,7 +29,6 @@ def _make_features(
         has_alpha=has_alpha,
         bg_color=None,
         trimmed=False,
-        watermark_masked=watermark_masked,
         width=width,
         height=height,
     )
@@ -131,18 +129,6 @@ def test_source_candidate_prefers_alpha() -> None:
     assert source[0].relative_path == "b.png"
 
 
-def test_source_candidate_prefers_no_watermark() -> None:
-    features = {
-        "a.png": _make_features("a.png", watermark_masked=True, size=5000),
-        "b.png": _make_features("b.png", watermark_masked=False, size=5000),
-    }
-    pairs = [CandidatePair(a="a.png", b="b.png")]
-    clusters = build_clusters(features, pairs, threshold=8, min_cluster_size=2)
-
-    source = [m for m in clusters[0].members if m.is_source_candidate]
-    assert source[0].relative_path == "b.png"
-
-
 def test_source_candidate_prefers_larger_pixels() -> None:
     features = {
         "small.png": _make_features("small.png", width=100, height=100, size=1000),
@@ -171,12 +157,10 @@ def test_source_score_values() -> None:
     alpha_png = source_score(
         _make_features("a.png", has_alpha=True, width=500, height=500, size=10000)
     )
-    watermarked_jpg = source_score(
-        _make_features(
-            "a.jpg", has_alpha=False, watermark_masked=True, width=100, height=100
-        )
+    small_jpg = source_score(
+        _make_features("a.jpg", has_alpha=False, width=100, height=100, size=100)
     )
-    assert alpha_png > watermarked_jpg
+    assert alpha_png > small_jpg
 
 
 def test_empty_features_returns_empty() -> None:

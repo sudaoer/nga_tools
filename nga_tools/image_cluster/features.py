@@ -25,7 +25,6 @@ class ImageFeatures:
     has_alpha: bool
     bg_color: tuple[int, int, int] | None
     trimmed: bool
-    watermark_masked: bool
     width: int
     height: int
 
@@ -62,7 +61,6 @@ def extract_features(
         has_alpha=result.has_alpha,
         bg_color=result.bg_color,
         trimmed=result.trimmed,
-        watermark_masked=result.watermark_masked,
         width=result.width,
         height=result.height,
     )

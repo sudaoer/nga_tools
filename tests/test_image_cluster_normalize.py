@@ -128,29 +128,6 @@ def test_trim_removes_uniform_border(tmp_path: Path) -> None:
     assert result.height == 20
 
 
-def test_watermark_in_corner_is_masked(tmp_path: Path) -> None:
-    arr = np.full((100, 100, 3), 255, dtype=np.uint8)
-    arr[30:70, 30:70] = (200, 50, 80)
-    arr[30:70, 30:70, 0] = np.clip(200 - np.arange(40) * 3, 0, 255).astype(np.uint8)
-    arr[30:70, 30:70, 1] = np.clip(
-        50 + np.arange(40).reshape(-1, 1) * 3, 0, 255
-    ).astype(np.uint8)
-    arr[30:70, 30:70, 2] = 80
-    arr[93:99, 72:95] = (10, 10, 10)
-    path = tmp_path / "watermark.png"
-    _save_png(arr, path)
-
-    result = normalize_image(path)
-
-    assert result.watermark_masked is True
-    assert result.bg_color == (255, 255, 255)
-    assert tuple(result.array[0, 0].tolist()) == (
-        int(np.clip(200, 0, 255)),
-        50,
-        80,
-    )
-
-
 def test_small_image_returns_min_canvas(tmp_path: Path) -> None:
     arr = np.full((3, 4, 3), 200, dtype=np.uint8)
     path = tmp_path / "tiny.png"

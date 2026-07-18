@@ -10,9 +10,6 @@ from nga_tools.core.image_formats import open_image_for_processing
 _BG_TOLERANCE = 30
 _ALPHA_THRESHOLD = 128
 _CORNER_BLOCK = 8
-_GRID = 16
-_WATERMARK_EDGE_RATIO = 0.2
-_WATERMARK_BG_RATIO = 0.5
 _BG_UNIFORM_RATIO = 0.9
 _COMPOSITE_BG: tuple[int, int, int] = (255, 255, 255)
 _MIN_SIDE = 8
@@ -24,7 +21,6 @@ class NormalizeResult:
     has_alpha: bool
     bg_color: tuple[int, int, int] | None
     trimmed: bool
-    watermark_masked: bool
     width: int
     height: int
 
@@ -65,45 +61,6 @@ def _background_mask_from_color(
     return distance < _BG_TOLERANCE
 
 
-def _detect_watermark_mask(
-    arr: np.ndarray,
-    bg_mask: np.ndarray,
-    bg_color: tuple[int, int, int],
-) -> np.ndarray:
-    h, w = arr.shape[:2]
-    gh = min(_GRID, h)
-    gw = min(_GRID, w)
-    row_edges = np.linspace(0, h, gh + 1, dtype=int)
-    col_edges = np.linspace(0, w, gw + 1, dtype=int)
-    bottom_start = int(h * (1 - _WATERMARK_EDGE_RATIO))
-    right_start = int(w * (1 - _WATERMARK_EDGE_RATIO))
-
-    watermark = np.zeros_like(bg_mask)
-    for ri in range(gh):
-        in_bottom = row_edges[ri + 1] > bottom_start
-        for ci in range(gw):
-            in_right = col_edges[ci + 1] > right_start
-            if not in_bottom and not in_right:
-                continue
-            r0, r1 = row_edges[ri], row_edges[ri + 1]
-            c0, c1 = col_edges[ci], col_edges[ci + 1]
-            cell_bg = bg_mask[r0:r1, c0:c1]
-            total = cell_bg.size
-            if total == 0:
-                continue
-            bg_ratio = int(cell_bg.sum()) / total
-            if bg_ratio < _WATERMARK_BG_RATIO or bg_ratio >= 1.0:
-                continue
-            cell_arr = arr[r0:r1, c0:c1]
-            diff = cell_arr.astype(np.int32) - np.array(
-                bg_color, dtype=np.int32
-            )
-            distance = np.sqrt((diff * diff).sum(axis=-1))
-            polluted = (distance >= _BG_TOLERANCE) & cell_bg.__invert__()
-            watermark[r0:r1, c0:c1] |= polluted
-    return watermark
-
-
 def _trim_to_foreground(
     arr: np.ndarray, fg_mask: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray, bool]:
@@ -142,7 +99,6 @@ def normalize_image(path: Path) -> NormalizeResult:
 
     bg_color: tuple[int, int, int] | None = None
     bg_mask: np.ndarray
-    watermark_masked = False
 
     if has_alpha and alpha is not None:
         bg_mask = _background_mask_from_alpha(alpha)
@@ -153,10 +109,6 @@ def normalize_image(path: Path) -> NormalizeResult:
             bg_mask = np.zeros((h, w), dtype=bool)
         else:
             bg_mask = _background_mask_from_color(arr, detected)
-            watermark = _detect_watermark_mask(arr, bg_mask, detected)
-            if watermark.any():
-                watermark_masked = True
-                bg_mask = bg_mask | watermark
 
     fg_mask = ~bg_mask
     trimmed_arr, trimmed_fg, trimmed = _trim_to_foreground(arr, fg_mask)
@@ -167,7 +119,6 @@ def normalize_image(path: Path) -> NormalizeResult:
         has_alpha=has_alpha,
         bg_color=bg_color,
         trimmed=trimmed,
-        watermark_masked=watermark_masked,
         width=int(composite.shape[1]),
         height=int(composite.shape[0]),
     )
@@ -190,7 +141,6 @@ def normalize_image_passthrough(path: Path) -> NormalizeResult:
             has_alpha=False,
             bg_color=None,
             trimmed=False,
-            watermark_masked=False,
             width=_MIN_SIDE,
             height=_MIN_SIDE,
         )
@@ -199,7 +149,6 @@ def normalize_image_passthrough(path: Path) -> NormalizeResult:
         has_alpha=False,
         bg_color=None,
         trimmed=False,
-        watermark_masked=False,
         width=w,
         height=h,
     )
