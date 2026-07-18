@@ -1,41 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import ImageUsageDetailPanel from '../components/ImageUsageDetailPanel.vue'
 import PaginationControls from '../components/PaginationControls.vue'
-import {
-  fetchImageUsage,
-  fetchImageUsageDetail,
-  fetchImageUsageReplies,
-} from '../api'
+import { fetchImageUsage } from '../api'
 import type {
-  ImageUsageDetailResult,
   ImageUsageItem,
-  ImageUsageRepliesResult,
   ImageUsageResult,
   ImageUsageSort,
-  ImageUsageThreadGroup,
 } from '../types'
 
 const PAGE_SIZE = 100
-const REPLY_PAGE_SIZE = 20
-
-interface ThreadReplyState {
-  open: boolean
-  loading: boolean
-  error: string | null
-  result: ImageUsageRepliesResult | null
-  nextOffset: number
-}
 
 const result = ref<ImageUsageResult | null>(null)
-const detail = ref<ImageUsageDetailResult | null>(null)
 const loading = ref(false)
-const loadingDetail = ref(false)
 const error = ref<string | null>(null)
-const detailError = ref<string | null>(null)
 const offset = ref(0)
 const sortMetric = ref<ImageUsageSort>('usage')
 const selectedPath = ref<string | null>(null)
-const threadStates = ref<Record<string, ThreadReplyState>>({})
+const detailReady = ref(false)
+const detailReloadToken = ref(0)
 
 const currentPage = computed(() => Math.floor(offset.value / PAGE_SIZE) + 1)
 const totalPages = computed(() => {
@@ -135,39 +118,12 @@ async function load(refresh = false): Promise<void> {
   }
 }
 
-async function loadDetail(): Promise<void> {
-  if (selectedPath.value === null) {
-    return
-  }
-  loadingDetail.value = true
-  detailError.value = null
-  try {
-    detail.value = await fetchImageUsageDetail(selectedPath.value)
-    threadStates.value = Object.fromEntries(
-      detail.value.threads.map((group) => [
-        String(group.tid),
-        {
-          open: false,
-          loading: false,
-          error: null,
-          result: null,
-          nextOffset: 0,
-        },
-      ]),
-    )
-  } catch (caught) {
-    detailError.value = caughtMessage(caught)
-  } finally {
-    loadingDetail.value = false
-  }
-}
-
 async function refresh(): Promise<void> {
   offset.value = 0
   syncUrl()
   await load(true)
   if (selectedPath.value !== null) {
-    await loadDetail()
+    detailReloadToken.value += 1
   }
 }
 
@@ -195,78 +151,20 @@ async function goToPage(page: number): Promise<void> {
   await load(false)
 }
 
-async function openImage(item: ImageUsageItem): Promise<void> {
+function openImage(item: ImageUsageItem): void {
   selectedPath.value = item.relativePath
-  detail.value = null
   syncUrl()
-  await loadDetail()
 }
 
 function closeDetail(): void {
   selectedPath.value = null
-  detail.value = null
-  detailError.value = null
-  threadStates.value = {}
   syncUrl()
-}
-
-function stateFor(tid: number): ThreadReplyState | null {
-  return threadStates.value[String(tid)] || null
-}
-
-async function toggleThread(group: ImageUsageThreadGroup): Promise<void> {
-  const state = stateFor(group.tid)
-  if (state === null) {
-    return
-  }
-  state.open = !state.open
-  if (state.open && state.result === null) {
-    await loadMoreReplies(group.tid)
-  }
-}
-
-async function loadMoreReplies(tid: number): Promise<void> {
-  const state = stateFor(tid)
-  if (state === null || selectedPath.value === null || state.loading) {
-    return
-  }
-  state.loading = true
-  state.error = null
-  try {
-    const payload = await fetchImageUsageReplies(
-      selectedPath.value,
-      tid,
-      state.nextOffset,
-      REPLY_PAGE_SIZE,
-    )
-    const previousItems = state.result?.items || []
-    state.result = {
-      ...payload,
-      items: [...previousItems, ...payload.items],
-    }
-    state.nextOffset = payload.offset + payload.limit
-  } catch (caught) {
-    state.error = caughtMessage(caught)
-  } finally {
-    state.loading = false
-  }
-}
-
-function hasMoreReplies(tid: number): boolean {
-  const state = stateFor(tid)
-  return (
-    state !== null &&
-    state.result !== null &&
-    state.nextOffset < state.result.total
-  )
 }
 
 onMounted(async () => {
   hydrateStateFromUrl()
   await load(false)
-  if (selectedPath.value !== null) {
-    await loadDetail()
-  }
+  detailReady.value = true
 })
 </script>
 
@@ -380,75 +278,23 @@ onMounted(async () => {
     </template>
 
     <template v-else>
-      <header class="image-detail-toolbar">
-        <button type="button" @click="closeDetail">← 返回图片网格</button>
-        <button type="button" :disabled="loading || loadingDetail" @click="refresh">重新统计</button>
-      </header>
-      <div v-if="detailError" class="error-box">{{ detailError }}</div>
-      <div v-else-if="loadingDetail || detail === null" class="empty-state">
-        正在读取图片引用详情...
-      </div>
-      <template v-else>
-        <section class="image-detail-hero">
-          <a :href="detail.item.fileUrl" target="_blank" rel="noreferrer">
-            <img :src="detail.item.fileUrl" :alt="detail.item.relativePath" />
-          </a>
-          <div>
-            <h1>图片引用详情</h1>
-            <p class="image-detail-path">{{ detail.item.relativePath }}</p>
-            <div class="image-detail-stats">
-              <strong>{{ formatNumber(detail.item.usageCount) }} 次出现</strong>
-              <span>{{ formatNumber(detail.item.threadCount) }} 个主题</span>
-              <span>{{ formatNumber(detail.item.replyCount) }} 条回复</span>
-            </div>
-          </div>
-        </section>
-
-        <div v-if="detail.threads.length === 0" class="empty-state reader-empty">
-          当前生效正文中没有回复引用这张图片。
-        </div>
-        <section v-else class="image-thread-groups">
-          <article v-for="group in detail.threads" :key="group.tid" class="image-thread-group">
-            <button type="button" class="image-thread-summary" @click="toggleThread(group)">
-              <span class="image-thread-chevron">{{ stateFor(group.tid)?.open ? '▼' : '▶' }}</span>
-              <strong>{{ group.title }}</strong>
-              <span>tid {{ group.tid }}</span>
-              <span>{{ formatNumber(group.replyCount) }} 条回复</span>
-              <span>{{ formatNumber(group.usageCount) }} 次出现</span>
-            </button>
-            <div v-if="stateFor(group.tid)?.open" class="image-thread-replies">
-              <div v-if="stateFor(group.tid)?.error" class="error-box">
-                {{ stateFor(group.tid)?.error }}
-              </div>
-              <article
-                v-for="reply in stateFor(group.tid)?.result?.items || []"
-                :key="`${reply.dirName}:${reply.pid}`"
-                class="image-reference-reply"
-              >
-                <header>
-                  <strong>{{ reply.floorLabel }}</strong>
-                  <span>{{ reply.authorName || '未知用户' }}</span>
-                  <span>{{ formatTime(reply.postdate) }}</span>
-                  <span class="image-reference-count">本回复出现 {{ reply.occurrenceCount }} 次</span>
-                  <a :href="reply.readerUrl">在阅读器查看</a>
-                </header>
-                <div class="post-body" v-html="reply.html"></div>
-              </article>
-              <div v-if="stateFor(group.tid)?.loading" class="empty-state">
-                正在读取回复...
-              </div>
-              <button
-                v-else-if="hasMoreReplies(group.tid)"
-                type="button"
-                class="image-replies-more"
-                @click="loadMoreReplies(group.tid)"
-              >
-                加载更多回复
-              </button>
-            </div>
-          </article>
-        </section>
+      <template v-if="!detailReady">
+        <header class="image-detail-toolbar">
+          <button type="button" @click="closeDetail">← 返回图片网格</button>
+          <button type="button" disabled>重新统计</button>
+        </header>
+        <div class="empty-state">正在读取图片引用详情...</div>
       </template>
+      <ImageUsageDetailPanel
+        v-else
+        :relative-path="selectedPath"
+        back-label="← 返回图片网格"
+        show-refresh
+        :refreshing="loading"
+        :reload-token="detailReloadToken"
+        @back="closeDetail"
+        @refresh="refresh"
+      />
     </template>
   </main>
 </template>

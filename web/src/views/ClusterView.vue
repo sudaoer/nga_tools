@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import ImageUsageDetailPanel from '../components/ImageUsageDetailPanel.vue'
 import PaginationControls from '../components/PaginationControls.vue'
 import {
   fetchClusterDetail,
@@ -16,8 +16,6 @@ import type {
 const LIST_PAGE_SIZE = 50
 const MEMBER_PAGE_SIZE = 60
 
-const router = useRouter()
-
 const result = ref<ClustersResult | null>(null)
 const stats = ref<ClusterStatsResult | null>(null)
 const detail = ref<ClusterDetailResult | null>(null)
@@ -28,6 +26,7 @@ const detailError = ref<string | null>(null)
 const offset = ref(0)
 const memberOffset = ref(0)
 const selectedClusterId = ref<number | null>(null)
+const selectedImagePath = ref<string | null>(null)
 
 const listCurrentPage = computed(
   () => Math.floor(offset.value / LIST_PAGE_SIZE) + 1,
@@ -68,10 +67,12 @@ function hydrateStateFromUrl(): void {
   const params = new URLSearchParams(window.location.search)
   const requestedOffset = integerFromParam(params.get('offset'))
   offset.value = requestedOffset === null ? 0 : requestedOffset
-  const cluster = params.get('cluster')
-  selectedClusterId.value = cluster ? Number(cluster) : null
+  selectedClusterId.value = integerFromParam(params.get('cluster'))
   const memberOffsetParam = integerFromParam(params.get('moffset'))
   memberOffset.value = memberOffsetParam === null ? 0 : memberOffsetParam
+  selectedImagePath.value = selectedClusterId.value === null
+    ? null
+    : params.get('image') || null
 }
 
 function syncUrl(): void {
@@ -91,6 +92,11 @@ function syncUrl(): void {
   } else {
     url.searchParams.delete('moffset')
   }
+  if (selectedClusterId.value !== null && selectedImagePath.value !== null) {
+    url.searchParams.set('image', selectedImagePath.value)
+  } else {
+    url.searchParams.delete('image')
+  }
   window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
 }
 
@@ -107,11 +113,14 @@ function stripImagesUnique(relativePath: string): string {
   return relativePath
 }
 
-function openImageUsage(relativePath: string): void {
-  router.push({
-    path: '/admin/image-usage',
-    query: { image: relativePath },
-  })
+function openImageDetail(relativePath: string): void {
+  selectedImagePath.value = relativePath
+  syncUrl()
+}
+
+function closeImageDetail(): void {
+  selectedImagePath.value = null
+  syncUrl()
 }
 
 async function loadStats(): Promise<void> {
@@ -147,7 +156,6 @@ async function loadDetail(): Promise<void> {
   detailError.value = null
   try {
     detail.value = await fetchClusterDetail(selectedClusterId.value)
-    memberOffset.value = 0
   } catch (err) {
     detailError.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -170,6 +178,7 @@ function goToMemberPage(page: number): void {
 
 function openCluster(clusterId: number): void {
   selectedClusterId.value = clusterId
+  selectedImagePath.value = null
   detail.value = null
   memberOffset.value = 0
   syncUrl()
@@ -178,6 +187,7 @@ function openCluster(clusterId: number): void {
 
 function closeDetail(): void {
   selectedClusterId.value = null
+  selectedImagePath.value = null
   detail.value = null
   memberOffset.value = 0
   syncUrl()
@@ -213,7 +223,15 @@ onMounted(() => {
 
     <div v-if="error" class="error-box">{{ error }}</div>
 
-    <template v-if="selectedClusterId !== null">
+    <template v-if="selectedClusterId !== null && selectedImagePath !== null">
+      <ImageUsageDetailPanel
+        :relative-path="selectedImagePath"
+        back-label="← 返回当前聚类"
+        @back="closeImageDetail"
+      />
+    </template>
+
+    <template v-else-if="selectedClusterId !== null">
       <header class="image-detail-toolbar">
         <button type="button" @click="closeDetail">← 返回聚类列表</button>
       </header>
@@ -252,7 +270,7 @@ onMounted(() => {
                 type="button"
                 class="cluster-detail-path cluster-detail-path-link"
                 :title="member.relativePath"
-                @click="openImageUsage(member.relativePath)"
+                @click="openImageDetail(member.relativePath)"
               >
                 {{ stripImagesUnique(member.relativePath) }}
               </button>
