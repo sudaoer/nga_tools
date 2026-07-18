@@ -3,16 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import imagehash
 import numpy as np
-from imagededup.methods import DHash, PHash
+from PIL import Image
 
 from nga_tools.image_cluster.normalize import (
     NormalizeResult,
     normalize_image,
 )
 
-_phash = PHash(verbose=False)
-_dhash = DHash(verbose=False)
+_HASH_SIZE = 8
+_IMAGEHASH_VERSION = str(getattr(imagehash, "__version__", "unknown"))
+IMAGE_HASH_ALGORITHM = (
+    f"imagehash-{_IMAGEHASH_VERSION}:phash{_HASH_SIZE}-dhash{_HASH_SIZE}"
+)
 
 
 @dataclass(frozen=True)
@@ -30,10 +34,11 @@ class ImageFeatures:
     height: int
 
 
-def compute_hashes(array: np.ndarray) -> tuple[str | None, str | None]:
-    phash = _phash.encode_image(image_array=array)  # pyright: ignore[reportUnknownMemberType]
-    dhash = _dhash.encode_image(image_array=array)  # pyright: ignore[reportUnknownMemberType]
-    return phash, dhash
+def compute_hashes(array: np.ndarray) -> tuple[str, str]:
+    image = Image.fromarray(array)
+    phash = imagehash.phash(image, hash_size=_HASH_SIZE)
+    dhash = imagehash.dhash(image, hash_size=_HASH_SIZE)
+    return str(phash), str(dhash)
 
 
 def hamming_distance(a: str, b: str) -> int:
@@ -62,8 +67,6 @@ def extract_features(
         return None
 
     phash, dhash = compute_hashes(result.array)
-    if phash is None or dhash is None:
-        return None
 
     stat = path.stat()
     return ImageFeatures(

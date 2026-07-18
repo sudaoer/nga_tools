@@ -107,6 +107,26 @@ def test_run_image_cluster_incremental_reuses_cache(tmp_path: Path) -> None:
     assert second.features_reused == 2
 
 
+def test_run_image_cluster_invalidates_changed_hash_algorithm(
+    tmp_path: Path,
+) -> None:
+    images_dir = tmp_path / "images_unique"
+    images_dir.mkdir()
+    _make_subject_image(images_dir / "a.png", (255, 255, 255), seed=1)
+    _make_subject_image(images_dir / "b.png", (0, 0, 0), seed=1)
+
+    run_image_cluster(tmp_path, ClusterParams(threshold=12, workers=1))
+    store = ImageClusterStore(tmp_path)
+    store.save_run({"hash_algorithm": "legacy:phash8-dhash8"}, [])
+
+    result = run_image_cluster(
+        tmp_path, ClusterParams(threshold=12, workers=1)
+    )
+
+    assert result.features_computed == 2
+    assert result.features_reused == 0
+
+
 def test_run_image_cluster_force_recomputes(tmp_path: Path) -> None:
     images_dir = tmp_path / "images_unique"
     images_dir.mkdir()

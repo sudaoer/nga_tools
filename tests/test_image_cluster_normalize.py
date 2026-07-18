@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import imagehash
 from PIL import Image
 
 from nga_tools.image_cluster.normalize import (
@@ -76,14 +77,13 @@ def test_alpha_transparent_bg_detected(tmp_path: Path) -> None:
 
 
 def test_black_white_alpha_produce_identical_hashes(tmp_path: Path) -> None:
-    from imagededup.methods import PHash
-
-    ph = PHash(verbose=False)
     variants = []
     for name, bg in (("black.png", (0, 0, 0)), ("white.png", (255, 255, 255))):
         path = tmp_path / name
         _save_png(_make_subject_on(bg), path)
-        variants.append(ph.encode_image(image_array=normalize_image(path).array))
+        variants.append(
+            str(imagehash.phash(Image.fromarray(normalize_image(path).array)))
+        )
 
     rgba = np.zeros((80, 100, 4), dtype=np.uint8)
     rgba[20:60, 30:70] = (200, 50, 80, 255)
@@ -94,7 +94,9 @@ def test_black_white_alpha_produce_identical_hashes(tmp_path: Path) -> None:
     rgba[20:60, 30:70, 2] = 80
     alpha_path = tmp_path / "alpha.png"
     Image.fromarray(rgba, mode="RGBA").save(alpha_path)
-    variants.append(ph.encode_image(image_array=normalize_image(alpha_path).array))
+    variants.append(
+        str(imagehash.phash(Image.fromarray(normalize_image(alpha_path).array)))
+    )
 
     assert variants[0] == variants[1] == variants[2]
     assert variants[0] != "ffffffffffffffff"
@@ -142,8 +144,6 @@ def test_small_image_returns_min_canvas(tmp_path: Path) -> None:
 
 
 def test_jpeg_input_works(tmp_path: Path) -> None:
-    from imagededup.methods import PHash
-
     arr = _make_subject_on((255, 255, 255))
     path = tmp_path / "img.jpg"
     Image.fromarray(arr, mode="RGB").save(path, quality=95)
@@ -151,7 +151,7 @@ def test_jpeg_input_works(tmp_path: Path) -> None:
     result = normalize_image(path)
 
     assert result.bg_color is not None
-    hash_value = PHash(verbose=False).encode_image(image_array=result.array)
+    hash_value = str(imagehash.phash(Image.fromarray(result.array)))
     assert isinstance(hash_value, str)
     assert hash_value != "ffffffffffffffff"
     assert hash_value != "0000000000000000"

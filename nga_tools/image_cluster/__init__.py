@@ -7,7 +7,11 @@ from pathlib import Path
 
 from nga_tools.console import report_info, report_progress
 from nga_tools.image_cluster.cluster import Cluster, build_clusters
-from nga_tools.image_cluster.features import ImageFeatures, extract_features
+from nga_tools.image_cluster.features import (
+    IMAGE_HASH_ALGORITHM,
+    ImageFeatures,
+    extract_features,
+)
 from nga_tools.image_cluster.lsh import (
     LshConfig,
     generate_candidate_pairs,
@@ -125,6 +129,14 @@ def run_image_cluster(
     total_images = len(scanned)
     scanned_keys = {relative for _, relative in scanned}
 
+    invalidated = store.invalidate_features_if_hash_algorithm_changed(
+        IMAGE_HASH_ALGORITHM
+    )
+    if invalidated:
+        report_info(
+            f"哈希算法已变更，清空旧图片特征缓存：{invalidated} 条"
+        )
+
     existing = (
         store.load_feature_fingerprints() if not params.force else {}
     )
@@ -187,6 +199,7 @@ def run_image_cluster(
         "min_cluster_size": params.min_cluster_size,
         "lsh_bands": params.lsh_bands,
         "force": params.force,
+        "hash_algorithm": IMAGE_HASH_ALGORITHM,
     }
     run_id = store.save_run(params_dict, clusters)
 

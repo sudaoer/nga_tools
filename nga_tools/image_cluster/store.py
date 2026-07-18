@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from contextlib import closing
 from pathlib import Path
+from typing import cast
 
 from nga_tools.core.sqlite import (
     SQLITE_BUSY_TIMEOUT_SECONDS,
@@ -201,6 +202,33 @@ class ImageClusterStore:
             ):
                 result[path] = (size, mtime_ns)
         return result
+
+    def invalidate_features_if_hash_algorithm_changed(
+        self, algorithm: str
+    ) -> int:
+        latest_run_id = self.latest_run_id()
+        if latest_run_id is not None:
+            params = self.load_run_params(latest_run_id)
+            if isinstance(params, dict):
+                params_dict = cast(dict[str, object], params)
+                stored_algorithm = params_dict.get("hash_algorithm")
+                if isinstance(stored_algorithm, str) and stored_algorithm == algorithm:
+                    return 0
+
+        with _LOCK:
+            with closing(self._connect_writable()) as connection:
+                with connection:
+                    row = connection.execute(
+                        "SELECT COUNT(*) FROM image_features"
+                    ).fetchone()
+                    count = (
+                        row[0]
+                        if row is not None and type(row[0]) is int
+                        else 0
+                    )
+                    if count:
+                        connection.execute("DELETE FROM image_features")
+        return count
 
     def upsert_features(self, features: list[ImageFeatures]) -> None:
         if not features:
