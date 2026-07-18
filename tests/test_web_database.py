@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +42,13 @@ class WebDatabaseViewerTest:
                 "mon_202607/15/database-bgm.mp3"
             ),
         )
-        AnkebakStateStore(output_dir / "backup_state.sqlite3").load_states()
+        AnkebakStateStore(output_dir / "backup_state.sqlite3").record_success(
+            tid=101,
+            aid=201,
+            forum_thread=None,
+            completed_at=datetime(2026, 7, 18, tzinfo=timezone.utc),
+            full_backup=False,
+        )
         thread_dir = output_dir / "101_201"
         _write_archive(thread_dir, [_post(1, "hello")])
         _store = ThreadArchiveStore(thread_dir)

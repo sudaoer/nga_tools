@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from nga_tools.backup.thread_stores import ThreadArchiveCacheStore
-from nga_tools.storage import UnsupportedStorageFormatError
 
 
 @dataclass(frozen=True)
@@ -66,13 +65,7 @@ class ArchiveCacheRepository:
     ) -> dict[str, PostImageReferenceCacheEntry]:
         if not cache_keys or not self.cache_store.exists():
             return {}
-        try:
-            return self._read_post_image_reference_cache(cache_keys)
-        except UnsupportedStorageFormatError:
-            raise
-        except (OSError, sqlite3.Error, ValueError):
-            self.cache_store.recreate_after_error(self.archive_store_id())
-            return {}
+        return self._read_post_image_reference_cache(cache_keys)
     def _read_post_image_reference_cache(
         self,
         cache_keys: set[str],

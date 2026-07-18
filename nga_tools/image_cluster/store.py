@@ -22,7 +22,6 @@ from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
 from nga_tools.storage.schema import (
     require_exact_columns,
     require_table_names,
-    table_names,
 )
 
 IMAGE_CLUSTERS_FILENAME = "image_clusters.sqlite3"
@@ -68,13 +67,13 @@ _DETAIL_PAIR_SCORES_COLUMNS = (
     ("updated_at", "TEXT"),
 )
 
-_BASE_TABLES = {
+_CURRENT_TABLES = {
     "storage_metadata",
     "image_features",
     "cluster_runs",
     "cluster_members",
+    "detail_pair_scores",
 }
-_CURRENT_TABLES = _BASE_TABLES | {"detail_pair_scores"}
 
 _LOCK = threading.RLock()
 
@@ -106,7 +105,7 @@ def _create_detail_pair_scores_table(
 ) -> None:
     connection.execute(
         """
-        CREATE TABLE detail_pair_scores (
+        CREATE TABLE IF NOT EXISTS detail_pair_scores (
             path_a TEXT NOT NULL,
             path_b TEXT NOT NULL,
             size_a INTEGER NOT NULL,
@@ -173,11 +172,17 @@ class ImageClusterStore:
                 sqlite3.connect(self._db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
             ) as connection:
                 configure_connection(connection)
-                if new_database:
-                    ensure_storage_metadata(connection, role="image_cluster")
+                with connection:
+                    if new_database:
+                        ensure_storage_metadata(connection, role="image_cluster")
+                    else:
+                        require_storage_metadata(
+                            connection,
+                            role="image_cluster",
+                        )
                     connection.execute(
                         """
-                        CREATE TABLE image_features (
+                        CREATE TABLE IF NOT EXISTS image_features (
                             relative_path TEXT PRIMARY KEY,
                             size INTEGER NOT NULL,
                             mtime_ns INTEGER NOT NULL,
@@ -195,7 +200,7 @@ class ImageClusterStore:
                     )
                     connection.execute(
                         """
-                        CREATE TABLE cluster_runs (
+                        CREATE TABLE IF NOT EXISTS cluster_runs (
                             run_id INTEGER PRIMARY KEY AUTOINCREMENT,
                             created_at TEXT NOT NULL,
                             params TEXT NOT NULL
@@ -204,7 +209,7 @@ class ImageClusterStore:
                     )
                     connection.execute(
                         """
-                        CREATE TABLE cluster_members (
+                        CREATE TABLE IF NOT EXISTS cluster_members (
                             run_id INTEGER NOT NULL,
                             cluster_id INTEGER NOT NULL,
                             ordinal INTEGER NOT NULL,
@@ -216,20 +221,12 @@ class ImageClusterStore:
                     )
                     connection.execute(
                         """
-                        CREATE INDEX idx_cluster_members_run
+                        CREATE INDEX IF NOT EXISTS idx_cluster_members_run
                         ON cluster_members(run_id, cluster_id)
                         """
                     )
                     _create_detail_pair_scores_table(connection)
-                else:
-                    if table_names(connection) == _BASE_TABLES:
-                        self._require_base(
-                            connection,
-                            expected_tables=_BASE_TABLES,
-                        )
-                        _create_detail_pair_scores_table(connection)
                     self._require_current(connection)
-                connection.commit()
             return self._db_path
 
     def _connect_writable(self) -> sqlite3.Connection:
@@ -241,13 +238,19 @@ class ImageClusterStore:
         return connection
 
     def _connect_readonly(self) -> sqlite3.Connection:
-        self.ensure_store()
+        if not self._db_path.is_file():
+            raise FileNotFoundError(self._db_path)
         connection = sqlite3.connect(
             f"{self._db_path.as_uri()}?mode=ro",
             timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
             uri=True,
         )
         configure_readonly_connection(connection)
+        try:
+            self._require_current(connection)
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     def load_feature_fingerprints(self) -> dict[str, tuple[int, int]]:

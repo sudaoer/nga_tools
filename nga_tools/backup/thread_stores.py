@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sqlite3
-import uuid
 from contextlib import closing
 from pathlib import Path
 
@@ -99,18 +98,6 @@ def _open_readonly(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _quarantine_database(path: Path) -> None:
-    quarantine_token = uuid.uuid4().hex
-    for suffix in ("", "-wal", "-shm"):
-        source = Path(f"{path}{suffix}")
-        if not source.exists():
-            continue
-        target = path.with_name(
-            f"{path.name}.corrupt-{quarantine_token}{suffix}"
-        )
-        source.replace(target)
-
-
 def _validate_source_binding(
     connection: sqlite3.Connection,
     *,
@@ -191,9 +178,20 @@ class ThreadArchiveStateStore:
         connection = _open_writable(self.db_path)
         if self._schema_initialized_for != source_store_id:
             try:
-                if new_database:
-                    self._initialize_schema(connection, source_store_id)
-                else:
+                with connection:
+                    if new_database:
+                        ensure_storage_metadata(
+                            connection,
+                            role="archive_state",
+                            source_store_id=source_store_id,
+                        )
+                    else:
+                        _validate_source_binding(
+                            connection,
+                            expected_role="archive_state",
+                            source_store_id=source_store_id,
+                        )
+                    self._create_schema_objects(connection)
                     _require_current_schema(
                         connection,
                         role="archive_state",
@@ -226,21 +224,8 @@ class ThreadArchiveStateStore:
         with closing(self.connect_write(source_store_id)):
             pass
 
-    def recreate_after_error(self, source_store_id: str) -> None:
-        _quarantine_database(self.db_path)
-        self._schema_initialized_for = None
-        self.ensure_schema(source_store_id)
-
     @staticmethod
-    def _initialize_schema(
-        connection: sqlite3.Connection,
-        source_store_id: str,
-    ) -> None:
-        ensure_storage_metadata(
-            connection,
-            role="archive_state",
-            source_store_id=source_store_id,
-        )
+    def _create_schema_objects(connection: sqlite3.Connection) -> None:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS backup_floor_processing_state (
@@ -345,7 +330,6 @@ class ThreadArchiveStateStore:
             )
             """
         )
-        connection.commit()
 
 
 class ThreadArchiveCacheStore:
@@ -361,9 +345,20 @@ class ThreadArchiveCacheStore:
         connection = _open_writable(self.db_path)
         if self._schema_initialized_for != source_store_id:
             try:
-                if new_database:
-                    self._initialize_schema(connection, source_store_id)
-                else:
+                with connection:
+                    if new_database:
+                        ensure_storage_metadata(
+                            connection,
+                            role="archive_cache",
+                            source_store_id=source_store_id,
+                        )
+                    else:
+                        _validate_source_binding(
+                            connection,
+                            expected_role="archive_cache",
+                            source_store_id=source_store_id,
+                        )
+                    self._create_schema_objects(connection)
                     _require_current_schema(
                         connection,
                         role="archive_cache",
@@ -396,21 +391,8 @@ class ThreadArchiveCacheStore:
         with closing(self.connect_write(source_store_id)):
             pass
 
-    def recreate_after_error(self, source_store_id: str) -> None:
-        _quarantine_database(self.db_path)
-        self._schema_initialized_for = None
-        self.ensure_schema(source_store_id)
-
     @staticmethod
-    def _initialize_schema(
-        connection: sqlite3.Connection,
-        source_store_id: str,
-    ) -> None:
-        ensure_storage_metadata(
-            connection,
-            role="archive_cache",
-            source_store_id=source_store_id,
-        )
+    def _create_schema_objects(connection: sqlite3.Connection) -> None:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS post_image_reference_cache (
@@ -423,4 +405,3 @@ class ThreadArchiveCacheStore:
             )
             """
         )
-        connection.commit()

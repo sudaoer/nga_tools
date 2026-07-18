@@ -144,27 +144,28 @@ def _initialize_audio_index(output_root: Path) -> Path:
             with connection:
                 if new_database:
                     ensure_storage_metadata(connection, role="audio_index")
-                    connection.execute(
-                        """
-                        CREATE TABLE audio_mappings (
-                            url TEXT PRIMARY KEY,
-                            unique_rel_path TEXT NOT NULL,
-                            content_sha256 TEXT NOT NULL,
-                            content_bytes INTEGER NOT NULL CHECK(content_bytes > 0),
-                            duration_seconds REAL NOT NULL CHECK(duration_seconds > 0),
-                            created_at TEXT NOT NULL,
-                            updated_at TEXT NOT NULL
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX idx_audio_mappings_unique_rel_path
-                        ON audio_mappings(unique_rel_path)
-                        """
-                    )
                 else:
-                    require_current_audio_index(connection, db_path)
+                    require_storage_metadata(connection, role="audio_index")
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS audio_mappings (
+                        url TEXT PRIMARY KEY,
+                        unique_rel_path TEXT NOT NULL,
+                        content_sha256 TEXT NOT NULL,
+                        content_bytes INTEGER NOT NULL CHECK(content_bytes > 0),
+                        duration_seconds REAL NOT NULL CHECK(duration_seconds > 0),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_audio_mappings_unique_rel_path
+                    ON audio_mappings(unique_rel_path)
+                    """
+                )
+                require_current_audio_index(connection, db_path)
         _INITIALIZED_AUDIO_INDEX_PATHS.add(db_path)
     return db_path
 

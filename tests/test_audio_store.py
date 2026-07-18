@@ -5,6 +5,8 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from nga_tools.backup import audio_store
 from nga_tools.core.download_types import (
     DownloadFileResult,
@@ -15,6 +17,7 @@ from nga_tools.core.nga_audio import (
     extract_nga_audio_urls,
     normalize_nga_audio_url,
 )
+from nga_tools.storage import UnsupportedStorageFormatError
 
 
 def _audio_url(name: str, *, day: str = "15") -> str:
@@ -27,6 +30,50 @@ def _audio_url(name: str, *, day: str = "15") -> str:
 def _mp3_bytes(marker: int = 0) -> bytes:
     frame = b"\xff\xfb\x90\x64" + bytes([marker]) * 413
     return frame * 10
+
+
+def test_audio_index_read_is_strict_and_ensure_repairs_missing_index(
+    tmp_path: Path,
+) -> None:
+    missing_output = tmp_path / "missing"
+    assert audio_store.audio_mappings_for_urls(
+        missing_output,
+        [_audio_url("missing-database")],
+    ) == {}
+    assert not audio_store.audio_index_path(missing_output).exists()
+
+    output_root = tmp_path / "output"
+    db_path = audio_store.ensure_audio_index(output_root)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP INDEX idx_audio_mappings_unique_rel_path")
+        connection.commit()
+    audio_store._INITIALIZED_AUDIO_INDEX_PATHS.discard(db_path.resolve())
+
+    with pytest.raises(UnsupportedStorageFormatError):
+        audio_store.audio_mappings_for_urls(
+            output_root,
+            [_audio_url("missing-index")],
+        )
+    with sqlite3.connect(db_path) as connection:
+        index_before_ensure = connection.execute(
+            """
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'index'
+              AND name = 'idx_audio_mappings_unique_rel_path'
+            """
+        ).fetchone()
+    assert index_before_ensure is None
+
+    audio_store.ensure_audio_index(output_root)
+    with sqlite3.connect(db_path) as connection:
+        index_after_ensure = connection.execute(
+            """
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'index'
+              AND name = 'idx_audio_mappings_unique_rel_path'
+            """
+        ).fetchone()
+    assert index_after_ensure == (1,)
 
 
 def test_extract_nga_audio_urls_normalizes_and_preserves_order() -> None:

@@ -12,6 +12,7 @@ from nga_tools.config import get_config
 from nga_tools.core.sqlite import (
     SQLITE_BUSY_TIMEOUT_SECONDS,
     configure_connection,
+    configure_readonly_connection,
 )
 from nga_tools.ngaclient.client import ForumThread
 from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
@@ -101,16 +102,37 @@ class ForumThreadStore:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = forum_thread_db_path() if db_path is None else db_path
 
-    def _connect(self) -> sqlite3.Connection:
-        existed = self.db_path.is_file()
+    def _connect_write(self) -> sqlite3.Connection:
+        new_database = not self.db_path.is_file()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
         configure_connection(connection)
-        if existed:
+        try:
+            with connection:
+                if new_database:
+                    ensure_storage_metadata(connection, role="forum_data")
+                else:
+                    require_storage_metadata(connection, role="forum_data")
+                require_current_forum_schema(connection, self.db_path)
+        except BaseException:
+            connection.close()
+            raise
+        return connection
+
+    def _connect_read(self) -> sqlite3.Connection:
+        if not self.db_path.is_file():
+            raise FileNotFoundError(self.db_path)
+        connection = sqlite3.connect(
+            f"{self.db_path.resolve().as_uri()}?mode=ro",
+            timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+            uri=True,
+        )
+        configure_readonly_connection(connection)
+        try:
             require_current_forum_schema(connection, self.db_path)
-        else:
-            ensure_storage_metadata(connection, role="forum_data")
-        connection.commit()
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     def _ensure_table(self, connection: sqlite3.Connection, fid: int) -> str:
@@ -138,12 +160,31 @@ class ForumThreadStore:
             _FORUM_THREAD_COLUMNS,
             source=f"forum_data {self.db_path}",
         )
-        connection.commit()
         return table_name
 
+    @staticmethod
+    def _existing_table_name(
+        connection: sqlite3.Connection,
+        fid: int,
+    ) -> str | None:
+        table_name = forum_thread_table_name(fid)
+        row = connection.execute(
+            """
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'table' AND name = ?
+            """,
+            (table_name,),
+        ).fetchone()
+        return table_name if row is not None else None
+
     def existing_tids(self, fid: int) -> set[int]:
-        with closing(self._connect()) as connection:
-            table_name = self._ensure_table(connection, fid)
+        forum_thread_table_name(fid)
+        if not self.db_path.is_file():
+            return set()
+        with closing(self._connect_read()) as connection:
+            table_name = self._existing_table_name(connection, fid)
+            if table_name is None:
+                return set()
             rows = connection.execute(f"SELECT tid FROM {table_name}").fetchall()
 
         tids: set[int] = set()
@@ -154,8 +195,13 @@ class ForumThreadStore:
         return tids
 
     def max_normal_lastpost(self, fid: int) -> int | None:
-        with closing(self._connect()) as connection:
-            table_name = self._ensure_table(connection, fid)
+        forum_thread_table_name(fid)
+        if not self.db_path.is_file():
+            return None
+        with closing(self._connect_read()) as connection:
+            table_name = self._existing_table_name(connection, fid)
+            if table_name is None:
+                return None
             return self._max_normal_lastpost_in_connection(connection, table_name)
 
     def upsert_fid_pages_atomically(
@@ -164,9 +210,9 @@ class ForumThreadStore:
         page_threads: Iterable[Iterable[ForumThread]],
     ) -> list[ForumThreadUpsertResult]:
         results: list[ForumThreadUpsertResult] = []
-        with closing(self._connect()) as connection:
-            self._ensure_table(connection, fid)
+        with closing(self._connect_write()) as connection:
             with connection:
+                self._ensure_table(connection, fid)
                 for threads in page_threads:
                     thread_list = list(threads)
                     if not thread_list:
@@ -191,8 +237,13 @@ class ForumThreadStore:
         return value if isinstance(value, int) else None
 
     def list_threads(self, fid: int, *, forumname: str) -> list[ForumThread]:
-        with closing(self._connect()) as connection:
-            table_name = self._ensure_table(connection, fid)
+        forum_thread_table_name(fid)
+        if not self.db_path.is_file():
+            return []
+        with closing(self._connect_read()) as connection:
+            table_name = self._existing_table_name(connection, fid)
+            if table_name is None:
+                return []
             rows = cast(
                 list[tuple[int, int, str, str, int, int, int, int, int]],
                 connection.execute(
@@ -282,14 +333,14 @@ class ForumThreadStore:
                 updated_count=len(existing_tids),
             )
 
-        with closing(self._connect()) as own_connection:
-            table_name = self._ensure_table(own_connection, fid)
-            existing_tids = self._existing_tids_in_connection(
-                own_connection,
-                table_name,
-                incoming_tids,
-            )
+        with closing(self._connect_write()) as own_connection:
             with own_connection:
+                table_name = self._ensure_table(own_connection, fid)
+                existing_tids = self._existing_tids_in_connection(
+                    own_connection,
+                    table_name,
+                    incoming_tids,
+                )
                 own_connection.executemany(
                     self._UPSERT_SQL.format(table_name=table_name),
                     rows,

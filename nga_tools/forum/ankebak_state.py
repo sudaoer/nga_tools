@@ -10,7 +10,11 @@ from nga_tools.core.retry_schedule import (
     RetryScheduleDecision,
     retry_schedule_decision,
 )
-from nga_tools.core.sqlite import SQLITE_BUSY_TIMEOUT_SECONDS, configure_connection
+from nga_tools.core.sqlite import (
+    SQLITE_BUSY_TIMEOUT_SECONDS,
+    configure_connection,
+    configure_readonly_connection,
+)
 from nga_tools.config import get_config
 from nga_tools.ngaclient.client import ForumThread
 from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
@@ -96,7 +100,7 @@ class AnkebakStateStore:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = backup_state_db_path() if db_path is None else db_path
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect_write(self) -> sqlite3.Connection:
         new_database = not self.db_path.is_file()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(
@@ -104,11 +108,33 @@ class AnkebakStateStore:
             timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
         )
         configure_connection(connection)
-        if new_database:
-            ensure_storage_metadata(connection, role="backup_state")
-        else:
+        try:
+            with connection:
+                if new_database:
+                    ensure_storage_metadata(connection, role="backup_state")
+                else:
+                    require_storage_metadata(connection, role="backup_state")
+                self._ensure_table(connection)
+                require_current_backup_state_schema(connection, self.db_path)
+        except BaseException:
+            connection.close()
+            raise
+        return connection
+
+    def _connect_read(self) -> sqlite3.Connection:
+        if not self.db_path.is_file():
+            raise FileNotFoundError(self.db_path)
+        connection = sqlite3.connect(
+            f"{self.db_path.resolve().as_uri()}?mode=ro",
+            timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+            uri=True,
+        )
+        configure_readonly_connection(connection)
+        try:
             require_current_backup_state_schema(connection, self.db_path)
-        connection.commit()
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     @staticmethod
@@ -132,11 +158,11 @@ class AnkebakStateStore:
             _ANKEBAK_STATE_COLUMNS,
             source="backup_state SQLite",
         )
-        connection.commit()
 
     def load_states(self) -> dict[str, AnkebakThreadState]:
-        with closing(self._connect()) as connection:
-            self._ensure_table(connection)
+        if not self.db_path.is_file():
+            return {}
+        with closing(self._connect_read()) as connection:
             rows = connection.execute(
                 """
                 SELECT
@@ -202,8 +228,7 @@ class AnkebakStateStore:
         lastpost = None if forum_thread is None else forum_thread["lastpost"]
         full_completed_text = completed_text if full_backup else None
 
-        with closing(self._connect()) as connection:
-            self._ensure_table(connection)
+        with closing(self._connect_write()) as connection:
             with connection:
                 connection.execute(
                     """

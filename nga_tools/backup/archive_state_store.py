@@ -25,7 +25,6 @@ from nga_tools.backup.archive_post_store import ArchivePostRepository
 from nga_tools.backup.thread_stores import ThreadArchiveStateStore
 from nga_tools.core.download_types import DOWNLOAD_FAILURE_KINDS
 from nga_tools.core.sqlite import iter_in_clause_chunks
-from nga_tools.storage import UnsupportedStorageFormatError
 
 
 class ArchiveStateSource(Protocol):
@@ -80,28 +79,12 @@ class ArchiveStateRepository:
     def read_backup_processing_snapshot(self) -> BackupProcessingSnapshot:
         self.require_exists()
         change_state = self._read_current_archive_change_state()
-        source_store_id = self.archive_store_id()
         if not self.state_store.exists():
-            self.state_store.ensure_schema(source_store_id)
-        try:
-            with closing(self._connect_state_read()):
-                pass
-        except UnsupportedStorageFormatError:
-            raise
-        except (OSError, sqlite3.Error, ValueError):
-            self.state_store.recreate_after_error(source_store_id)
             return BackupProcessingSnapshot(
                 change_state=change_state,
                 pending_image_retries=(),
             )
-        try:
-            return self._read_backup_processing_snapshot_from_state(change_state)
-        except (OSError, sqlite3.Error):
-            self.state_store.recreate_after_error(source_store_id)
-            return BackupProcessingSnapshot(
-                change_state=change_state,
-                pending_image_retries=(),
-            )
+        return self._read_backup_processing_snapshot_from_state(change_state)
     def _read_backup_processing_snapshot_from_state(
         self,
         change_state: ArchiveChangeState,
@@ -557,6 +540,8 @@ class ArchiveStateRepository:
         self,
     ) -> ImageReferenceManifestSnapshot | None:
         self.require_exists()
+        if not self.state_store.exists():
+            return None
         with closing(self._connect_state_read()) as connection:
             state_row = connection.execute(
                 """
@@ -676,6 +661,8 @@ class ArchiveStateRepository:
         self,
     ) -> ImageReferenceManifestState | None:
         self.require_exists()
+        if not self.state_store.exists():
+            return None
         with closing(self._connect_state_read()) as connection:
             row = connection.execute(
                 """
@@ -699,7 +686,7 @@ class ArchiveStateRepository:
         lous: set[int],
     ) -> dict[int, ImageReferenceManifestPost]:
         self.require_exists()
-        if not lous:
+        if not lous or not self.state_store.exists():
             return {}
         post_rows: list[tuple[object, object]] = []
         entry_rows: list[tuple[object, object, object, object]] = []
@@ -783,7 +770,7 @@ class ArchiveStateRepository:
         urls: set[str],
     ) -> dict[str, tuple[int, bool]]:
         self.require_exists()
-        if not urls:
+        if not urls or not self.state_store.exists():
             return {}
         rows: list[tuple[object, object, object]] = []
         with closing(self._connect_state_read()) as connection:

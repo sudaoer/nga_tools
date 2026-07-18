@@ -197,7 +197,7 @@ class ImageStoreTest:
             assert set(mappings) == {existing_url}
             assert pending_tasks == [{'url': missing_url}]
 
-    def test_image_index_schema_initializes_once_before_readonly_queries(
+    def test_image_index_readonly_queries_do_not_create_database(
         self,
         tmp_path: Path,
     ) -> None:
@@ -225,15 +225,43 @@ class ImageStoreTest:
             assert index_store.mappings_for_urls([missing_url]) == {}
             assert index_store.mappings_for_urls([missing_url]) == {}
 
-        assert (output_dir / "image_index.sqlite3").is_file()
-        assert writable_config_mock.call_count == 1
-        assert readonly_config_mock.call_count == 2
-        with sqlite3.connect(output_dir / "image_index.sqlite3") as connection:
-            assert [
-                row[1] for row in connection.execute(
-                    "PRAGMA table_info(image_mappings)"
-                )
-            ] == ["url", "unique_rel_path"]
+        assert not (output_dir / "image_index.sqlite3").exists()
+        writable_config_mock.assert_not_called()
+        readonly_config_mock.assert_not_called()
+
+    def test_missing_image_index_table_is_readonly_until_next_write(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        image_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202506/06/missing-table.png"
+        )
+        image_path = output_dir / "images_unique/image.png"
+        store = image_index.ImageIndexStore(output_dir)
+        store.upsert_mapping(image_url, image_path)
+        with sqlite3.connect(store.db_path) as connection:
+            connection.execute("DROP TABLE image_mappings")
+            connection.commit()
+        image_index._INITIALIZED_IMAGE_INDEX_PATHS.discard(
+            store.db_path.resolve()
+        )
+
+        reopened = image_index.ImageIndexStore(output_dir)
+        with pytest.raises(UnsupportedStorageFormatError):
+            reopened.mappings_by_url()
+        with sqlite3.connect(store.db_path) as connection:
+            table_before_write = connection.execute(
+                """
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'table' AND name = 'image_mappings'
+                """
+            ).fetchone()
+        assert table_before_write is None
+
+        reopened.upsert_mapping(image_url, image_path)
+        assert reopened.mappings_by_url()[image_url].unique_path == image_path
 
     def test_old_image_index_schema_is_rejected_without_mutation(
         self,

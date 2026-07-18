@@ -76,11 +76,14 @@ def _initialize_image_cache() -> Path:
             sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
         ) as connection:
             configure_connection(connection)
-            if new_database:
-                ensure_storage_metadata(connection, role="image_cache")
+            with connection:
+                if new_database:
+                    ensure_storage_metadata(connection, role="image_cache")
+                else:
+                    require_storage_metadata(connection, role="image_cache")
                 connection.execute(
                     """
-                    CREATE TABLE image_validation_cache (
+                    CREATE TABLE IF NOT EXISTS image_validation_cache (
                         relative_path TEXT PRIMARY KEY,
                         size INTEGER NOT NULL,
                         mtime_ns INTEGER NOT NULL,
@@ -89,9 +92,7 @@ def _initialize_image_cache() -> Path:
                     )
                     """
                 )
-            else:
                 require_current_image_cache(connection, db_path)
-            connection.commit()
         _INITIALIZED_IMAGE_CACHE_PATHS.add(db_path)
     return db_path
 
@@ -106,13 +107,21 @@ def _connect_image_cache_writable() -> sqlite3.Connection:
 
 
 def _connect_image_cache_readonly() -> sqlite3.Connection:
-    db_uri = f"{_initialize_image_cache().as_uri()}?mode=ro"
+    db_path = image_cache_path().resolve()
+    if not db_path.is_file():
+        raise FileNotFoundError(db_path)
+    db_uri = f"{db_path.as_uri()}?mode=ro"
     connection = sqlite3.connect(
         db_uri,
         timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
         uri=True,
     )
     configure_readonly_connection(connection)
+    try:
+        require_current_image_cache(connection, db_path)
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
@@ -138,7 +147,7 @@ def load_persistent_validation_cache(
         if (storage_key := _validation_storage_key(canonical_path)) is not None
     }
     sorted_paths = sorted(canonical_by_storage_key)
-    if not sorted_paths:
+    if not sorted_paths or not image_cache_path().is_file():
         return {}
 
     entries: dict[str, tuple[int, int, bool]] = {}
@@ -167,7 +176,7 @@ def load_persistent_validation_cache(
                             mtime_ns,
                             bool(valid),
                         )
-    except (OSError, sqlite3.Error, ValueError):
+    except (OSError, sqlite3.Error):
         return {}
     return entries
 
@@ -210,7 +219,7 @@ def save_persistent_validation_entries(
                         """,
                         rows,
                     )
-        except (OSError, sqlite3.Error, ValueError):
+        except (OSError, sqlite3.Error):
             pass
 
 
@@ -226,5 +235,5 @@ def delete_persistent_validation_entry(canonical_path: str) -> None:
                         "DELETE FROM image_validation_cache WHERE relative_path = ?",
                         (storage_key,),
                     )
-        except (OSError, sqlite3.Error, ValueError):
+        except (OSError, sqlite3.Error):
             pass

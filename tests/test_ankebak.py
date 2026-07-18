@@ -22,6 +22,7 @@ from nga_tools.forum.ankebak_state import (
 )
 from nga_tools.forum.thread_configs import ThreadConfig
 from nga_tools.ngaclient.client import ForumThread
+from nga_tools.storage import UnsupportedStorageFormatError
 
 
 def _thread_config(tid: int = 101, aid: int | None = 201) -> ThreadConfig:
@@ -68,7 +69,7 @@ def _captured_reporter() -> Iterator[io.StringIO]:
 
 
 class AnkebakStateStoreTest:
-    def test_default_store_uses_dedicated_backup_state_database(
+    def test_default_store_read_does_not_create_database(
         self,
         tmp_path: Path,
     ) -> None:
@@ -78,11 +79,48 @@ class AnkebakStateStoreTest:
             return_value=SimpleNamespace(output_dir=str(output_dir)),
         ):
             store = AnkebakStateStore()
-            store.load_states()
+            assert store.load_states() == {}
 
         assert store.db_path == output_dir / "backup_state.sqlite3"
-        assert store.db_path.is_file()
+        assert not store.db_path.exists()
         assert not (output_dir / "forum_threads.sqlite3").exists()
+
+    def test_missing_state_table_is_readonly_until_next_write(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = AnkebakStateStore(tmp_path / "backup_state.sqlite3")
+        completed_at = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)
+        store.record_success(
+            tid=101,
+            aid=201,
+            forum_thread=_forum_thread(),
+            completed_at=completed_at,
+            full_backup=True,
+        )
+        with sqlite3.connect(store.db_path) as connection:
+            connection.execute("DROP TABLE ankebak_thread_state")
+            connection.commit()
+
+        with pytest.raises(UnsupportedStorageFormatError):
+            store.load_states()
+        with sqlite3.connect(store.db_path) as connection:
+            table_before_write = connection.execute(
+                """
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'table' AND name = 'ankebak_thread_state'
+                """
+            ).fetchone()
+        assert table_before_write is None
+
+        store.record_success(
+            tid=101,
+            aid=201,
+            forum_thread=_forum_thread(),
+            completed_at=completed_at,
+            full_backup=True,
+        )
+        assert ankebak_target_key(101, 201) in store.load_states()
 
     def test_records_forum_signature_and_full_success(self, tmp_path: Path) -> None:
         store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")

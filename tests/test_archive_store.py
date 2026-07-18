@@ -858,7 +858,7 @@ class ThreadArchiveStoreTest:
         assert cleared_selections == {}
         assert cleared_fingerprint == empty_fingerprint
 
-    def test_missing_selection_table_is_rejected_without_recreation(self) -> None:
+    def test_missing_selection_table_is_readonly_until_next_write(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             thread_folder = Path(temp_dir_name)
             store = ThreadArchiveStore(thread_folder)
@@ -895,8 +895,11 @@ class ThreadArchiveStoreTest:
             reopened = ThreadArchiveStore(thread_folder)
             with pytest.raises(UnsupportedStorageFormatError):
                 reopened.posts.read_valid_post_version_selections()
-            with pytest.raises(UnsupportedStorageFormatError):
-                reopened.posts.upsert_post_version_selection(1, old_version_id)
+            selected = reopened.posts.upsert_post_version_selection(
+                1,
+                old_version_id,
+            )
+            selections = reopened.posts.read_valid_post_version_selections()
             with closing(sqlite3.connect(store.db_path)) as connection:
                 table_exists = connection.execute(
                     """
@@ -906,7 +909,9 @@ class ThreadArchiveStoreTest:
                     """
                 ).fetchone()
 
-        assert table_exists is None
+        assert table_exists == (1,)
+        assert selected["version_id"] == old_version_id
+        assert selections[1]["version_id"] == old_version_id
 
     def test_metadata_only_change_does_not_create_post_version(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

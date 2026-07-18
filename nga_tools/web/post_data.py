@@ -162,10 +162,7 @@ def _read_image_mappings_for_urls(
     urls: set[str],
 ) -> dict[str, str]:
     try:
-        mappings = image_index.ImageIndexStore(output_dir).mappings_for_urls(
-            urls,
-            create=False,
-        )
+        mappings = image_index.ImageIndexStore(output_dir).mappings_for_urls(urls)
     except sqlite3.Error:
         return {}
     return {

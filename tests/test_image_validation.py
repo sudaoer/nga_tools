@@ -8,9 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from PIL import Image
 
-from nga_tools.backup import image_index, image_store
+from nga_tools.backup import image_index, image_store, image_validation_store
 from nga_tools.backup.image_pipeline import download_images_compact
 from nga_tools.backup.image_validation import (
     ImageValidationCache,
@@ -18,6 +19,7 @@ from nga_tools.backup.image_validation import (
 )
 from nga_tools.core.image_formats import image_file_is_valid
 from nga_tools.core.download_types import DownloadFileResult
+from nga_tools.storage import UnsupportedStorageFormatError
 from nga_tools.timing import use_timing_log
 
 
@@ -26,6 +28,51 @@ def _image_url(name: str) -> str:
         "https://img.nga.178.com/attachments/"
         f"mon_202607/11/{name}.png"
     )
+
+
+def test_image_cache_read_does_not_create_and_write_repairs_missing_table(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    image_path = output_dir / "images_unique" / "cached.png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (1, 1), color="white").save(image_path)
+    canonical_path = str(image_path.resolve())
+    entry: image_validation_store.PersistentValidationEntry = {
+        "canonical_path": canonical_path,
+        "size": image_path.stat().st_size,
+        "mtime_ns": image_path.stat().st_mtime_ns,
+        "valid": True,
+    }
+
+    with patch(
+        "nga_tools.config.get_config",
+        return_value=SimpleNamespace(output_dir=str(output_dir)),
+    ):
+        assert image_validation_store.load_persistent_validation_cache(
+            {canonical_path}
+        ) == {}
+        assert not image_validation_store.image_cache_path().exists()
+
+        image_validation_store.save_persistent_validation_entries([entry])
+        db_path = image_validation_store.image_cache_path().resolve()
+        with closing(sqlite3.connect(db_path)) as connection:
+            connection.execute("DROP TABLE image_validation_cache")
+            connection.commit()
+        image_validation_store._INITIALIZED_IMAGE_CACHE_PATHS.discard(db_path)
+
+        with pytest.raises(UnsupportedStorageFormatError):
+            image_validation_store.load_persistent_validation_cache(
+                {canonical_path}
+            )
+        image_validation_store.save_persistent_validation_entries([entry])
+        assert image_validation_store.load_persistent_validation_cache(
+            {canonical_path}
+        )[canonical_path] == (
+            entry["size"],
+            entry["mtime_ns"],
+            True,
+        )
 
 
 def test_preparation_deep_validates_alias_mappings_once(tmp_path: Path) -> None:

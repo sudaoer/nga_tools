@@ -43,6 +43,8 @@ def test_thread_databases_have_disjoint_roles_and_source_binding(
     store = ThreadArchiveStore(tmp_path / "123_456")
     store.ensure_schema()
     store.state.read_backup_processing_snapshot()
+    assert not store.state.db_path.exists()
+    store.state.ensure_schema()
     store.cache.upsert_post_image_reference_cache(
         [
             PostImageReferenceCacheEntry(
@@ -123,7 +125,7 @@ def test_mismatched_state_store_is_rejected_without_mutation(
     assert metadata.source_store_id == "wrong"
 
 
-def test_missing_state_index_is_rejected_without_recreation(
+def test_missing_state_index_is_readonly_until_explicit_ensure(
     tmp_path: Path,
 ) -> None:
     store = ThreadArchiveStore(tmp_path / "123_456")
@@ -139,14 +141,68 @@ def test_missing_state_index_is_rejected_without_recreation(
         reopened.state.read_backup_processing_snapshot()
 
     with closing(sqlite3.connect(store.state.db_path)) as connection:
-        index_exists = connection.execute(
+        index_before_ensure = connection.execute(
             """
             SELECT 1 FROM sqlite_schema
             WHERE type = 'index'
               AND name = 'idx_image_reference_manifest_entries_url'
             """
         ).fetchone()
-    assert index_exists is None
+    assert index_before_ensure is None
+
+    reopened.state.ensure_schema()
+    reopened.state.read_backup_processing_snapshot()
+    with closing(sqlite3.connect(store.state.db_path)) as connection:
+        index_after_ensure = connection.execute(
+            """
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'index'
+              AND name = 'idx_image_reference_manifest_entries_url'
+            """
+        ).fetchone()
+    assert index_after_ensure == (1,)
+
+
+def test_missing_archive_cache_table_is_readonly_until_next_write(
+    tmp_path: Path,
+) -> None:
+    store = ThreadArchiveStore(tmp_path / "123_456")
+    store.ensure_schema()
+    store.cache.ensure_schema()
+    with closing(sqlite3.connect(store.cache.db_path)) as connection:
+        connection.execute("DROP TABLE post_image_reference_cache")
+        connection.commit()
+
+    reopened = ThreadArchiveStore(store.thread_folder)
+    with pytest.raises(UnsupportedStorageFormatError):
+        reopened.cache.read_post_image_reference_cache({"key"})
+    with closing(sqlite3.connect(store.cache.db_path)) as connection:
+        table_before_write = connection.execute(
+            """
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'table' AND name = 'post_image_reference_cache'
+            """
+        ).fetchone()
+    assert table_before_write is None
+
+    reopened.cache.upsert_post_image_reference_cache(
+        [
+            PostImageReferenceCacheEntry(
+                cache_key="key",
+                source_hash="source",
+                extractor_version=1,
+                references_json="[]",
+            )
+        ]
+    )
+    assert reopened.cache.read_post_image_reference_cache({"key"})["key"] == (
+        PostImageReferenceCacheEntry(
+            cache_key="key",
+            source_hash="source",
+            extractor_version=1,
+            references_json="[]",
+        )
+    )
 
 
 def test_state_commit_double_checks_archive_revision(tmp_path: Path) -> None:
@@ -234,9 +290,12 @@ def test_data_only_handoff_reads_without_state_or_cache_databases(
 
     target_store = ThreadArchiveStore(target_thread)
     target_post = target_store.posts.read_effective_post_records()[0]["post"]
+    target_snapshot = target_store.state.read_backup_processing_snapshot()
     assert target_post is not None
     assert target_post["content"] == "portable body"
     assert not target_store.state.db_path.exists()
+    assert target_snapshot.floor_state is None
+    assert target_snapshot.image_state is None
     assert not target_store.cache.db_path.exists()
     assert target_store.cache.read_post_image_reference_cache({"drop-me"}) == {}
     with patch(

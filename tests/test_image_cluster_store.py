@@ -72,6 +72,14 @@ def test_ensure_store_idempotent(tmp_path: Path) -> None:
     assert store.db_path.is_file()
 
 
+def test_read_methods_do_not_create_missing_store(tmp_path: Path) -> None:
+    store = ImageClusterStore(tmp_path)
+
+    assert store.load_all_features() == {}
+    assert store.latest_run_id() is None
+    assert not store.db_path.exists()
+
+
 def test_upsert_and_load_features(tmp_path: Path) -> None:
     store = ImageClusterStore(tmp_path)
     store.ensure_store()
@@ -195,7 +203,7 @@ def test_delete_features_also_deletes_detail_pair_scores(
     ) == {}
 
 
-def test_ensure_store_additively_migrates_legacy_database(
+def test_ensure_store_repairs_missing_current_table(
     tmp_path: Path,
 ) -> None:
     store = ImageClusterStore(tmp_path)
@@ -205,6 +213,15 @@ def test_ensure_store_additively_migrates_legacy_database(
     with closing(sqlite3.connect(store.db_path)) as connection:
         connection.execute("DROP TABLE detail_pair_scores")
         connection.commit()
+
+    with pytest.raises(UnsupportedStorageFormatError):
+        store.load_detail_pair_scores(DETAIL_SCORE_ALGORITHM, {})
+    with closing(sqlite3.connect(store.db_path)) as connection:
+        table_before_ensure = connection.execute(
+            "SELECT 1 FROM sqlite_schema "
+            "WHERE type = 'table' AND name = 'detail_pair_scores'"
+        ).fetchone()
+    assert table_before_ensure is None
 
     store.ensure_store()
 

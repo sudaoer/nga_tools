@@ -296,7 +296,7 @@ def _image_index_connection(output_dir: Path) -> sqlite3.Connection:
     if not db_path.is_file():
         raise ImageIndexUnavailableError(f"缺少{image_index.IMAGE_INDEX_FILENAME}。")
     try:
-        return store.connect_readonly(create=False)
+        return store.connect_readonly()
     except FileNotFoundError as error:
         raise ImageIndexUnavailableError(
             f"缺少{image_index.IMAGE_INDEX_FILENAME}。"

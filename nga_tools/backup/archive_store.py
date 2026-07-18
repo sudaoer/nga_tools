@@ -13,6 +13,7 @@ from nga_tools.backup.archive_post_store import ArchivePostRepository
 from nga_tools.backup.archive_state_store import ArchiveStateRepository
 from nga_tools.backup.archive_schema import (
     ARCHIVE_SCHEMA_VERSION,
+    require_current_archive_identity,
     require_current_archive_schema,
 )
 from nga_tools.backup.processing_state import ArchiveChangeState
@@ -261,14 +262,11 @@ class ThreadArchiveStore:
         *,
         new_database: bool,
     ) -> None:
-        if not new_database:
-            metadata = require_current_archive_schema(connection, self.db_path)
-            self._store_id = metadata.store_id
-            return
-
         with connection:
-            metadata = ensure_storage_metadata(connection, role="archive_data")
-            self._store_id = metadata.store_id
+            if new_database:
+                ensure_storage_metadata(connection, role="archive_data")
+            else:
+                require_current_archive_identity(connection, self.db_path)
             self._create_archive_pages_table(connection)
             self._create_post_versions_table(connection)
             self._create_post_latest_metadata_table(connection)
@@ -278,11 +276,16 @@ class ThreadArchiveStore:
             self._create_archive_change_state_table(connection)
             connection.execute(
                 """
-                CREATE INDEX idx_post_versions_latest_covering
+                CREATE INDEX IF NOT EXISTS idx_post_versions_latest_covering
                 ON post_versions(lou, last_seen_at DESC, id DESC, pid)
                 """
             )
-            connection.execute(f"PRAGMA user_version = {ARCHIVE_SCHEMA_VERSION}")
+            if new_database:
+                connection.execute(
+                    f"PRAGMA user_version = {ARCHIVE_SCHEMA_VERSION}"
+                )
+            metadata = require_current_archive_schema(connection, self.db_path)
+            self._store_id = metadata.store_id
 
     @staticmethod
     def _read_archive_change_state(

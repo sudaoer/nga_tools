@@ -108,14 +108,8 @@ def require_current_archive_schema(
     connection: sqlite3.Connection,
     db_path: Path,
 ) -> StorageMetadata:
+    metadata = require_current_archive_identity(connection, db_path)
     source = f"archive {db_path}"
-    metadata = require_storage_metadata(connection, role="archive_data")
-    version = read_archive_schema_version(connection)
-    if version != ARCHIVE_SCHEMA_VERSION:
-        raise UnsupportedStorageFormatError(
-            f"{source} schema版本不受支持："
-            f"期望{ARCHIVE_SCHEMA_VERSION}，实际{version}。"
-        )
     require_table_names(connection, expected=ARCHIVE_TABLES, source=source)
     for table_name, columns in ARCHIVE_TABLE_COLUMNS.items():
         require_exact_columns(
@@ -142,4 +136,19 @@ def require_current_archive_schema(
         forbidden={"idx_post_versions_latest"},
         source=source,
     )
+    return metadata
+
+
+def require_current_archive_identity(
+    connection: sqlite3.Connection,
+    db_path: Path,
+) -> StorageMetadata:
+    source = f"archive {db_path}"
+    metadata = require_storage_metadata(connection, role="archive_data")
+    version = read_archive_schema_version(connection)
+    if version != ARCHIVE_SCHEMA_VERSION:
+        raise UnsupportedStorageFormatError(
+            f"{source} schema版本不受支持："
+            f"期望{ARCHIVE_SCHEMA_VERSION}，实际{version}。"
+        )
     return metadata

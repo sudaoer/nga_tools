@@ -26,7 +26,11 @@ from nga_tools.core.sqlite import (
     configure_readonly_connection,
     iter_in_clause_chunks,
 )
-from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
+from nga_tools.storage import (
+    UnsupportedStorageFormatError,
+    ensure_storage_metadata,
+    require_storage_metadata,
+)
 from nga_tools.storage.schema import require_exact_columns, require_table_names
 
 IMAGE_INDEX_FILENAME = "image_index.sqlite3"
@@ -86,19 +90,20 @@ class ImageIndexStore:
                 sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
             ) as connection:
                 configure_connection(connection)
-                if new_database:
-                    ensure_storage_metadata(connection, role="image_index")
+                with connection:
+                    if new_database:
+                        ensure_storage_metadata(connection, role="image_index")
+                    else:
+                        require_storage_metadata(connection, role="image_index")
                     connection.execute(
                         """
-                        CREATE TABLE image_mappings (
+                        CREATE TABLE IF NOT EXISTS image_mappings (
                             url TEXT PRIMARY KEY,
                             unique_rel_path TEXT NOT NULL
                         )
                         """
                     )
-                else:
                     require_current_image_index(connection, db_path)
-                connection.commit()
             _INITIALIZED_IMAGE_INDEX_PATHS.add(db_path)
         return db_path
 
@@ -110,8 +115,8 @@ class ImageIndexStore:
         configure_connection(connection)
         return connection
 
-    def connect_readonly(self, *, create: bool) -> sqlite3.Connection:
-        db_path = self._initialize() if create else self.db_path
+    def connect_readonly(self) -> sqlite3.Connection:
+        db_path = self.db_path
         if not db_path.is_file():
             raise FileNotFoundError(db_path)
         connection = sqlite3.connect(
@@ -197,9 +202,9 @@ class ImageIndexStore:
 
     def mapping_for_url(self, url: str) -> ImageMapping | None:
         normalized_url = normalize_nga_image_url(url)
-        if not NGA_img_link_verify(normalized_url):
+        if not NGA_img_link_verify(normalized_url) or not self.db_path.is_file():
             return None
-        with closing(self.connect_readonly(create=True)) as connection:
+        with closing(self.connect_readonly()) as connection:
             row = connection.execute(
                 "SELECT unique_rel_path FROM image_mappings WHERE url = ?",
                 (normalized_url,),
@@ -209,7 +214,9 @@ class ImageIndexStore:
         return self._mapping(normalized_url, row[0])
 
     def mappings_by_url(self) -> dict[str, ImageMapping]:
-        with closing(self.connect_readonly(create=True)) as connection:
+        if not self.db_path.is_file():
+            return {}
+        with closing(self.connect_readonly()) as connection:
             rows = connection.execute(
                 "SELECT url, unique_rel_path FROM image_mappings"
             ).fetchall()
@@ -222,8 +229,6 @@ class ImageIndexStore:
     def mappings_for_urls(
         self,
         urls: Iterable[str],
-        *,
-        create: bool = True,
     ) -> dict[str, ImageMapping]:
         normalized_urls = sorted(
             {
@@ -234,9 +239,9 @@ class ImageIndexStore:
                 )
             }
         )
-        if not normalized_urls or (not create and not self.db_path.is_file()):
+        if not normalized_urls or not self.db_path.is_file():
             return {}
-        with closing(self.connect_readonly(create=create)) as connection:
+        with closing(self.connect_readonly()) as connection:
             return self.mappings_for_urls_in_connection(
                 connection,
                 normalized_urls,
@@ -304,7 +309,9 @@ class ImageIndexStore:
 
     def existing_paths_for_urls(self, urls: Iterable[str]) -> dict[str, Path]:
         try:
-            mappings = self.mappings_for_urls(urls, create=False)
+            mappings = self.mappings_for_urls(urls)
+        except UnsupportedStorageFormatError:
+            raise
         except (OSError, sqlite3.Error, ValueError):
             return {}
         images_root = (self.output_root / "images_unique").resolve()

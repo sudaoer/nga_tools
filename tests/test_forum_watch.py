@@ -961,6 +961,29 @@ class ForumThreadStoreTest:
 
         assert db_path == Path(tmp_dir) / 'forum_threads.sqlite3'
 
+    def test_read_methods_do_not_create_database_or_missing_fid_table(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        db_path = tmp_path / "forum_threads.sqlite3"
+        store = ForumThreadStore(db_path)
+
+        assert store.existing_tids(784) == set()
+        assert store.max_normal_lastpost(784) is None
+        assert store.list_threads(784, forumname="rp784") == []
+        assert not db_path.exists()
+
+        store.upsert_threads(784, [_thread(tid=101)])
+        assert store.list_threads(999, forumname="rp999") == []
+        with closing(sqlite3.connect(db_path)) as connection:
+            missing_fid_table = connection.execute(
+                """
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'table' AND name = 'forum_threads_fid_999'
+                """
+            ).fetchone()
+        assert missing_fid_table is None
+
     def test_upsert_uses_tid_primary_key_and_updates_thread_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = Path(tmp_dir) / "forum_threads.sqlite3"
