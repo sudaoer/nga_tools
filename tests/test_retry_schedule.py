@@ -7,6 +7,8 @@ import pytest
 from nga_tools.core.retry_schedule import (
     cubic_retry_probability,
     retry_schedule_decision,
+    retry_schedule_decision_for_ticket,
+    stable_retry_ticket,
 )
 
 
@@ -59,6 +61,48 @@ def test_ticket_is_stable_and_decision_is_monotonic() -> None:
     assert all(
         decision.should_run for decision in decisions[first_run_index:]
     )
+
+
+def test_shared_ticket_is_stable_without_an_event_timestamp() -> None:
+    first = stable_retry_ticket(
+        namespace="image-retry",
+        target_key="123:456",
+    )
+    second = stable_retry_ticket(
+        namespace="image-retry",
+        target_key="123:456",
+    )
+
+    assert first == second
+    assert 0.0 <= first < 1.0
+
+
+def test_shared_ticket_preserves_each_retry_probability_and_deadline() -> None:
+    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    ticket = 0.1
+
+    older = retry_schedule_decision_for_ticket(
+        ticket=ticket,
+        last_event_at=now - timedelta(days=4),
+        now=now,
+        max_interval=timedelta(days=7),
+    )
+    newer = retry_schedule_decision_for_ticket(
+        ticket=ticket,
+        last_event_at=now - timedelta(days=2),
+        now=now,
+        max_interval=timedelta(days=7),
+    )
+    deadline = retry_schedule_decision_for_ticket(
+        ticket=ticket,
+        last_event_at=now - timedelta(days=7),
+        now=now,
+        max_interval=timedelta(days=7),
+    )
+
+    assert older.should_run
+    assert not newer.should_run
+    assert deadline.reason == "deadline"
 
 
 def test_deadline_always_runs_independently_of_ticket() -> None:

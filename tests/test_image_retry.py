@@ -97,6 +97,54 @@ def test_recent_persistent_failure_is_deferred_but_transient_is_due() -> None:
     assert selection.deferred == (persistent,)
 
 
+def test_many_same_age_persistent_failures_share_one_thread_gate() -> None:
+    retries = tuple(
+        _retry(f"https://example.invalid/missing-{index}")
+        for index in range(20)
+    )
+
+    selection = select_image_retries(
+        retries,
+        thread_target_key="123:456",
+        now=_NOW,
+        max_interval=timedelta(hours=168),
+        force=False,
+    )
+
+    assert selection.due == ()
+    assert selection.deferred == retries
+
+
+def test_shared_thread_gate_keeps_individual_age_thresholds() -> None:
+    retries = (
+        _retry(
+            "https://example.invalid/older",
+            last_attempt_at=_NOW - timedelta(days=4),
+        ),
+        _retry(
+            "https://example.invalid/newer",
+            last_attempt_at=_NOW - timedelta(days=2),
+        ),
+    )
+
+    from unittest.mock import patch
+
+    with patch(
+        "nga_tools.backup.image_retry.shared_media_retry_ticket",
+        return_value=0.1,
+    ):
+        selection = select_image_retries(
+            retries,
+            thread_target_key="123:456",
+            now=_NOW,
+            max_interval=timedelta(days=7),
+            force=False,
+        )
+
+    assert selection.due == (retries[0],)
+    assert selection.deferred == (retries[1],)
+
+
 def test_deadline_and_force_select_persistent_failures() -> None:
     old_retry = _retry(
         "https://example.invalid/old",

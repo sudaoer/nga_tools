@@ -9,7 +9,11 @@ from nga_tools.core.download_types import (
     DownloadFailureKind,
     DownloadFileResult,
 )
-from nga_tools.core.retry_schedule import retry_schedule_decision
+from nga_tools.core.retry_schedule import (
+    retry_schedule_decision,
+    retry_schedule_decision_for_ticket,
+    stable_retry_ticket,
+)
 
 
 class PendingMediaRetry(Protocol):
@@ -51,6 +55,7 @@ def select_media_retries(
     now: datetime,
     max_interval: timedelta,
     force: bool,
+    shared_ticket: float | None = None,
 ) -> MediaRetrySelection[RetryT]:
     due: list[RetryT] = []
     deferred: list[RetryT] = []
@@ -58,18 +63,33 @@ def select_media_retries(
         if force or not uses_probabilistic_backoff(retry):
             due.append(retry)
             continue
-        decision = retry_schedule_decision(
-            namespace=namespace,
-            target_key=f"{thread_target_key}\0{retry.url}",
-            last_event_at=retry.last_attempt_at,
-            now=now,
-            max_interval=max_interval,
-        )
+        if shared_ticket is None:
+            decision = retry_schedule_decision(
+                namespace=namespace,
+                target_key=f"{thread_target_key}\0{retry.url}",
+                last_event_at=retry.last_attempt_at,
+                now=now,
+                max_interval=max_interval,
+            )
+        else:
+            decision = retry_schedule_decision_for_ticket(
+                ticket=shared_ticket,
+                last_event_at=retry.last_attempt_at,
+                now=now,
+                max_interval=max_interval,
+            )
         if decision.should_run:
             due.append(retry)
         else:
             deferred.append(retry)
     return MediaRetrySelection(tuple(due), tuple(deferred))
+
+
+def shared_media_retry_ticket(*, namespace: str, thread_target_key: str) -> float:
+    return stable_retry_ticket(
+        namespace=namespace,
+        target_key=thread_target_key,
+    )
 
 
 def pending_media_retries_after_attempt(

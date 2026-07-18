@@ -7,6 +7,7 @@ from nga_tools.backup.media_retry import (
     MediaRetrySelection,
     pending_media_retries_after_attempt,
     select_media_retries,
+    shared_media_retry_ticket,
     uses_probabilistic_backoff as uses_probabilistic_backoff,
 )
 from nga_tools.backup.processing_state import PendingImageRetry
@@ -34,6 +35,10 @@ def select_image_retries(
         now=now,
         max_interval=max_interval,
         force=force,
+        shared_ticket=shared_media_retry_ticket(
+            namespace=_IMAGE_RETRY_NAMESPACE,
+            thread_target_key=thread_target_key,
+        ),
     )
 
 

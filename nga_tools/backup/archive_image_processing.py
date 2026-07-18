@@ -18,6 +18,7 @@ from nga_tools.backup.image_retry import (
     ImageRetrySelection,
     pending_image_retries_after_attempt,
     select_image_retries,
+    uses_probabilistic_backoff,
 )
 from nga_tools.backup.image_store import ImageDownloadTask
 from nga_tools.backup.models import PostRecord
@@ -104,6 +105,23 @@ def download_images_with_retry_policy(
     record_timing_metric("历史待重试图片URL数", len(pending_image_retries))
     record_timing_metric("本次重试图片URL数", len(selection.due))
     record_timing_metric("概率延后图片URL数", len(selection.deferred))
+    persistent_retry_count = sum(
+        uses_probabilistic_backoff(retry)
+        for retry in pending_image_retries
+    )
+    due_persistent_retry_count = sum(
+        uses_probabilistic_backoff(retry)
+        for retry in selection.due
+    )
+    record_timing_metric("持久性图片重试URL数", persistent_retry_count)
+    record_timing_metric(
+        "图片重试共享调度组数",
+        int(persistent_retry_count > 0),
+    )
+    record_timing_metric(
+        "图片重试共享调度放行组数",
+        int(due_persistent_retry_count > 0),
+    )
     download_summary = _download_images(tid, aid, selected_tasks)
     retries_after = pending_image_retries_after_attempt(
         selection.deferred,

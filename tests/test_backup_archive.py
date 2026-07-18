@@ -1196,6 +1196,57 @@ class BackupRawArchiveTest:
         assert deferred_at.year == 2099
         assert forced_snapshot.pending_image_retries == ()
 
+    def test_many_recent_404s_share_thread_maintenance_gate(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        image_urls = tuple(
+            f"https://img.nga.178.com/attachments/mon_202506/06/many-{index}.png"
+            for index in range(12)
+        )
+        thread_dir = tmp_path / "123_all"
+        client = MutableFakeClient()
+        client.posts = [
+            {
+                "lou": 1,
+                "pid": 1001,
+                "content": " ".join(f"[img]{url}[/img]" for url in image_urls),
+            }
+        ]
+        downloaded_urls: list[list[str]] = []
+
+        _run_backup(
+            thread_dir,
+            client,
+            aid=None,
+            downloaded_urls=downloaded_urls,
+            failed_download_urls=set(image_urls),
+            failed_download_kind="http_4xx",
+            failed_http_status=404,
+        )
+        with patch(
+            "nga_tools.backup.image_retry.shared_media_retry_ticket",
+            return_value=0.9,
+        ):
+            _run_backup(
+                thread_dir,
+                client,
+                aid=None,
+                downloaded_urls=downloaded_urls,
+                failed_download_urls=set(image_urls),
+                failed_download_kind="http_4xx",
+                failed_http_status=404,
+            )
+            with patch.object(
+                archive_module,
+                "get_folder",
+                side_effect=_fake_get_folder(thread_dir),
+            ):
+                local_work = backup_local_work_kind(123, None)
+
+        assert downloaded_urls == [list(image_urls), []]
+        assert local_work is None
+
     def test_404_at_deadline_is_due_for_local_maintenance(
         self,
         tmp_path: Path,

@@ -39,16 +39,27 @@ def _require_aware_datetime(value: datetime, label: str) -> None:
         raise ValueError(f"{label}必须包含时区。")
 
 
+def _validate_identity(*, namespace: str, target_key: str) -> None:
+    if not namespace:
+        raise ValueError("概率调度命名空间不能为空。")
+    if not target_key:
+        raise ValueError("概率调度目标标识不能为空。")
+
+
+def stable_retry_ticket(*, namespace: str, target_key: str) -> float:
+    """Return a deterministic ticket shared by one retry scheduling group."""
+    _validate_identity(namespace=namespace, target_key=target_key)
+    digest = hash_object((namespace, target_key))
+    return int(digest[:16], 16) / float(1 << 64)
+
+
 def _stable_ticket(
     *,
     namespace: str,
     target_key: str,
     last_event_at: datetime,
 ) -> float:
-    if not namespace:
-        raise ValueError("概率调度命名空间不能为空。")
-    if not target_key:
-        raise ValueError("概率调度目标标识不能为空。")
+    _validate_identity(namespace=namespace, target_key=target_key)
     canonical_time = last_event_at.astimezone(timezone.utc).isoformat(
         timespec="microseconds"
     )
@@ -56,21 +67,19 @@ def _stable_ticket(
     return int(digest[:16], 16) / float(1 << 64)
 
 
-def retry_schedule_decision(
+def retry_schedule_decision_for_ticket(
     *,
-    namespace: str,
-    target_key: str,
+    ticket: float,
     last_event_at: datetime | None,
     now: datetime,
     max_interval: timedelta,
 ) -> RetryScheduleDecision:
+    """Evaluate one retry using a caller-provided stable ticket."""
     _require_aware_datetime(now, "概率调度当前时间")
     if max_interval <= timedelta(0):
         raise ValueError("概率调度最大间隔必须大于0。")
-    if not namespace:
-        raise ValueError("概率调度命名空间不能为空。")
-    if not target_key:
-        raise ValueError("概率调度目标标识不能为空。")
+    if not 0.0 <= ticket < 1.0:
+        raise ValueError(f"概率调度票据无效：{ticket!r}")
     if last_event_at is None:
         return RetryScheduleDecision(
             should_run=True,
@@ -82,11 +91,6 @@ def retry_schedule_decision(
     _require_aware_datetime(last_event_at, "概率调度上次事件时间")
     elapsed = now - last_event_at
     probability = cubic_retry_probability(elapsed, max_interval)
-    ticket = _stable_ticket(
-        namespace=namespace,
-        target_key=target_key,
-        last_event_at=last_event_at,
-    )
     if elapsed >= max_interval:
         return RetryScheduleDecision(
             should_run=True,
@@ -106,4 +110,37 @@ def retry_schedule_decision(
         cumulative_probability=probability,
         ticket=ticket,
         reason="waiting",
+    )
+
+
+def retry_schedule_decision(
+    *,
+    namespace: str,
+    target_key: str,
+    last_event_at: datetime | None,
+    now: datetime,
+    max_interval: timedelta,
+) -> RetryScheduleDecision:
+    _require_aware_datetime(now, "概率调度当前时间")
+    if max_interval <= timedelta(0):
+        raise ValueError("概率调度最大间隔必须大于0。")
+    _validate_identity(namespace=namespace, target_key=target_key)
+    if last_event_at is None:
+        return RetryScheduleDecision(
+            should_run=True,
+            cumulative_probability=1.0,
+            ticket=None,
+            reason="missing_timestamp",
+        )
+
+    ticket = _stable_ticket(
+        namespace=namespace,
+        target_key=target_key,
+        last_event_at=last_event_at,
+    )
+    return retry_schedule_decision_for_ticket(
+        ticket=ticket,
+        last_event_at=last_event_at,
+        now=now,
+        max_interval=max_interval,
     )
