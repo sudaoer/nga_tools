@@ -89,7 +89,7 @@ def build_clusters(
     threshold: int,
     min_cluster_size: int,
     dhash_threshold: int = 2,
-    color_threshold: float = 0.1,
+    color_threshold: float = 0.05,
 ) -> list[Cluster]:
     if not features:
         return []

@@ -40,7 +40,7 @@ class ClusterCliTest:
         assert args["action"] == "run"
         assert args["threshold"] == 1
         assert args["dhash_threshold"] == 2
-        assert args["color_threshold"] == 0.1
+        assert args["color_threshold"] == 0.05
         assert args["min_cluster_size"] == 2
         assert args["lsh_bands"] == 4
 

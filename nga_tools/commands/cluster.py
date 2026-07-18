@@ -33,7 +33,7 @@ def cluster_run(args: CommandArgs) -> None:
         color_threshold=(
             color_threshold
             if color_threshold is not None and color_threshold >= 0
-            else 0.1
+            else 0.05
         ),
         min_cluster_size=(
             min_cluster_size

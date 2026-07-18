@@ -35,7 +35,7 @@ _PROGRESS_INTERVAL = 100
 class ClusterParams:
     threshold: int = 1
     dhash_threshold: int = 2
-    color_threshold: float = 0.1
+    color_threshold: float = 0.05
     min_cluster_size: int = 2
     lsh_bands: int = 4
     workers: int = 0

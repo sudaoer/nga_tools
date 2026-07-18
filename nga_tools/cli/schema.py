@@ -596,7 +596,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "defaults": {
                 "threshold": 1,
                 "dhash_threshold": 2,
-                "color_threshold": 0.1,
+                "color_threshold": 0.05,
                 "min_cluster_size": 2,
                 "lsh_bands": 4,
             },
