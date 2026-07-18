@@ -42,6 +42,7 @@ def test_white_bg_detected(tmp_path: Path) -> None:
     assert result.has_alpha is False
     assert result.bg_color == (255, 255, 255)
     assert result.trimmed is True
+    assert len(result.color_histogram) > 0
     assert tuple(result.array[0, 0].tolist()) == _SUBJECT_TOP_LEFT
 
 

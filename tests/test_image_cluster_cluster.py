@@ -16,6 +16,7 @@ def _make_features(
     phash: str = "0000000000000000",
     dhash: str = "0000000000000000",
     has_alpha: bool = False,
+    color_histogram: str = "",
     size: int = 1000,
     width: int = 100,
     height: int = 100,
@@ -29,6 +30,7 @@ def _make_features(
         has_alpha=has_alpha,
         bg_color=None,
         trimmed=False,
+        color_histogram=color_histogram,
         width=width,
         height=height,
     )
@@ -112,6 +114,66 @@ def test_build_clusters_merges_when_dhash_within_threshold() -> None:
     )
     assert len(clusters) == 1
     assert len(clusters[0].members) == 2
+
+
+def test_build_clusters_respects_color_threshold() -> None:
+    hist_a = ",".join("0.5" if i == 0 else "0.0" for i in range(32))
+    hist_b = ",".join("0.5" if i == 1 else "0.0" for i in range(32))
+    features = {
+        "a.png": _make_features(
+            "a.png", phash="ffff0000ffff0000", dhash="ffff0000ffff0000",
+            color_histogram=hist_a,
+        ),
+        "b.png": _make_features(
+            "b.png", phash="ffff0000ffff0000", dhash="ffff0000ffff0000",
+            color_histogram=hist_b,
+        ),
+    }
+    pairs = [CandidatePair(a="a.png", b="b.png")]
+    clusters = build_clusters(
+        features, pairs, threshold=8, min_cluster_size=2,
+        dhash_threshold=2, color_threshold=0.5,
+    )
+    assert clusters == []
+
+
+def test_build_clusters_merges_when_color_within_threshold() -> None:
+    hist_a = ",".join("0.5" if i == 0 else "0.0" for i in range(32))
+    hist_b = ",".join("0.4" if i == 0 else "0.1" if i == 1 else "0.0" for i in range(32))
+    features = {
+        "a.png": _make_features(
+            "a.png", phash="ffff0000ffff0000", dhash="ffff0000ffff0000",
+            color_histogram=hist_a,
+        ),
+        "b.png": _make_features(
+            "b.png", phash="ffff0000ffff0000", dhash="ffff0000ffff0000",
+            color_histogram=hist_b,
+        ),
+    }
+    pairs = [CandidatePair(a="a.png", b="b.png")]
+    clusters = build_clusters(
+        features, pairs, threshold=8, min_cluster_size=2,
+        dhash_threshold=2, color_threshold=0.5,
+    )
+    assert len(clusters) == 1
+    assert len(clusters[0].members) == 2
+
+
+def test_build_clusters_empty_histogram_skips_color_check() -> None:
+    features = {
+        "a.png": _make_features(
+            "a.png", phash="ffff0000ffff0000", color_histogram="",
+        ),
+        "b.png": _make_features(
+            "b.png", phash="ffff0000ffff0000", color_histogram="",
+        ),
+    }
+    pairs = [CandidatePair(a="a.png", b="b.png")]
+    clusters = build_clusters(
+        features, pairs, threshold=8, min_cluster_size=2,
+        color_threshold=0.01,
+    )
+    assert len(clusters) == 1
 
 
 def test_build_clusters_min_size_filter() -> None:

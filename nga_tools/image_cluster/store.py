@@ -29,6 +29,7 @@ _FEATURES_COLUMNS = (
     ("has_alpha", "INTEGER"),
     ("bg_color", "TEXT"),
     ("trimmed", "INTEGER"),
+    ("color_histogram", "TEXT"),
     ("width", "INTEGER"),
     ("height", "INTEGER"),
     ("updated_at", "TEXT"),
@@ -126,6 +127,7 @@ class ImageClusterStore:
                             has_alpha INTEGER NOT NULL,
                             bg_color TEXT,
                             trimmed INTEGER NOT NULL,
+                            color_histogram TEXT,
                             width INTEGER NOT NULL,
                             height INTEGER NOT NULL,
                             updated_at TEXT NOT NULL
@@ -214,6 +216,7 @@ class ImageClusterStore:
                 int(f.has_alpha),
                 _encode_bg_color(f.bg_color),
                 int(f.trimmed),
+                f.color_histogram,
                 f.width,
                 f.height,
                 now,
@@ -227,10 +230,10 @@ class ImageClusterStore:
                         """
                         INSERT INTO image_features (
                             relative_path, size, mtime_ns, phash, dhash,
-                            has_alpha, bg_color, trimmed,
+                            has_alpha, bg_color, trimmed, color_histogram,
                             width, height, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(relative_path) DO UPDATE SET
                             size = excluded.size,
                             mtime_ns = excluded.mtime_ns,
@@ -239,6 +242,7 @@ class ImageClusterStore:
                             has_alpha = excluded.has_alpha,
                             bg_color = excluded.bg_color,
                             trimmed = excluded.trimmed,
+                            color_histogram = excluded.color_histogram,
                             width = excluded.width,
                             height = excluded.height,
                             updated_at = excluded.updated_at
@@ -252,7 +256,7 @@ class ImageClusterStore:
                 rows = connection.execute(
                     """
                     SELECT relative_path, size, mtime_ns, phash, dhash,
-                           has_alpha, bg_color, trimmed,
+                           has_alpha, bg_color, trimmed, color_histogram,
                            width, height
                     FROM image_features
                     """
@@ -391,7 +395,7 @@ class ImageClusterStore:
 
 
 def _row_to_features(row: tuple[object, ...]) -> ImageFeatures | None:
-    if len(row) < 10:
+    if len(row) < 11:
         return None
     (
         relative_path,
@@ -402,6 +406,7 @@ def _row_to_features(row: tuple[object, ...]) -> ImageFeatures | None:
         has_alpha,
         bg_color,
         trimmed,
+        color_histogram,
         width,
         height,
     ) = row
@@ -418,6 +423,7 @@ def _row_to_features(row: tuple[object, ...]) -> ImageFeatures | None:
         and isinstance(height, int)
     ):
         return None
+    histogram_value: str = color_histogram if isinstance(color_histogram, str) else ""
     return ImageFeatures(
         relative_path=relative_path,
         size=size,
@@ -427,6 +433,7 @@ def _row_to_features(row: tuple[object, ...]) -> ImageFeatures | None:
         has_alpha=bool(has_alpha),
         bg_color=_decode_bg_color(bg_color),
         trimmed=bool(trimmed),
+        color_histogram=histogram_value,
         width=width,
         height=height,
     )

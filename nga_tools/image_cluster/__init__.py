@@ -35,6 +35,7 @@ _PROGRESS_INTERVAL = 100
 class ClusterParams:
     threshold: int = 1
     dhash_threshold: int = 2
+    color_threshold: float = 0.1
     min_cluster_size: int = 2
     lsh_bands: int = 4
     workers: int = 0
@@ -167,7 +168,8 @@ def run_image_cluster(
 
     report_info(
         f"聚类（{len(pairs)} 候选对，pHash阈值 {params.threshold}，"
-        f"dHash阈值 {params.dhash_threshold}）..."
+        f"dHash阈值 {params.dhash_threshold}，"
+        f"颜色阈值 {params.color_threshold}）..."
     )
     clusters: list[Cluster] = build_clusters(
         all_features,
@@ -175,11 +177,13 @@ def run_image_cluster(
         params.threshold,
         params.min_cluster_size,
         params.dhash_threshold,
+        params.color_threshold,
     )
 
     params_dict: dict[str, object] = {
         "threshold": params.threshold,
         "dhash_threshold": params.dhash_threshold,
+        "color_threshold": params.color_threshold,
         "min_cluster_size": params.min_cluster_size,
         "lsh_bands": params.lsh_bands,
         "force": params.force,

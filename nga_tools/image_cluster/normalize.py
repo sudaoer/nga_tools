@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from nga_tools.core.image_formats import open_image_for_processing
 
@@ -13,6 +14,8 @@ _CORNER_BLOCK = 8
 _BG_UNIFORM_RATIO = 0.9
 _COMPOSITE_BG: tuple[int, int, int] = (255, 255, 255)
 _MIN_SIDE = 8
+_HUE_BINS = 32
+_SATURATION_MIN = 25
 
 
 @dataclass(frozen=True)
@@ -21,6 +24,7 @@ class NormalizeResult:
     has_alpha: bool
     bg_color: tuple[int, int, int] | None
     trimmed: bool
+    color_histogram: str
     width: int
     height: int
 
@@ -88,6 +92,26 @@ def _composite_on_white(
     return canvas
 
 
+def _compute_color_histogram(
+    arr: np.ndarray, fg_mask: np.ndarray
+) -> str:
+    if not fg_mask.any():
+        return ""
+    hsv = np.array(Image.fromarray(arr).convert("HSV"))
+    hue = hsv[:, :, 0][fg_mask]
+    saturation = hsv[:, :, 1][fg_mask]
+    colored = saturation > _SATURATION_MIN
+    if not colored.any():
+        return ""
+    hue_colored = hue[colored]
+    hist, _ = np.histogram(hue_colored, bins=_HUE_BINS, range=(0, 256))
+    total = hist.sum()
+    if total == 0:
+        return ""
+    normalized = hist / total
+    return ",".join(f"{v:.6f}" for v in normalized)
+
+
 def normalize_image(path: Path) -> NormalizeResult:
     with open_image_for_processing(path) as image:
         converted = image.convert("RGBA" if "A" in image.getbands() else "RGB")
@@ -111,6 +135,7 @@ def normalize_image(path: Path) -> NormalizeResult:
             bg_mask = _background_mask_from_color(arr, detected)
 
     fg_mask = ~bg_mask
+    color_histogram = _compute_color_histogram(arr, fg_mask)
     trimmed_arr, trimmed_fg, trimmed = _trim_to_foreground(arr, fg_mask)
     composite = _composite_on_white(trimmed_arr, trimmed_fg)
 
@@ -119,6 +144,7 @@ def normalize_image(path: Path) -> NormalizeResult:
         has_alpha=has_alpha,
         bg_color=bg_color,
         trimmed=trimmed,
+        color_histogram=color_histogram,
         width=int(composite.shape[1]),
         height=int(composite.shape[0]),
     )
@@ -141,14 +167,18 @@ def normalize_image_passthrough(path: Path) -> NormalizeResult:
             has_alpha=False,
             bg_color=None,
             trimmed=False,
+            color_histogram="",
             width=_MIN_SIDE,
             height=_MIN_SIDE,
         )
+    fg_mask = np.ones((h, w), dtype=bool)
+    color_histogram = _compute_color_histogram(arr, fg_mask)
     return NormalizeResult(
         array=arr,
         has_alpha=False,
         bg_color=None,
         trimmed=False,
+        color_histogram=color_histogram,
         width=w,
         height=h,
     )

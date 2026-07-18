@@ -24,7 +24,7 @@ HELP_FLAGS = {"-h", "--help"}
 class ArgDef(TypedDict):
     flags: tuple[str, ...]
     help: str
-    type: NotRequired[type[str] | type[int]]
+    type: NotRequired[type[str] | type[int] | type[float]]
     metavar: NotRequired[str]
     action: NotRequired[Literal["store_true"]]
 
@@ -231,6 +231,12 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": int,
         "metavar": "N",
         "help": "图片聚类 dHash Hamming 距离阈值",
+    },
+    "color_threshold": {
+        "flags": ("--color-threshold", "--color_threshold"),
+        "type": float,
+        "metavar": "F",
+        "help": "图片聚类颜色直方图 L1 距离阈值（0=完全相同）",
     },
     "min_cluster_size": {
         "flags": ("--min-cluster-size", "--min_cluster_size"),
@@ -555,13 +561,14 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "usage": (
                 f"{PROGRAM_USAGE} cluster run "
                 "[--threshold N] [--dhash-threshold N] "
-                "[--min-cluster-size N] "
+                "[--color-threshold F] [--min-cluster-size N] "
                 "[--lsh-bands N] [--workers N] [--limit N] [--force]"
             ),
             "examples": [
                 f"{PROGRAM_USAGE} cluster run",
                 f"{PROGRAM_USAGE} cluster run --threshold 10 --min-cluster-size 3",
                 f"{PROGRAM_USAGE} cluster run --dhash-threshold 0",
+                f"{PROGRAM_USAGE} cluster run --color-threshold 0.05",
                 f"{PROGRAM_USAGE} cluster run --workers 8",
                 f"{PROGRAM_USAGE} cluster run --limit 100",
                 f"{PROGRAM_USAGE} cluster run --force",
@@ -569,8 +576,8 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "notes": [
                 "扫描 output_dir/images_unique 下所有图片，计算感知哈希并聚类。",
                 "透明底/黑底/白底会归一化为白底后比较。",
-                "合并条件：pHash 距离 ≤ threshold 且 dHash 距离 ≤ dhash-threshold。",
-                "dHash 对表情/动作等结构变化更敏感，可用于拆分仅 pHash 相同的变异簇。",
+                "合并条件：pHash 距离 ≤ threshold 且 dHash 距离 ≤ dhash-threshold 且颜色直方图 L1 距离 ≤ color-threshold。",
+                "dHash 对表情/动作等结构变化更敏感，颜色直方图对瞳色/发色等纯颜色变化更敏感。",
                 "特征按 (size, mtime_ns) 指纹缓存增量更新，--force 强制重算。",
                 "聚类结果写入 output_dir/image_clusters.sqlite3，供 web 界面查看。",
                 "聚类过程在本地计算，不访问 NGA；web 界面只读展示结果不触发计算。",
@@ -579,6 +586,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "args": [
                 "threshold",
                 "dhash_threshold",
+                "color_threshold",
                 "min_cluster_size",
                 "lsh_bands",
                 "workers",
@@ -588,6 +596,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "defaults": {
                 "threshold": 1,
                 "dhash_threshold": 2,
+                "color_threshold": 0.1,
                 "min_cluster_size": 2,
                 "lsh_bands": 4,
             },

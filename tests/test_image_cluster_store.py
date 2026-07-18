@@ -27,6 +27,7 @@ def _make_features(path: str, **overrides: object) -> ImageFeatures:
         "has_alpha": False,
         "bg_color": None,
         "trimmed": False,
+        "color_histogram": "",
         "width": 100,
         "height": 100,
     }

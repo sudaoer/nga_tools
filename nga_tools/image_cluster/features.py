@@ -25,6 +25,7 @@ class ImageFeatures:
     has_alpha: bool
     bg_color: tuple[int, int, int] | None
     trimmed: bool
+    color_histogram: str
     width: int
     height: int
 
@@ -37,6 +38,19 @@ def compute_hashes(array: np.ndarray) -> tuple[str | None, str | None]:
 
 def hamming_distance(a: str, b: str) -> int:
     return (int(a, 16) ^ int(b, 16)).bit_count()
+
+
+def color_distance(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    ha = a.split(",")
+    hb = b.split(",")
+    if len(ha) != len(hb):
+        return 0.0
+    try:
+        return sum(abs(float(x) - float(y)) for x, y in zip(ha, hb))
+    except ValueError:
+        return 0.0
 
 
 def extract_features(
@@ -61,6 +75,7 @@ def extract_features(
         has_alpha=result.has_alpha,
         bg_color=result.bg_color,
         trimmed=result.trimmed,
+        color_histogram=result.color_histogram,
         width=result.width,
         height=result.height,
     )

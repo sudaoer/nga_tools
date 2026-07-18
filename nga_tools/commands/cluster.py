@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from nga_tools.commands.types import CommandArgs, optional_bool, optional_int
+from nga_tools.commands.types import (
+    CommandArgs,
+    optional_bool,
+    optional_float,
+    optional_int,
+)
 from nga_tools.config import get_config
 from nga_tools.console import report_info
 from nga_tools.image_cluster import ClusterParams, default_workers, run_image_cluster
@@ -11,6 +16,7 @@ from nga_tools.image_cluster import ClusterParams, default_workers, run_image_cl
 def cluster_run(args: CommandArgs) -> None:
     threshold = optional_int(args, "threshold")
     dhash_threshold = optional_int(args, "dhash_threshold")
+    color_threshold = optional_float(args, "color_threshold")
     min_cluster_size = optional_int(args, "min_cluster_size")
     lsh_bands = optional_int(args, "lsh_bands")
     workers = optional_int(args, "workers")
@@ -23,6 +29,11 @@ def cluster_run(args: CommandArgs) -> None:
             dhash_threshold
             if dhash_threshold is not None and dhash_threshold > 0
             else 2
+        ),
+        color_threshold=(
+            color_threshold
+            if color_threshold is not None and color_threshold >= 0
+            else 0.1
         ),
         min_cluster_size=(
             min_cluster_size

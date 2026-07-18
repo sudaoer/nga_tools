@@ -39,6 +39,15 @@ def optional_int(args: CommandArgs, key: str) -> Optional[int]:
     raise ValueError(f"--{key}必须是整数。")
 
 
+def optional_float(args: CommandArgs, key: str) -> Optional[float]:
+    value = args.get(key)
+    if value is None:
+        return None
+    if type(value) is float or type(value) is int:
+        return float(value)
+    raise ValueError(f"--{key}必须是浮点数。")
+
+
 def optional_bool(args: CommandArgs, key: str) -> bool:
     value = args.get(key)
     if value is None:

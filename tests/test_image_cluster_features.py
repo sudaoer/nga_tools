@@ -7,6 +7,7 @@ from PIL import Image
 
 from nga_tools.image_cluster.features import (
     ImageFeatures,
+    color_distance,
     extract_features,
     hamming_distance,
 )
@@ -80,6 +81,33 @@ def test_hamming_distance_basics() -> None:
     assert hamming_distance("ffffffffffffffff", "0000000000000000") == 64
     assert hamming_distance("f0f0f0f0f0f0f0f0", "0f0f0f0f0f0f0f0f") == 64
     assert hamming_distance("0000000000000001", "0000000000000000") == 1
+
+
+def test_color_distance_identical() -> None:
+    hist = "0.5,0.3,0.2"
+    assert color_distance(hist, hist) == 0.0
+
+
+def test_color_distance_different() -> None:
+    a = "1.0,0.0,0.0"
+    b = "0.0,1.0,0.0"
+    assert color_distance(a, b) == 2.0
+
+
+def test_color_distance_empty_returns_zero() -> None:
+    assert color_distance("", "0.5,0.5") == 0.0
+    assert color_distance("0.5,0.5", "") == 0.0
+    assert color_distance("", "") == 0.0
+
+
+def test_color_distance_mismatched_length_returns_zero() -> None:
+    assert color_distance("0.5,0.5", "0.3,0.3,0.4") == 0.0
+
+
+def test_color_distance_partial_difference() -> None:
+    a = "0.5,0.3,0.2"
+    b = "0.4,0.4,0.2"
+    assert abs(color_distance(a, b) - 0.2) < 1e-9
 
 
 def test_extract_features_returns_none_for_corrupt(tmp_path: Path) -> None:

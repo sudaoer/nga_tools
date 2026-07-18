@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from nga_tools.image_cluster.features import ImageFeatures, hamming_distance
+from nga_tools.image_cluster.features import ImageFeatures, color_distance, hamming_distance
 from nga_tools.image_cluster.lsh import CandidatePair
 
 
@@ -89,6 +89,7 @@ def build_clusters(
     threshold: int,
     min_cluster_size: int,
     dhash_threshold: int = 2,
+    color_threshold: float = 0.1,
 ) -> list[Cluster]:
     if not features:
         return []
@@ -105,6 +106,9 @@ def build_clusters(
             continue
         dhash_dist = hamming_distance(fa.dhash, fb.dhash)
         if dhash_dist > dhash_threshold:
+            continue
+        cdist = color_distance(fa.color_histogram, fb.color_histogram)
+        if cdist > color_threshold:
             continue
         uf.union(pair.a, pair.b)
 
