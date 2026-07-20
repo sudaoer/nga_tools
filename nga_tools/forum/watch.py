@@ -14,6 +14,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_name,
     thread_config_tid,
 )
+from nga_tools.forum.thread_store import timestamp_text
 from nga_tools.forum.timing import ForumSyncTimingCollector
 
 DEFAULT_WATCH_CONFIG_PATH = "forum_watch_configs.json"
@@ -449,11 +450,9 @@ def _managed_thread_fields(
         "link": build_thread_link(base_url, thread["tid"]),
         "subject": thread["subject"],
         "author": thread["author"],
-        "fid": thread["fid"],
-        "forumname": thread["forumname"],
         "replies": thread["replies"],
-        "postdate": thread["postdate"],
-        "lastpost": thread["lastpost"],
+        "postdate": timestamp_text(thread["postdate"]),
+        "lastpost": timestamp_text(thread["lastpost"]),
     }
 
 

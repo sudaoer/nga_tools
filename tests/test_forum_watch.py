@@ -22,6 +22,7 @@ from nga_tools.forum.thread_store import (
     ForumThreadUpsertResult,
     forum_thread_db_path,
     forum_thread_table_name,
+    timestamp_text,
 )
 from nga_tools.forum.watch import (
     ForumWatchConfig,
@@ -895,11 +896,9 @@ class ForumWatchSyncTest:
                 "link": build_thread_link("https://bbs.nga.cn", 100),
                 "subject": "安价测试帖",
                 "author": "楼主",
-                "fid": 784,
-                "forumname": "二次元跑团综合",
                 "replies": 600,
-                "postdate": 1000,
-                "lastpost": 2000,
+                "postdate": timestamp_text(1000),
+                "lastpost": timestamp_text(2000),
             }
         ]
         matches = [
@@ -1568,11 +1567,9 @@ class ForumWatchCommandTest:
                     "link": build_thread_link("https://bbs.nga.cn", 101),
                     "subject": "安价一号",
                     "author": "楼主",
-                    "fid": 784,
-                    "forumname": "rp784",
                     "replies": 600,
-                    "postdate": 1000,
-                    "lastpost": 2000,
+                    "postdate": timestamp_text(1000),
+                    "lastpost": timestamp_text(2000),
                 }
             ]
         )
