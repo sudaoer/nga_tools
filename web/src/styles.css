@@ -105,6 +105,55 @@ a:hover {
   color: var(--nga-red);
 }
 
+.bgm-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bgm-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--nga-nav-text);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--nga-nav-text);
+  padding: 5px 9px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.bgm-toggle:hover,
+.bgm-toggle:focus-visible {
+  outline: 0;
+  background: var(--nga-surface);
+  color: var(--nga-red);
+}
+
+.bgm-toggle--on {
+  background: var(--nga-surface);
+  color: var(--nga-red);
+  border-color: var(--nga-surface);
+}
+
+.bgm-toggle-label {
+  font-weight: 650;
+}
+
+.bgm-volume {
+  width: 90px;
+  height: 4px;
+  padding: 0;
+  accent-color: var(--nga-surface);
+  cursor: pointer;
+}
+
+.bgm-volume:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .app-shell {
   display: flex;
   height: calc(100vh - 46px);

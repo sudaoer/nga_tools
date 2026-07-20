@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, type Ref, watch } from 'vue'
 import { Pane, Splitpanes } from 'splitpanes'
 import {
   clearPostOverlay,
@@ -15,6 +15,9 @@ import PaginationControls from '../components/PaginationControls.vue'
 import PaneRestoreRail from '../components/PaneRestoreRail.vue'
 import { usePersistentPaneLayout } from '../composables/usePersistentPaneLayout'
 import type { PostItem, PostsResult, ThreadStatus, ThreadSummary } from '../types'
+
+const bgmEnabled = inject<Ref<boolean>>('bgmEnabled', ref(false))
+const bgmVolume = inject<Ref<number>>('bgmVolume', ref(0.5))
 
 type SortKey =
   | 'backupUpdated'
@@ -719,9 +722,169 @@ function pauseOtherAudioPlayers(event: Event): void {
     ?.querySelectorAll<HTMLAudioElement>('audio.nga-audio-player')
     .forEach((player) => {
       if (player !== currentPlayer && !player.paused) {
+        rememberPosition(player)
         player.pause()
       }
     })
+}
+
+// BGM 自动播放：按滚动位置决定“当前 BGM”。
+// 规则：当前 BGM = 已滚过（顶部越过阅读区参考线）的最后一个含 BGM 的帖子对应的音乐；
+// 滚动经过没有音乐的帖子时不会中断，保持当前 BGM 直到遇到下一段不同的 BGM。
+// 因为“中间无音乐的帖子没有音乐”并非作者意图，所以以 BGM 段落而非帖子为单元切换。
+const bgmObserver = ref<IntersectionObserver | null>(null)
+let activeBgmPlayer: HTMLAudioElement | null = null
+let bgmScrollScheduled = false
+// 以音频 src 为键，在内存中记忆各 BGM 上次播放到的时间点。
+const bgmPositions = new Map<string, number>()
+
+function bgmKey(player: HTMLAudioElement): string {
+  return player.currentSrc || player.src
+}
+
+function findBgmPlayers(): HTMLAudioElement[] {
+  const pane = readerPaneRef.value
+  if (!pane) {
+    return []
+  }
+  return Array.from(
+    pane.querySelectorAll<HTMLAudioElement>('audio.nga-audio-player'),
+  )
+}
+
+function rememberPosition(player: HTMLAudioElement): void {
+  const key = bgmKey(player)
+  if (key) {
+    bgmPositions.set(key, player.currentTime)
+  }
+}
+
+function applyBgmVolume(): void {
+  const volume = Math.min(1, Math.max(0, bgmVolume.value))
+  findBgmPlayers().forEach((player) => {
+    player.volume = volume
+  })
+}
+
+function pauseAllBgm(): void {
+  findBgmPlayers().forEach((player) => {
+    if (!player.paused) {
+      rememberPosition(player)
+      player.pause()
+    }
+  })
+  activeBgmPlayer = null
+}
+
+function playBgmFor(player: HTMLAudioElement | null): void {
+  if (player === activeBgmPlayer) {
+    return
+  }
+  if (activeBgmPlayer && !activeBgmPlayer.paused) {
+    rememberPosition(activeBgmPlayer)
+    activeBgmPlayer.pause()
+  }
+  activeBgmPlayer = player
+  if (player === null) {
+    return
+  }
+  player.volume = Math.min(1, Math.max(0, bgmVolume.value))
+  // 从上次记忆的时间点续播；无记忆时从头开始。
+  const remembered = bgmPositions.get(bgmKey(player))
+  if (remembered !== undefined && Number.isFinite(remembered)) {
+    try {
+      player.currentTime = remembered
+    } catch {
+      // 元数据未就绪时忽略，播放后浏览器会自行处理
+    }
+  }
+  void player.play().catch(() => {
+    // 浏览器自动播放策略可能拦截，忽略失败
+  })
+}
+
+// 找出“当前 BGM”对应的播放器：以 BGM 段落为单元。
+// 优先取顶部已滚过阅读区参考线（顶部 + 1/3 高度）的最后一个 BGM 帖子；
+// 若尚无任何 BGM 帖子滚过参考线，则取视口内第一个 BGM 帖子。
+function updateActiveBgm(): void {
+  if (!bgmEnabled.value) {
+    pauseAllBgm()
+    return
+  }
+  const pane = readerPaneRef.value
+  if (!pane) {
+    return
+  }
+  const paneRect = pane.getBoundingClientRect()
+  const referenceLine = paneRect.top + paneRect.height / 3
+  let passedPlayer: HTMLAudioElement | null = null
+  let firstVisiblePlayer: HTMLAudioElement | null = null
+  pane.querySelectorAll<HTMLElement>('.post-card').forEach((card) => {
+    const audio = card.querySelector<HTMLAudioElement>(
+      'audio.nga-audio-player',
+    )
+    if (!audio) {
+      return
+    }
+    const rect = card.getBoundingClientRect()
+    // 帖子顶部已越过参考线：其 BGM 成为“已滚过”的候选（保留最后一个）。
+    if (rect.top <= referenceLine) {
+      passedPlayer = audio
+    }
+    // 记录视口内第一个 BGM 帖子作为回退。
+    if (
+      firstVisiblePlayer === null &&
+      rect.bottom > paneRect.top &&
+      rect.top < paneRect.bottom
+    ) {
+      firstVisiblePlayer = audio
+    }
+  })
+  playBgmFor(passedPlayer ?? firstVisiblePlayer)
+}
+
+function onBgmScroll(): void {
+  if (bgmScrollScheduled) {
+    return
+  }
+  bgmScrollScheduled = true
+  requestAnimationFrame(() => {
+    bgmScrollScheduled = false
+    updateActiveBgm()
+  })
+}
+
+function setupBgmObserver(): void {
+  const pane = readerPaneRef.value
+  if (!pane || bgmObserver.value) {
+    return
+  }
+  applyBgmVolume()
+  bgmObserver.value = new IntersectionObserver(
+    () => updateActiveBgm(),
+    { root: pane, threshold: 0 },
+  )
+  pane
+    .querySelectorAll<HTMLElement>('.post-card')
+    .forEach((card) => bgmObserver.value?.observe(card))
+  pane.addEventListener('scroll', onBgmScroll, { passive: true })
+}
+
+function teardownBgmObserver(): void {
+  bgmObserver.value?.disconnect()
+  bgmObserver.value = null
+  readerPaneRef.value?.removeEventListener('scroll', onBgmScroll)
+  pauseAllBgm()
+}
+
+function rescanBgm(): void {
+  teardownBgmObserver()
+  void nextTick(() => {
+    setupBgmObserver()
+    if (bgmEnabled.value) {
+      updateActiveBgm()
+    }
+  })
 }
 
 onMounted(() => {
@@ -732,7 +895,25 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   readerPaneRef.value?.removeEventListener('play', pauseOtherAudioPlayers, true)
+  teardownBgmObserver()
 })
+
+watch(bgmEnabled, (enabled) => {
+  if (enabled) {
+    updateActiveBgm()
+  } else {
+    pauseAllBgm()
+  }
+})
+
+watch(bgmVolume, () => {
+  applyBgmVolume()
+})
+
+watch(
+  () => posts.value,
+  () => rescanBgm(),
+)
 </script>
 
 <template>
