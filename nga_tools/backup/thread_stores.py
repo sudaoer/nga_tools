@@ -21,6 +21,11 @@ ARCHIVE_STATE_DB_FILENAME = "archive_state.sqlite3"
 ARCHIVE_CACHE_DB_FILENAME = "archive_cache.sqlite3"
 
 _STATE_COLUMNS = {
+    "backup_current_pagination_state": (
+        ("singleton", "INTEGER"), ("page_count", "INTEGER"),
+        ("author_total_lou_count", "INTEGER"),
+        ("source_page_number", "INTEGER"), ("observed_at", "TEXT"),
+    ),
     "backup_floor_processing_state": (
         ("singleton", "INTEGER"), ("format_version", "INTEGER"),
         ("processed_archive_revision", "INTEGER"),
@@ -237,6 +242,20 @@ class ThreadArchiveStateStore:
 
     @staticmethod
     def _create_schema_objects(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backup_current_pagination_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                page_count INTEGER NOT NULL CHECK(page_count >= 1),
+                author_total_lou_count INTEGER
+                    CHECK(author_total_lou_count IS NULL
+                          OR author_total_lou_count >= 0),
+                source_page_number INTEGER NOT NULL
+                    CHECK(source_page_number >= 1),
+                observed_at TEXT NOT NULL CHECK(observed_at != '')
+            )
+            """
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS backup_floor_processing_state (

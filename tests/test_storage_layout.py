@@ -67,6 +67,7 @@ def test_thread_databases_have_disjoint_roles_and_source_binding(
     assert "backup_floor_processing_state" not in data_tables
     assert "post_image_reference_cache" not in data_tables
     assert "backup_floor_processing_state" in state_tables
+    assert "backup_current_pagination_state" in state_tables
     assert "archive_change_state" not in state_tables
     assert cache_tables == {"storage_metadata", "post_image_reference_cache"}
 

@@ -20,6 +20,14 @@ class ArchiveChangeState:
 
 
 @dataclass(frozen=True)
+class CurrentPaginationState:
+    page_count: int
+    author_total_lou_count: int | None
+    source_page_number: int
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
 class FloorProcessingState:
     format_version: int
     processed_archive_revision: int
@@ -103,6 +111,7 @@ class PendingAudioRetry:
 class BackupProcessingSnapshot:
     change_state: ArchiveChangeState
     pending_image_retries: tuple[PendingImageRetry, ...]
+    current_pagination_state: CurrentPaginationState | None = None
     floor_state: FloorProcessingState | None = None
     image_state: ImageReferenceState | None = None
     audio_state: AudioProcessingState | None = None

@@ -21,6 +21,7 @@ from nga_tools.backup.post_version_selection import (
     PostVersionSelection,
     post_version_selections_fingerprint,
 )
+from nga_tools.backup.processing_state import CurrentPaginationState
 from nga_tools.timing import time_section
 
 _LATEST_POST_RECORDS_QUERY = """
@@ -797,6 +798,59 @@ class ArchivePostRepository(ArchiveRepository):
         if vrows is not None and type(vrows) is not int:
             raise ValueError(f"archive vrows字段无效：{vrows!r}")
         return ArchivePagePagination(page_count, vrows)
+
+    def read_latest_pagination_observation(
+        self,
+    ) -> CurrentPaginationState | None:
+        self.require_exists()
+        with self._read_connection() as connection:
+            row = cast(
+                Optional[tuple[object, object, object, object]],
+                connection.execute(
+                    """
+                    SELECT total_page, vrows, page_number, last_seen_at
+                    FROM archive_pages
+                    ORDER BY last_seen_at DESC, page_number DESC
+                    LIMIT 1
+                    """
+                ).fetchone(),
+            )
+        if row is None:
+            return None
+        total_page, vrows, source_page_number, observed_at = row
+        if total_page is None:
+            page_count = 1
+        elif type(total_page) is int and total_page >= 1:
+            page_count = total_page
+        else:
+            raise ValueError(f"archive totalPage字段无效：{total_page!r}")
+        if vrows is not None and (type(vrows) is not int or vrows < 0):
+            raise ValueError(f"archive vrows字段无效：{vrows!r}")
+        if type(source_page_number) is not int or source_page_number < 1:
+            raise ValueError(
+                f"archive page_number字段无效：{source_page_number!r}"
+            )
+        if not isinstance(observed_at, str) or not observed_at:
+            raise ValueError(f"archive last_seen_at字段无效：{observed_at!r}")
+        try:
+            parsed_observed_at = datetime.datetime.fromisoformat(observed_at)
+        except ValueError as error:
+            raise ValueError(
+                f"archive last_seen_at字段无效：{observed_at!r}"
+            ) from error
+        if (
+            parsed_observed_at.tzinfo is None
+            or parsed_observed_at.utcoffset() is None
+        ):
+            raise ValueError(
+                f"archive last_seen_at字段缺少时区：{observed_at!r}"
+            )
+        return CurrentPaginationState(
+            page_count=page_count,
+            author_total_lou_count=vrows,
+            source_page_number=source_page_number,
+            observed_at=parsed_observed_at,
+        )
 
     def read_page_numbers(self) -> set[int]:
         if not self.exists():

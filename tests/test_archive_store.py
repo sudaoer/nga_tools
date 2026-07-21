@@ -24,6 +24,7 @@ from nga_tools.backup.floor_models import (
 )
 from nga_tools.backup.processing_state import (
     IMAGE_REFERENCE_MANIFEST_VERSION,
+    CurrentPaginationState,
     FloorProcessingState,
     ImageReferenceManifestEntry,
     ImageReferenceManifestPost,
@@ -661,6 +662,78 @@ class ThreadArchiveStoreTest:
         assert pagination is not None
         assert pagination.page_count == 3
         assert pagination.vrows == 8
+
+    def test_latest_pagination_observation_uses_newest_archived_page(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ingest.upsert_page(
+                1,
+                {"totalPage": 2, "vrows": 20, "result": []},
+                observed_at="2026-07-11T01:00:00+00:00",
+            )
+            store.ingest.upsert_page(
+                3,
+                {"totalPage": 3, "vrows": 27, "result": []},
+                observed_at="2026-07-11T02:00:00+00:00",
+            )
+
+            observation = store.posts.read_latest_pagination_observation()
+
+        assert observation == CurrentPaginationState(
+            page_count=3,
+            author_total_lou_count=27,
+            source_page_number=3,
+            observed_at=datetime(2026, 7, 11, 2, tzinfo=timezone.utc),
+        )
+
+    def test_state_schema_backfills_current_pagination_from_latest_page(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ingest.upsert_page(
+                1,
+                {"totalPage": 2, "vrows": 20, "result": []},
+                observed_at="2026-07-11T01:00:00+00:00",
+            )
+            store.ingest.upsert_page(
+                3,
+                {"totalPage": 3, "vrows": 27, "result": []},
+                observed_at="2026-07-11T02:00:00+00:00",
+            )
+
+            store.state.ensure_schema()
+            snapshot = store.state.read_backup_processing_snapshot()
+
+        assert snapshot.current_pagination_state == CurrentPaginationState(
+            page_count=3,
+            author_total_lou_count=27,
+            source_page_number=3,
+            observed_at=datetime(2026, 7, 11, 2, tzinfo=timezone.utc),
+        )
+
+    def test_current_pagination_state_rejects_older_observation(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            newer = CurrentPaginationState(
+                page_count=3,
+                author_total_lou_count=27,
+                source_page_number=3,
+                observed_at=datetime(2026, 7, 11, 2, tzinfo=timezone.utc),
+            )
+            older = CurrentPaginationState(
+                page_count=2,
+                author_total_lou_count=20,
+                source_page_number=1,
+                observed_at=datetime(2026, 7, 11, 1, tzinfo=timezone.utc),
+            )
+
+            assert store.state.commit_current_pagination_state(newer)
+            assert not store.state.commit_current_pagination_state(older)
+            snapshot = store.state.read_backup_processing_snapshot()
+
+        assert snapshot.current_pagination_state == newer
 
     def test_compact_page_state_rejects_stale_updates_and_clears_vrows(
         self,

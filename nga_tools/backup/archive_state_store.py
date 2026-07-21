@@ -13,6 +13,7 @@ from nga_tools.backup.processing_state import (
     ArchiveChangeState,
     AudioProcessingState,
     BackupProcessingSnapshot,
+    CurrentPaginationState,
     FloorProcessingState,
     ImageReferenceManifestEntry,
     ImageReferenceManifestPost,
@@ -88,6 +89,144 @@ class ArchiveStateRepository:
             self._source.ensure_schema()
         with self._state_write_connection():
             pass
+        if self.read_current_pagination_state() is not None:
+            return
+        fallback = self._posts.read_latest_pagination_observation()
+        if fallback is not None:
+            self.initialize_current_pagination_state(fallback)
+
+    @staticmethod
+    def _validate_current_pagination_state(
+        state: CurrentPaginationState,
+    ) -> str:
+        if (
+            type(state.page_count) is not int
+            or state.page_count < 1
+            or (
+                state.author_total_lou_count is not None
+                and (
+                    type(state.author_total_lou_count) is not int
+                    or state.author_total_lou_count < 0
+                )
+            )
+            or type(state.source_page_number) is not int
+            or state.source_page_number < 1
+            or state.observed_at.tzinfo is None
+            or state.observed_at.utcoffset() is None
+        ):
+            raise ValueError(f"backup当前分页水位无效：{state!r}")
+        return state.observed_at.astimezone(datetime.timezone.utc).isoformat(
+            timespec="microseconds"
+        )
+
+    @staticmethod
+    def _current_pagination_state_from_row(
+        row: tuple[object, object, object, object] | None,
+    ) -> CurrentPaginationState | None:
+        if row is None:
+            return None
+        page_count, author_total_lou_count, source_page_number, observed_at = row
+        if type(page_count) is not int or page_count < 1:
+            raise ValueError(f"backup当前分页数无效：{row!r}")
+        if author_total_lou_count is not None and (
+            type(author_total_lou_count) is not int
+            or author_total_lou_count < 0
+        ):
+            raise ValueError(f"backup当前分页vrows无效：{row!r}")
+        if type(source_page_number) is not int or source_page_number < 1:
+            raise ValueError(f"backup当前分页来源页无效：{row!r}")
+        if not isinstance(observed_at, str) or not observed_at:
+            raise ValueError(f"backup当前分页时间无效：{row!r}")
+        try:
+            parsed_observed_at = datetime.datetime.fromisoformat(observed_at)
+        except ValueError as error:
+            raise ValueError(f"backup当前分页时间无效：{row!r}") from error
+        if (
+            parsed_observed_at.tzinfo is None
+            or parsed_observed_at.utcoffset() is None
+        ):
+            raise ValueError(f"backup当前分页时间缺少时区：{row!r}")
+        return CurrentPaginationState(
+            page_count=page_count,
+            author_total_lou_count=author_total_lou_count,
+            source_page_number=source_page_number,
+            observed_at=parsed_observed_at,
+        )
+
+    def read_current_pagination_state(self) -> CurrentPaginationState | None:
+        if not self.state_store.exists():
+            return None
+        with self._state_read_connection() as connection:
+            row = cast(
+                tuple[object, object, object, object] | None,
+                connection.execute(
+                    """
+                    SELECT page_count, author_total_lou_count,
+                           source_page_number, observed_at
+                    FROM backup_current_pagination_state
+                    WHERE singleton = 1
+                    """
+                ).fetchone(),
+            )
+        return self._current_pagination_state_from_row(row)
+
+    def initialize_current_pagination_state(
+        self,
+        state: CurrentPaginationState,
+    ) -> bool:
+        observed_at = self._validate_current_pagination_state(state)
+        self.require_exists()
+        with self._state_write_connection() as connection:
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO backup_current_pagination_state VALUES
+                    (1, ?, ?, ?, ?)
+                    ON CONFLICT(singleton) DO NOTHING
+                    """,
+                    (
+                        state.page_count,
+                        state.author_total_lou_count,
+                        state.source_page_number,
+                        observed_at,
+                    ),
+                )
+        current = self.read_current_pagination_state()
+        return current is not None
+
+    def commit_current_pagination_state(
+        self,
+        state: CurrentPaginationState,
+    ) -> bool:
+        observed_at = self._validate_current_pagination_state(state)
+        self.require_exists()
+        with self._state_write_connection() as connection:
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO backup_current_pagination_state VALUES
+                    (1, ?, ?, ?, ?)
+                    ON CONFLICT(singleton) DO UPDATE SET
+                        page_count = excluded.page_count,
+                        author_total_lou_count = excluded.author_total_lou_count,
+                        source_page_number = excluded.source_page_number,
+                        observed_at = excluded.observed_at
+                    WHERE excluded.observed_at >=
+                          backup_current_pagination_state.observed_at
+                    """,
+                    (
+                        state.page_count,
+                        state.author_total_lou_count,
+                        state.source_page_number,
+                        observed_at,
+                    ),
+                )
+        current = self.read_current_pagination_state()
+        return current is not None and (
+            current.page_count == state.page_count
+            and current.author_total_lou_count
+            == state.author_total_lou_count
+        )
 
     def read_backup_processing_snapshot(self) -> BackupProcessingSnapshot:
         self.require_exists()
@@ -132,6 +271,17 @@ class ArchiveStateRepository:
                     ORDER BY author_lou
                     """
                 ).fetchall(),
+            )
+            pagination_row = cast(
+                tuple[object, object, object, object] | None,
+                connection.execute(
+                    """
+                    SELECT page_count, author_total_lou_count,
+                           source_page_number, observed_at
+                    FROM backup_current_pagination_state
+                    WHERE singleton = 1
+                    """
+                ).fetchone(),
             )
             floor_row = connection.execute(
                 """
@@ -339,6 +489,9 @@ class ArchiveStateRepository:
         return BackupProcessingSnapshot(
             change_state=change_state,
             pending_image_retries=tuple(pending_image_retries),
+            current_pagination_state=(
+                self._current_pagination_state_from_row(pagination_row)
+            ),
             floor_state=floor_state,
             image_state=image_state,
             audio_state=audio_state,
