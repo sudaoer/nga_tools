@@ -1,12 +1,36 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping, Sequence
+from typing import cast
 
 from nga_tools.backup.archive_repository import ArchiveRepository
-from nga_tools.backup.floor_models import FloorMapEntry, StoredFloorMap
+from nga_tools.backup.floor_models import (
+    FLOOR_MAP_GENERATION_VERSION,
+    FLOOR_MAP_HASH_ALGORITHM,
+    FLOOR_MAP_VERSION,
+    ExactMissingFloorLocatorRead,
+    FloorMapEntry,
+    PartialFloorMapUpdateResult,
+    StoredFloorMap,
+)
+from nga_tools.core.sqlite import iter_in_clause_chunks
 
 
 class ArchiveFloorMapRepository(ArchiveRepository):
+    @staticmethod
+    def _validate_requested_author_lous(author_lous: Sequence[int]) -> list[int]:
+        if any(
+            type(author_lou) is not int or author_lou < 0
+            for author_lou in author_lous
+        ):
+            raise ValueError("增量缺失楼author_lou必须是非负整数。")
+        return sorted(set(author_lous))
+
+    @staticmethod
+    def _placeholders(values: Sequence[object]) -> str:
+        return ", ".join("?" for _value in values)
+
     @staticmethod
     def _validate_floor_map(floor_map: StoredFloorMap) -> None:
         integer_fields = {
@@ -145,6 +169,213 @@ class ArchiveFloorMapRepository(ArchiveRepository):
                         )
                 self._increment_floor_map_revision(connection)
         return True
+
+    def read_exact_missing_floor_locators(
+        self,
+        author_lous: Sequence[int],
+        *,
+        tid: int,
+        aid: int,
+        expected_archive_revision: int,
+        expected_floor_map_revision: int,
+    ) -> ExactMissingFloorLocatorRead:
+        requested_lous = self._validate_requested_author_lous(author_lous)
+        if not requested_lous:
+            return ExactMissingFloorLocatorRead({}, None)
+        for label, value in (
+            ("tid", tid),
+            ("aid", aid),
+            ("archive revision", expected_archive_revision),
+            ("floor-map revision", expected_floor_map_revision),
+        ):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"增量缺失楼{label}必须是非负整数。")
+
+        self.require_exists()
+        with self._read_connection() as connection:
+            connection.execute("BEGIN")
+            try:
+                state_row = connection.execute(
+                    """
+                    SELECT
+                        tid,
+                        aid,
+                        format_version,
+                        generation_version,
+                        hash_algorithm,
+                        input_signature
+                    FROM floor_map_state
+                    WHERE singleton = 1
+                    """
+                ).fetchone()
+                if (
+                    state_row is None
+                    or state_row[0] != tid
+                    or state_row[1] != aid
+                    or state_row[2] != FLOOR_MAP_VERSION
+                    or state_row[3] != FLOOR_MAP_GENERATION_VERSION
+                    or state_row[4] != FLOOR_MAP_HASH_ALGORITHM
+                    or not isinstance(state_row[5], str)
+                    or not state_row[5]
+                ):
+                    return ExactMissingFloorLocatorRead({}, "state_mismatch")
+
+                revision_row = connection.execute(
+                    """
+                    SELECT archive_revision, floor_map_revision
+                    FROM archive_change_state
+                    WHERE singleton = 1
+                    """
+                ).fetchone()
+                if revision_row != (
+                    expected_archive_revision,
+                    expected_floor_map_revision,
+                ):
+                    return ExactMissingFloorLocatorRead({}, "revision_mismatch")
+
+                entry_rows: list[tuple[object, object, object, object]] = []
+                candidate_author_lous: set[int] = set()
+                for chunk in iter_in_clause_chunks(requested_lous):
+                    placeholders = self._placeholders(chunk)
+                    entry_rows.extend(
+                        cast(
+                            list[tuple[object, object, object, object]],
+                            connection.execute(
+                                f"""
+                                SELECT author_lou, pid, original_lou, original_pid
+                                FROM floor_map_entries
+                                WHERE author_lou IN ({placeholders})
+                                """,
+                                chunk,
+                            ).fetchall(),
+                        )
+                    )
+                    candidate_rows = connection.execute(
+                        f"""
+                        SELECT DISTINCT author_lou
+                        FROM floor_map_candidates
+                        WHERE author_lou IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                    for row in candidate_rows:
+                        if len(row) != 1 or type(row[0]) is not int:
+                            raise ValueError(
+                                f"archive楼层映射候选author_lou无效：{row!r}"
+                            )
+                        candidate_author_lous.add(row[0])
+            finally:
+                connection.rollback()
+
+        entries_by_author_lou: dict[int, tuple[object, object, object]] = {}
+        for author_lou, pid, original_lou, original_pid in entry_rows:
+            if type(author_lou) is not int or author_lou in entries_by_author_lou:
+                raise ValueError(f"archive增量楼层映射行无效：{entry_rows!r}")
+            entries_by_author_lou[author_lou] = (pid, original_lou, original_pid)
+
+        exact: dict[int, int] = {}
+        for author_lou in requested_lous:
+            row = entries_by_author_lou.get(author_lou)
+            if author_lou in candidate_author_lous:
+                return ExactMissingFloorLocatorRead({}, "candidate")
+            if row is None or row[1] is None:
+                return ExactMissingFloorLocatorRead({}, "no_locator")
+            pid, original_lou, original_pid = row
+            if (
+                pid is not None
+                or original_pid is not None
+                or type(original_lou) is not int
+                or original_lou < 0
+            ):
+                return ExactMissingFloorLocatorRead({}, "entry_state")
+            exact[author_lou] = original_lou
+        return ExactMissingFloorLocatorRead(exact, None)
+
+    def mark_missing_floor_entries_recovered(
+        self,
+        recovered_by_author_lou: Mapping[int, tuple[int, int]],
+        *,
+        expected_floor_map_revision: int,
+    ) -> PartialFloorMapUpdateResult:
+        if (
+            type(expected_floor_map_revision) is not int
+            or expected_floor_map_revision < 0
+        ):
+            raise ValueError("增量楼层映射预期revision必须是非负整数。")
+        rows = sorted(recovered_by_author_lou.items())
+        for author_lou, (original_lou, original_pid) in rows:
+            if (
+                type(author_lou) is not int
+                or author_lou < 0
+                or type(original_lou) is not int
+                or original_lou < 0
+                or type(original_pid) is not int
+                or original_pid < 0
+            ):
+                raise ValueError("增量楼层映射恢复字段必须是非负整数。")
+        self.require_exists()
+        with self._write_connection() as connection:
+            with connection:
+                revision_row = connection.execute(
+                    """
+                    SELECT floor_map_revision
+                    FROM archive_change_state
+                    WHERE singleton = 1
+                    """
+                ).fetchone()
+                if revision_row != (expected_floor_map_revision,):
+                    return PartialFloorMapUpdateResult(False, 0)
+                if not rows:
+                    return PartialFloorMapUpdateResult(True, 0)
+
+                rows_to_update: list[tuple[int, int, int]] = []
+                for author_lou, (original_lou, original_pid) in rows:
+                    entry_row = connection.execute(
+                        """
+                        SELECT pid, original_lou, original_pid
+                        FROM floor_map_entries
+                        WHERE author_lou = ?
+                        """,
+                        (author_lou,),
+                    ).fetchone()
+                    candidate_row = connection.execute(
+                        """
+                        SELECT 1
+                        FROM floor_map_candidates
+                        WHERE author_lou = ?
+                        LIMIT 1
+                        """,
+                        (author_lou,),
+                    ).fetchone()
+                    if candidate_row is not None:
+                        return PartialFloorMapUpdateResult(False, 0)
+                    if entry_row == (None, original_lou, original_pid):
+                        continue
+                    if entry_row != (None, original_lou, None):
+                        return PartialFloorMapUpdateResult(False, 0)
+                    rows_to_update.append(
+                        (author_lou, original_lou, original_pid)
+                    )
+
+                for author_lou, original_lou, original_pid in rows_to_update:
+                    cursor = connection.execute(
+                        """
+                        UPDATE floor_map_entries
+                        SET original_pid = ?
+                        WHERE author_lou = ?
+                          AND pid IS NULL
+                          AND original_lou = ?
+                          AND original_pid IS NULL
+                        """,
+                        (original_pid, author_lou, original_lou),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            f"增量楼层映射更新行数异常：author_lou={author_lou}"
+                        )
+                if rows_to_update:
+                    self._increment_floor_map_revision(connection)
+        return PartialFloorMapUpdateResult(True, len(rows_to_update))
 
     def read_floor_map_from_connection(
         self,

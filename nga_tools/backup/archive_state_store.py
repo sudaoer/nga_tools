@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import sqlite3
 from collections import Counter
+from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Protocol, cast
@@ -925,6 +926,7 @@ class ArchiveStateRepository:
         with self._state_write_connection() as connection:
             with connection:
                 self._replace_pending_images(connection, pending_image_retries)
+
     def replace_pending_missing_floor_retries(
         self,
         retries: tuple[PendingMissingFloorRetry, ...],
@@ -933,6 +935,106 @@ class ArchiveStateRepository:
         with self._state_write_connection() as connection:
             with connection:
                 self._replace_pending_missing_floors(connection, retries)
+
+    def apply_missing_floor_retry_attempt(
+        self,
+        *,
+        expected_retries: Sequence[PendingMissingFloorRetry],
+        recovered_lous: Sequence[int],
+        attempted_unresolved_lous: Sequence[int],
+        attempted_at: datetime.datetime,
+    ) -> bool:
+        if attempted_at.tzinfo is None or attempted_at.utcoffset() is None:
+            raise ValueError("缺失楼增量重试时间必须包含时区。")
+        recovered = set(recovered_lous)
+        attempted_unresolved = set(attempted_unresolved_lous)
+        if recovered & attempted_unresolved:
+            raise ValueError("已恢复与仍未恢复的缺失楼不能重叠。")
+        target_lous = sorted(recovered | attempted_unresolved)
+        if any(
+            type(author_lou) is not int or author_lou < 0
+            for author_lou in target_lous
+        ):
+            raise ValueError("缺失楼增量待办author_lou必须是非负整数。")
+        if not target_lous:
+            return True
+
+        expected_by_lou: dict[int, str] = {}
+        for retry in expected_retries:
+            if retry.author_lou in expected_by_lou:
+                raise ValueError(f"backup待重试缺失楼重复：{retry.author_lou}")
+            if (
+                retry.last_attempt_at.tzinfo is None
+                or retry.last_attempt_at.utcoffset() is None
+            ):
+                raise ValueError(
+                    f"backup待重试缺失楼时间缺少时区：{retry.author_lou}"
+                )
+            expected_by_lou[retry.author_lou] = retry.last_attempt_at.astimezone(
+                datetime.timezone.utc
+            ).isoformat(timespec="microseconds")
+        if any(author_lou not in expected_by_lou for author_lou in target_lous):
+            return False
+
+        self.require_exists()
+        with self._state_write_connection() as connection:
+            with connection:
+                current_by_lou: dict[int, str] = {}
+                for chunk in iter_in_clause_chunks(target_lous):
+                    placeholders = ", ".join("?" for _value in chunk)
+                    rows = connection.execute(
+                        f"""
+                        SELECT author_lou, last_attempt_at
+                        FROM backup_pending_missing_floors
+                        WHERE author_lou IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                    for author_lou, last_attempt_at in rows:
+                        if (
+                            type(author_lou) is not int
+                            or not isinstance(last_attempt_at, str)
+                            or author_lou in current_by_lou
+                        ):
+                            raise ValueError(
+                                "backup待重试缺失楼增量状态无效："
+                                f"{(author_lou, last_attempt_at)!r}"
+                            )
+                        current_by_lou[author_lou] = last_attempt_at
+                expected_targets = {
+                    author_lou: expected_by_lou[author_lou]
+                    for author_lou in target_lous
+                }
+                if current_by_lou != expected_targets:
+                    return False
+
+                for chunk in iter_in_clause_chunks(sorted(recovered)):
+                    if not chunk:
+                        continue
+                    placeholders = ", ".join("?" for _value in chunk)
+                    connection.execute(
+                        f"""
+                        DELETE FROM backup_pending_missing_floors
+                        WHERE author_lou IN ({placeholders})
+                        """,
+                        chunk,
+                    )
+                attempted_at_text = attempted_at.astimezone(
+                    datetime.timezone.utc
+                ).isoformat(timespec="microseconds")
+                connection.executemany(
+                    """
+                    UPDATE backup_pending_missing_floors
+                    SET last_attempt_at = ?
+                    WHERE author_lou = ?
+                    """,
+                    [
+                        (attempted_at_text, author_lou)
+                        for author_lou in sorted(attempted_unresolved)
+                    ],
+                )
+        return True
+
     def commit_audio_processing_state(
         self,
         state: AudioProcessingState,

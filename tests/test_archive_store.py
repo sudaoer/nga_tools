@@ -31,6 +31,7 @@ from nga_tools.backup.processing_state import (
     ImageReferenceManifestState,
     ImageReferenceState,
     PendingImageRetry,
+    PendingMissingFloorRetry,
 )
 from nga_tools.core.downloads import DownloadFailureKind
 from nga_tools.core.hashing import hash_text
@@ -330,6 +331,146 @@ class ThreadArchiveStoreTest:
         assert not repeated_changed
         assert after_first.floor_map_revision == 1
         assert after_repeated.floor_map_revision == 1
+
+    def test_reads_only_requested_exact_missing_floor_locators(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            store.floor_maps.replace_floor_map(
+                _stored_floor_map(
+                    [
+                        {"pid": 1001, "author_lou": 1, "original_lou": 10},
+                        {"pid": None, "author_lou": 2, "original_lou": 11},
+                        {
+                            "pid": None,
+                            "author_lou": 3,
+                            "original_lou": None,
+                            "candidate_original_lous": [12, 13],
+                        },
+                        {"pid": None, "author_lou": 4, "original_lou": None},
+                    ]
+                )
+            )
+            change_state = store.state.read_backup_processing_snapshot().change_state
+
+            exact = store.floor_maps.read_exact_missing_floor_locators(
+                [2],
+                tid=123,
+                aid=456,
+                expected_archive_revision=change_state.archive_revision,
+                expected_floor_map_revision=change_state.floor_map_revision,
+            )
+            candidate = store.floor_maps.read_exact_missing_floor_locators(
+                [3],
+                tid=123,
+                aid=456,
+                expected_archive_revision=change_state.archive_revision,
+                expected_floor_map_revision=change_state.floor_map_revision,
+            )
+            no_locator = store.floor_maps.read_exact_missing_floor_locators(
+                [4],
+                tid=123,
+                aid=456,
+                expected_archive_revision=change_state.archive_revision,
+                expected_floor_map_revision=change_state.floor_map_revision,
+            )
+            stale = store.floor_maps.read_exact_missing_floor_locators(
+                [2],
+                tid=123,
+                aid=456,
+                expected_archive_revision=change_state.archive_revision,
+                expected_floor_map_revision=change_state.floor_map_revision + 1,
+            )
+
+        assert exact.exact_original_lou_by_author_lou == {2: 11}
+        assert exact.fallback_reason is None
+        assert candidate.fallback_reason == "candidate"
+        assert no_locator.fallback_reason == "no_locator"
+        assert stale.fallback_reason == "revision_mismatch"
+
+    def test_partially_marks_recovered_floor_entries_and_is_idempotent(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            store.floor_maps.replace_floor_map(
+                _stored_floor_map(
+                    [
+                        {"pid": 1001, "author_lou": 1, "original_lou": 10},
+                        {"pid": None, "author_lou": 2, "original_lou": 11},
+                        {"pid": None, "author_lou": 3, "original_lou": 12},
+                    ]
+                )
+            )
+            before = store.state.read_backup_processing_snapshot().change_state
+
+            updated = store.floor_maps.mark_missing_floor_entries_recovered(
+                {2: (11, 2002)},
+                expected_floor_map_revision=before.floor_map_revision,
+            )
+            after = store.state.read_backup_processing_snapshot().change_state
+            repeated = store.floor_maps.mark_missing_floor_entries_recovered(
+                {2: (11, 2002)},
+                expected_floor_map_revision=after.floor_map_revision,
+            )
+            final_state = store.state.read_backup_processing_snapshot().change_state
+            floor_map = store.floor_maps.read_floor_map()
+
+        assert updated.succeeded
+        assert updated.updated_count == 1
+        assert after.floor_map_revision == before.floor_map_revision + 1
+        assert repeated.succeeded
+        assert repeated.updated_count == 0
+        assert final_state == after
+        assert floor_map is not None
+        assert floor_map.entries == [
+            {"pid": 1001, "author_lou": 1, "original_lou": 10},
+            {
+                "pid": None,
+                "author_lou": 2,
+                "original_lou": 11,
+                "original_pid": 2002,
+            },
+            {"pid": None, "author_lou": 3, "original_lou": 12},
+        ]
+
+    def test_applies_missing_floor_attempt_delta_without_replacing_deferred(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            store.state.ensure_schema()
+            earlier = datetime(2026, 7, 1, tzinfo=timezone.utc)
+            attempted_at = datetime(2026, 7, 22, tzinfo=timezone.utc)
+            expected = (
+                PendingMissingFloorRetry(2, earlier),
+                PendingMissingFloorRetry(3, earlier),
+                PendingMissingFloorRetry(4, earlier),
+            )
+            store.state.replace_pending_missing_floor_retries(expected)
+
+            changed = store.state.apply_missing_floor_retry_attempt(
+                expected_retries=expected,
+                recovered_lous=[2],
+                attempted_unresolved_lous=[3],
+                attempted_at=attempted_at,
+            )
+            snapshot = store.state.read_backup_processing_snapshot()
+            conflicted = store.state.apply_missing_floor_retry_attempt(
+                expected_retries=expected,
+                recovered_lous=[],
+                attempted_unresolved_lous=[3],
+                attempted_at=attempted_at,
+            )
+
+        assert changed
+        assert snapshot.pending_missing_floor_retries == (
+            PendingMissingFloorRetry(3, attempted_at),
+            PendingMissingFloorRetry(4, earlier),
+        )
+        assert not conflicted
 
     def test_invalid_floor_map_does_not_replace_existing_data(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

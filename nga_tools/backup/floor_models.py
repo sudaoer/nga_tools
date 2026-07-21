@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import NotRequired, Optional, TypedDict
+from typing import Literal, NotRequired, Optional, TypedDict
 
 FLOOR_MAP_VERSION = 1
 FLOOR_MAP_GENERATION_VERSION = 1
@@ -33,6 +33,27 @@ class StoredFloorMap:
     aid: int
     input_signature: str
     entries: list[FloorMapEntry]
+
+
+MissingFloorIncrementalFallbackReason = Literal[
+    "revision_mismatch",
+    "state_mismatch",
+    "candidate",
+    "no_locator",
+    "entry_state",
+]
+
+
+@dataclass(frozen=True)
+class ExactMissingFloorLocatorRead:
+    exact_original_lou_by_author_lou: dict[int, int]
+    fallback_reason: MissingFloorIncrementalFallbackReason | None
+
+
+@dataclass(frozen=True)
+class PartialFloorMapUpdateResult:
+    succeeded: bool
+    updated_count: int
 
 
 class OriginalPostSnapshot(TypedDict):
