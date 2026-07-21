@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 import sqlite3
 from collections.abc import Sequence
-from contextlib import closing
 from typing import Optional, cast
 
 from nga_tools.backup.archive_floor_store import ArchiveFloorMapRepository
@@ -93,7 +92,7 @@ class ArchivePostRepository(ArchiveRepository):
         self._floor_maps = floor_maps
     def max_post_version_id(self) -> int:
         self.require_exists()
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 "SELECT COALESCE(MAX(id), 0) FROM post_versions"
             ).fetchone()
@@ -116,7 +115,7 @@ class ArchivePostRepository(ArchiveRepository):
             )
         if after_id == through_id:
             return []
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT id, content
@@ -145,7 +144,7 @@ class ArchivePostRepository(ArchiveRepository):
     def read_latest_post_record_summaries(self) -> list[PostRecord]:
         self.require_exists()
 
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             rows = cast(
                 list[tuple[int, int, int, str]],
                 connection.execute(_LATEST_POST_RECORD_SUMMARIES_QUERY).fetchall(),
@@ -235,7 +234,7 @@ class ArchivePostRepository(ArchiveRepository):
 
     def read_valid_post_version_selections(self) -> dict[int, PostVersionSelection]:
         self.require_exists()
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             return self._validated_post_version_selections(connection)
 
     def post_version_selections_fingerprint(self) -> str:
@@ -254,7 +253,7 @@ class ArchivePostRepository(ArchiveRepository):
             raise ValueError(f"正文版本ID必须是正整数：{version_id!r}")
 
         selected_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        with closing(self._connect_write()) as connection:
+        with self._write_connection() as connection:
             with connection:
                 version_row = cast(
                     Optional[tuple[object, object]],
@@ -317,7 +316,7 @@ class ArchivePostRepository(ArchiveRepository):
     def delete_post_version_selection(self, lou: int) -> int:
         if type(lou) is not int or lou < 0:
             raise ValueError(f"正文版本选择楼层必须是非负整数：{lou!r}")
-        with closing(self._connect_write()) as connection:
+        with self._write_connection() as connection:
             with connection:
                 latest_row = cast(
                     Optional[tuple[object]],
@@ -342,7 +341,7 @@ class ArchivePostRepository(ArchiveRepository):
 
     def read_effective_post_stats(self) -> ArchiveEffectivePostStats:
         self.require_exists()
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             row = cast(
                 tuple[int, Optional[int]],
                 connection.execute(
@@ -367,7 +366,7 @@ class ArchivePostRepository(ArchiveRepository):
     def read_effective_post_record_summaries(self) -> list[PostRecord]:
         self.require_exists()
 
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             rows = cast(
                 list[tuple[int, int, int, str]],
                 connection.execute(_LATEST_POST_RECORD_SUMMARIES_QUERY).fetchall(),
@@ -465,7 +464,7 @@ class ArchivePostRepository(ArchiveRepository):
             where_lous = f"WHERE lou IN ({placeholders})"
             params = sorted_lous
 
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             latest_rows = cast(
                 list[
                     tuple[
@@ -544,7 +543,7 @@ class ArchivePostRepository(ArchiveRepository):
         version_id: int,
     ) -> ArchivePostVersionRow | None:
         self.require_exists()
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             row = cast(
                 Optional[
                     tuple[
@@ -598,7 +597,7 @@ class ArchivePostRepository(ArchiveRepository):
             where_lous = f"WHERE lou IN ({placeholders})"
             params = sorted_lous
 
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             rows = cast(
                 list[tuple[int, int, int, object, str]],
                 connection.execute(
@@ -665,7 +664,7 @@ class ArchivePostRepository(ArchiveRepository):
 
     def read_latest_author_post_refs(self) -> list[AuthorPostRef]:
         self.require_exists()
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             return self._read_latest_author_post_refs(connection)
 
     def read_next_postdates_after_lous(
@@ -678,7 +677,7 @@ class ArchivePostRepository(ArchiveRepository):
             return {}
         self.require_exists()
         result: dict[int, Optional[PostDate]] = {}
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             for after_lou in ordered_lous:
                 row = cast(
                     Optional[tuple[object, object]],
@@ -728,26 +727,31 @@ class ArchivePostRepository(ArchiveRepository):
     def read_author_floor_refresh_inputs(self) -> AuthorFloorRefreshInputs:
         """Read author refs and the prior floor map from one SQLite snapshot."""
         self.require_exists()
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             connection.execute("BEGIN")
-            with time_section("楼主最新回复索引读取"):
-                post_refs = self._read_latest_author_post_refs(connection)
             try:
-                with time_section("历史未恢复缺失楼读取"):
-                    stored_floor_map = self._floor_maps.read_floor_map_from_connection(
-                        connection
+                with time_section("楼主最新回复索引读取"):
+                    post_refs = self._read_latest_author_post_refs(connection)
+                try:
+                    with time_section("历史未恢复缺失楼读取"):
+                        stored_floor_map = (
+                            self._floor_maps.read_floor_map_from_connection(
+                                connection
+                            )
+                        )
+                except ValueError as error:
+                    return AuthorFloorRefreshInputs(
+                        tuple(post_refs),
+                        None,
+                        str(error),
                     )
-            except ValueError as error:
-                return AuthorFloorRefreshInputs(
-                    tuple(post_refs),
-                    None,
-                    str(error),
-                )
+            finally:
+                connection.rollback()
         return AuthorFloorRefreshInputs(tuple(post_refs), stored_floor_map, None)
 
     def read_latest_author_total_lou_count(self) -> Optional[int]:
         self.require_exists()
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 """
                 SELECT vrows
@@ -769,7 +773,7 @@ class ArchivePostRepository(ArchiveRepository):
         self,
     ) -> ArchivePagePagination | None:
         self.require_exists()
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             row = cast(
                 Optional[tuple[object, object]],
                 connection.execute(
@@ -797,7 +801,7 @@ class ArchivePostRepository(ArchiveRepository):
     def read_page_numbers(self) -> set[int]:
         if not self.exists():
             return set()
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             rows = cast(
                 list[tuple[int]],
                 connection.execute(

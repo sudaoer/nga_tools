@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import closing
 from typing import cast
 
 from nga_tools.backup.archive_repository import ArchiveRepository
@@ -49,7 +48,7 @@ class ArchiveOverlayRepository(ArchiveRepository):
             where_lous = f"WHERE lou IN ({placeholders})"
             params = sorted_lous
 
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             rows = cast(
                 list[tuple[object, object, object, object, object]],
                 connection.execute(
@@ -73,7 +72,7 @@ class ArchiveOverlayRepository(ArchiveRepository):
             content_hash=overlay["content_hash"],
             updated_at=overlay["updated_at"],
         )
-        with closing(self._connect_write()) as connection:
+        with self._write_connection() as connection:
             with connection:
                 connection.execute(
                     """
@@ -104,7 +103,7 @@ class ArchiveOverlayRepository(ArchiveRepository):
     def delete_post_overlay(self, lou: int) -> bool:
         if type(lou) is not int or lou < 0:
             raise ValueError(f"overlay楼层必须是非负整数：{lou!r}")
-        with closing(self._connect_write()) as connection:
+        with self._write_connection() as connection:
             with connection:
                 cursor = connection.execute(
                     "DELETE FROM post_overlays WHERE lou = ?",

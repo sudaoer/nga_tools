@@ -223,6 +223,14 @@ class ThreadArchiveStateStore:
             raise
         return connection
 
+    def open_session_write(self) -> sqlite3.Connection:
+        return _open_writable(self.db_path)
+
+    def open_session_read(self) -> sqlite3.Connection:
+        if not self.exists():
+            raise FileNotFoundError(f"缺少archive_state.sqlite3：{self.db_path}")
+        return _open_readonly(self.db_path)
+
     def ensure_schema(self, source_store_id: str) -> None:
         with closing(self.connect_write(source_store_id)):
             pass
@@ -397,6 +405,14 @@ class ThreadArchiveCacheStore:
             connection.close()
             raise
         return connection
+
+    def open_session_write(self) -> sqlite3.Connection:
+        return _open_writable(self.db_path)
+
+    def open_session_read(self) -> sqlite3.Connection:
+        if not self.exists():
+            raise FileNotFoundError(f"缺少archive_cache.sqlite3：{self.db_path}")
+        return _open_readonly(self.db_path)
 
     def ensure_schema(self, source_store_id: str) -> None:
         with closing(self.connect_write(source_store_id)):

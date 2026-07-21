@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 import sqlite3
 from collections import Counter
-from contextlib import closing
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -34,6 +34,12 @@ class ArchiveStateSource(Protocol):
     def ensure_schema(self) -> None: ...
     def archive_store_id(self) -> str: ...
     def read_current_archive_change_state(self) -> ArchiveChangeState: ...
+    def state_write_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]: ...
+    def state_read_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]: ...
 
 
 class ArchiveStateRepository:
@@ -66,16 +72,21 @@ class ArchiveStateRepository:
     def max_post_version_id(self) -> int:
         return self._posts.max_post_version_id()
 
-    def _connect_state_write(self) -> sqlite3.Connection:
-        return self.state_store.connect_write(self.archive_store_id())
+    def _state_write_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        return self._source.state_write_connection()
 
-    def _connect_state_read(self) -> sqlite3.Connection:
-        return self.state_store.connect_read(self.archive_store_id())
+    def _state_read_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        return self._source.state_read_connection()
 
     def ensure_schema(self) -> None:
         if not self.exists():
             self._source.ensure_schema()
-        self.state_store.ensure_schema(self.archive_store_id())
+        with self._state_write_connection():
+            pass
 
     def read_backup_processing_snapshot(self) -> BackupProcessingSnapshot:
         self.require_exists()
@@ -90,7 +101,7 @@ class ArchiveStateRepository:
         self,
         change_state: ArchiveChangeState,
     ) -> BackupProcessingSnapshot:
-        with closing(self._connect_state_read()) as connection:
+        with self._state_read_connection() as connection:
             pending_rows = cast(
                 list[tuple[object, object, object, object]],
                 connection.execute(
@@ -628,7 +639,7 @@ class ArchiveStateRepository:
         self.require_exists()
         if not self.state_store.exists():
             return None
-        with closing(self._connect_state_read()) as connection:
+        with self._state_read_connection() as connection:
             state_row = connection.execute(
                 """
                 SELECT format_version, processed_archive_revision
@@ -749,7 +760,7 @@ class ArchiveStateRepository:
         self.require_exists()
         if not self.state_store.exists():
             return None
-        with closing(self._connect_state_read()) as connection:
+        with self._state_read_connection() as connection:
             row = connection.execute(
                 """
                 SELECT format_version, processed_archive_revision
@@ -776,7 +787,7 @@ class ArchiveStateRepository:
             return {}
         post_rows: list[tuple[object, object]] = []
         entry_rows: list[tuple[object, object, object, object]] = []
-        with closing(self._connect_state_read()) as connection:
+        with self._state_read_connection() as connection:
             for chunk in iter_in_clause_chunks(sorted(lous)):
                 placeholders = ",".join("?" for _value in chunk)
                 post_rows.extend(
@@ -859,7 +870,7 @@ class ArchiveStateRepository:
         if not urls or not self.state_store.exists():
             return {}
         rows: list[tuple[object, object, object]] = []
-        with closing(self._connect_state_read()) as connection:
+        with self._state_read_connection() as connection:
             for chunk in iter_in_clause_chunks(sorted(urls)):
                 placeholders = ",".join("?" for _value in chunk)
                 rows.extend(
@@ -896,7 +907,7 @@ class ArchiveStateRepository:
     def clear_backup_processing_state(self) -> None:
         if not self.exists():
             return
-        with closing(self._connect_state_write()) as connection:
+        with self._state_write_connection() as connection:
             with connection:
                 connection.execute("DELETE FROM backup_pending_images")
                 connection.execute("DELETE FROM backup_pending_missing_floors")
@@ -911,7 +922,7 @@ class ArchiveStateRepository:
     ) -> None:
         """Replace rebuildable retry state without marking image processing current."""
         self.require_exists()
-        with closing(self._connect_state_write()) as connection:
+        with self._state_write_connection() as connection:
             with connection:
                 self._replace_pending_images(connection, pending_image_retries)
     def replace_pending_missing_floor_retries(
@@ -919,7 +930,7 @@ class ArchiveStateRepository:
         retries: tuple[PendingMissingFloorRetry, ...],
     ) -> None:
         self.require_exists()
-        with closing(self._connect_state_write()) as connection:
+        with self._state_write_connection() as connection:
             with connection:
                 self._replace_pending_missing_floors(connection, retries)
     def commit_audio_processing_state(
@@ -941,7 +952,7 @@ class ArchiveStateRepository:
         expected_max_id = state.processed_max_post_version_id
         if self.max_post_version_id() != expected_max_id:
             return False
-        with closing(self._connect_state_write()) as connection:
+        with self._state_write_connection() as connection:
             with connection:
                 connection.execute(
                     "DELETE FROM backup_audio_processing_state"
@@ -976,7 +987,7 @@ class ArchiveStateRepository:
         )
         if self._read_current_archive_change_state() != expected_change_state:
             return False
-        with closing(self._connect_state_write()) as connection:
+        with self._state_write_connection() as connection:
             with connection:
                 connection.execute("DELETE FROM backup_floor_processing_state")
                 connection.execute(
@@ -1010,7 +1021,7 @@ class ArchiveStateRepository:
             != state.processed_archive_revision
         ):
             return False
-        with closing(self._connect_state_write()) as connection:
+        with self._state_write_connection() as connection:
             with connection:
                 self._replace_image_reference_state(connection, state)
                 self._replace_pending_images(connection, pending_image_retries)
@@ -1087,7 +1098,7 @@ class ArchiveStateRepository:
             != state.processed_archive_revision
         ):
             return False
-        with closing(self._connect_state_write()) as connection:
+        with self._state_write_connection() as connection:
             with connection:
                 if not self._stored_image_reference_state_matches(
                     connection,
@@ -1150,7 +1161,7 @@ class ArchiveStateRepository:
             != state.processed_archive_revision
         ):
             return False
-        with closing(self._connect_state_write()) as connection:
+        with self._state_write_connection() as connection:
             with connection:
                 if not self._stored_image_reference_state_matches(
                     connection,
@@ -1335,7 +1346,7 @@ class ArchiveStateRepository:
             != expected_state.processed_archive_revision
         ):
             return False
-        with closing(self._connect_state_write()) as connection:
+        with self._state_write_connection() as connection:
             with connection:
                 row = connection.execute(
                     """

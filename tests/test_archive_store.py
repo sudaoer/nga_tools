@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
+from nga_tools.backup import archive_store as archive_store_module
+from nga_tools.backup import thread_stores as thread_stores_module
 from nga_tools.backup.archive_post_store import _LATEST_AUTHOR_POST_REFS_QUERY
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.floor_models import (
@@ -651,6 +653,87 @@ class ThreadArchiveStoreTest:
             with closing(reader.connect_read()) as connection:
                 with pytest.raises(sqlite3.OperationalError, match="readonly"):
                     connection.execute("DELETE FROM archive_change_state")
+
+    def test_connection_session_reuses_six_read_write_connections(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = ThreadArchiveStore(tmp_path / "123_456")
+        store.ensure_schema()
+        store.state.ensure_schema()
+        store.cache.ensure_schema()
+        reader = ThreadArchiveStore(store.thread_folder)
+        opened_connections: list[sqlite3.Connection] = []
+
+        with (
+            patch(
+                "nga_tools.backup.archive_store.require_current_archive_schema",
+                wraps=archive_store_module.require_current_archive_schema,
+            ) as require_archive_schema,
+            patch(
+                "nga_tools.backup.thread_stores._require_current_schema",
+                wraps=thread_stores_module._require_current_schema,
+            ) as require_auxiliary_schema,
+            reader.connection_session(),
+        ):
+            for connection_context in (
+                reader.read_connection,
+                reader.write_connection,
+                reader.state_read_connection,
+                reader.state_write_connection,
+                reader.cache_read_connection,
+                reader.cache_write_connection,
+            ):
+                with connection_context() as connection:
+                    opened_connections.append(connection)
+            with reader.read_connection() as first_read:
+                with reader.read_connection() as second_read:
+                    assert first_read is second_read
+                    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                        first_read.execute("DELETE FROM archive_change_state")
+
+        assert len({id(connection) for connection in opened_connections}) == 6
+        assert require_archive_schema.call_count == 1
+        assert require_auxiliary_schema.call_count == 2
+        for connection in opened_connections:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
+
+    def test_connection_session_ends_read_transaction_and_closes_on_error(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = ThreadArchiveStore(tmp_path / "123_456")
+        store.ingest.upsert_page(
+            1,
+            {
+                "totalPage": 1,
+                "vrows": 2,
+                "result": [
+                    {
+                        "lou": 1,
+                        "pid": 1001,
+                        "content": "body",
+                        "author": {"uid": 456},
+                    }
+                ],
+            },
+        )
+        reader = ThreadArchiveStore(store.thread_folder)
+        captured_connections: list[sqlite3.Connection] = []
+
+        with pytest.raises(RuntimeError, match="stop session"):
+            with reader.connection_session():
+                reader.posts.read_author_floor_refresh_inputs()
+                with reader.read_connection() as connection:
+                    assert not connection.in_transaction
+                    connection.execute("BEGIN")
+                    captured_connections.append(connection)
+                raise RuntimeError("stop session")
+
+        assert len(captured_connections) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            captured_connections[0].execute("SELECT 1")
 
     def test_page_refresh_preserves_posts_missing_from_new_response(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

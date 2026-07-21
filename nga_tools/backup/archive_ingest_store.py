@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
-from contextlib import closing
 from typing import Optional, cast
 
 from nga_tools.backup.archive_posts import (
@@ -330,7 +329,7 @@ class ArchiveIngestRepository(ArchiveRepository):
             count_observation=False,
         )
         affected_lous = {item.post["lou"] for item in prepared_page.posts}
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             inputs_before = self._read_effective_processing_inputs(
                 connection,
                 affected_lous,
@@ -389,7 +388,7 @@ class ArchiveIngestRepository(ArchiveRepository):
         post_versions_inserted = 0
         changed_lous: set[int] = set()
 
-        with closing(self._connect_write()) as connection:
+        with self._write_connection() as connection:
             with connection:
                 inputs_before = self._read_effective_processing_inputs(
                     connection,
@@ -484,7 +483,7 @@ class ArchiveIngestRepository(ArchiveRepository):
         inserted_count = 0
         affected_lous = set(recovered_posts_by_author_lou)
         changed_lous: set[int] = set()
-        with closing(self._connect_write()) as connection:
+        with self._write_connection() as connection:
             with connection:
                 inputs_before = self._read_effective_processing_inputs(
                     connection,
@@ -543,7 +542,7 @@ class ArchiveIngestRepository(ArchiveRepository):
 
     def refresh_stored_word_counts(self) -> int:
         self.require_exists()
-        with closing(self._connect_write()) as connection:
+        with self._write_connection() as connection:
             with connection:
                 rows = cast(
                     list[tuple[int, object]],

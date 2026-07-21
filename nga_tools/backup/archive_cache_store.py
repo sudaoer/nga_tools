@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
-from contextlib import closing
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -27,6 +27,12 @@ class ArchiveCacheSource(Protocol):
     def require_exists(self) -> None: ...
     def ensure_schema(self) -> None: ...
     def archive_store_id(self) -> str: ...
+    def cache_write_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]: ...
+    def cache_read_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]: ...
 
 
 class ArchiveCacheRepository:
@@ -48,16 +54,21 @@ class ArchiveCacheRepository:
     def archive_store_id(self) -> str:
         return self._source.archive_store_id()
 
-    def _connect_cache_write(self) -> sqlite3.Connection:
-        return self.cache_store.connect_write(self.archive_store_id())
+    def _cache_write_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        return self._source.cache_write_connection()
 
-    def _connect_cache_read(self) -> sqlite3.Connection:
-        return self.cache_store.connect_read(self.archive_store_id())
+    def _cache_read_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        return self._source.cache_read_connection()
 
     def ensure_schema(self) -> None:
         if not self._source.exists():
             self._source.ensure_schema()
-        self.cache_store.ensure_schema(self.archive_store_id())
+        with self._cache_write_connection():
+            pass
 
     def read_post_image_reference_cache(
         self,
@@ -76,7 +87,7 @@ class ArchiveCacheRepository:
 
         entries: dict[str, PostImageReferenceCacheEntry] = {}
         sorted_cache_keys = sorted(cache_keys)
-        with closing(self._connect_cache_read()) as connection:
+        with self._cache_read_connection() as connection:
             for start in range(0, len(sorted_cache_keys), 900):
                 chunk = sorted_cache_keys[start : start + 900]
                 placeholders = ",".join("?" for _ in chunk)
@@ -133,7 +144,7 @@ class ArchiveCacheRepository:
             )
             for entry in entries
         ]
-        with closing(self._connect_cache_write()) as connection:
+        with self._cache_write_connection() as connection:
             with connection:
                 connection.executemany(
                     """

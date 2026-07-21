@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import AbstractContextManager
 from typing import Protocol
 
 
@@ -12,6 +13,10 @@ class ArchiveRepositorySource(Protocol):
     def connect_write(self) -> sqlite3.Connection: ...
 
     def connect_read(self) -> sqlite3.Connection: ...
+
+    def write_connection(self) -> AbstractContextManager[sqlite3.Connection]: ...
+
+    def read_connection(self) -> AbstractContextManager[sqlite3.Connection]: ...
 
     def increment_archive_revision(
         self,
@@ -34,11 +39,11 @@ class ArchiveRepository:
     def require_exists(self) -> None:
         self._source.require_exists()
 
-    def _connect_write(self) -> sqlite3.Connection:
-        return self._source.connect_write()
+    def _write_connection(self) -> AbstractContextManager[sqlite3.Connection]:
+        return self._source.write_connection()
 
-    def _connect_read(self) -> sqlite3.Connection:
-        return self._source.connect_read()
+    def _read_connection(self) -> AbstractContextManager[sqlite3.Connection]:
+        return self._source.read_connection()
 
     def _increment_archive_revision(
         self,

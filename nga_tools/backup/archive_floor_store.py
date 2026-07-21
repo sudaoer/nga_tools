@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sqlite3
-from contextlib import closing
 
 from nga_tools.backup.archive_repository import ArchiveRepository
 from nga_tools.backup.floor_models import FloorMapEntry, StoredFloorMap
@@ -78,7 +77,7 @@ class ArchiveFloorMapRepository(ArchiveRepository):
         self._validate_floor_map(floor_map)
         normalized_floor_map = self._normalized_floor_map(floor_map)
         self.require_exists()
-        with closing(self._connect_write()) as connection:
+        with self._write_connection() as connection:
             with connection:
                 try:
                     current_floor_map = self.read_floor_map_from_connection(connection)
@@ -243,5 +242,5 @@ class ArchiveFloorMapRepository(ArchiveRepository):
     def read_floor_map(self) -> StoredFloorMap | None:
         if not self.exists():
             return None
-        with closing(self._connect_read()) as connection:
+        with self._read_connection() as connection:
             return self.read_floor_map_from_connection(connection)

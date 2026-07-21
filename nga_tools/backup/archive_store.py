@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
-from contextlib import closing
+import threading
+from collections.abc import Callable, Generator
+from contextlib import AbstractContextManager, contextmanager, closing
 from pathlib import Path
 from typing import Optional, cast
 
@@ -30,6 +32,59 @@ from nga_tools.storage import ensure_storage_metadata
 
 ARCHIVE_DB_FILENAME = "archive.sqlite3"
 
+
+class _ArchiveConnectionSession:
+    def __init__(self) -> None:
+        self._owner_thread_id = threading.get_ident()
+        self._connections: dict[str, sqlite3.Connection] = {}
+        self._validated_databases: set[str] = set()
+
+    def require_owner(self) -> None:
+        if threading.get_ident() != self._owner_thread_id:
+            raise RuntimeError("archive连接会话不能跨线程使用。")
+
+    def connection(
+        self,
+        *,
+        key: str,
+        database: str,
+        validated_factory: Callable[[], sqlite3.Connection],
+        unchecked_factory: Callable[[], sqlite3.Connection],
+    ) -> sqlite3.Connection:
+        self.require_owner()
+        existing = self._connections.get(key)
+        if existing is not None:
+            return existing
+        factory = (
+            unchecked_factory
+            if database in self._validated_databases
+            else validated_factory
+        )
+        connection = factory()
+        self._connections[key] = connection
+        self._validated_databases.add(database)
+        return connection
+
+    def close(self) -> None:
+        self.require_owner()
+        first_error: sqlite3.Error | None = None
+        for connection in reversed(tuple(self._connections.values())):
+            try:
+                if connection.in_transaction:
+                    connection.rollback()
+            except sqlite3.Error as error:
+                if first_error is None:
+                    first_error = error
+            try:
+                connection.close()
+            except sqlite3.Error as error:
+                if first_error is None:
+                    first_error = error
+        self._connections.clear()
+        if first_error is not None:
+            raise first_error
+
+
 class ThreadArchiveStore:
     def __init__(
         self,
@@ -37,16 +92,17 @@ class ThreadArchiveStore:
     ) -> None:
         self.thread_folder = thread_folder
         self.db_path = thread_folder / ARCHIVE_DB_FILENAME
-        state_store = ThreadArchiveStateStore(thread_folder)
-        cache_store = ThreadArchiveCacheStore(thread_folder)
+        self._state_store = ThreadArchiveStateStore(thread_folder)
+        self._cache_store = ThreadArchiveCacheStore(thread_folder)
         self.overlays = ArchiveOverlayRepository(self)
         self.floor_maps = ArchiveFloorMapRepository(self)
         self.ingest = ArchiveIngestRepository(self)
         self.posts = ArchivePostRepository(self, self.floor_maps)
-        self.state = ArchiveStateRepository(self, state_store, self.posts)
-        self.cache = ArchiveCacheRepository(self, cache_store)
+        self.state = ArchiveStateRepository(self, self._state_store, self.posts)
+        self.cache = ArchiveCacheRepository(self, self._cache_store)
         self._schema_initialized = False
         self._store_id: str | None = None
+        self._connection_session: _ArchiveConnectionSession | None = None
 
     def exists(self) -> bool:
         return self.db_path.is_file()
@@ -57,14 +113,18 @@ class ThreadArchiveStore:
                 f"缺少archive.sqlite3：{self.db_path}。请重新运行备份初始化。"
             )
 
-    def connect_write(self) -> sqlite3.Connection:
-        new_database = not self.db_path.is_file()
+    def _open_write_connection(self) -> sqlite3.Connection:
         self.thread_folder.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(
             self.db_path,
             timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
         )
         configure_connection(connection)
+        return connection
+
+    def connect_write(self) -> sqlite3.Connection:
+        new_database = not self.db_path.is_file()
+        connection = self._open_write_connection()
         if not self._schema_initialized:
             try:
                 self._ensure_schema(connection, new_database=new_database)
@@ -74,7 +134,7 @@ class ThreadArchiveStore:
             self._schema_initialized = True
         return connection
 
-    def connect_read(self) -> sqlite3.Connection:
+    def _open_read_connection(self) -> sqlite3.Connection:
         self.require_exists()
         database_uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
         connection = sqlite3.connect(
@@ -83,6 +143,10 @@ class ThreadArchiveStore:
             uri=True,
         )
         configure_readonly_connection(connection)
+        return connection
+
+    def connect_read(self) -> sqlite3.Connection:
+        connection = self._open_read_connection()
         try:
             metadata = require_current_archive_schema(connection, self.db_path)
             self._store_id = metadata.store_id
@@ -91,17 +155,130 @@ class ThreadArchiveStore:
             raise
         return connection
 
+    @contextmanager
+    def _borrow_connection(
+        self,
+        *,
+        key: str,
+        database: str,
+        validated_factory: Callable[[], sqlite3.Connection],
+        unchecked_factory: Callable[[], sqlite3.Connection],
+    ) -> Generator[sqlite3.Connection]:
+        session = self._connection_session
+        if session is None:
+            with closing(validated_factory()) as connection:
+                yield connection
+            return
+        connection = session.connection(
+            key=key,
+            database=database,
+            validated_factory=validated_factory,
+            unchecked_factory=unchecked_factory,
+        )
+        yield connection
+
+    def read_connection(self) -> AbstractContextManager[sqlite3.Connection]:
+        return self._borrow_connection(
+            key="archive_read",
+            database="archive",
+            validated_factory=self.connect_read,
+            unchecked_factory=self._open_read_connection,
+        )
+
+    def write_connection(self) -> AbstractContextManager[sqlite3.Connection]:
+        return self._borrow_connection(
+            key="archive_write",
+            database="archive",
+            validated_factory=self.connect_write,
+            unchecked_factory=self._open_write_connection,
+        )
+
+    def state_read_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        source_store_id = self.archive_store_id()
+        return self._borrow_connection(
+            key="state_read",
+            database="state",
+            validated_factory=lambda: self._state_store.connect_read(
+                source_store_id
+            ),
+            unchecked_factory=self._state_store.open_session_read,
+        )
+
+    def state_write_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        source_store_id = self.archive_store_id()
+        return self._borrow_connection(
+            key="state_write",
+            database="state",
+            validated_factory=lambda: self._state_store.connect_write(
+                source_store_id
+            ),
+            unchecked_factory=self._state_store.open_session_write,
+        )
+
+    def cache_read_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        source_store_id = self.archive_store_id()
+        return self._borrow_connection(
+            key="cache_read",
+            database="cache",
+            validated_factory=lambda: self._cache_store.connect_read(
+                source_store_id
+            ),
+            unchecked_factory=self._cache_store.open_session_read,
+        )
+
+    def cache_write_connection(
+        self,
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        source_store_id = self.archive_store_id()
+        return self._borrow_connection(
+            key="cache_write",
+            database="cache",
+            validated_factory=lambda: self._cache_store.connect_write(
+                source_store_id
+            ),
+            unchecked_factory=self._cache_store.open_session_write,
+        )
+
+    @contextmanager
+    def connection_session(self) -> Generator[None]:
+        current = self._connection_session
+        if current is not None:
+            current.require_owner()
+            yield
+            return
+        session = _ArchiveConnectionSession()
+        self._connection_session = session
+        body_failed = False
+        try:
+            yield
+        except BaseException:
+            body_failed = True
+            raise
+        finally:
+            self._connection_session = None
+            try:
+                session.close()
+            except sqlite3.Error:
+                if not body_failed:
+                    raise
+
     def archive_store_id(self) -> str:
         if self._store_id is not None:
             return self._store_id
-        with closing(self.connect_read()):
+        with self.read_connection():
             pass
         if self._store_id is None:
             raise RuntimeError(f"archive无法读取store_id：{self.db_path}")
         return self._store_id
 
     def ensure_schema(self) -> None:
-        with closing(self.connect_write()):
+        with self.write_connection():
             pass
 
     def _create_archive_pages_table(
@@ -309,7 +486,7 @@ class ThreadArchiveStore:
         )
 
     def read_current_archive_change_state(self) -> ArchiveChangeState:
-        with closing(self.connect_read()) as connection:
+        with self.read_connection() as connection:
             return self._read_archive_change_state(connection)
 
     @staticmethod
