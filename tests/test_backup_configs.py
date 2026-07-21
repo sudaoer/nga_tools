@@ -27,7 +27,10 @@ from nga_tools.commands.backup import (
     backup_sub,
     pdf_generate,
 )
-from nga_tools.commands.thread_batch import run_thread_config_batch
+from nga_tools.commands.thread_batch import (
+    run_thread_config_batch,
+    thread_config_label,
+)
 from nga_tools.forum.thread_configs import ThreadConfig
 from nga_tools.ngaclient.client import NGAPageError
 from nga_tools.ngaclient.api_runtime import current_api_runtime
@@ -282,6 +285,20 @@ def _captured_reporter() -> Iterator[io.StringIO]:
 
 
 class BackupWarningLogTest:
+    def test_thread_config_label_uses_subject_author_and_truncates_subject(self) -> None:
+        thread_config = _thread_config(name="sample", tid=101, aid=201)
+        thread_config["subject"] = "甲" * 31
+        thread_config["author"] = "作者"
+
+        expected_label = f"sample：（{'甲' * 29}…，作者）"
+
+        assert thread_config_label(thread_config) == expected_label
+
+    def test_thread_config_label_keeps_identifier_for_legacy_config(self) -> None:
+        thread_config = _thread_config(name="legacy", tid=101, aid=None)
+
+        assert thread_config_label(thread_config) == "legacy (tid: 101, aid: None)"
+
     def test_batch_warning_summaries_use_the_live_progress_console(self) -> None:
         output = io.StringIO()
         console = Console(
@@ -534,9 +551,15 @@ class BackupWarningLogTest:
             assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
 
     def test_backup_sub_batch_writes_per_thread_warning_and_timing_logs(self) -> None:
+        first_thread_config = _thread_config(name="first", tid=101, aid=201)
+        first_thread_config["subject"] = "first subject"
+        first_thread_config["author"] = "first author"
+        second_thread_config = _thread_config(name="second", tid=102, aid=None)
+        second_thread_config["subject"] = "second subject"
+        second_thread_config["author"] = "second author"
         thread_configs = [
-            _thread_config(name="first", tid=101, aid=201),
-            _thread_config(name="second", tid=102, aid=None),
+            first_thread_config,
+            second_thread_config,
         ]
 
         with TemporaryDirectory() as temp_dir_name:
@@ -590,6 +613,11 @@ class BackupWarningLogTest:
             assert "警告：warning" not in output.getvalue()
             assert output.getvalue().count("警告汇总：") == 2
             assert (
+                "警告汇总：first：（first subject，first author）：共1条；"
+                "帖子内容1条。"
+                in output.getvalue()
+            )
+            assert (
                 "警告总计：共2条，涉及2个帖子；帖子内容2条。"
                 in output.getvalue()
             )
@@ -600,11 +628,11 @@ class BackupWarningLogTest:
                 base_dir / "102_all" / "timing.log"
             ).read_text(encoding="utf-8")
             assert "任务：backup sub --all-threads\n" in first_timing
-            assert "目标：first (tid: 101, aid: 201)\n" in first_timing
+            assert "目标：first：（first subject，first author）\n" in first_timing
             assert "总耗时：" in first_timing
             assert "状态：完成" in first_timing
             assert "任务：backup sub --all-threads\n" in second_timing
-            assert "目标：second (tid: 102, aid: None)\n" in second_timing
+            assert "目标：second：（second subject，second author）\n" in second_timing
 
     def test_pdf_generate_writes_thread_warning_and_timing_logs(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

@@ -50,6 +50,7 @@ from nga_tools.timing import (
 ThreadConfigAction = Callable[[ThreadConfig], str | None]
 ThreadBatchFailure = tuple[ThreadConfig, Exception]
 ThreadBatchSuccess = tuple[int, str]
+_THREAD_SUBJECT_LABEL_MAX_CHARS = 30
 
 
 @dataclass(frozen=True)
@@ -79,12 +80,25 @@ class ThreadBatchResult:
 
 
 def thread_config_label(thread_config: ThreadConfig) -> str:
+    name = thread_config_name(thread_config)
+    subject = thread_config.get("subject")
+    author = thread_config.get("author")
+    if (
+        isinstance(subject, str)
+        and subject.strip()
+        and isinstance(author, str)
+        and author.strip()
+    ):
+        normalized_subject = subject.strip()
+        if len(normalized_subject) > _THREAD_SUBJECT_LABEL_MAX_CHARS:
+            normalized_subject = (
+                normalized_subject[: _THREAD_SUBJECT_LABEL_MAX_CHARS - 1] + "…"
+            )
+        return f"{name}：（{normalized_subject}，{author.strip()}）"
+
     tid = thread_config_tid(thread_config)
     aid = thread_config_aid(thread_config)
-    return (
-        f"{thread_config_name(thread_config)} "
-        f"(tid: {tid}, aid: {aid})"
-    )
+    return f"{name} (tid: {tid}, aid: {aid})"
 
 
 def _run_thread_config_with_progress(
