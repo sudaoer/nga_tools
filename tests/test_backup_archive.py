@@ -41,6 +41,7 @@ from nga_tools.backup.post_html import (
 )
 from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.backup.processing_state import BackupProcessingSnapshot
+from nga_tools.backup.processing_state import FLOOR_PROCESSING_STATE_VERSION
 from nga_tools.core.downloads import DownloadFailureKind, DownloadFileResult
 from nga_tools.core.hashing import hash_text
 from nga_tools.ngaclient.client import NGAPageError
@@ -2031,9 +2032,45 @@ class BackupRawArchiveTest:
         assert "指标：增量有效变更页数，值：0\n" in timing_text
         assert "指标：待恢复缺失楼数，值：0\n" in timing_text
         assert "指标：缺失楼重试引发完整处理，值：0\n" in timing_text
+        assert "阶段：楼主最新回复索引读取，开始时间：" not in timing_text
+        assert "阶段：历史未恢复缺失楼读取，开始时间：" not in timing_text
         assert "阶段：读取完整归档记录，开始时间：" not in timing_text
         assert "阶段：正文解析与图片处理，开始时间：" not in timing_text
         assert "阶段：图片缓存文件校验，开始时间：" not in timing_text
+
+    def test_v1_floor_state_refreshes_once_before_empty_retry_fast_path(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = MutableFakeClient()
+        _run_backup(thread_dir, client)
+        store = ThreadArchiveStore(thread_dir)
+        with sqlite3.connect(store.state.db_path) as connection:
+            connection.execute(
+                "UPDATE backup_floor_processing_state SET format_version = 1"
+            )
+
+        floor_map_calls: list[str] = []
+        _run_backup(
+            thread_dir,
+            client,
+            floor_map_calls=floor_map_calls,
+        )
+        migrated_snapshot = store.state.read_backup_processing_snapshot()
+        _run_backup(
+            thread_dir,
+            client,
+            floor_map_calls=floor_map_calls,
+        )
+
+        assert floor_map_calls == ["build"]
+        assert migrated_snapshot.floor_state is not None
+        assert (
+            migrated_snapshot.floor_state.format_version
+            == FLOOR_PROCESSING_STATE_VERSION
+        )
+        assert migrated_snapshot.pending_missing_floor_retries == ()
 
     def test_smart_author_fast_path_checks_tail_page(
         self,

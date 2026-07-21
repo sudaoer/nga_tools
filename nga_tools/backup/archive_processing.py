@@ -161,6 +161,18 @@ def select_missing_floor_retries_for_archive(
     return selection
 
 
+def _record_empty_missing_floor_retry() -> None:
+    record_timing_metric("待恢复缺失楼数", 0)
+    record_timing_metric("缺失楼连续缺口组数", 0)
+    record_timing_metric("本次重试缺失楼数", 0)
+    record_timing_metric("本次重试缺口组数", 0)
+    record_timing_metric("概率延后缺失楼数", 0)
+    record_timing_metric("概率延后缺口组数", 0)
+    record_timing_metric("缺失楼重试共享调度组数", 0)
+    record_timing_metric("缺失楼重试共享调度放行组数", 0)
+    record_timing_metric("本次恢复缺失楼数", 0)
+
+
 def _store_missing_floor_attempt_result(
     archive_store: ThreadArchiveStore,
     snapshot: BackupProcessingSnapshot,
@@ -277,21 +289,6 @@ def _unresolved_missing_lous_from_archive_records(
         for record in archive_store.posts.read_latest_post_record_summaries()
     }
     return [lou for lou in missing_lous if lou not in present_lous]
-
-
-def read_unresolved_missing_floor_lous(
-    archive_store: ThreadArchiveStore,
-    author_total_lou_count: int | None,
-) -> list[int]:
-    _post_refs, missing_lous = _author_post_refs_and_missing_lous(
-        archive_store,
-        author_total_lou_count,
-    )
-    return _unresolved_missing_lous_from_archive_records(
-        archive_store,
-        missing_lous,
-    )
-
 
 
 def _post_refs_and_missing_lous(
@@ -573,27 +570,33 @@ def _try_processing_state_reuse(
         if aid is not None:
             with time_section("未完成缺失楼重试"):
                 before_archive_revision = snapshot.change_state.archive_revision
-                floor_refresh = _refresh_author_floor_state(
-                    client,
-                    archive_store,
-                    tid,
-                    aid,
-                    page_count=page_count,
-                    author_total_lou_count=author_total_lou_count,
-                    expected_snapshot=snapshot,
-                    missing_floor_retry_mode=missing_floor_retry_mode,
-                    commit_even_if_unchanged=False,
-                )
-                snapshot = floor_refresh.snapshot
-                if not floor_refresh.succeeded:
-                    return ProcessingStateReuseResult(False, "floor_map_changed")
-                changes = ArchiveIncrementalChanges(
-                    changes.previous_snapshot,
-                    changes.changed_lous | floor_refresh.changed_lous,
-                    changes.added_lous | floor_refresh.added_lous,
-                    changes.archive_revision_increments
-                    + int(bool(floor_refresh.changed_lous)),
-                )
+                if not snapshot.pending_missing_floor_retries:
+                    _record_empty_missing_floor_retry()
+                else:
+                    floor_refresh = _refresh_author_floor_state(
+                        client,
+                        archive_store,
+                        tid,
+                        aid,
+                        page_count=page_count,
+                        author_total_lou_count=author_total_lou_count,
+                        expected_snapshot=snapshot,
+                        missing_floor_retry_mode=missing_floor_retry_mode,
+                        commit_even_if_unchanged=False,
+                    )
+                    snapshot = floor_refresh.snapshot
+                    if not floor_refresh.succeeded:
+                        return ProcessingStateReuseResult(
+                            False,
+                            "floor_map_changed",
+                        )
+                    changes = ArchiveIncrementalChanges(
+                        changes.previous_snapshot,
+                        changes.changed_lous | floor_refresh.changed_lous,
+                        changes.added_lous | floor_refresh.added_lous,
+                        changes.archive_revision_increments
+                        + int(bool(floor_refresh.changed_lous)),
+                    )
                 record_timing_metric(
                     "缺失楼重试引发完整处理",
                     int(snapshot.change_state.archive_revision != before_archive_revision),

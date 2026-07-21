@@ -117,10 +117,10 @@ def backup_local_work_kind(
         if retry_selection.due:
             return "maintenance"
     if aid is not None:
-        missing_lous = archive_processing.read_unresolved_missing_floor_lous(
-            archive_store,
-            author_total_lou_count,
-        )
+        missing_lous = [
+            retry.author_lou
+            for retry in snapshot.pending_missing_floor_retries
+        ]
         if missing_lous:
             retry_selection = (
                 archive_processing.select_missing_floor_retries_for_archive(
