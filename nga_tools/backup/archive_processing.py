@@ -74,6 +74,16 @@ ProcessingStateReuseReason = Literal[
     "state_changed_during_image_retry",
 ]
 MissingFloorRetryMode = Literal["immediate", "scheduled"]
+FloorStateMismatchReason = Literal[
+    "state_missing",
+    "current_pagination_missing",
+    "format_version",
+    "archive_revision",
+    "floor_map_revision",
+    "page_count",
+    "author_total_lou_count",
+    "floor_map_contract",
+]
 
 
 @dataclass(frozen=True)
@@ -368,24 +378,80 @@ def _new_floor_state(
 
 
 
+def floor_state_mismatch_reasons(
+    snapshot: BackupProcessingSnapshot,
+    *,
+    page_count: int,
+    author_total_lou_count: int | None,
+) -> tuple[FloorStateMismatchReason, ...]:
+    state = snapshot.floor_state
+    if state is None:
+        return ("state_missing",)
+    reasons: list[FloorStateMismatchReason] = []
+    if state.format_version != FLOOR_PROCESSING_STATE_VERSION:
+        reasons.append("format_version")
+    if state.processed_archive_revision != snapshot.change_state.archive_revision:
+        reasons.append("archive_revision")
+    if (
+        state.processed_floor_map_revision
+        != snapshot.change_state.floor_map_revision
+    ):
+        reasons.append("floor_map_revision")
+    if state.page_count != page_count:
+        reasons.append("page_count")
+    if state.author_total_lou_count != author_total_lou_count:
+        reasons.append("author_total_lou_count")
+    if (
+        state.floor_map_format_version != FLOOR_MAP_VERSION
+        or state.floor_map_generation_version != FLOOR_MAP_GENERATION_VERSION
+        or state.floor_map_hash_algorithm != FLOOR_MAP_HASH_ALGORITHM
+    ):
+        reasons.append("floor_map_contract")
+    return tuple(reasons)
+
+
 def floor_state_is_current(
     snapshot: BackupProcessingSnapshot,
     *,
     page_count: int,
     author_total_lou_count: int | None,
 ) -> bool:
-    state = snapshot.floor_state
-    return state is not None and (
-        state.format_version == FLOOR_PROCESSING_STATE_VERSION
-        and state.processed_archive_revision == snapshot.change_state.archive_revision
-        and state.processed_floor_map_revision
-        == snapshot.change_state.floor_map_revision
-        and state.page_count == page_count
-        and state.author_total_lou_count == author_total_lou_count
-        and state.floor_map_format_version == FLOOR_MAP_VERSION
-        and state.floor_map_generation_version == FLOOR_MAP_GENERATION_VERSION
-        and state.floor_map_hash_algorithm == FLOOR_MAP_HASH_ALGORITHM
+    return not floor_state_mismatch_reasons(
+        snapshot,
+        page_count=page_count,
+        author_total_lou_count=author_total_lou_count,
     )
+
+
+def _record_floor_state_mismatch(
+    snapshot: BackupProcessingSnapshot,
+    reasons: tuple[FloorStateMismatchReason, ...],
+    *,
+    page_count: int,
+    author_total_lou_count: int | None,
+) -> None:
+    record_timing_label("楼层状态未命中原因", ",".join(reasons))
+    pagination_state = snapshot.current_pagination_state
+    if pagination_state is not None:
+        record_timing_label("当前分页水位来源", "archive_state")
+        record_timing_metric(
+            "当前分页水位来源页",
+            pagination_state.source_page_number,
+        )
+    state = snapshot.floor_state
+    if state is not None:
+        record_timing_metric("楼层状态分页数", state.page_count)
+        if state.author_total_lou_count is not None:
+            record_timing_metric(
+                "楼层状态楼主回复数",
+                state.author_total_lou_count,
+            )
+    record_timing_metric("当前分页水位分页数", page_count)
+    if author_total_lou_count is not None:
+        record_timing_metric(
+            "当前分页水位楼主回复数",
+            author_total_lou_count,
+        )
 
 
 def _try_incremental_exact_missing_floor_repair(
@@ -722,13 +788,25 @@ def _try_processing_state_reuse(
         if incremental_changes is None
         else incremental_changes
     )
-    floor_hit = floor_state_is_current(
+    floor_mismatch_reasons = floor_state_mismatch_reasons(
         snapshot,
         page_count=page_count,
         author_total_lou_count=author_total_lou_count,
     )
+    if snapshot.current_pagination_state is None:
+        floor_mismatch_reasons = (
+            "current_pagination_missing",
+            *floor_mismatch_reasons,
+        )
+    floor_hit = not floor_mismatch_reasons
     record_timing_metric("楼层状态复用命中", int(floor_hit))
     if not floor_hit:
+        _record_floor_state_mismatch(
+            snapshot,
+            floor_mismatch_reasons,
+            page_count=page_count,
+            author_total_lou_count=author_total_lou_count,
+        )
         if aid is None or snapshot.floor_state is None:
             record_timing_label("楼层状态复用结果", "rebuild_required")
             return ProcessingStateReuseResult(False, "state_missing")

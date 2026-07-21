@@ -49,6 +49,7 @@ from nga_tools.backup.post_html import (
 from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.backup.processing_state import (
     FLOOR_PROCESSING_STATE_VERSION,
+    ArchiveChangeState,
     BackupProcessingSnapshot,
     CurrentPaginationState,
     FloorProcessingState,
@@ -2318,6 +2319,10 @@ class BackupRawArchiveTest:
             _run_backup(thread_dir, client)
 
         timing_text = timing_log.path.read_text(encoding="utf-8")
+        assert "标签：楼层状态未命中原因，值：archive_revision\n" in timing_text
+        assert "标签：当前分页水位来源，值：archive_state\n" in timing_text
+        assert "指标：楼层状态分页数，值：1\n" in timing_text
+        assert "指标：当前分页水位分页数，值：1\n" in timing_text
         for stage_name in (
             "楼主最新回复索引读取",
             "历史未恢复缺失楼读取",
@@ -2328,6 +2333,29 @@ class BackupRawArchiveTest:
         ):
             assert f"阶段：{stage_name}，开始时间：" in timing_text
             assert f"阶段：{stage_name}，结束时间：" in timing_text
+
+    def test_floor_state_mismatch_reasons_are_field_specific(self) -> None:
+        snapshot = BackupProcessingSnapshot(
+            change_state=ArchiveChangeState(4, 7),
+            pending_image_retries=(),
+            floor_state=FloorProcessingState(
+                format_version=FLOOR_PROCESSING_STATE_VERSION,
+                processed_archive_revision=4,
+                processed_floor_map_revision=7,
+                page_count=2,
+                author_total_lou_count=20,
+                floor_map_format_version=FLOOR_MAP_VERSION,
+                floor_map_generation_version=FLOOR_MAP_GENERATION_VERSION,
+                floor_map_hash_algorithm=FLOOR_MAP_HASH_ALGORITHM,
+                completed_at="2026-07-22T00:00:00+00:00",
+            ),
+        )
+
+        assert archive_processing_module.floor_state_mismatch_reasons(
+            snapshot,
+            page_count=3,
+            author_total_lou_count=27,
+        ) == ("page_count", "author_total_lou_count")
 
     def test_fast_path_timing_omits_full_archive_and_image_stages(
         self,
