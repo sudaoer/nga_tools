@@ -562,6 +562,26 @@ def _original_page_for_lou(lou: int) -> int:
     return max(1, lou // ORIGINAL_POSTS_PER_PAGE + 1)
 
 
+def recover_exact_missing_posts_from_original_pages(
+    client: NGAClient,
+    tid: int,
+    exact_original_lou_by_author_lou: dict[int, int],
+) -> dict[int, RecoveredMissingPost]:
+    targeted_pages = {
+        _original_page_for_lou(original_lou)
+        for original_lou in exact_original_lou_by_author_lou.values()
+    }
+    record_timing_metric("增量修补原帖页数", len(targeted_pages))
+    return _recover_missing_posts_from_original_pages(
+        client,
+        tid,
+        exact_original_lou_by_author_lou,
+        set(),
+        set(),
+        {},
+    )
+
+
 def _pages_for_original_interval(start_lou: int, end_lou: int) -> list[int]:
     start_page = _original_page_for_lou(start_lou)
     end_page = _original_page_for_lou(end_lou)

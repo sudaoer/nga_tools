@@ -15,6 +15,7 @@ from nga_tools.backup.floor_map import (
     find_missing_author_lous,
     load_floor_map_build_result_if_current,
     read_unresolved_missing_author_lous_from_archive,
+    recover_exact_missing_posts_from_original_pages,
     unresolved_missing_author_lous_from_stored_floor_map,
     _page_post_dicts,
     _scan_pending_author_pages,
@@ -132,6 +133,44 @@ class FloorMapPagePostRefsTest:
         assert refs == []
         assert '警告：原帖第2538页 缺少帖子列表' in output.getvalue()
 
+
+class ExactMissingFloorRecoveryTest:
+    def test_deduplicates_target_original_pages(self) -> None:
+        client = FakeClient(
+            {
+                1: {
+                    "result": [
+                        {
+                            "pid": 2011,
+                            "lou": 11,
+                            "author": {"uid": -1},
+                            "content": "missing two",
+                        },
+                        {
+                            "pid": 2012,
+                            "lou": 12,
+                            "author": {"uid": -1},
+                            "content": "missing four",
+                        },
+                    ]
+                }
+            }
+        )
+
+        with (
+            patch("builtins.print"),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            recovered = recover_exact_missing_posts_from_original_pages(
+                client,
+                123,
+                {2: 11, 4: 12},
+            )
+
+        assert client.page_calls == [1]
+        assert set(recovered) == {2, 4}
+        assert recovered[2]["original_pid"] == 2011
+        assert recovered[4]["original_pid"] == 2012
 
 class FloorMapOriginalScanTest:
     def test_scan_original_pages_continues_after_null_result_page(self) -> None:

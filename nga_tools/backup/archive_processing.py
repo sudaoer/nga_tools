@@ -17,6 +17,7 @@ from nga_tools.backup.floor_map import (
     find_missing_author_lous,
     load_floor_map_build_result_if_current,
     load_floor_labels_from_archive,
+    recover_exact_missing_posts_from_original_pages,
     unresolved_missing_author_lous_from_stored_floor_map,
 )
 from nga_tools.backup.floor_models import (
@@ -162,6 +163,7 @@ def select_missing_floor_retries_for_archive(
 
 
 def _record_empty_missing_floor_retry() -> None:
+    record_timing_label("缺失楼修补路径", "empty")
     record_timing_metric("待恢复缺失楼数", 0)
     record_timing_metric("缺失楼连续缺口组数", 0)
     record_timing_metric("本次重试缺失楼数", 0)
@@ -171,6 +173,10 @@ def _record_empty_missing_floor_retry() -> None:
     record_timing_metric("缺失楼重试共享调度组数", 0)
     record_timing_metric("缺失楼重试共享调度放行组数", 0)
     record_timing_metric("本次恢复缺失楼数", 0)
+    record_timing_metric("增量修补待办数", 0)
+    record_timing_metric("增量修补原帖页数", 0)
+    record_timing_metric("增量修补恢复数", 0)
+    record_timing_metric("增量楼层映射更新数", 0)
 
 
 def _store_missing_floor_attempt_result(
@@ -382,6 +388,189 @@ def floor_state_is_current(
     )
 
 
+def _try_incremental_exact_missing_floor_repair(
+    client: NGAClient,
+    archive_store: ThreadArchiveStore,
+    tid: int,
+    aid: int,
+    *,
+    page_count: int,
+    author_total_lou_count: int | None,
+    expected_snapshot: BackupProcessingSnapshot,
+    missing_floor_retry_mode: MissingFloorRetryMode,
+) -> _FloorStateRefreshResult | None:
+    pending_retries = expected_snapshot.pending_missing_floor_retries
+    pending_lous = [retry.author_lou for retry in pending_retries]
+    record_timing_metric("待恢复缺失楼数", len(pending_lous))
+    attempted_at = datetime.datetime.now(datetime.timezone.utc)
+    retry_selection = select_missing_floor_retries_for_archive(
+        archive_store,
+        tid,
+        aid,
+        pending_lous,
+        pending_retries,
+        now=attempted_at,
+        mode=missing_floor_retry_mode,
+    )
+    due_lous = retry_selection.due_lous
+    record_timing_metric("增量修补待办数", len(due_lous))
+    if not due_lous:
+        record_timing_label("缺失楼修补路径", "incremental_no_due")
+        record_timing_metric("本次恢复缺失楼数", 0)
+        record_timing_metric("增量修补原帖页数", 0)
+        record_timing_metric("增量修补恢复数", 0)
+        record_timing_metric("增量楼层映射更新数", 0)
+        return _FloorStateRefreshResult(
+            True,
+            expected_snapshot,
+            frozenset(),
+            frozenset(),
+        )
+
+    try:
+        with time_section("缺失楼增量定位读取"):
+            locator_read = archive_store.floor_maps.read_exact_missing_floor_locators(
+                due_lous,
+                tid=tid,
+                aid=aid,
+                expected_archive_revision=(
+                    expected_snapshot.change_state.archive_revision
+                ),
+                expected_floor_map_revision=(
+                    expected_snapshot.change_state.floor_map_revision
+                ),
+            )
+    except ValueError as error:
+        report_warning(
+            WarningCategory.FLOOR_MAP,
+            f"缺失楼增量定位无效，改为完整楼层映射：{error}",
+        )
+        record_timing_label("缺失楼修补路径", "full_fallback_invalid")
+        record_timing_metric("增量修补原帖页数", 0)
+        record_timing_metric("增量修补恢复数", 0)
+        record_timing_metric("增量楼层映射更新数", 0)
+        return None
+    if locator_read.fallback_reason is not None:
+        record_timing_label(
+            "缺失楼修补路径",
+            f"full_fallback_{locator_read.fallback_reason}",
+        )
+        record_timing_metric("增量修补原帖页数", 0)
+        record_timing_metric("增量修补恢复数", 0)
+        record_timing_metric("增量楼层映射更新数", 0)
+        return None
+
+    try:
+        with time_section("缺失楼定点原帖抓取"):
+            recovered_posts = recover_exact_missing_posts_from_original_pages(
+                client,
+                tid,
+                locator_read.exact_original_lou_by_author_lou,
+            )
+    except Exception as error:
+        report_warning(
+            WarningCategory.FLOOR_MAP,
+            f"缺失楼定点原帖抓取失败，保留待办：{error}",
+        )
+        record_timing_label("缺失楼修补路径", "incremental_fetch_failed")
+        record_timing_metric("本次恢复缺失楼数", 0)
+        record_timing_metric("增量修补恢复数", 0)
+        record_timing_metric("增量楼层映射更新数", 0)
+        return _FloorStateRefreshResult(
+            True,
+            expected_snapshot,
+            frozenset(),
+            frozenset(),
+        )
+
+    record_timing_label("缺失楼修补路径", "incremental_exact")
+    record_timing_metric("增量修补恢复数", len(recovered_posts))
+    with time_section("缺失楼增量正文写入"):
+        recovered_result = archive_store.ingest.upsert_recovered_posts(
+            recovered_posts
+        )
+    record_timing_metric(
+        "本次恢复缺失楼数",
+        recovered_result.inserted_count,
+    )
+
+    recovered_floor_rows = {
+        author_lou: (
+            recovered_post["original_lou"],
+            recovered_post["original_pid"],
+        )
+        for author_lou, recovered_post in recovered_posts.items()
+    }
+    with time_section("缺失楼映射局部更新"):
+        floor_update = archive_store.floor_maps.mark_missing_floor_entries_recovered(
+            recovered_floor_rows,
+            expected_floor_map_revision=(
+                expected_snapshot.change_state.floor_map_revision
+            ),
+        )
+    record_timing_metric("增量楼层映射更新数", floor_update.updated_count)
+    if not floor_update.succeeded:
+        report_warning(
+            WarningCategory.FLOOR_MAP,
+            "缺失楼映射在增量修补期间发生变化，改为完整处理。",
+        )
+        record_timing_label("缺失楼修补路径", "incremental_write_conflict")
+        return _FloorStateRefreshResult(
+            False,
+            expected_snapshot,
+            recovered_result.effective_changed_lous,
+            recovered_result.effective_added_lous,
+        )
+
+    recovered_lous = set(recovered_posts)
+    attempted_unresolved_lous = [
+        author_lou for author_lou in due_lous if author_lou not in recovered_lous
+    ]
+    with time_section("缺失楼待办局部更新"):
+        pending_updated = archive_store.state.apply_missing_floor_retry_attempt(
+            expected_retries=pending_retries,
+            recovered_lous=sorted(recovered_lous),
+            attempted_unresolved_lous=attempted_unresolved_lous,
+            attempted_at=attempted_at,
+        )
+    if not pending_updated:
+        report_warning(
+            WarningCategory.PROCESSING_STATE,
+            "缺失楼待办在增量修补期间发生变化，改为完整处理。",
+        )
+        record_timing_label("缺失楼修补路径", "incremental_write_conflict")
+        return _FloorStateRefreshResult(
+            False,
+            expected_snapshot,
+            recovered_result.effective_changed_lous,
+            recovered_result.effective_added_lous,
+        )
+
+    with time_section("处理状态快照重读"):
+        snapshot = archive_store.state.read_backup_processing_snapshot()
+    if snapshot.change_state == expected_snapshot.change_state:
+        return _FloorStateRefreshResult(
+            True,
+            snapshot,
+            recovered_result.effective_changed_lous,
+            recovered_result.effective_added_lous,
+        )
+    with time_section("楼层状态提交"):
+        committed = archive_store.state.commit_floor_processing_state(
+            _new_floor_state(
+                snapshot,
+                page_count=page_count,
+                author_total_lou_count=author_total_lou_count,
+            )
+        )
+    return _FloorStateRefreshResult(
+        committed,
+        snapshot,
+        recovered_result.effective_changed_lous,
+        recovered_result.effective_added_lous,
+    )
+
+
 def _refresh_author_floor_state(
     client: NGAClient,
     archive_store: ThreadArchiveStore,
@@ -573,7 +762,7 @@ def _try_processing_state_reuse(
                 if not snapshot.pending_missing_floor_retries:
                     _record_empty_missing_floor_retry()
                 else:
-                    floor_refresh = _refresh_author_floor_state(
+                    floor_refresh = _try_incremental_exact_missing_floor_repair(
                         client,
                         archive_store,
                         tid,
@@ -582,8 +771,19 @@ def _try_processing_state_reuse(
                         author_total_lou_count=author_total_lou_count,
                         expected_snapshot=snapshot,
                         missing_floor_retry_mode=missing_floor_retry_mode,
-                        commit_even_if_unchanged=False,
                     )
+                    if floor_refresh is None:
+                        floor_refresh = _refresh_author_floor_state(
+                            client,
+                            archive_store,
+                            tid,
+                            aid,
+                            page_count=page_count,
+                            author_total_lou_count=author_total_lou_count,
+                            expected_snapshot=snapshot,
+                            missing_floor_retry_mode=missing_floor_retry_mode,
+                            commit_even_if_unchanged=False,
+                        )
                     snapshot = floor_refresh.snapshot
                     if not floor_refresh.succeeded:
                         return ProcessingStateReuseResult(

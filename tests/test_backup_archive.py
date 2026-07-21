@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from contextlib import ExitStack, closing, contextmanager, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,7 +25,14 @@ from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.archive_post_store import ArchivePostRepository
 from nga_tools.backup.archive_state_store import ArchiveStateRepository
 from nga_tools.backup.floor_map import FloorLabels, FloorMapBuildResult
-from nga_tools.backup.floor_models import RecoveredMissingPost
+from nga_tools.backup.floor_models import (
+    FLOOR_MAP_GENERATION_VERSION,
+    FLOOR_MAP_HASH_ALGORITHM,
+    FLOOR_MAP_VERSION,
+    FloorMapEntry,
+    RecoveredMissingPost,
+    StoredFloorMap,
+)
 from nga_tools.backup.image_pipeline import (
     ImageDownloadOutcome,
     collect_image_download_tasks_from_parsed,
@@ -40,8 +47,12 @@ from nga_tools.backup.post_html import (
     prepare_post_records,
 )
 from nga_tools.backup.post_overlay import make_post_overlay
-from nga_tools.backup.processing_state import BackupProcessingSnapshot
-from nga_tools.backup.processing_state import FLOOR_PROCESSING_STATE_VERSION
+from nga_tools.backup.processing_state import (
+    FLOOR_PROCESSING_STATE_VERSION,
+    BackupProcessingSnapshot,
+    FloorProcessingState,
+    PendingMissingFloorRetry,
+)
 from nga_tools.core.downloads import DownloadFailureKind, DownloadFileResult
 from nga_tools.core.hashing import hash_text
 from nga_tools.ngaclient.client import NGAPageError
@@ -101,6 +112,22 @@ class MutableFakeClient:
             if on_page_complete is not None:
                 on_page_complete(page, completed, total)
         return result
+
+    def iter_pages(
+        self,
+        tid: int,
+        aid: int | None,
+        pages: Sequence[int],
+        *,
+        on_page_complete: Callable[[int, int, int], None] | None = None,
+    ) -> Generator[tuple[int, dict[str, object]]]:
+        ordered_pages = list(dict.fromkeys(pages))
+        total = len(ordered_pages)
+        for completed, page in enumerate(ordered_pages, start=1):
+            page_data = self.get_page(tid, aid, page)
+            if on_page_complete is not None:
+                on_page_complete(page, completed, total)
+            yield page, page_data
 
 
 class FailingTailFakeClient(MutableFakeClient):
@@ -188,6 +215,73 @@ def _fake_get_folder(thread_dir: Path) -> Callable[..., str]:
         return str(path)
 
     return get_folder
+
+
+def _prepare_current_missing_floor_state(
+    thread_dir: Path,
+    entries: list[FloorMapEntry],
+    *,
+    pending_lous: Sequence[int] = (2,),
+    author_total_lou_count: int = 4,
+) -> tuple[ThreadArchiveStore, BackupProcessingSnapshot]:
+    store = ThreadArchiveStore(thread_dir)
+    store.ingest.upsert_page(
+        1,
+        {
+            "totalPage": 1,
+            "vrows": author_total_lou_count,
+            "result": [
+                {
+                    "lou": 1,
+                    "pid": 1001,
+                    "content": "first",
+                    "author": {"uid": 456},
+                },
+                {
+                    "lou": 3,
+                    "pid": 1003,
+                    "content": "third",
+                    "author": {"uid": 456},
+                },
+            ],
+        },
+    )
+    store.floor_maps.replace_floor_map(
+        StoredFloorMap(
+            version=FLOOR_MAP_VERSION,
+            generation_version=FLOOR_MAP_GENERATION_VERSION,
+            algorithm=FLOOR_MAP_HASH_ALGORITHM,
+            tid=123,
+            aid=456,
+            input_signature="incremental-test",
+            entries=entries,
+        )
+    )
+    store.state.ensure_schema()
+    retry_at = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    store.state.replace_pending_missing_floor_retries(
+        tuple(
+            PendingMissingFloorRetry(author_lou, retry_at)
+            for author_lou in pending_lous
+        )
+    )
+    snapshot = store.state.read_backup_processing_snapshot()
+    assert store.state.commit_floor_processing_state(
+        FloorProcessingState(
+            format_version=FLOOR_PROCESSING_STATE_VERSION,
+            processed_archive_revision=snapshot.change_state.archive_revision,
+            processed_floor_map_revision=(
+                snapshot.change_state.floor_map_revision
+            ),
+            page_count=1,
+            author_total_lou_count=author_total_lou_count,
+            floor_map_format_version=FLOOR_MAP_VERSION,
+            floor_map_generation_version=FLOOR_MAP_GENERATION_VERSION,
+            floor_map_hash_algorithm=FLOOR_MAP_HASH_ALGORITHM,
+            completed_at="2026-07-01T00:00:00+00:00",
+        )
+    )
+    return store, store.state.read_backup_processing_snapshot()
 
 
 def _run_backup(
@@ -1517,6 +1611,165 @@ class BackupRawArchiveTest:
         assert downloaded_urls == [[image_url], [image_url]]
         assert full_processing_calls == ["full"]
 
+    def test_exact_missing_floor_retry_avoids_full_floor_map_reads(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store, snapshot = _prepare_current_missing_floor_state(
+            tmp_path / "123_456",
+            [
+                {"pid": 1001, "author_lou": 1, "original_lou": 10},
+                {"pid": None, "author_lou": 2, "original_lou": 11},
+                {"pid": 1003, "author_lou": 3, "original_lou": 12},
+            ],
+        )
+        client = PagedFakeClient(
+            {
+                1: [
+                    {
+                        "lou": 11,
+                        "pid": 2011,
+                        "content": "recovered body",
+                        "author": {"uid": -1, "username": "匿名"},
+                        "postdate": 123456,
+                        "attches": [],
+                    }
+                ]
+            },
+            total_page=1,
+            vrows=None,
+        )
+
+        with (
+            patch.object(
+                store.posts,
+                "read_author_floor_refresh_inputs",
+                side_effect=AssertionError("不应读取全部楼主帖子和楼层映射"),
+            ),
+            patch.object(
+                store.posts,
+                "read_latest_post_record_summaries",
+                side_effect=AssertionError("不应读取全部帖子摘要"),
+            ),
+            patch.object(
+                store.floor_maps,
+                "replace_floor_map",
+                side_effect=AssertionError("不应完整替换楼层映射"),
+            ),
+            patch("builtins.print"),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = (
+                archive_processing_module._try_incremental_exact_missing_floor_repair(
+                    client,
+                    store,
+                    123,
+                    456,
+                    page_count=1,
+                    author_total_lou_count=4,
+                    expected_snapshot=snapshot,
+                    missing_floor_retry_mode="immediate",
+                )
+            )
+
+        assert result is not None
+        assert result.succeeded
+        assert result.changed_lous == frozenset({2})
+        assert client.get_page_calls == [1]
+        records = store.posts.read_effective_post_records()
+        assert [record["lou"] for record in records] == [1, 2, 3]
+        assert records[1]["post"]["content"] == "recovered body"
+        floor_map = store.floor_maps.read_floor_map()
+        assert floor_map is not None
+        assert floor_map.entries[1] == {
+            "pid": None,
+            "author_lou": 2,
+            "original_lou": 11,
+            "original_pid": 2011,
+        }
+        current = store.state.read_backup_processing_snapshot()
+        assert current.pending_missing_floor_retries == ()
+        assert archive_processing_module.floor_state_is_current(
+            current,
+            page_count=1,
+            author_total_lou_count=4,
+        )
+
+    def test_candidate_missing_floor_falls_back_before_network_fetch(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store, snapshot = _prepare_current_missing_floor_state(
+            tmp_path / "123_456",
+            [
+                {"pid": 1001, "author_lou": 1, "original_lou": 10},
+                {
+                    "pid": None,
+                    "author_lou": 2,
+                    "original_lou": None,
+                    "candidate_original_lous": [11, 12],
+                },
+                {"pid": 1003, "author_lou": 3, "original_lou": 13},
+            ],
+        )
+        client = PagedFakeClient({1: []}, total_page=1, vrows=None)
+
+        result = archive_processing_module._try_incremental_exact_missing_floor_repair(
+            client,
+            store,
+            123,
+            456,
+            page_count=1,
+            author_total_lou_count=4,
+            expected_snapshot=snapshot,
+            missing_floor_retry_mode="immediate",
+        )
+
+        assert result is None
+        assert client.get_page_calls == []
+
+    def test_failed_exact_missing_floor_fetch_keeps_current_state(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store, snapshot = _prepare_current_missing_floor_state(
+            tmp_path / "123_456",
+            [
+                {"pid": 1001, "author_lou": 1, "original_lou": 10},
+                {"pid": None, "author_lou": 2, "original_lou": 11},
+                {"pid": 1003, "author_lou": 3, "original_lou": 12},
+            ],
+        )
+        floor_map_before = store.floor_maps.read_floor_map()
+        client = PagedFakeClient({1: []}, total_page=1, vrows=None)
+        client.errors_by_page[1] = RuntimeError("original fetch failed")
+
+        with (
+            patch("builtins.print"),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = (
+                archive_processing_module._try_incremental_exact_missing_floor_repair(
+                    client,
+                    store,
+                    123,
+                    456,
+                    page_count=1,
+                    author_total_lou_count=4,
+                    expected_snapshot=snapshot,
+                    missing_floor_retry_mode="immediate",
+                )
+            )
+
+        assert result is not None
+        assert result.succeeded
+        assert store.floor_maps.read_floor_map() == floor_map_before
+        assert (
+            store.state.read_backup_processing_snapshot()
+            .pending_missing_floor_retries
+            == snapshot.pending_missing_floor_retries
+        )
+
     def test_ankebak_defers_old_missing_floor_after_initial_attempt(
         self,
         tmp_path: Path,
@@ -1573,7 +1826,7 @@ class BackupRawArchiveTest:
             retry_missing_lou_calls=retry_missing_lou_calls,
         )
 
-        assert retry_missing_lou_calls == [(2,), (), (2,)]
+        assert retry_missing_lou_calls == [(2,), (2,)]
         assert local_work is None
         assert first_snapshot.pending_missing_floor_retries
         assert (
