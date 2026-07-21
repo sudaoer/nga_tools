@@ -55,11 +55,27 @@ def backup_local_work_kind(
     *,
     now: datetime.datetime | None = None,
 ) -> BackupLocalWorkKind | None:
+    thread_folder = Path(get_folder(tid, aid, create=False))
+    archive_store = ThreadArchiveStore(thread_folder)
+    with archive_store.connection_session():
+        return _backup_local_work_kind(
+            tid,
+            aid,
+            archive_store,
+            now=now,
+        )
+
+
+def _backup_local_work_kind(
+    tid: int,
+    aid: Optional[int],
+    archive_store: ThreadArchiveStore,
+    *,
+    now: datetime.datetime | None,
+) -> BackupLocalWorkKind | None:
     schedule_now = (
         datetime.datetime.now(datetime.timezone.utc) if now is None else now
     )
-    thread_folder = Path(get_folder(tid, aid, create=False))
-    archive_store = ThreadArchiveStore(thread_folder)
     if not archive_store.exists():
         return "refresh"
     archive_store.state.ensure_schema()
@@ -155,6 +171,22 @@ def maintain_thread_backup(
 ) -> None:
     thread_folder = Path(get_folder(tid, aid, create=False))
     archive_store = ThreadArchiveStore(thread_folder)
+    with archive_store.connection_session():
+        _maintain_thread_backup(
+            tid,
+            aid,
+            archive_store,
+            schedule_missing_floor_retries=schedule_missing_floor_retries,
+        )
+
+
+def _maintain_thread_backup(
+    tid: int,
+    aid: Optional[int],
+    archive_store: ThreadArchiveStore,
+    *,
+    schedule_missing_floor_retries: bool,
+) -> None:
     with time_section("处理状态Schema兼容检查"):
         archive_store.state.ensure_schema()
         archive_store.cache.ensure_schema()
@@ -223,11 +255,31 @@ def backup_thread(
     force_processing: bool = False,
     schedule_missing_floor_retries: bool = False,
 ) -> None:
+    thread_folder = Path(get_folder(tid, aid))
+    archive_store = ThreadArchiveStore(thread_folder)
+    with archive_store.connection_session():
+        _backup_thread(
+            tid,
+            aid,
+            archive_store,
+            write_json=write_json,
+            force_processing=force_processing,
+            schedule_missing_floor_retries=schedule_missing_floor_retries,
+        )
+
+
+def _backup_thread(
+    tid: int,
+    aid: Optional[int],
+    archive_store: ThreadArchiveStore,
+    *,
+    write_json: bool,
+    force_processing: bool,
+    schedule_missing_floor_retries: bool,
+) -> None:
     with time_section("客户端初始化"):
         client = NGAClient()
 
-    thread_folder = Path(get_folder(tid, aid))
-    archive_store = ThreadArchiveStore(thread_folder)
     with time_section("远端页面抓取"):
         first_page_data = client.get_page(tid, aid, 1)
         page_count = _page_count_from_page_data(first_page_data)
@@ -333,11 +385,35 @@ def backup_thread_sub(
     allow_unchanged_author_fast_path: bool = False,
     schedule_missing_floor_retries: bool = False,
 ) -> None:
+    thread_folder = Path(get_folder(tid, aid))
+    archive_store = ThreadArchiveStore(thread_folder)
+    with archive_store.connection_session():
+        _backup_thread_sub(
+            tid,
+            aid,
+            archive_store,
+            write_json=write_json,
+            force_processing=force_processing,
+            allow_unchanged_author_fast_path=(
+                allow_unchanged_author_fast_path
+            ),
+            schedule_missing_floor_retries=schedule_missing_floor_retries,
+        )
+
+
+def _backup_thread_sub(
+    tid: int,
+    aid: Optional[int],
+    archive_store: ThreadArchiveStore,
+    *,
+    write_json: bool,
+    force_processing: bool,
+    allow_unchanged_author_fast_path: bool,
+    schedule_missing_floor_retries: bool,
+) -> None:
     with time_section("客户端初始化"):
         client = NGAClient()
 
-    thread_folder = Path(get_folder(tid, aid))
-    archive_store = ThreadArchiveStore(thread_folder)
     archive_existed = archive_store.exists()
     if archive_existed:
         with time_section("归档Schema初始化"):

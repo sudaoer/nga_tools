@@ -4,7 +4,7 @@ import io
 import json
 import sqlite3
 from collections.abc import Sequence
-from contextlib import ExitStack, closing, redirect_stdout
+from contextlib import ExitStack, closing, contextmanager, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
@@ -462,6 +462,74 @@ class SparseAuthorPageTest:
 
 
 class BackupRawArchiveTest:
+    def test_backup_entrypoints_use_archive_connection_session(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        active_sessions = 0
+        session_entries = 0
+
+        @contextmanager
+        def capture_session(_store: ThreadArchiveStore):
+            nonlocal active_sessions, session_entries
+            active_sessions += 1
+            session_entries += 1
+            try:
+                yield
+            finally:
+                active_sessions -= 1
+
+        def require_active_session(
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            assert active_sessions == 1
+
+        with (
+            patch.object(
+                archive_module,
+                "get_folder",
+                side_effect=_fake_get_folder(thread_dir),
+            ),
+            patch.object(
+                ThreadArchiveStore,
+                "connection_session",
+                capture_session,
+            ),
+            patch.object(
+                archive_module,
+                "_backup_local_work_kind",
+                side_effect=require_active_session,
+            ) as local_work,
+            patch.object(
+                archive_module,
+                "_maintain_thread_backup",
+                side_effect=require_active_session,
+            ) as maintain,
+            patch.object(
+                archive_module,
+                "_backup_thread",
+                side_effect=require_active_session,
+            ) as backup_all,
+            patch.object(
+                archive_module,
+                "_backup_thread_sub",
+                side_effect=require_active_session,
+            ) as backup_sub,
+        ):
+            assert backup_local_work_kind(123, 456) is None
+            maintain_thread_backup(123, 456)
+            backup_thread(123, 456)
+            backup_thread_sub(123, 456)
+
+        assert active_sessions == 0
+        assert session_entries == 4
+        local_work.assert_called_once()
+        maintain.assert_called_once()
+        backup_all.assert_called_once()
+        backup_sub.assert_called_once()
+
     def test_local_work_planning_rejects_unexpected_archive_table(
         self,
         tmp_path: Path,
