@@ -19,6 +19,7 @@ from nga_tools.backup.page_store import (
     fetch_backup_pages as _fetch_backup_pages,
     fetch_backup_page as _fetch_backup_page,
     page_count_from_page_data as _page_count_from_page_data,
+    probe_incremental_backup_pages as _probe_incremental_backup_pages,
     write_page_json as _write_page_json,
 )
 from nga_tools.backup.processing_state import BackupProcessingSnapshot
@@ -346,11 +347,6 @@ def backup_thread_sub(
         with time_section("归档Schema初始化"):
             archive_store.ensure_schema()
 
-    previous_author_total_lou_count = (
-        archive_store.posts.read_latest_author_total_lou_count()
-        if aid is not None and existing_page_numbers
-        else None
-    )
     previous_processing_snapshot = _read_incremental_base_snapshot(
         archive_store
     )
@@ -359,14 +355,23 @@ def backup_thread_sub(
         if previous_processing_snapshot is not None and existing_page_numbers
         else None
     )
+    previous_author_total_lou_count = (
+        previous_floor_state.author_total_lou_count
+        if aid is not None and previous_floor_state is not None
+        else None
+    )
 
     with time_section("远端页面抓取"):
-        first_page_data = client.get_page(tid, aid, 1)
-        page_count = _page_count_from_page_data(first_page_data)
-        author_total_lou_count = _author_total_lou_count_from_page_data(
-            first_page_data,
+        incremental_probe = _probe_incremental_backup_pages(
+            client,
+            tid,
             aid,
+            existing_page_numbers,
         )
+        page_count = incremental_probe.page_count
+        author_total_lou_count = incremental_probe.author_total_lou_count
+        page_data_by_page = dict(incremental_probe.page_data_by_page)
+        reference_page_data = page_data_by_page[incremental_probe.page_number]
 
         local_pages_cover_remote = set(range(1, page_count + 1)) <= (
             existing_page_numbers
@@ -380,79 +385,69 @@ def backup_thread_sub(
             and local_pages_cover_remote
         )
 
-        if unchanged_author_fast_path:
-            report_progress(
-                "楼主回复数和分页数未变化，仅校验第一页",
-                completed=0,
-                total=1,
-            )
-            page_data_by_page = {1: first_page_data}
-            report_progress("第一页校验完成", completed=1, total=1)
-            with time_section("智能增量第一页变更预检"):
-                first_page_changed = (
-                    archive_store.ingest.page_effective_processing_inputs_changed(
-                        1,
-                        first_page_data,
-                    )
-                )
-            if first_page_changed:
-                with time_section("智能增量尾页回退抓取"):
-                    tail_start = min(max(existing_page_numbers), page_count)
-                    fallback_page_numbers = (
-                        set(range(tail_start, page_count + 1)) - {1}
-                    )
-                    for page_number in sorted(fallback_page_numbers):
-                        page_data_by_page[page_number] = _fetch_backup_page(
-                            client,
-                            tid,
-                            aid,
-                            page_number,
-                            page_count,
-                            first_page_data,
-                        )
+        if existing_page_numbers:
+            tail_start = min(max(existing_page_numbers), page_count)
         else:
-            if existing_page_numbers:
-                tail_start = min(max(existing_page_numbers), page_count)
-            else:
-                tail_start = 1
-            missing_page_numbers = (
-                set(range(1, page_count + 1)) - existing_page_numbers
-            )
-            refresh_page_numbers = (
-                set(range(tail_start, page_count + 1)) | missing_page_numbers
-            )
+            tail_start = 1
+        missing_page_numbers = (
+            set(range(1, page_count + 1)) - existing_page_numbers
+        )
+        refresh_page_numbers = (
+            set(range(tail_start, page_count + 1)) | missing_page_numbers
+        )
+
+        def fetch_refresh_pages() -> None:
+            sorted_refresh_page_numbers = sorted(refresh_page_numbers)
+            completed = len(refresh_page_numbers & set(page_data_by_page))
             report_progress(
                 f"准备增量备份：远端{page_count}页，"
                 f"本地{len(existing_page_numbers)}页，"
                 f"需获取{len(refresh_page_numbers)}页",
-                completed=0,
-                total=len(refresh_page_numbers),
+                completed=completed,
+                total=len(sorted_refresh_page_numbers),
             )
-            sorted_refresh_page_numbers = sorted(refresh_page_numbers)
-            page_data_by_page = {}
-            for index, page_number in enumerate(
-                sorted_refresh_page_numbers,
-                start=1,
-            ):
+            for page_number in sorted_refresh_page_numbers:
+                if page_number in page_data_by_page:
+                    continue
                 report_progress(
                     f"正在获取第{page_number}页",
-                    completed=index - 1,
+                    completed=completed,
                     total=len(sorted_refresh_page_numbers),
                 )
-                page_data = _fetch_backup_page(
+                page_data_by_page[page_number] = _fetch_backup_page(
                     client,
                     tid,
                     aid,
                     page_number,
                     page_count,
-                    first_page_data,
+                    reference_page_data,
                 )
-                page_data_by_page[page_number] = page_data
+                completed += 1
             report_progress(
                 "页面获取完成",
                 completed=len(sorted_refresh_page_numbers),
                 total=len(sorted_refresh_page_numbers),
             )
+
+        if unchanged_author_fast_path:
+            report_progress(
+                "楼主回复数和分页数未变化，仅校验尾页",
+                completed=0,
+                total=1,
+            )
+            report_progress("尾页校验完成", completed=1, total=1)
+            with time_section("智能增量尾页变更预检"):
+                probe_page_changed = (
+                    archive_store.ingest.page_effective_processing_inputs_changed(
+                        incremental_probe.page_number,
+                        reference_page_data,
+                    )
+                )
+            if probe_page_changed:
+                with time_section("智能增量尾页刷新"):
+                    fetch_refresh_pages()
+        else:
+            fetch_refresh_pages()
 
     with time_section("分页JSON导出"):
         if write_json:
@@ -475,7 +470,7 @@ def backup_thread_sub(
     available_page_numbers = existing_page_numbers | set(page_data_by_page)
     archived_page_data_count = len(page_data_by_page)
     page_data_by_page.clear()
-    del page_data_by_page, first_page_data
+    del page_data_by_page, incremental_probe
     cleared_client_page_count = client.clear_page_cache()
     record_timing_metric(
         "归档页面内存释放页数",

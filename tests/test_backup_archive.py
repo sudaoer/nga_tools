@@ -133,6 +133,45 @@ class FailingTailFakeClient(MutableFakeClient):
         return data
 
 
+class PagedFakeClient(MutableFakeClient):
+    def __init__(
+        self,
+        pages_by_page: dict[int, list[dict[str, object]]],
+        *,
+        total_page: int,
+        vrows: int | None,
+    ) -> None:
+        super().__init__()
+        self.pages_by_page = pages_by_page
+        self.total_page = total_page
+        self.vrows = vrows
+        self.empty_page_numbers: set[int] = set()
+        self.errors_by_page: dict[int, Exception] = {}
+
+    def get_page(
+        self,
+        tid: int,
+        aid: int | None,
+        page: int,
+    ) -> dict[str, object]:
+        del tid
+        self.get_page_calls.append(page)
+        if error := self.errors_by_page.get(page):
+            raise error
+        if page in self.empty_page_numbers:
+            raise NGAPageError(None, "找不到内容 或 没有更多页了")
+        data: dict[str, object] = {
+            "currentPage": page,
+            "totalPage": self.total_page,
+            "result": [
+                dict(post) for post in self.pages_by_page[page]
+            ],
+        }
+        if aid is not None and self.vrows is not None:
+            data["vrows"] = self.vrows
+        return data
+
+
 def _fake_get_folder(thread_dir: Path) -> Callable[..., str]:
     def get_folder(
         tid: int,
@@ -806,7 +845,7 @@ class BackupRawArchiveTest:
         )
 
         assert full_processing_calls == ["full"]
-        assert client.get_page_calls == [1, 1, 1, 1]
+        assert client.get_page_calls == [1, 1, 1]
 
     @pytest.mark.parametrize("aid", [456, None])
     def test_second_unchanged_full_backup_reuses_processing_state(
@@ -1996,7 +2035,7 @@ class BackupRawArchiveTest:
         assert "阶段：正文解析与图片处理，开始时间：" not in timing_text
         assert "阶段：图片缓存文件校验，开始时间：" not in timing_text
 
-    def test_smart_author_fast_path_does_not_refresh_tail_page(
+    def test_smart_author_fast_path_checks_tail_page(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2012,18 +2051,24 @@ class BackupRawArchiveTest:
             allow_unchanged_author_fast_path=True,
         )
 
-        assert client.get_page_calls == [1]
+        assert client.get_page_calls == [2]
 
-    def test_smart_author_fast_path_refreshes_tail_when_first_page_changes(
+    def test_smart_author_fast_path_does_not_check_first_page(
         self,
         tmp_path: Path,
     ) -> None:
         thread_dir = tmp_path / "123_456"
-        client = MutableFakeClient()
-        client.total_page = 2
+        client = PagedFakeClient(
+            {
+                1: [{"lou": 1, "pid": 1001, "content": "first"}],
+                2: [{"lou": 2, "pid": 1002, "content": "tail"}],
+            },
+            total_page=2,
+            vrows=3,
+        )
         _run_backup(thread_dir, client)
         client.get_page_calls.clear()
-        client.posts[0]["content"] = "first edited"
+        client.pages_by_page[1][0]["content"] = "first edited"
 
         _run_backup(
             thread_dir,
@@ -2031,9 +2076,14 @@ class BackupRawArchiveTest:
             allow_unchanged_author_fast_path=True,
         )
 
-        assert client.get_page_calls == [1, 2]
+        assert client.get_page_calls == [2]
+        records = ThreadArchiveStore(thread_dir).posts.read_effective_post_records()
+        assert [record["post"]["content"] for record in records] == [
+            "first",
+            "tail",
+        ]
 
-    def test_smart_author_fast_path_retries_tail_before_any_page_commit(
+    def test_smart_author_fast_path_does_not_commit_when_tail_probe_fails(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2058,7 +2108,7 @@ class BackupRawArchiveTest:
             "first",
             "second",
         ]
-        assert client.get_page_calls == [1, 2]
+        assert client.get_page_calls == [2]
 
         client.fail_tail = False
         client.get_page_calls.clear()
@@ -2070,10 +2120,113 @@ class BackupRawArchiveTest:
 
         records_after_retry = store.posts.read_effective_post_records()
         assert [record["post"]["content"] for record in records_after_retry] == [
-            "first edited",
+            "first",
             "second edited",
         ]
-        assert client.get_page_calls == [1, 2]
+        assert client.get_page_calls == [2]
+
+    def test_author_empty_tail_uses_previous_page_pagination(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = PagedFakeClient(
+            {
+                1: [{"lou": 1, "pid": 1001, "content": "first"}],
+                2: [{"lou": 2, "pid": 1002, "content": "second"}],
+                3: [],
+            },
+            total_page=3,
+            vrows=4,
+        )
+        client.empty_page_numbers.add(3)
+        _run_backup(thread_dir, client)
+        client.vrows = 5
+        client.get_page_calls.clear()
+
+        _run_backup(thread_dir, client)
+
+        assert client.get_page_calls == [3, 2]
+        with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
+            page_three = connection.execute(
+                """
+                SELECT total_page, vrows
+                FROM archive_pages
+                WHERE page_number = 3
+                """
+            ).fetchone()
+        assert page_three == (3, 5)
+
+    def test_stale_tail_probe_discovers_remote_page_shrink_without_page_one(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_all"
+        client = PagedFakeClient(
+            {
+                1: [{"lou": 1, "pid": 1001, "content": "first"}],
+                2: [{"lou": 2, "pid": 1002, "content": "second"}],
+                3: [{"lou": 3, "pid": 1003, "content": "old tail"}],
+            },
+            total_page=3,
+            vrows=None,
+        )
+        _run_backup(thread_dir, client, aid=None)
+        client.total_page = 2
+        client.empty_page_numbers.add(3)
+        client.get_page_calls.clear()
+
+        _run_backup(thread_dir, client, aid=None)
+
+        assert client.get_page_calls == [3, 2]
+        with closing(sqlite3.connect(thread_dir / "archive.sqlite3")) as connection:
+            page_two = connection.execute(
+                """
+                SELECT total_page
+                FROM archive_pages
+                WHERE page_number = 2
+                """
+            ).fetchone()
+            page_three = connection.execute(
+                """
+                SELECT total_page
+                FROM archive_pages
+                WHERE page_number = 3
+                """
+            ).fetchone()
+        assert page_two == (2,)
+        assert page_three == (3,)
+
+    def test_tail_refresh_failure_does_not_commit_probe_page(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = PagedFakeClient(
+            {
+                1: [{"lou": 1, "pid": 1001, "content": "first"}],
+                2: [{"lou": 2, "pid": 1002, "content": "old tail"}],
+                3: [{"lou": 3, "pid": 1003, "content": "new tail"}],
+            },
+            total_page=2,
+            vrows=3,
+        )
+        _run_backup(thread_dir, client)
+        store = ThreadArchiveStore(thread_dir)
+        client.total_page = 3
+        client.pages_by_page[2][0]["content"] = "edited tail"
+        client.errors_by_page[3] = RuntimeError("new tail fetch failed")
+        client.get_page_calls.clear()
+
+        with pytest.raises(RuntimeError, match="new tail fetch failed"):
+            _run_backup(thread_dir, client)
+
+        assert client.get_page_calls == [2, 3]
+        records = store.posts.read_effective_post_records()
+        assert [record["post"]["content"] for record in records] == [
+            "first",
+            "old tail",
+        ]
 
     def test_maintenance_uses_latest_archived_pagination_metadata(
         self,
