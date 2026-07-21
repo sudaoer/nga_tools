@@ -8,6 +8,7 @@ from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.audio_pipeline import maintain_archived_audio
 from nga_tools.backup.audio_store import AudioDownloadTask
 from nga_tools.core.downloads import DownloadSummary
+from nga_tools.timing import use_timing_log
 
 
 def _audio_url(name: str) -> str:
@@ -95,6 +96,67 @@ def test_audio_pipeline_scans_all_versions_then_only_new_versions(
     assert not second_result.full_scan
     assert second_result.scanned_post_versions == 1
     assert download_mock.call_args.args[0] == [{"url": third_url}]
+
+
+def test_audio_pipeline_current_state_skips_all_noop_work(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    store = ThreadArchiveStore(output_root / "123_456")
+    store.ingest.upsert_page(
+        1,
+        _page("plain text"),
+        observed_at="2026-07-15T00:00:00+00:00",
+    )
+    maintain_archived_audio(123, 456, store, force=False)
+    before = store.state.read_backup_processing_snapshot()
+    assert before.audio_state is not None
+    timing_path = tmp_path / "audio-noop.timing.log"
+
+    with (
+        patch.object(
+            store.posts,
+            "read_post_version_contents",
+            side_effect=AssertionError("unexpected version scan"),
+        ),
+        patch(
+            "nga_tools.backup.audio_pipeline.audio_mappings_for_urls",
+            side_effect=AssertionError("unexpected mapping lookup"),
+        ),
+        patch(
+            "nga_tools.backup.audio_pipeline.download_audio_tasks",
+            side_effect=AssertionError("unexpected download"),
+        ),
+        patch.object(
+            store.state,
+            "commit_audio_processing_state",
+            side_effect=AssertionError("unexpected state commit"),
+        ),
+        use_timing_log(
+            timing_path,
+            task_name="audio noop",
+        ) as timing_log,
+    ):
+        assert timing_log is not None
+        result = maintain_archived_audio(
+            123,
+            456,
+            store,
+            force=False,
+            processing_snapshot=before,
+        )
+
+    after = store.state.read_backup_processing_snapshot()
+    timing_text = timing_log.path.read_text(encoding="utf-8")
+    assert result.committed
+    assert not result.full_scan
+    assert result.scanned_post_versions == 0
+    assert after.audio_state is not None
+    assert after.audio_state.completed_at == before.audio_state.completed_at
+    assert "标签：音频引用扫描模式，值：hit\n" in timing_text
+    assert "阶段：历史帖子版本音频引用扫描，开始时间：" not in timing_text
+    assert "阶段：音频本地映射校验，开始时间：" not in timing_text
+    assert "阶段：音频处理状态提交，开始时间：" not in timing_text
 
 
 def test_audio_pipeline_persists_failure_and_force_retries_it(

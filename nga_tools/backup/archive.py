@@ -211,7 +211,7 @@ def maintain_thread_backup(
         aid,
         archive_store,
         force=False,
-        processing_snapshot=snapshot if reuse_result.hit else None,
+        processing_snapshot=snapshot,
     )
 
 
@@ -320,6 +320,7 @@ def backup_thread(
         aid,
         archive_store,
         force=force_processing,
+        processing_snapshot=previous_processing_snapshot,
     )
 
 
@@ -519,4 +520,5 @@ def backup_thread_sub(
         aid,
         archive_store,
         force=force_processing,
+        processing_snapshot=previous_processing_snapshot,
     )

@@ -113,6 +113,17 @@ def _audio_download_progress(
     )
 
 
+def _record_audio_noop() -> None:
+    record_timing_label("音频引用扫描模式", "hit")
+    record_timing_metric("音频扫描帖子版本数", 0)
+    record_timing_metric("音频扫描唯一URL数", 0)
+    record_timing_metric("历史待重试音频URL数", 0)
+    record_timing_metric("本次重试音频URL数", 0)
+    record_timing_metric("概率延后音频URL数", 0)
+    record_timing_metric("本次新增音频URL数", 0)
+    record_timing_metric("待重试音频URL数", 0)
+
+
 def maintain_archived_audio(
     tid: int,
     aid: int | None,
@@ -128,6 +139,23 @@ def maintain_archived_audio(
             else processing_snapshot
         )
         max_post_version_id = archive_store.posts.max_post_version_id()
+    if (
+        not force
+        and not snapshot.pending_audio_retries
+        and audio_state_is_current(
+            snapshot,
+            max_post_version_id=max_post_version_id,
+        )
+    ):
+        _record_audio_noop()
+        return AudioArchiveMaintenanceResult(
+            scanned_post_versions=0,
+            discovered_urls=0,
+            attempted_urls=0,
+            failed_urls=0,
+            full_scan=False,
+            committed=True,
+        )
     state_compatible = _audio_state_is_compatible(
         snapshot,
         max_post_version_id=max_post_version_id,
