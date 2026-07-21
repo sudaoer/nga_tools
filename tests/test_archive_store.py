@@ -735,6 +735,51 @@ class ThreadArchiveStoreTest:
 
         assert snapshot.current_pagination_state == newer
 
+    def test_floor_state_commit_rejects_changed_current_pagination(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            first_pagination = CurrentPaginationState(
+                page_count=2,
+                author_total_lou_count=21,
+                source_page_number=2,
+                observed_at=datetime(2026, 7, 11, 1, tzinfo=timezone.utc),
+            )
+            assert store.state.commit_current_pagination_state(first_pagination)
+            initial = store.state.read_backup_processing_snapshot()
+            floor_state = FloorProcessingState(
+                format_version=1,
+                processed_archive_revision=initial.change_state.archive_revision,
+                processed_floor_map_revision=(
+                    initial.change_state.floor_map_revision
+                ),
+                page_count=2,
+                author_total_lou_count=21,
+                floor_map_format_version=1,
+                floor_map_generation_version=1,
+                floor_map_hash_algorithm="sha256",
+                completed_at="2026-07-11T01:00:00+00:00",
+            )
+            assert store.state.commit_floor_processing_state(floor_state)
+            assert store.state.commit_current_pagination_state(
+                CurrentPaginationState(
+                    page_count=3,
+                    author_total_lou_count=27,
+                    source_page_number=3,
+                    observed_at=datetime(
+                        2026, 7, 11, 2, tzinfo=timezone.utc
+                    ),
+                )
+            )
+
+            assert not store.state.commit_floor_processing_state(floor_state)
+            snapshot = store.state.read_backup_processing_snapshot()
+
+        assert snapshot.floor_state == floor_state
+        assert snapshot.current_pagination_state is not None
+        assert snapshot.current_pagination_state.page_count == 3
+        assert snapshot.current_pagination_state.author_total_lou_count == 27
+
     def test_compact_page_state_rejects_stale_updates_and_clears_vrows(
         self,
     ) -> None:
@@ -1590,6 +1635,16 @@ class ThreadArchiveStoreTest:
                 completed_at="2026-07-11T00:00:00+00:00",
             )
 
+            assert store.state.commit_current_pagination_state(
+                CurrentPaginationState(
+                    page_count=2,
+                    author_total_lou_count=21,
+                    source_page_number=2,
+                    observed_at=datetime(
+                        2026, 7, 11, tzinfo=timezone.utc
+                    ),
+                )
+            )
             assert store.state.commit_floor_processing_state(floor_state)
             manifest_posts = (
                 ImageReferenceManifestPost(

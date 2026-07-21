@@ -1244,6 +1244,26 @@ class ArchiveStateRepository:
             return False
         with self._state_write_connection() as connection:
             with connection:
+                pagination_row = cast(
+                    tuple[object, object, object, object] | None,
+                    connection.execute(
+                        """
+                        SELECT page_count, author_total_lou_count,
+                               source_page_number, observed_at
+                        FROM backup_current_pagination_state
+                        WHERE singleton = 1
+                        """
+                    ).fetchone(),
+                )
+                pagination_state = self._current_pagination_state_from_row(
+                    pagination_row
+                )
+                if pagination_state is None or (
+                    pagination_state.page_count != state.page_count
+                    or pagination_state.author_total_lou_count
+                    != state.author_total_lou_count
+                ):
+                    return False
                 connection.execute("DELETE FROM backup_floor_processing_state")
                 connection.execute(
                     """

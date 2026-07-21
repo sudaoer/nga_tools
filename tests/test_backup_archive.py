@@ -50,6 +50,7 @@ from nga_tools.backup.post_overlay import make_post_overlay
 from nga_tools.backup.processing_state import (
     FLOOR_PROCESSING_STATE_VERSION,
     BackupProcessingSnapshot,
+    CurrentPaginationState,
     FloorProcessingState,
     PendingMissingFloorRetry,
 )
@@ -2586,7 +2587,7 @@ class BackupRawArchiveTest:
             "old tail",
         ]
 
-    def test_maintenance_uses_latest_archived_pagination_metadata(
+    def test_maintenance_uses_current_pagination_state(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2614,6 +2615,14 @@ class BackupRawArchiveTest:
                 },
             }
         )
+        assert store.state.commit_current_pagination_state(
+            CurrentPaginationState(
+                page_count=2,
+                author_total_lou_count=5,
+                source_page_number=2,
+                observed_at=datetime(2026, 7, 22, tzinfo=timezone.utc),
+            )
+        )
 
         _run_backup(thread_dir, client, mode="maintenance")
 
@@ -2621,6 +2630,58 @@ class BackupRawArchiveTest:
         assert state is not None
         assert state.page_count == 2
         assert state.author_total_lou_count == 5
+
+    def test_maintenance_does_not_refresh_from_stale_page_one_pagination(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = PagedFakeClient(
+            {
+                1: [{"lou": 1, "pid": 1001, "content": "first"}],
+                2: [{"lou": 2, "pid": 1002, "content": "second"}],
+                3: [{"lou": 3, "pid": 1003, "content": "third"}],
+            },
+            total_page=2,
+            vrows=3,
+        )
+        floor_map_calls: list[str] = []
+        _run_backup(
+            thread_dir,
+            client,
+            floor_map_calls=floor_map_calls,
+        )
+        client.total_page = 3
+        client.vrows = 4
+        _run_backup(
+            thread_dir,
+            client,
+            floor_map_calls=floor_map_calls,
+        )
+        store = ThreadArchiveStore(thread_dir)
+        page_one = store.posts.read_latest_page_one_pagination()
+        before_maintenance = store.state.read_backup_processing_snapshot()
+
+        _run_backup(
+            thread_dir,
+            client,
+            mode="maintenance",
+            floor_map_calls=floor_map_calls,
+        )
+
+        after_maintenance = store.state.read_backup_processing_snapshot()
+        assert page_one is not None
+        assert (page_one.page_count, page_one.vrows) == (2, 3)
+        assert before_maintenance.current_pagination_state is not None
+        assert (
+            before_maintenance.current_pagination_state.page_count,
+            before_maintenance.current_pagination_state.author_total_lou_count,
+        ) == (3, 4)
+        assert before_maintenance.floor_state is not None
+        assert after_maintenance.floor_state is not None
+        assert after_maintenance.floor_state.page_count == 3
+        assert after_maintenance.floor_state.author_total_lou_count == 4
+        assert floor_map_calls == ["build", "build"]
 
 
 def test_recovered_post_upsert_is_idempotent_and_preserves_metadata(

@@ -23,10 +23,12 @@ from nga_tools.backup.page_store import (
     write_page_json as _write_page_json,
 )
 from nga_tools.backup.processing_state import BackupProcessingSnapshot
+from nga_tools.backup.processing_state import CurrentPaginationState
 from nga_tools.console import report_progress
 from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import PageData
 from nga_tools.timing import record_timing_metric, time_section
+from nga_tools.storage import UnsupportedStorageFormatError
 
 
 BackupLocalWorkKind = Literal["refresh", "maintenance"]
@@ -35,8 +37,50 @@ BackupLocalWorkKind = Literal["refresh", "maintenance"]
 def _upsert_archive_pages(
     store: ThreadArchiveStore,
     page_data_by_page: dict[int, PageData],
+    *,
+    observed_at: datetime.datetime | None = None,
 ) -> ArchivePagesUpsertResult:
-    return store.ingest.upsert_pages(page_data_by_page)
+    return store.ingest.upsert_pages(
+        page_data_by_page,
+        observed_at=(
+            None
+            if observed_at is None
+            else observed_at.astimezone(datetime.timezone.utc).isoformat(
+                timespec="microseconds"
+            )
+        ),
+    )
+
+
+def _current_pagination_state(
+    *,
+    page_count: int,
+    author_total_lou_count: int | None,
+    source_page_number: int,
+    observed_at: datetime.datetime,
+) -> CurrentPaginationState:
+    return CurrentPaginationState(
+        page_count=page_count,
+        author_total_lou_count=author_total_lou_count,
+        source_page_number=source_page_number,
+        observed_at=observed_at,
+    )
+
+
+def _commit_current_pagination_state(
+    archive_store: ThreadArchiveStore,
+    pagination_state: CurrentPaginationState,
+) -> None:
+    with time_section("当前分页水位提交"):
+        committed = archive_store.state.commit_current_pagination_state(
+            pagination_state
+        )
+    record_timing_metric(
+        "当前分页水位来源页",
+        pagination_state.source_page_number,
+    )
+    if not committed:
+        raise RuntimeError("当前分页水位在备份期间发生变化，拒绝提交旧状态。")
 
 
 def _record_archive_upsert_metrics(result: ArchivePagesUpsertResult) -> None:
@@ -88,17 +132,16 @@ def _backup_local_work_kind(
     if snapshot.floor_state is None or snapshot.image_state is None:
         return "refresh"
 
-    try:
-        pagination = archive_store.posts.read_latest_page_one_pagination()
-    except ValueError:
+    pagination_state = snapshot.current_pagination_state
+    if pagination_state is None:
         return "refresh"
-    if pagination is None:
-        return "refresh"
-    author_total_lou_count = pagination.vrows if aid is not None else None
+    author_total_lou_count = (
+        pagination_state.author_total_lou_count if aid is not None else None
+    )
 
     floor_current = archive_processing.floor_state_is_current(
         snapshot,
-        page_count=pagination.page_count,
+        page_count=pagination_state.page_count,
         author_total_lou_count=author_total_lou_count,
     )
     image_current = archive_image_processing.image_state_is_current(
@@ -159,6 +202,13 @@ def _read_incremental_base_snapshot(
 ) -> BackupProcessingSnapshot | None:
     try:
         return archive_store.state.read_backup_processing_snapshot()
+    except UnsupportedStorageFormatError:
+        with time_section("处理状态Schema兼容检查"):
+            archive_store.state.ensure_schema()
+        try:
+            return archive_store.state.read_backup_processing_snapshot()
+        except ValueError:
+            return None
     except ValueError:
         return None
 
@@ -194,13 +244,15 @@ def _maintain_thread_backup(
         snapshot = archive_store.state.read_backup_processing_snapshot()
     if snapshot.floor_state is None or snapshot.image_state is None:
         raise RuntimeError("缺少线程级处理状态，必须先执行增量备份。")
-    pagination = archive_store.posts.read_latest_page_one_pagination()
-    if pagination is None:
-        raise RuntimeError("归档缺少第一页分页元数据，必须先执行增量备份。")
-    author_total_lou_count = pagination.vrows if aid is not None else None
+    pagination_state = snapshot.current_pagination_state
+    if pagination_state is None:
+        raise RuntimeError("缺少当前分页水位，必须先执行增量备份。")
+    author_total_lou_count = (
+        pagination_state.author_total_lou_count if aid is not None else None
+    )
     existing_page_numbers = archive_store.posts.read_page_numbers()
     local_pages_cover_remote = set(
-        range(1, pagination.page_count + 1)
+        range(1, pagination_state.page_count + 1)
     ) <= existing_page_numbers
 
     with time_section("客户端初始化"):
@@ -210,7 +262,7 @@ def _maintain_thread_backup(
         tid,
         aid,
         archive_store,
-        page_count=pagination.page_count,
+        page_count=pagination_state.page_count,
         author_total_lou_count=author_total_lou_count,
         local_pages_cover_remote=local_pages_cover_remote,
         force_processing=False,
@@ -231,7 +283,7 @@ def _maintain_thread_backup(
             archive_store,
             tid,
             aid,
-            page_count=pagination.page_count,
+            page_count=pagination_state.page_count,
             author_total_lou_count=author_total_lou_count,
             force_image_retries=False,
             missing_floor_retry_mode=(
@@ -287,6 +339,7 @@ def _backup_thread(
             first_page_data,
             aid,
         )
+        pagination_observed_at = datetime.datetime.now(datetime.timezone.utc)
 
         page_data_by_page = _fetch_backup_pages(
             client,
@@ -313,8 +366,21 @@ def _backup_thread(
         archive_store
     )
     with time_section("归档页面准备与事务写入"):
-        upsert_result = _upsert_archive_pages(archive_store, page_data_by_page)
+        upsert_result = _upsert_archive_pages(
+            archive_store,
+            page_data_by_page,
+            observed_at=pagination_observed_at,
+        )
     _record_archive_upsert_metrics(upsert_result)
+    _commit_current_pagination_state(
+        archive_store,
+        _current_pagination_state(
+            page_count=page_count,
+            author_total_lou_count=author_total_lou_count,
+            source_page_number=1,
+            observed_at=pagination_observed_at,
+        ),
+    )
     with time_section("归档字数回填"):
         refreshed_word_counts = archive_store.ingest.refresh_stored_word_counts()
     record_timing_metric("归档字数回填版本数", refreshed_word_counts)
@@ -447,6 +513,8 @@ def _backup_thread_sub(
         )
         page_count = incremental_probe.page_count
         author_total_lou_count = incremental_probe.author_total_lou_count
+        pagination_source_page = incremental_probe.page_number
+        pagination_observed_at = datetime.datetime.now(datetime.timezone.utc)
         page_data_by_page = dict(incremental_probe.page_data_by_page)
         reference_page_data = page_data_by_page[incremental_probe.page_number]
 
@@ -537,8 +605,21 @@ def _backup_thread_sub(
     )
 
     with time_section("归档页面准备与事务写入"):
-        upsert_result = _upsert_archive_pages(archive_store, page_data_by_page)
+        upsert_result = _upsert_archive_pages(
+            archive_store,
+            page_data_by_page,
+            observed_at=pagination_observed_at,
+        )
     _record_archive_upsert_metrics(upsert_result)
+    _commit_current_pagination_state(
+        archive_store,
+        _current_pagination_state(
+            page_count=page_count,
+            author_total_lou_count=author_total_lou_count,
+            source_page_number=pagination_source_page,
+            observed_at=pagination_observed_at,
+        ),
+    )
     record_timing_metric("增量有效变更页数", upsert_result.effective_changed_pages)
     with time_section("归档字数回填"):
         refreshed_word_counts = archive_store.ingest.refresh_stored_word_counts()
