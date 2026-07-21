@@ -111,11 +111,15 @@ class ConsoleReporter:
         return self._active_console()
 
     def info(self, message: str) -> None:
-        self._active_console().print(message, markup=False)
+        self._active_console().print(message, markup=False, highlight=False)
 
     def warning(self, category: WarningCategory, message: str) -> None:
         del category
-        self._active_console().print(f"警告：{message}", markup=False)
+        self._active_console().print(
+            f"警告：{message}",
+            markup=False,
+            highlight=False,
+        )
 
     def progress(
         self,
@@ -587,6 +591,7 @@ class BackupConfigsProgressDisplay:
                     f"警告汇总：{reporter.label}：共{warning_total}条；"
                     f"{_warning_counts_text(counts)}。",
                     markup=False,
+                    highlight=False,
                 )
             total_task = self._progress.tasks[self._total_task]
             completed = int(total_task.completed) + 1
