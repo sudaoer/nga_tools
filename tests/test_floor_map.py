@@ -738,6 +738,66 @@ class FloorMapMissingInferenceTest:
         assert deferred_client.page_count_calls == 0
         assert deferred_client.page_calls == []
 
+    def test_rebuild_preserves_recovered_missing_floor_pid(self) -> None:
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 1001, "author_lou": 1},
+            {"pid": 1003, "author_lou": 3},
+        ]
+        page_data: PageData = {
+            "result": [
+                {"pid": 1001, "lou": 10, "author": {"uid": 42}},
+                {
+                    "pid": 2002,
+                    "lou": 11,
+                    "author": {"uid": -1},
+                    "content": "anonymous body",
+                },
+                {"pid": 1003, "lou": 12, "author": {"uid": 42}},
+            ]
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            store = ThreadArchiveStore(Path(temp_dir))
+            store.ensure_schema()
+            initial_client = FakeClient({1: page_data}, page_count=1)
+            deferred_client = FakeClient({1: page_data}, page_count=1)
+            with (
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                initial = build_and_save_floor_map(
+                    initial_client,
+                    store,
+                    123,
+                    456,
+                    author_posts,
+                    [2],
+                )
+                deferred = build_and_save_floor_map(
+                    deferred_client,
+                    store,
+                    123,
+                    456,
+                    author_posts,
+                    [2],
+                    retry_missing_author_lous=(),
+                )
+            floor_map = store.floor_maps.read_floor_map()
+
+        assert initial.recovered_missing_posts_by_author_lou[2][
+            "original_pid"
+        ] == 2002
+        assert deferred.recovered_missing_posts_by_author_lou == {}
+        assert deferred_client.page_count_calls == 0
+        assert deferred_client.page_calls == []
+        assert floor_map is not None
+        assert floor_map.entries[1] == {
+            "pid": None,
+            "author_lou": 2,
+            "original_lou": 11,
+            "original_pid": 2002,
+        }
+
     def test_already_fetched_page_can_recover_deferred_missing_floor(self) -> None:
         author_posts: list[AuthorPostRef] = [
             {"pid": 1001, "author_lou": 1},

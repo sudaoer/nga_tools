@@ -337,12 +337,15 @@ def build_and_save_floor_map(
         author_lou = post["author_lou"]
         author_lou_to_pid[author_lou] = pid
 
-    found_original_by_author_lou, existing_missing_originals, existing_candidates = (
-        _load_reusable_floor_map(
-            archive_store,
-            author_lou_to_pid,
-            missing_author_lou_set,
-        )
+    (
+        found_original_by_author_lou,
+        existing_missing_originals,
+        existing_recovered_original_pids,
+        existing_candidates,
+    ) = _load_reusable_floor_map(
+        archive_store,
+        author_lou_to_pid,
+        missing_author_lou_set,
     )
     original_lou_by_author_lou = {
         **found_original_by_author_lou,
@@ -475,7 +478,23 @@ def build_and_save_floor_map(
         }
         recovered_post = recovered_missing_posts.get(author_lou)
         if recovered_post is not None:
-            entry["original_pid"] = recovered_post["original_pid"]
+            recovered_original_pid = recovered_post["original_pid"]
+            existing_original_pid = existing_recovered_original_pids.get(
+                author_lou
+            )
+            if (
+                existing_original_pid is not None
+                and existing_original_pid != recovered_original_pid
+            ):
+                raise RuntimeError(
+                    "已恢复缺失楼PID与本次原帖恢复结果不一致："
+                    f"author_lou={author_lou}, "
+                    f"existing={existing_original_pid}, "
+                    f"recovered={recovered_original_pid}"
+                )
+            entry["original_pid"] = recovered_original_pid
+        elif author_lou in existing_recovered_original_pids:
+            entry["original_pid"] = existing_recovered_original_pids[author_lou]
         entries.append(entry)
     for author_lou in sorted(final_candidate_missing_originals):
         entries.append(
@@ -511,13 +530,19 @@ def _load_reusable_floor_map(
     archive_store: ThreadArchiveStore,
     author_lou_to_pid: dict[int, int],
     missing_author_lous: set[int],
-) -> tuple[dict[int, int], dict[int, int], dict[int, list[int]]]:
+) -> tuple[
+    dict[int, int],
+    dict[int, int],
+    dict[int, int],
+    dict[int, list[int]],
+]:
     stored_floor_map = archive_store.floor_maps.read_floor_map()
     if stored_floor_map is None:
-        return {}, {}, {}
+        return {}, {}, {}, {}
 
     original_lou_by_author_lou: dict[int, int] = {}
     missing_original_lou_by_author_lou: dict[int, int] = {}
+    recovered_original_pid_by_author_lou: dict[int, int] = {}
     candidate_originals_by_author_lou: dict[int, list[int]] = {}
     for entry in stored_floor_map.entries:
         author_lou = entry["author_lou"]
@@ -535,6 +560,9 @@ def _load_reusable_floor_map(
             continue
         if original_lou is not None:
             missing_original_lou_by_author_lou[author_lou] = original_lou
+            original_pid = entry.get("original_pid")
+            if original_pid is not None:
+                recovered_original_pid_by_author_lou[author_lou] = original_pid
             continue
 
         candidate_original_lous = entry.get("candidate_original_lous")
@@ -549,11 +577,13 @@ def _load_reusable_floor_map(
         report_info(
             f"复用已有楼层映射：确定{len(original_lou_by_author_lou)}楼，"
             f"缺失确定{len(missing_original_lou_by_author_lou)}楼，"
+            f"已恢复{len(recovered_original_pid_by_author_lou)}楼，"
             f"候选{len(candidate_originals_by_author_lou)}楼。",
         )
     return (
         original_lou_by_author_lou,
         missing_original_lou_by_author_lou,
+        recovered_original_pid_by_author_lou,
         candidate_originals_by_author_lou,
     )
 

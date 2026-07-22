@@ -1128,6 +1128,22 @@ def reuse_processing_state_after_page_refresh(
     processing_snapshot: BackupProcessingSnapshot | None = None,
     incremental_changes: ArchiveIncrementalChanges | None = None,
 ) -> ProcessingStateReuseResult:
+    repaired_floor_entries = 0
+    if aid is not None:
+        with time_section("已恢复缺失楼映射一致性修复"):
+            repaired_floor_entries = (
+                archive_store.floor_maps.repair_recovered_missing_floor_entries()
+            )
+        if repaired_floor_entries:
+            report_info(
+                f"已根据本地匿名正文修复{repaired_floor_entries}条楼层映射。"
+            )
+            processing_snapshot = None
+    record_timing_metric(
+        "本地匿名正文修复楼层映射数",
+        repaired_floor_entries,
+    )
+
     with time_section("处理状态复用判定"):
         if force_processing:
             report_info("已要求强制重处理，跳过处理状态复用。")

@@ -19,6 +19,142 @@ from nga_tools.core.sqlite import iter_in_clause_chunks
 
 class ArchiveFloorMapRepository(ArchiveRepository):
     @staticmethod
+    def _repairable_recovered_missing_floor_entries_from_connection(
+        connection: sqlite3.Connection,
+    ) -> dict[int, tuple[int, int]]:
+        rows = cast(
+            list[tuple[object, object, object, object, object]],
+            connection.execute(
+                """
+                WITH latest AS (
+                    SELECT
+                        lou,
+                        pid,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY lou
+                            ORDER BY last_seen_at DESC, id DESC
+                        ) AS row_number
+                    FROM post_versions
+                )
+                SELECT
+                    floor_map.author_lou,
+                    floor_map.original_lou,
+                    floor_map.original_pid,
+                    latest.pid,
+                    metadata.author_uid
+                FROM floor_map_entries AS floor_map
+                LEFT JOIN latest
+                    ON latest.lou = floor_map.author_lou
+                    AND latest.row_number = 1
+                LEFT JOIN post_latest_metadata AS metadata
+                    ON metadata.lou = latest.lou
+                    AND metadata.pid = latest.pid
+                WHERE floor_map.pid IS NULL
+                  AND floor_map.original_lou IS NOT NULL
+                ORDER BY floor_map.author_lou
+                """
+            ).fetchall(),
+        )
+
+        repairable: dict[int, tuple[int, int]] = {}
+        for (
+            raw_author_lou,
+            raw_original_lou,
+            raw_original_pid,
+            raw_latest_pid,
+            raw_author_uid,
+        ) in rows:
+            if (
+                type(raw_author_lou) is not int
+                or raw_author_lou < 0
+                or type(raw_original_lou) is not int
+                or raw_original_lou < 0
+            ):
+                raise ValueError(
+                    "archive缺失楼映射定位字段无效："
+                    f"{(raw_author_lou, raw_original_lou)!r}"
+                )
+            if raw_original_pid is not None and (
+                type(raw_original_pid) is not int or raw_original_pid <= 0
+            ):
+                raise ValueError(
+                    "archive缺失楼映射original_pid无效："
+                    f"author_lou={raw_author_lou}, original_pid={raw_original_pid!r}"
+                )
+
+            if raw_latest_pid is None:
+                if raw_original_pid is not None:
+                    raise ValueError(
+                        "archive已恢复缺失楼缺少本地正文："
+                        f"author_lou={raw_author_lou}, "
+                        f"original_pid={raw_original_pid}"
+                    )
+                continue
+            if type(raw_latest_pid) is not int or raw_latest_pid <= 0:
+                raise ValueError(
+                    "archive缺失楼本地正文PID无效："
+                    f"author_lou={raw_author_lou}, pid={raw_latest_pid!r}"
+                )
+            if raw_author_uid != -1:
+                raise ValueError(
+                    "archive缺失楼存在非匿名或缺少元数据的本地正文："
+                    f"author_lou={raw_author_lou}, author_uid={raw_author_uid!r}"
+                )
+            if raw_original_pid is None:
+                repairable[raw_author_lou] = (
+                    raw_original_lou,
+                    raw_latest_pid,
+                )
+            elif raw_original_pid != raw_latest_pid:
+                raise ValueError(
+                    "archive已恢复缺失楼PID与本地正文不一致："
+                    f"author_lou={raw_author_lou}, "
+                    f"original_pid={raw_original_pid}, pid={raw_latest_pid}"
+                )
+        return repairable
+
+    def read_repairable_recovered_missing_floor_entries(
+        self,
+    ) -> dict[int, tuple[int, int]]:
+        self.require_exists()
+        with self._read_connection() as connection:
+            return self._repairable_recovered_missing_floor_entries_from_connection(
+                connection
+            )
+
+    def repair_recovered_missing_floor_entries(self) -> int:
+        self.require_exists()
+        with self._write_connection() as connection:
+            with connection:
+                repairable = (
+                    self._repairable_recovered_missing_floor_entries_from_connection(
+                        connection
+                    )
+                )
+                for author_lou, (original_lou, original_pid) in sorted(
+                    repairable.items()
+                ):
+                    cursor = connection.execute(
+                        """
+                        UPDATE floor_map_entries
+                        SET original_pid = ?
+                        WHERE author_lou = ?
+                          AND pid IS NULL
+                          AND original_lou = ?
+                          AND original_pid IS NULL
+                        """,
+                        (original_pid, author_lou, original_lou),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "archive缺失楼映射本地修复行数异常："
+                            f"author_lou={author_lou}"
+                        )
+                if repairable:
+                    self._increment_floor_map_revision(connection)
+        return len(repairable)
+
+    @staticmethod
     def _validate_requested_author_lous(author_lous: Sequence[int]) -> list[int]:
         if any(
             type(author_lou) is not int or author_lou < 0

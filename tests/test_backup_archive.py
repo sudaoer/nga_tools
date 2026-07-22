@@ -22,6 +22,7 @@ from nga_tools.backup.archive import (
 )
 from nga_tools.backup.archive_processing import FloorMapProcessingResult
 from nga_tools.backup.archive_store import ThreadArchiveStore
+from nga_tools.backup.archive_floor_store import ArchiveFloorMapRepository
 from nga_tools.backup.archive_post_store import ArchivePostRepository
 from nga_tools.backup.archive_state_store import ArchiveStateRepository
 from nga_tools.backup.floor_map import FloorLabels, FloorMapBuildResult
@@ -706,6 +707,83 @@ class BackupRawArchiveTest:
             assert connection.execute(
                 "SELECT COUNT(*) FROM backup_processing_state"
             ).fetchone() == (1,)
+
+    def test_local_work_plans_maintenance_for_repairable_floor_map(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        _run_backup(thread_dir, MutableFakeClient())
+
+        with (
+            patch.object(
+                archive_module,
+                "get_folder",
+                side_effect=_fake_get_folder(thread_dir),
+            ),
+            patch.object(
+                ArchiveFloorMapRepository,
+                "read_repairable_recovered_missing_floor_entries",
+                return_value={2: (11, 2002)},
+            ),
+        ):
+            local_work = backup_local_work_kind(123, 456)
+
+        assert local_work == "maintenance"
+
+    def test_force_processing_repairs_local_recovered_floor_map_first(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = ThreadArchiveStore(tmp_path / "123_456")
+        store.ensure_schema()
+        store.floor_maps.replace_floor_map(
+            StoredFloorMap(
+                version=FLOOR_MAP_VERSION,
+                generation_version=FLOOR_MAP_GENERATION_VERSION,
+                algorithm=FLOOR_MAP_HASH_ALGORITHM,
+                tid=123,
+                aid=456,
+                input_signature="repair-test",
+                entries=[
+                    {"pid": 1001, "author_lou": 1, "original_lou": 10},
+                    {"pid": None, "author_lou": 2, "original_lou": 11},
+                ],
+            )
+        )
+        store.ingest.upsert_recovered_posts(
+            {
+                2: {
+                    "original_pid": 2002,
+                    "original_lou": 11,
+                    "content": "anonymous body",
+                    "raw_post": {
+                        "lou": 11,
+                        "pid": 2002,
+                        "content": "anonymous body",
+                        "author": {"uid": -1, "username": "匿名"},
+                        "postdate": 123456,
+                        "attches": [],
+                    },
+                }
+            }
+        )
+
+        result = archive_processing_module.reuse_processing_state_after_page_refresh(
+            MutableFakeClient(),
+            123,
+            456,
+            store,
+            page_count=1,
+            author_total_lou_count=3,
+            local_pages_cover_remote=True,
+            force_processing=True,
+        )
+        floor_map = store.floor_maps.read_floor_map()
+
+        assert result.reason == "forced"
+        assert floor_map is not None
+        assert floor_map.entries[1]["original_pid"] == 2002
 
     @pytest.mark.parametrize("mode", ["sub", "all"])
     def test_backup_writes_archive_without_intermediate_html(

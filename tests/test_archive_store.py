@@ -561,6 +561,95 @@ class ThreadArchiveStoreTest:
             {"pid": None, "author_lou": 3, "original_lou": 12},
         ]
 
+    def test_repairs_recovered_missing_floor_entry_from_local_anonymous_post(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = ThreadArchiveStore(tmp_path / "thread")
+        store.ensure_schema()
+        store.floor_maps.replace_floor_map(
+            _stored_floor_map(
+                [
+                    {"pid": 1001, "author_lou": 1, "original_lou": 10},
+                    {"pid": None, "author_lou": 2, "original_lou": 11},
+                ]
+            )
+        )
+        store.ingest.upsert_recovered_posts(
+            {
+                2: {
+                    "original_pid": 2002,
+                    "original_lou": 11,
+                    "content": "anonymous body",
+                    "raw_post": {
+                        "lou": 11,
+                        "pid": 2002,
+                        "content": "anonymous body",
+                        "author": {"uid": -1, "username": "匿名"},
+                        "postdate": "2026-07-11 10:00",
+                        "attches": [],
+                    },
+                }
+            }
+        )
+        before = store.state.read_backup_processing_snapshot().change_state
+
+        repairable = (
+            store.floor_maps.read_repairable_recovered_missing_floor_entries()
+        )
+        repaired = store.floor_maps.repair_recovered_missing_floor_entries()
+        after = store.state.read_backup_processing_snapshot().change_state
+        repeated = store.floor_maps.repair_recovered_missing_floor_entries()
+        final_state = store.state.read_backup_processing_snapshot().change_state
+        floor_map = store.floor_maps.read_floor_map()
+
+        assert repairable == {2: (11, 2002)}
+        assert repaired == 1
+        assert repeated == 0
+        assert after.floor_map_revision == before.floor_map_revision + 1
+        assert after.archive_revision == before.archive_revision
+        assert final_state == after
+        assert floor_map is not None
+        assert floor_map.entries[1] == {
+            "pid": None,
+            "author_lou": 2,
+            "original_lou": 11,
+            "original_pid": 2002,
+        }
+
+    def test_recovered_missing_floor_repair_rejects_non_anonymous_content(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = ThreadArchiveStore(tmp_path / "thread")
+        store.ingest.upsert_page(
+            1,
+            {
+                "totalPage": 1,
+                "vrows": 3,
+                "result": [
+                    {
+                        "lou": 2,
+                        "pid": 1002,
+                        "content": "not anonymous",
+                        "author": {"uid": 456, "username": "author"},
+                    }
+                ],
+            },
+        )
+        store.floor_maps.replace_floor_map(
+            _stored_floor_map(
+                [{"pid": None, "author_lou": 2, "original_lou": 11}]
+            )
+        )
+        before = store.state.read_backup_processing_snapshot().change_state
+
+        with pytest.raises(ValueError, match="非匿名或缺少元数据"):
+            store.floor_maps.repair_recovered_missing_floor_entries()
+
+        after = store.state.read_backup_processing_snapshot().change_state
+        assert after == before
+
     def test_applies_missing_floor_attempt_delta_without_replacing_deferred(
         self,
     ) -> None:

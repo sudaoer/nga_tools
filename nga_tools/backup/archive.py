@@ -139,6 +139,12 @@ def _backup_local_work_kind(
         pagination_state.author_total_lou_count if aid is not None else None
     )
 
+    if (
+        aid is not None
+        and archive_store.floor_maps.read_repairable_recovered_missing_floor_entries()
+    ):
+        return "maintenance"
+
     floor_current = archive_processing.floor_state_is_current(
         snapshot,
         page_count=pagination_state.page_count,
