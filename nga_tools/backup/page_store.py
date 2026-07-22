@@ -151,14 +151,17 @@ def fetch_backup_pages(
             completed=page_number - 1,
             total=page_count,
         )
-        page_data = fetch_backup_page(
-            client,
-            tid,
-            aid,
-            page_number,
-            page_count,
-            first_page_data,
-        )
+        if page_number == 1:
+            page_data = first_page_data
+        else:
+            page_data = fetch_backup_page(
+                client,
+                tid,
+                aid,
+                page_number,
+                page_count,
+                first_page_data,
+            )
         if folder_json is not None:
             write_page_json(folder_json, page_number, page_data)
         page_data_by_page[page_number] = page_data

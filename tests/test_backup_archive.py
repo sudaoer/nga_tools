@@ -202,6 +202,36 @@ class PagedFakeClient(MutableFakeClient):
         return data
 
 
+class GrowingDuringPageOneFakeClient(MutableFakeClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.page_one_request_count = 0
+
+    def get_page(
+        self,
+        tid: int,
+        aid: int | None,
+        page: int,
+    ) -> dict[str, object]:
+        del tid
+        self.get_page_calls.append(page)
+        if page == 1:
+            self.page_one_request_count += 1
+        initial_snapshot = page == 1 and self.page_one_request_count == 1
+        data: dict[str, object] = {
+            "currentPage": page,
+            "totalPage": 1 if initial_snapshot else 2,
+            "result": (
+                [dict(post) for post in self.posts]
+                if page == 1
+                else [{"lou": 3, "pid": 1003, "content": "third"}]
+            ),
+        }
+        if aid is not None:
+            data["vrows"] = 3 if initial_snapshot else 4
+        return data
+
+
 def _fake_get_folder(thread_dir: Path) -> Callable[..., str]:
     def get_folder(
         tid: int,
@@ -1010,7 +1040,7 @@ class BackupRawArchiveTest:
         )
 
         assert full_processing_calls == ["full"]
-        assert client.get_page_calls == [1, 1, 1]
+        assert client.get_page_calls == [1, 1]
 
     @pytest.mark.parametrize("aid", [456, None])
     def test_second_unchanged_full_backup_reuses_processing_state(
@@ -1038,7 +1068,45 @@ class BackupRawArchiveTest:
         )
 
         assert full_processing_calls == ["full"]
-        assert client.get_page_calls == [1, 1, 1, 1]
+        assert client.get_page_calls == [1, 1]
+
+    def test_full_backup_keeps_first_page_and_pagination_state_consistent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        thread_dir = tmp_path / "123_456"
+        client = GrowingDuringPageOneFakeClient()
+
+        _run_backup(thread_dir, client, mode="all")
+
+        store = ThreadArchiveStore(thread_dir)
+        page_one = store.posts.read_latest_page_one_pagination()
+        snapshot = store.state.read_backup_processing_snapshot()
+        assert client.get_page_calls == [1]
+        assert page_one is not None
+        assert (page_one.page_count, page_one.vrows) == (1, 3)
+        assert snapshot.current_pagination_state is not None
+        assert (
+            snapshot.current_pagination_state.page_count,
+            snapshot.current_pagination_state.author_total_lou_count,
+        ) == (1, 3)
+        assert snapshot.floor_state is not None
+        assert (
+            snapshot.floor_state.page_count,
+            snapshot.floor_state.author_total_lou_count,
+        ) == (1, 3)
+
+        client.get_page_calls.clear()
+        _run_backup(thread_dir, client)
+
+        refreshed = store.state.read_backup_processing_snapshot()
+        assert client.get_page_calls == [1, 2]
+        assert store.posts.read_page_numbers() == {1, 2}
+        assert refreshed.current_pagination_state is not None
+        assert (
+            refreshed.current_pagination_state.page_count,
+            refreshed.current_pagination_state.author_total_lou_count,
+        ) == (2, 4)
 
     def test_force_processing_bypasses_reusable_state(self, tmp_path: Path) -> None:
         thread_dir = tmp_path / "123_456"
@@ -2643,12 +2711,19 @@ class BackupRawArchiveTest:
                 },
             }
         )
+        current_pagination_state = (
+            store.state.read_backup_processing_snapshot().current_pagination_state
+        )
+        assert current_pagination_state is not None
         assert store.state.commit_current_pagination_state(
             CurrentPaginationState(
                 page_count=2,
                 author_total_lou_count=5,
                 source_page_number=2,
-                observed_at=datetime(2026, 7, 22, tzinfo=timezone.utc),
+                observed_at=(
+                    current_pagination_state.observed_at
+                    + timedelta(microseconds=1)
+                ),
             )
         )
 
