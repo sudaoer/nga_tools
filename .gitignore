@@ -28,3 +28,4 @@ web/dist/
 !web/package.json
 !web/tsconfig.json
 *.txt
+replay-output
