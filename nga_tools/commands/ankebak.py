@@ -41,6 +41,10 @@ from nga_tools.core.image_download_runtime import (
 from nga_tools.backup.image_index_writer import use_image_index_writer
 from nga_tools.backup.image_store_metrics import use_image_store_metrics
 from nga_tools.backup.image_store import use_image_download_coordination
+from nga_tools.backup.image_store_runtime import (
+    effective_image_store_workers,
+    use_image_store_runtime,
+)
 
 
 AnkebakMode = Literal["full", "sub", "maintenance"]
@@ -185,6 +189,11 @@ def backup_auto(args: CommandArgs) -> None:
     validation_cache = ImageValidationCache()
     session_pool = ThreadLocalAPISessionPool()
     write_json = optional_bool(args, "write_json")
+    worker_count = _worker_count(args, app_config.backup_configs_workers)
+    image_store_workers = effective_image_store_workers(
+        worker_count,
+        app_config.image_concurrency,
+    )
 
     def action(thread_config: ThreadConfig) -> None:
         tid = thread_config_tid(thread_config)
@@ -231,6 +240,7 @@ def backup_auto(args: CommandArgs) -> None:
         use_api_runtime(app_config.api_concurrency),
         use_image_download_runtime(app_config.image_concurrency),
         use_audio_download_runtime(app_config.audio_concurrency),
+        use_image_store_runtime(image_store_workers),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),
@@ -240,7 +250,7 @@ def backup_auto(args: CommandArgs) -> None:
             progress_text="正在执行智能备份",
             failure_text="ankebak失败",
             summary_name="ankebak",
-            worker_count=_worker_count(args, app_config.backup_configs_workers),
+            worker_count=worker_count,
             write_timing_log=True,
             timing_log_enabled=app_config.timing_log_enabled,
             task_name="backup auto",

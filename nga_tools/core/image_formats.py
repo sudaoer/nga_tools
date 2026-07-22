@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import threading
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -32,6 +33,16 @@ IMAGE_FORMAT_BY_PILLOW_FORMAT = {
     "AVIF": "avif",
     "JPEGXL": "jxl",
 }
+
+
+@dataclass(frozen=True)
+class ImageFileInspection:
+    extension: str | None
+    error: str | None
+
+    @property
+    def valid(self) -> bool:
+        return self.error is None
 
 
 def register_pillow_image_openers() -> None:
@@ -129,47 +140,51 @@ def _pillow_image_extension(path: Path) -> str | None:
 
     if image_format is None:
         return None
-    return IMAGE_FORMAT_BY_PILLOW_FORMAT.get(image_format.upper(), image_format.lower())
+    return IMAGE_FORMAT_BY_PILLOW_FORMAT.get(
+        image_format.upper(),
+        image_format.lower(),
+    )
 
 
-def image_extension_from_file(path: Path) -> str | None:
-    header = _read_header(path)
-    if header is None:
-        return None
-
-    modern_extension = _modern_image_extension_from_header(header)
-    if modern_extension is not None:
-        return modern_extension
-
-    return _pillow_image_extension(path)
-
-
-def image_file_error(path: Path) -> str | None:
+def inspect_image_file(path: Path) -> ImageFileInspection:
     if not path.is_file():
-        return "not a file"
+        return ImageFileInspection(extension=None, error="not a file")
 
     header = _read_header(path)
     if header is None:
-        return "cannot read file"
+        return ImageFileInspection(extension=None, error="cannot read file")
 
     modern_extension = _modern_image_extension_from_header(header)
     if modern_extension is not None:
         decode_name = _modern_codec_for_extension(modern_extension)
         if decode_name is None:
-            return f"缺少图像解码器：{modern_extension}"
+            return ImageFileInspection(
+                extension=modern_extension,
+                error=f"缺少图像解码器：{modern_extension}",
+            )
         imagecodecs = _imagecodecs_module()
         if imagecodecs is None:
-            return "imagecodecs not installed"
+            return ImageFileInspection(
+                extension=modern_extension,
+                error="imagecodecs not installed",
+            )
         data = _read_file(path)
         if data is None:
-            return "cannot read file"
+            return ImageFileInspection(
+                extension=modern_extension,
+                error="cannot read file",
+            )
         try:
             _decode_codec(imagecodecs, decode_name, data)
         except Exception as error:
-            return str(error)
-        return None
+            return ImageFileInspection(
+                extension=modern_extension,
+                error=str(error),
+            )
+        return ImageFileInspection(extension=modern_extension, error=None)
 
     register_pillow_image_openers()
+    image_extension: str | None = None
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -178,11 +193,31 @@ def image_file_error(path: Path) -> str | None:
                 category=UserWarning,
             )
             with Image.open(path) as image:
+                image_format = image.format
+                if image_format is not None:
+                    image_extension = IMAGE_FORMAT_BY_PILLOW_FORMAT.get(
+                        image_format.upper(),
+                        image_format.lower(),
+                    )
                 image.verify()
     except (OSError, SyntaxError) as error:
-        return str(error)
+        return ImageFileInspection(extension=image_extension, error=str(error))
 
-    return None
+    return ImageFileInspection(extension=image_extension, error=None)
+
+
+def image_extension_from_file(path: Path) -> str | None:
+    header = _read_header(path)
+    if header is None:
+        return None
+    modern_extension = _modern_image_extension_from_header(header)
+    if modern_extension is not None:
+        return modern_extension
+    return _pillow_image_extension(path)
+
+
+def image_file_error(path: Path) -> str | None:
+    return inspect_image_file(path).error
 
 
 def image_file_is_valid(path: Path) -> bool:

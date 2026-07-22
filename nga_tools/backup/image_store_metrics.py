@@ -9,6 +9,7 @@ from typing import Literal
 
 
 type ImageStorePhase = Literal[
+    "source_inspection",
     "source_validation",
     "fallback_hash",
     "format_detection",
@@ -35,6 +36,7 @@ class ImageStoreMetrics:
     mapping_rows: int
     mapping_failures: int
     single_flight_waits: int
+    source_inspection_seconds: float
     source_validation_seconds: float
     fallback_hash_seconds: float
     format_detection_seconds: float
@@ -60,6 +62,7 @@ class ImageStoreMetrics:
             "mapping_rows": self.mapping_rows,
             "mapping_failures": self.mapping_failures,
             "single_flight_waits": self.single_flight_waits,
+            "source_inspection_seconds": self.source_inspection_seconds,
             "source_validation_seconds": self.source_validation_seconds,
             "fallback_hash_seconds": self.fallback_hash_seconds,
             "format_detection_seconds": self.format_detection_seconds,
@@ -91,6 +94,7 @@ class ImageStoreMetricsCollector:
         self._mapping_failures = 0
         self._single_flight_waits = 0
         self._phase_seconds: dict[ImageStorePhase, float] = {
+            "source_inspection": 0.0,
             "source_validation": 0.0,
             "fallback_hash": 0.0,
             "format_detection": 0.0,
@@ -170,6 +174,9 @@ class ImageStoreMetricsCollector:
                 mapping_rows=self._mapping_rows,
                 mapping_failures=self._mapping_failures,
                 single_flight_waits=self._single_flight_waits,
+                source_inspection_seconds=self._phase_seconds[
+                    "source_inspection"
+                ],
                 source_validation_seconds=self._phase_seconds[
                     "source_validation"
                 ],

@@ -25,6 +25,10 @@ from nga_tools.backup.image_store_metrics import (
     time_image_store_phase,
     use_image_store_metrics,
 )
+from nga_tools.backup.image_store_runtime import (
+    image_store_runtime_metrics,
+    use_image_store_runtime,
+)
 from nga_tools.core.image_download_runtime import (
     ImageDownloadRuntime,
     _AttemptFailure,
@@ -474,9 +478,10 @@ class ImageStoreMetricsTest:
         assert metrics.mapping_submissions == 2
         assert metrics.mapping_rows == 2
         assert metrics.mapping_failures == 0
-        assert metrics.source_validation_seconds > 0
+        assert metrics.source_inspection_seconds > 0
         assert metrics.fallback_hash_seconds > 0
-        assert metrics.format_detection_seconds > 0
+        assert metrics.source_validation_seconds == 0
+        assert metrics.format_detection_seconds == 0
         assert metrics.target_selection_seconds > 0
         assert metrics.content_compare_seconds > 0
         assert metrics.file_placement_seconds > 0
@@ -592,6 +597,51 @@ class ImageStoreMetricsTest:
         assert metrics.fallback_hashes == 1
 
 
+class ImageStoreRuntimeTest:
+    def test_runtime_bounds_workers_and_queue(self) -> None:
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+        saturated = threading.Event()
+        release = threading.Event()
+
+        def work(index: int) -> int:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                if active == 2:
+                    saturated.set()
+            assert release.wait(timeout=3)
+            with lock:
+                active -= 1
+            return index
+
+        with use_image_store_runtime(2) as runtime:
+            futures = [
+                runtime.submit(lambda index=index: work(index))
+                for index in range(6)
+            ]
+            assert saturated.wait(timeout=2)
+            metrics = image_store_runtime_metrics()
+            assert metrics is not None
+            assert metrics.worker_count == 2
+            assert metrics.queue_capacity == 4
+            assert metrics.peak_active_workers == 2
+            release.set()
+            assert [future.result(timeout=3) for future in futures] == list(
+                range(6)
+            )
+
+        final_metrics = image_store_runtime_metrics()
+        assert final_metrics is not None
+        assert final_metrics.items_submitted == 6
+        assert final_metrics.items_completed == 6
+        assert final_metrics.active_workers == 0
+        assert final_metrics.queued_items == 0
+        assert peak == 2
+
+
 class ImageMappingBatchTest:
     @pytest.mark.parametrize(
         ("task_count", "expected_batch_sizes"),
@@ -617,6 +667,8 @@ class ImageMappingBatchTest:
             for index in range(task_count)
         ]
         progress: list[tuple[int, str]] = []
+        progress_threads: list[int] = []
+        caller_thread = threading.get_ident()
 
         def fake_download(download_tasks, on_progress=None, **_kwargs):
             results: list[DownloadFileResult] = []
@@ -634,6 +686,14 @@ class ImageMappingBatchTest:
                     on_progress(current, len(download_tasks), result)
             return {"succeeded": results, "failed": []}
 
+        def record_progress(
+            current: int,
+            _total: int,
+            result: DownloadFileResult,
+        ) -> None:
+            progress.append((current, result["url"]))
+            progress_threads.append(threading.get_ident())
+
         real_enqueue = image_store._enqueue_image_mappings
         with (
             patch("nga_tools.config.get_config", return_value=config),
@@ -647,13 +707,12 @@ class ImageMappingBatchTest:
             ) as enqueue_mock,
             use_image_index_writer(),
             use_image_store_metrics(),
+            use_image_store_runtime(4),
             image_store.use_image_download_coordination(),
         ):
             summary = image_store.download_image_tasks(
                 tasks,
-                on_progress=lambda current, _total, result: progress.append(
-                    (current, result["url"])
-                ),
+                on_progress=record_progress,
             )
             metrics = image_store_metrics()
             writer_metrics = image_index_writer_metrics()
@@ -672,6 +731,7 @@ class ImageMappingBatchTest:
             (index, task["url"])
             for index, task in enumerate(tasks, start=1)
         ]
+        assert progress_threads == [caller_thread] * task_count
         assert len(mappings) == task_count
         assert metrics is not None
         assert metrics.mapping_submissions == len(expected_batch_sizes)
@@ -679,7 +739,6 @@ class ImageMappingBatchTest:
         assert writer_metrics is not None
         assert writer_metrics.rows_written == task_count
         assert writer_metrics.transactions <= len(expected_batch_sizes)
-
     def test_download_failure_flushes_earlier_successes_in_completion_order(
         self,
         tmp_path: Path,
@@ -1221,5 +1280,3 @@ class ImageSingleFlightTest:
 
         assert len(retried["succeeded"]) == 1
         assert calls == 2
-
-

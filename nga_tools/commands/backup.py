@@ -39,6 +39,10 @@ from nga_tools.core.image_download_runtime import (
 from nga_tools.backup.image_index_writer import use_image_index_writer
 from nga_tools.backup.image_store_metrics import use_image_store_metrics
 from nga_tools.backup.image_store import use_image_download_coordination
+from nga_tools.backup.image_store_runtime import (
+    effective_image_store_workers,
+    use_image_store_runtime,
+)
 from nga_tools.timing import use_timing_log
 
 
@@ -104,6 +108,10 @@ def run_backup_fetch_batch(
     worker_count = _batch_worker_count(args, app_config.backup_configs_workers)
     validation_cache = ImageValidationCache()
     session_pool = ThreadLocalAPISessionPool()
+    image_store_workers = effective_image_store_workers(
+        worker_count,
+        app_config.image_concurrency,
+    )
 
     def action(thread_config: ThreadConfig) -> None:
         tid = thread_config_tid(thread_config)
@@ -127,6 +135,7 @@ def run_backup_fetch_batch(
         use_api_runtime(app_config.api_concurrency),
         use_image_download_runtime(app_config.image_concurrency),
         use_audio_download_runtime(app_config.audio_concurrency),
+        use_image_store_runtime(image_store_workers),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),
@@ -171,6 +180,7 @@ def backup_all(args: CommandArgs) -> None:
         use_image_validation_cache(),
         use_image_download_runtime(app_config.image_concurrency),
         use_audio_download_runtime(app_config.audio_concurrency),
+        use_image_store_runtime(1),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),
@@ -211,6 +221,7 @@ def backup_sub(args: CommandArgs) -> None:
         use_image_validation_cache(),
         use_image_download_runtime(app_config.image_concurrency),
         use_audio_download_runtime(app_config.audio_concurrency),
+        use_image_store_runtime(1),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),
