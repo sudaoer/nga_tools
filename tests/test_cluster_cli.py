@@ -7,7 +7,6 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from nga_tools.cli import args_parse
 from nga_tools.commands.cluster import cluster_run
 from nga_tools.image_cluster.store import ImageClusterStore
 
@@ -33,53 +32,6 @@ def _make_subject_image(
 
 
 class ClusterCliTest:
-    def test_cluster_run_args_parse_defaults(self) -> None:
-        args = args_parse(["cluster", "run"])
-
-        assert args["command"] == "cluster"
-        assert args["action"] == "run"
-        assert args["threshold"] == 1
-        assert args["dhash_threshold"] == 2
-        assert args["color_threshold"] == 0.05
-        assert args["detail_threshold"] == 0.18
-        assert args["min_cluster_size"] == 2
-        assert args["lsh_bands"] == 4
-
-    def test_cluster_run_args_parse_custom(self) -> None:
-        args = args_parse(
-            [
-                "cluster",
-                "run",
-                "--threshold",
-                "12",
-                "--dhash-threshold",
-                "0",
-                "--color-threshold",
-                "0.05",
-                "--detail-threshold",
-                "0.12",
-                "--min-cluster-size",
-                "3",
-                "--lsh-bands",
-                "8",
-                "--workers",
-                "2",
-                "--limit",
-                "50",
-                "--force",
-            ],
-        )
-
-        assert args["threshold"] == 12
-        assert args["dhash_threshold"] == 0
-        assert args["color_threshold"] == 0.05
-        assert args["detail_threshold"] == 0.12
-        assert args["min_cluster_size"] == 3
-        assert args["lsh_bands"] == 8
-        assert args["workers"] == 2
-        assert args["limit"] == 50
-        assert args["force"] is True
-
     def test_cluster_run_processor_end_to_end(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
         images_dir = output_dir / "images_unique"

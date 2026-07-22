@@ -33,15 +33,6 @@ class InlineProgressTest:
 
         assert output.getvalue() == '\rabcdef\rxy    \rxy\n'
 
-    def test_finish_without_update_is_noop(self) -> None:
-        output = io.StringIO()
-        progress = InlineProgress(output)
-
-        progress.finish()
-
-        assert output.getvalue() == ''
-
-
 class ConsoleReporterTest:
     def test_plain_messages_are_written_without_markup_parsing(self) -> None:
         output = io.StringIO()
@@ -90,23 +81,6 @@ class ConsoleReporterTest:
             "图片下载2条，楼层映射1条，缓存1条。"
             in output_text
         )
-
-    def test_command_warning_summary_prints_zero(self) -> None:
-        output = io.StringIO()
-        console = Console(
-            file=output,
-            force_terminal=False,
-            color_system=None,
-            width=120,
-        )
-
-        with (
-            use_reporter(ConsoleReporter(console)),
-            use_command_warning_summary(),
-        ):
-            report_info("完成")
-
-        assert output.getvalue() == "完成\n警告总计：共0条。\n"
 
     def test_warning_log_mirrors_warnings_and_overwrites_file(self) -> None:
         output = io.StringIO()

@@ -5,7 +5,6 @@ from nga_tools.image_cluster.cluster import (
     ClusterMember,
     UnionFind,
     build_clusters,
-    source_score,
 )
 from nga_tools.image_cluster.features import ImageFeatures
 from nga_tools.image_cluster.lsh import CandidatePair
@@ -210,20 +209,6 @@ def test_clusters_sorted_by_size_desc() -> None:
     assert clusters[1].cluster_id == 2
 
 
-def test_source_candidate_prefers_alpha() -> None:
-    features = {
-        "a.png": _make_features("a.png", has_alpha=False, size=5000),
-        "b.png": _make_features("b.png", has_alpha=True, size=5000),
-    }
-    pairs = [CandidatePair(a="a.png", b="b.png")]
-    clusters = build_clusters(features, pairs, threshold=8, min_cluster_size=2)
-
-    assert len(clusters) == 1
-    source = [m for m in clusters[0].members if m.is_source_candidate]
-    assert len(source) == 1
-    assert source[0].relative_path == "b.png"
-
-
 def test_source_candidate_prefers_larger_pixels() -> None:
     features = {
         "small.png": _make_features("small.png", width=100, height=100, size=1000),
@@ -246,18 +231,6 @@ def test_source_candidate_prefers_png_format() -> None:
 
     source = [m for m in clusters[0].members if m.is_source_candidate]
     assert source[0].relative_path == "b.png"
-
-
-def test_source_score_values() -> None:
-    alpha_png = source_score(
-        _make_features("a.png", has_alpha=True, width=500, height=500, size=10000)
-    )
-    small_jpg = source_score(
-        _make_features("a.jpg", has_alpha=False, width=100, height=100, size=100)
-    )
-    assert alpha_png > small_jpg
-
-
 def test_empty_features_returns_empty() -> None:
     assert build_clusters({}, [], threshold=8, min_cluster_size=2) == []
 

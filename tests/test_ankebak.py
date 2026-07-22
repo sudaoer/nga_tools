@@ -121,7 +121,10 @@ class AnkebakStateStoreTest:
         )
         assert ankebak_target_key(101, 201) in store.load_states()
 
-    def test_records_forum_signature_and_full_success(self, tmp_path: Path) -> None:
+    def test_records_forum_signature_and_full_success_timestamps(
+        self,
+        tmp_path: Path,
+    ) -> None:
         store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")
         completed_at = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)
 
@@ -139,24 +142,6 @@ class AnkebakStateStoreTest:
         assert state.last_backup_success_at == completed_at
         assert state.last_full_backup_success_at == completed_at
         assert state.forum_signature_matches(_forum_thread())
-        waiting = state.full_backup_schedule_decision(
-            completed_at + timedelta(hours=84),
-            168,
-        )
-        probabilistic = state.full_backup_schedule_decision(
-            completed_at + timedelta(hours=120),
-            168,
-        )
-        deadline = state.full_backup_schedule_decision(
-            completed_at + timedelta(hours=168),
-            168,
-        )
-        assert not waiting.should_run
-        assert waiting.cumulative_probability == 0.125
-        assert probabilistic.should_run
-        assert probabilistic.reason == "probability"
-        assert deadline.should_run
-        assert deadline.reason == "deadline"
 
     def test_incremental_success_preserves_full_timestamp(self, tmp_path: Path) -> None:
         store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")

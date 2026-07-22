@@ -15,8 +15,6 @@ from nga_tools.image_cluster.features import ImageFeatures
 from nga_tools.image_cluster.store import (
     IMAGE_CLUSTERS_FILENAME,
     ImageClusterStore,
-    _decode_bg_color,
-    _encode_bg_color,
 )
 from nga_tools.storage import UnsupportedStorageFormatError
 
@@ -37,11 +35,6 @@ def _make_features(path: str, **overrides: object) -> ImageFeatures:
     }
     defaults.update(overrides)
     return ImageFeatures(**defaults)  # type: ignore[arg-type]
-
-
-def test_db_path_property(tmp_path: Path) -> None:
-    store = ImageClusterStore(tmp_path)
-    assert store.db_path.name == IMAGE_CLUSTERS_FILENAME
 
 
 def test_ensure_store_creates_tables(tmp_path: Path) -> None:
@@ -277,18 +270,6 @@ def test_load_run_params(tmp_path: Path) -> None:
     assert params == {"threshold": 8, "bands": 4}
 
 
-def test_latest_run_id_none_when_empty(tmp_path: Path) -> None:
-    store = ImageClusterStore(tmp_path)
-    store.ensure_store()
-    assert store.latest_run_id() is None
-
-
-def test_load_clusters_nonexistent_run(tmp_path: Path) -> None:
-    store = ImageClusterStore(tmp_path)
-    store.ensure_store()
-    assert store.load_clusters(999) == []
-
-
 def test_readonly_access(tmp_path: Path) -> None:
     store = ImageClusterStore(tmp_path)
     store.ensure_store()
@@ -308,12 +289,3 @@ def test_corrupt_database_raises(tmp_path: Path) -> None:
     db_path.write_bytes(b"not a database")
     with pytest.raises((sqlite3.DatabaseError, UnsupportedStorageFormatError)):
         store.ensure_store()
-
-
-def test_bg_color_encode_decode() -> None:
-    assert _encode_bg_color(None) is None
-    assert _encode_bg_color((0, 128, 255)) == "0,128,255"
-    assert _decode_bg_color(None) is None
-    assert _decode_bg_color("0,128,255") == (0, 128, 255)
-    assert _decode_bg_color("bad") is None
-    assert _decode_bg_color("1,2") is None

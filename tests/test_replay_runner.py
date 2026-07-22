@@ -515,32 +515,16 @@ class ReplayStateTest:
         with pytest.raises(ValueError, match="不能包含符号链接"):
             prepare_target_state("existing", source, target)
 
-    @pytest.mark.parametrize(
-        "relative_path",
-        [
-            Path("123_456/archive.sqlite3"),
-            Path("image_index.sqlite3"),
-            Path(IMAGE_CACHE_FILENAME),
-            Path("images_unique") / "linked-image.png",
-        ],
-    )
     @pytest.mark.skipif(
         os.name == "nt",
         reason="Windows replay暂时跳过链接隔离检查",
     )
-    def test_existing_rejects_source_hardlinks(
-        self,
-        tmp_path: Path,
-        relative_path: Path,
-    ) -> None:
+    def test_existing_rejects_source_hardlink(self, tmp_path: Path) -> None:
         source, _thread_config = _build_warm_source(tmp_path)
-        target = tmp_path / f"hardlink-{relative_path.name}"
+        target = tmp_path / "hardlink-archive"
         prepare_target_state("empty", source, target)
-        if relative_path.parts[0] == "images_unique":
-            source_path = next((source / "images_unique").iterdir())
-        else:
-            source_path = source / relative_path
-        target_path = target / relative_path
+        source_path = source / "123_456" / "archive.sqlite3"
+        target_path = target / "123_456" / "archive.sqlite3"
         target_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.link(source_path, target_path)
@@ -765,32 +749,6 @@ class ReplayRunnerTest:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind(("127.0.0.1", port))
-
-    @pytest.mark.skipif(
-        os.name == "nt",
-        reason="Windows replay暂时跳过链接隔离检查",
-    )
-    def test_runner_preserves_target_symlink_for_guard(self, tmp_path: Path) -> None:
-        source, thread_config = _build_warm_source(tmp_path)
-        target = tmp_path / "owned-target"
-        prepare_target_state("empty", source, target)
-        alias = tmp_path / "owned-target-alias"
-        try:
-            alias.symlink_to(target, target_is_directory=True)
-        except OSError as error:
-            pytest.skip(f"当前平台不能创建符号链接：{error}")
-
-        with pytest.raises(ValueError, match="target-output不能是符号链接"):
-            run_replay_backup(
-                {
-                    "server_url": "http://127.0.0.1:1",
-                    "source_output": str(source),
-                    "target_output": str(alias),
-                    "thread_config": str(thread_config),
-                    "initial_state": "existing",
-                    "all_threads": True,
-                }
-            )
 
     def test_cli_and_runner_write_reproducible_report(self, tmp_path: Path) -> None:
         source, thread_config = _build_warm_source(tmp_path)

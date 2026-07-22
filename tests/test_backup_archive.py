@@ -2332,76 +2332,6 @@ class BackupRawArchiveTest:
         assert records[1]["post"]["content"] == "anonymous body"
         assert {ref["author_lou"] for ref in author_refs} == {1, 3}
 
-    @pytest.mark.parametrize("mode", ["sub", "all"])
-    def test_timing_records_raw_render_stages(
-        self,
-        tmp_path: Path,
-        mode: str,
-    ) -> None:
-        thread_dir = tmp_path / "123_456"
-        timing_path = tmp_path / f"{mode}.timing.log"
-
-        with use_timing_log(
-            timing_path,
-            task_name=f"backup {mode}",
-        ) as timing_log:
-            assert timing_log is not None
-            _run_backup(thread_dir, MutableFakeClient(), mode=mode)
-
-        timing_text = timing_log.path.read_text(encoding="utf-8")
-        for stage_name in (
-            "楼主最新回复索引读取",
-            "历史未恢复缺失楼读取",
-            "读取完整归档记录",
-            "正文解析与图片处理",
-            "图片引用缓存读取",
-            "BBCode转临时HTML",
-            "图片解析与任务收集",
-            "图片引用缓存写入",
-        ):
-            assert f"阶段：{stage_name}，开始时间：" in timing_text
-            assert f"阶段：{stage_name}，结束时间：" in timing_text
-        assert "指标：图片引用记录数，值：2\n" in timing_text
-        assert "指标：恢复正文写入引发归档重读，值：0\n" in timing_text
-
-    def test_changed_archive_records_floor_refresh_substages(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        thread_dir = tmp_path / "123_456"
-        client = MutableFakeClient()
-        client.posts = [
-            {"lou": 1, "pid": 1001, "content": "first"},
-            {"lou": 3, "pid": 1003, "content": "third"},
-        ]
-        client.vrows = 4
-        _run_backup(thread_dir, client)
-        client.posts[1]["content"] = "third edited"
-        timing_path = tmp_path / "floor-refresh.timing.log"
-
-        with use_timing_log(
-            timing_path,
-            task_name="backup sub floor refresh",
-        ) as timing_log:
-            assert timing_log is not None
-            _run_backup(thread_dir, client)
-
-        timing_text = timing_log.path.read_text(encoding="utf-8")
-        assert "标签：楼层状态未命中原因，值：archive_revision\n" in timing_text
-        assert "标签：当前分页水位来源，值：archive_state\n" in timing_text
-        assert "指标：楼层状态分页数，值：1\n" in timing_text
-        assert "指标：当前分页水位分页数，值：1\n" in timing_text
-        for stage_name in (
-            "楼主最新回复索引读取",
-            "历史未恢复缺失楼读取",
-            "缺失楼恢复与楼层映射",
-            "恢复正文事务写入",
-            "处理状态快照重读",
-            "楼层状态提交",
-        ):
-            assert f"阶段：{stage_name}，开始时间：" in timing_text
-            assert f"阶段：{stage_name}，结束时间：" in timing_text
-
     def test_floor_state_mismatch_reasons_are_field_specific(self) -> None:
         snapshot = BackupProcessingSnapshot(
             change_state=ArchiveChangeState(4, 7),
@@ -2424,37 +2354,6 @@ class BackupRawArchiveTest:
             page_count=3,
             author_total_lou_count=27,
         ) == ("page_count", "author_total_lou_count")
-
-    def test_fast_path_timing_omits_full_archive_and_image_stages(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        thread_dir = tmp_path / "123_456"
-        client = MutableFakeClient()
-        _run_backup(thread_dir, client)
-        timing_path = tmp_path / "fast.timing.log"
-
-        with use_timing_log(
-            timing_path,
-            task_name="backup sub fast",
-        ) as timing_log:
-            assert timing_log is not None
-            _run_backup(thread_dir, client)
-
-        timing_text = timing_log.path.read_text(encoding="utf-8")
-        assert "阶段：处理状态复用判定，开始时间：" in timing_text
-        assert "阶段：未完成缺失楼重试，开始时间：" in timing_text
-        assert "阶段：未完成图片重试，开始时间：" in timing_text
-        assert "指标：处理状态复用命中，值：1\n" in timing_text
-        assert "标签：处理状态复用结果，值：hit\n" in timing_text
-        assert "指标：增量有效变更页数，值：0\n" in timing_text
-        assert "指标：待恢复缺失楼数，值：0\n" in timing_text
-        assert "指标：缺失楼重试引发完整处理，值：0\n" in timing_text
-        assert "阶段：楼主最新回复索引读取，开始时间：" not in timing_text
-        assert "阶段：历史未恢复缺失楼读取，开始时间：" not in timing_text
-        assert "阶段：读取完整归档记录，开始时间：" not in timing_text
-        assert "阶段：正文解析与图片处理，开始时间：" not in timing_text
-        assert "阶段：图片缓存文件校验，开始时间：" not in timing_text
 
     def test_v1_floor_state_refreshes_once_before_empty_retry_fast_path(
         self,

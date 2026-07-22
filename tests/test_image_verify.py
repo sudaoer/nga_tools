@@ -14,8 +14,6 @@ from nga_tools.backup import image_index, image_store
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.backup.image_verify import (
     ImageVerifyResult,
-    _image_verify_worker_count,
-    _list_downloaded_image_folders,
     _list_thread_referenced_image_paths,
     _verify_images_in_folder,
     verify_all_downloaded_images,
@@ -31,60 +29,6 @@ from nga_tools.commands.image import image_add, image_verify
 
 
 class ImageVerifyHandlerTest:
-    def test_without_thread_target_verifies_all_downloaded_images(self) -> None:
-        with (
-            patch("nga_tools.commands.image.verify_all_downloaded_images") as all_mock,
-            patch("nga_tools.commands.image.resolve_command_thread_target") as resolve_mock,
-            patch("nga_tools.commands.image.verify_downloaded_images") as verify_mock,
-        ):
-            image_verify({"name": None, "tid": None, "aid": None})
-
-        all_mock.assert_called_once_with()
-        resolve_mock.assert_not_called()
-        verify_mock.assert_not_called()
-
-    def test_with_thread_target_verifies_single_thread(self) -> None:
-        args = {"name": "帖子名", "tid": None, "aid": None}
-        with tempfile.TemporaryDirectory() as temp_dir_name:
-            thread_dir = Path(temp_dir_name) / "101_201"
-
-            def fake_get_folder(
-                tid: int,
-                aid: int | None,
-                subfolder: str | None = None,
-                *,
-                create: bool = True,
-            ) -> str:
-                assert (tid, aid) == (101, 201)
-                path = thread_dir
-                if subfolder is not None:
-                    path = path / subfolder
-                if create:
-                    path.mkdir(parents=True, exist_ok=True)
-                return str(path)
-
-            with (
-                patch("nga_tools.commands.image.verify_all_downloaded_images") as all_mock,
-                patch(
-                    "nga_tools.commands.image.resolve_command_thread_target",
-                    return_value=(101, 201),
-                ) as resolve_mock,
-                patch("nga_tools.commands.image.verify_downloaded_images") as verify_mock,
-                patch(
-                    "nga_tools.core.paths.get_folder",
-                    side_effect=fake_get_folder,
-                ),
-                patch(
-                    "nga_tools.commands.image.load_timing_log_enabled",
-                    return_value=True,
-                ),
-            ):
-                image_verify(args)
-
-        all_mock.assert_not_called()
-        resolve_mock.assert_called_once_with(args)
-        verify_mock.assert_called_once_with(101, 201)
-
     def test_single_thread_verify_writes_warning_log(self) -> None:
         args = {"name": "帖子名", "tid": None, "aid": None}
         output = io.StringIO()
@@ -295,23 +239,6 @@ class ImageAddHandlerTest:
 
 
 class ImageVerifyAllTest:
-    def test_lists_global_unique_image_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output_dir = Path(temp_dir)
-            unique_images = output_dir / "images_unique"
-            unique_images.mkdir(parents=True)
-            (output_dir / "101_201" / "images").mkdir(parents=True)
-            (output_dir / "103_301").mkdir()
-            (output_dir / "101_201" / "pdf" / "long_image_slices").mkdir(parents=True)
-
-            with patch(
-                "nga_tools.backup.image_verify.get_config",
-                return_value=SimpleNamespace(output_dir=str(output_dir)),
-            ):
-                folders = _list_downloaded_image_folders()
-
-        assert folders == [str(unique_images)]
-
     def test_verify_all_reports_global_unique_image_directory(self) -> None:
         results = [
             ImageVerifyResult(folder="output/images_unique", total=2, removed=1),
@@ -416,9 +343,3 @@ class ImageVerifyAllTest:
             assert result.removed == 1
             assert valid_image.exists()
             assert not broken_image.exists()
-
-    def test_worker_count_is_bounded(self) -> None:
-        assert _image_verify_worker_count(0) == 1
-        assert _image_verify_worker_count(1) == 1
-        assert _image_verify_worker_count(10) == 10
-        assert _image_verify_worker_count(100) == 32

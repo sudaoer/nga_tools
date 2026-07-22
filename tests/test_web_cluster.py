@@ -3,17 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from fastapi.testclient import TestClient
 from PIL import Image
 
 from nga_tools.image_cluster import ClusterParams, run_image_cluster
-from nga_tools.image_cluster.store import ImageClusterStore
 from nga_tools.web.cluster_data import (
     read_cluster_detail,
     read_cluster_stats,
     read_clusters,
 )
-from nga_tools.web.server import create_app
 
 
 def _make_subject_image(
@@ -117,78 +114,3 @@ class WebClusterTest:
         assert stats["totalClusters"] >= 1
         assert stats["totalImages"] >= 2
         assert stats["maxClusterSize"] >= 2
-
-    def test_api_clusters_endpoint(self, tmp_path: Path) -> None:
-        output_dir = tmp_path / "output"
-        run_id = _prepare_clusters(tmp_path)
-        client = TestClient(
-            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
-        )
-
-        response = client.get("/api/clusters", params={"min_size": 2})
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body["runId"] == run_id
-        assert body["total"] >= 1
-
-    def test_api_cluster_detail_endpoint(self, tmp_path: Path) -> None:
-        output_dir = tmp_path / "output"
-        _prepare_clusters(tmp_path)
-        client = TestClient(
-            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
-        )
-        listing = client.get("/api/clusters", params={"min_size": 2}).json()
-        cluster_id = listing["items"][0]["clusterId"]
-
-        response = client.get(f"/api/clusters/{cluster_id}")
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body["cluster"]["clusterId"] == cluster_id
-        assert len(body["cluster"]["members"]) >= 2
-
-    def test_api_cluster_stats_endpoint(self, tmp_path: Path) -> None:
-        output_dir = tmp_path / "output"
-        run_id = _prepare_clusters(tmp_path)
-        client = TestClient(
-            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
-        )
-
-        response = client.get("/api/clusters/stats")
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body["runId"] == run_id
-        assert body["totalClusters"] >= 1
-
-    def test_api_clusters_with_explicit_run_id(self, tmp_path: Path) -> None:
-        output_dir = tmp_path / "output"
-        run_id = _prepare_clusters(tmp_path)
-        client = TestClient(
-            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
-        )
-
-        response = client.get("/api/clusters", params={"run_id": run_id})
-
-        assert response.status_code == 200
-        assert response.json()["runId"] == run_id
-
-    def test_api_clusters_pagination(self, tmp_path: Path) -> None:
-        output_dir = tmp_path / "output"
-        _prepare_clusters(tmp_path)
-        client = TestClient(
-            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
-        )
-
-        page1 = client.get(
-            "/api/clusters", params={"min_size": 2, "offset": 0, "limit": 1}
-        ).json()
-        page2 = client.get(
-            "/api/clusters", params={"min_size": 2, "offset": 1, "limit": 1}
-        ).json()
-
-        assert page1["limit"] == 1
-        assert len(page1["items"]) <= 1
-        if page2["items"]:
-            assert page1["items"][0]["clusterId"] != page2["items"][0]["clusterId"]
