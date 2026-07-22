@@ -470,6 +470,58 @@ class ArchiveFloorMapRepository(ArchiveRepository):
         self._validate_floor_map(floor_map)
         return floor_map
 
+    def read_unresolved_author_lous_from_connection(
+        self,
+        connection: sqlite3.Connection,
+    ) -> tuple[int, ...]:
+        """Read only historical unresolved lous after validating map state."""
+
+        state_row = connection.execute(
+            """
+            SELECT
+                format_version,
+                generation_version,
+                hash_algorithm,
+                tid,
+                aid,
+                input_signature
+            FROM floor_map_state
+            WHERE singleton = 1
+            """
+        ).fetchone()
+        if state_row is None:
+            return ()
+        version, generation_version, algorithm, tid, aid, input_signature = state_row
+        for field_name, value in (
+            ("version", version),
+            ("generation_version", generation_version),
+            ("tid", tid),
+            ("aid", aid),
+        ):
+            if type(value) is not int:
+                raise ValueError(f"楼层映射字段必须是整数：{field_name}")
+        if not isinstance(algorithm, str) or not algorithm:
+            raise ValueError(f"archive楼层映射algorithm无效：{algorithm!r}")
+        if not isinstance(input_signature, str) or not input_signature:
+            raise ValueError(
+                f"archive楼层映射input_signature无效：{input_signature!r}"
+            )
+
+        rows = connection.execute(
+            """
+            SELECT author_lou
+            FROM floor_map_entries
+            WHERE pid IS NULL AND original_pid IS NULL
+            ORDER BY author_lou
+            """
+        ).fetchall()
+        unresolved_lous: list[int] = []
+        for row in rows:
+            if len(row) != 1 or type(row[0]) is not int:
+                raise ValueError(f"archive楼层映射author_lou无效：{row!r}")
+            unresolved_lous.append(row[0])
+        return tuple(unresolved_lous)
+
     def read_floor_map(self) -> StoredFloorMap | None:
         if not self.exists():
             return None

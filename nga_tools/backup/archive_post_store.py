@@ -69,16 +69,16 @@ _LATEST_POST_ROWS_QUERY = """
     """
 _LATEST_AUTHOR_POST_REFS_QUERY = """
     SELECT latest.pid, latest.lou, metadata.author_uid
-    FROM (
-        SELECT pid, lou,
-            ROW_NUMBER() OVER (
-                PARTITION BY lou ORDER BY last_seen_at DESC, id DESC
-            ) AS row_number
-        FROM post_versions
-    ) AS latest
+    FROM post_versions AS latest
     LEFT JOIN post_latest_metadata AS metadata
         ON metadata.pid = latest.pid AND metadata.lou = latest.lou
-    WHERE latest.row_number = 1
+    WHERE latest.id = (
+        SELECT candidate.id
+        FROM post_versions AS candidate
+        WHERE candidate.lou = latest.lou
+        ORDER BY candidate.last_seen_at DESC, candidate.id DESC
+        LIMIT 1
+    )
     ORDER BY latest.lou
     """
 
@@ -726,7 +726,7 @@ class ArchivePostRepository(ArchiveRepository):
         return result
 
     def read_author_floor_refresh_inputs(self) -> AuthorFloorRefreshInputs:
-        """Read author refs and the prior floor map from one SQLite snapshot."""
+        """Read author refs and historical unresolved lous in one snapshot."""
         self.require_exists()
         with self._read_connection() as connection:
             connection.execute("BEGIN")
@@ -735,20 +735,24 @@ class ArchivePostRepository(ArchiveRepository):
                     post_refs = self._read_latest_author_post_refs(connection)
                 try:
                     with time_section("历史未恢复缺失楼读取"):
-                        stored_floor_map = (
-                            self._floor_maps.read_floor_map_from_connection(
-                                connection
+                        historical_unresolved_lous = (
+                            self._floor_maps.read_unresolved_author_lous_from_connection(
+                                connection,
                             )
                         )
                 except ValueError as error:
                     return AuthorFloorRefreshInputs(
                         tuple(post_refs),
-                        None,
+                        (),
                         str(error),
                     )
             finally:
                 connection.rollback()
-        return AuthorFloorRefreshInputs(tuple(post_refs), stored_floor_map, None)
+        return AuthorFloorRefreshInputs(
+            tuple(post_refs),
+            historical_unresolved_lous,
+            None,
+        )
 
     def read_latest_author_total_lou_count(self) -> Optional[int]:
         self.require_exists()

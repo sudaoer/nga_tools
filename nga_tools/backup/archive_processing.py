@@ -18,7 +18,6 @@ from nga_tools.backup.floor_map import (
     load_floor_map_build_result_if_current,
     load_floor_labels_from_archive,
     recover_exact_missing_posts_from_original_pages,
-    unresolved_missing_author_lous_from_stored_floor_map,
 )
 from nga_tools.backup.floor_models import (
     FLOOR_MAP_GENERATION_VERSION,
@@ -283,14 +282,16 @@ def _author_post_refs_and_missing_lous(
             f"{archive_store.db_path}: {inputs.floor_map_error}",
         )
         previous_missing_lous: list[int] = []
-    elif inputs.stored_floor_map is None:
-        previous_missing_lous = []
     else:
-        previous_missing_lous = unresolved_missing_author_lous_from_stored_floor_map(
-            inputs.stored_floor_map,
-            present_lous=present_lous,
-            total_lou_count=author_total_lou_count,
-        )
+        previous_missing_lous = [
+            author_lou
+            for author_lou in inputs.historical_unresolved_lous
+            if author_lou not in present_lous
+            and (
+                author_total_lou_count is None
+                or author_lou < author_total_lou_count
+            )
+        ]
     return post_refs, _merge_missing_lou(missing_lous, previous_missing_lous)
 
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from nga_tools.backup.archive_posts import ArchivePostMetadata
-from nga_tools.backup.floor_models import AuthorPostRef, StoredFloorMap
+from nga_tools.backup.floor_models import AuthorPostRef
 from nga_tools.backup.models import PostData
 from nga_tools.word_count import TextWordCount
 
@@ -49,7 +49,7 @@ class ArchiveEffectivePostStats:
 @dataclass(frozen=True)
 class AuthorFloorRefreshInputs:
     post_refs: tuple[AuthorPostRef, ...]
-    stored_floor_map: StoredFloorMap | None
+    historical_unresolved_lous: tuple[int, ...]
     floor_map_error: str | None
 
 

@@ -178,11 +178,15 @@ class ArchiveStateRepository:
         self.require_exists()
         with self._state_write_connection() as connection:
             with connection:
-                connection.execute(
+                row = cast(
+                    tuple[object, object, object, object] | None,
+                    connection.execute(
                     """
                     INSERT INTO backup_current_pagination_state VALUES
                     (1, ?, ?, ?, ?)
                     ON CONFLICT(singleton) DO NOTHING
+                    RETURNING page_count, author_total_lou_count,
+                              source_page_number, observed_at
                     """,
                     (
                         state.page_count,
@@ -190,8 +194,21 @@ class ArchiveStateRepository:
                         state.source_page_number,
                         observed_at,
                     ),
+                    ).fetchone(),
                 )
-        current = self.read_current_pagination_state()
+                if row is None:
+                    row = cast(
+                        tuple[object, object, object, object] | None,
+                        connection.execute(
+                            """
+                            SELECT page_count, author_total_lou_count,
+                                   source_page_number, observed_at
+                            FROM backup_current_pagination_state
+                            WHERE singleton = 1
+                            """
+                        ).fetchone(),
+                    )
+                current = self._current_pagination_state_from_row(row)
         return current is not None
 
     def commit_current_pagination_state(
@@ -202,7 +219,9 @@ class ArchiveStateRepository:
         self.require_exists()
         with self._state_write_connection() as connection:
             with connection:
-                connection.execute(
+                row = cast(
+                    tuple[object, object, object, object] | None,
+                    connection.execute(
                     """
                     INSERT INTO backup_current_pagination_state VALUES
                     (1, ?, ?, ?, ?)
@@ -213,6 +232,8 @@ class ArchiveStateRepository:
                         observed_at = excluded.observed_at
                     WHERE excluded.observed_at >=
                           backup_current_pagination_state.observed_at
+                    RETURNING page_count, author_total_lou_count,
+                              source_page_number, observed_at
                     """,
                     (
                         state.page_count,
@@ -220,8 +241,21 @@ class ArchiveStateRepository:
                         state.source_page_number,
                         observed_at,
                     ),
+                    ).fetchone(),
                 )
-        current = self.read_current_pagination_state()
+                if row is None:
+                    row = cast(
+                        tuple[object, object, object, object] | None,
+                        connection.execute(
+                            """
+                            SELECT page_count, author_total_lou_count,
+                                   source_page_number, observed_at
+                            FROM backup_current_pagination_state
+                            WHERE singleton = 1
+                            """
+                        ).fetchone(),
+                    )
+                current = self._current_pagination_state_from_row(row)
         return current is not None and (
             current.page_count == state.page_count
             and current.author_total_lou_count

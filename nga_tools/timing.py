@@ -490,11 +490,20 @@ def write_batch_timing_summary(
     image_failure_categories: Counter[str] = Counter()
     processing_reuse_results: Counter[str] = Counter()
     image_reference_modes: Counter[str] = Counter()
+    sqlite_max_wait_microseconds = 0
+    sqlite_peak_concurrency = 0
     for snapshot in snapshot_list:
         for metric_name, value in snapshot.metrics:
             prefix = "图片下载失败/"
             if metric_name.startswith(prefix):
                 image_failure_categories[metric_name.removeprefix(prefix)] += value
+            if metric_name == "SQLite最大排队微秒":
+                sqlite_max_wait_microseconds = max(
+                    sqlite_max_wait_microseconds,
+                    value,
+                )
+            elif metric_name == "SQLite峰值并发":
+                sqlite_peak_concurrency = max(sqlite_peak_concurrency, value)
         for label_name, value in snapshot.labels:
             if label_name in {"处理状态复用结果", "增量快路径结果"}:
                 processing_reuse_results[value] += 1
@@ -568,6 +577,17 @@ def write_batch_timing_summary(
         )
     else:
         lines.append("不适用（本批次无图片引用处理样本）")
+
+    lines.extend(
+        [
+            "",
+            "SQLite并发门：",
+            (
+                f"峰值并发={sqlite_peak_concurrency}，"
+                f"最大排队={_format_duration(sqlite_max_wait_microseconds / 1_000_000)}"
+            ),
+        ]
+    )
 
     has_command_phases = (
         forum_sync_seconds is not None

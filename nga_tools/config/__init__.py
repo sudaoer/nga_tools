@@ -19,6 +19,7 @@ DEFAULT_API_CONCURRENCY = 4
 DEFAULT_IMAGE_CONCURRENCY = 50
 DEFAULT_AUDIO_CONCURRENCY = 8
 DEFAULT_BACKUP_CONFIGS_WORKERS = 4
+DEFAULT_BACKUP_SQLITE_CONCURRENCY = 2
 DEFAULT_TIMING_LOG_ENABLED = True
 DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS = 168
 DEFAULT_ANKEBAK_MISSING_FLOOR_IMMEDIATE_RETRY_HOURS = 168
@@ -50,6 +51,7 @@ class AppConfig:
     image_concurrency: int
     audio_concurrency: int
     backup_configs_workers: int
+    backup_sqlite_concurrency: int
     timing_log_enabled: bool
     ankebak_full_backup_interval_hours: int
     ankebak_missing_floor_immediate_retry_hours: int
@@ -329,6 +331,12 @@ def load_config(
             "backup_configs_workers",
             resolved_config_path,
             DEFAULT_BACKUP_CONFIGS_WORKERS,
+        ),
+        backup_sqlite_concurrency=_optional_positive_int(
+            config_data,
+            "backup_sqlite_concurrency",
+            resolved_config_path,
+            DEFAULT_BACKUP_SQLITE_CONCURRENCY,
         ),
         timing_log_enabled=_optional_bool(
             config_data,

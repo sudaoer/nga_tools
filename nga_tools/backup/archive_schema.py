@@ -14,6 +14,12 @@ from nga_tools.storage.schema import (
 
 
 ARCHIVE_SCHEMA_VERSION = 1
+ARCHIVE_READ_INDEXES = {"idx_post_versions_latest_covering"}
+ARCHIVE_WRITE_INDEXES = {
+    *ARCHIVE_READ_INDEXES,
+    "idx_floor_map_entries_unresolved",
+}
+ARCHIVE_FORBIDDEN_INDEXES = {"idx_post_versions_latest"}
 ARCHIVE_TABLES = {
     "storage_metadata",
     "archive_pages",
@@ -132,9 +138,23 @@ def require_current_archive_schema(
     )
     require_index_names(
         connection,
-        required={"idx_post_versions_latest_covering"},
-        forbidden={"idx_post_versions_latest"},
+        required=ARCHIVE_READ_INDEXES,
+        forbidden=ARCHIVE_FORBIDDEN_INDEXES,
         source=source,
+    )
+    return metadata
+
+
+def require_archive_write_ready_schema(
+    connection: sqlite3.Connection,
+    db_path: Path,
+) -> StorageMetadata:
+    metadata = require_current_archive_schema(connection, db_path)
+    require_index_names(
+        connection,
+        required=ARCHIVE_WRITE_INDEXES,
+        forbidden=ARCHIVE_FORBIDDEN_INDEXES,
+        source=f"archive {db_path}",
     )
     return metadata
 

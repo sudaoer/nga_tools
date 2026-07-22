@@ -150,8 +150,69 @@ class ThreadArchiveStoreTest:
 
         assert connect_read.call_count == 1
         assert inputs.post_refs == ({"pid": 1001, "author_lou": 1},)
-        assert inputs.stored_floor_map == expected_floor_map
+        assert inputs.historical_unresolved_lous == ()
         assert inputs.floor_map_error is None
+
+    def test_author_floor_refresh_uses_partial_index_without_candidate_rows(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            store.floor_maps.replace_floor_map(
+                _stored_floor_map(
+                    [
+                        {
+                            "pid": None,
+                            "author_lou": 1,
+                            "original_lou": None,
+                            "candidate_original_lous": [10, 11],
+                        },
+                        {"pid": None, "author_lou": 2, "original_lou": 12},
+                        {
+                            "pid": None,
+                            "author_lou": 3,
+                            "original_lou": 13,
+                            "original_pid": 3003,
+                        },
+                        {"pid": 4004, "author_lou": 4, "original_lou": 14},
+                    ]
+                )
+            )
+            reader = ThreadArchiveStore(store.thread_folder)
+            traced_statements: list[str] = []
+            original_open = reader._open_read_connection
+
+            def traced_open() -> sqlite3.Connection:
+                connection = original_open()
+                connection.set_trace_callback(traced_statements.append)
+                return connection
+
+            with patch.object(reader, "_open_read_connection", traced_open):
+                inputs = reader.posts.read_author_floor_refresh_inputs()
+
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                query_plan = connection.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT author_lou
+                    FROM floor_map_entries
+                    WHERE pid IS NULL AND original_pid IS NULL
+                    ORDER BY author_lou
+                    """
+                ).fetchall()
+
+        assert inputs.historical_unresolved_lous == (1, 2)
+        assert inputs.floor_map_error is None
+        assert not any(
+            "FROM FLOOR_MAP_CANDIDATES" in statement.upper()
+            for statement in traced_statements
+        )
+        assert any(
+            "idx_floor_map_entries_unresolved" in row[3]
+            for row in query_plan
+        )
+        assert not any("TEMP B-TREE" in row[3] for row in query_plan)
 
     def test_latest_author_refs_keep_tie_break_and_anonymous_filtering(
         self,
@@ -205,6 +266,70 @@ class ThreadArchiveStoreTest:
             refs = store.posts.read_latest_author_post_refs()
 
         assert refs == [{"pid": 1002, "author_lou": 1}]
+
+    def test_latest_author_refs_match_window_query_without_temp_sort(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            for observed_at, posts in (
+                (
+                    "2026-07-13T01:00:00+00:00",
+                    [
+                        {"lou": 1, "pid": 1001, "content": "old"},
+                        {"lou": 2, "pid": 2001, "content": "visible"},
+                    ],
+                ),
+                (
+                    "2026-07-13T02:00:00+00:00",
+                    [
+                        {"lou": 1, "pid": 1002, "content": "new"},
+                        {
+                            "lou": 2,
+                            "pid": 2002,
+                            "content": "anonymous",
+                            "author": {"uid": -1},
+                        },
+                    ],
+                ),
+            ):
+                store.ingest.upsert_page(
+                    1,
+                    {"totalPage": 1, "result": posts},
+                    observed_at=observed_at,
+                )
+
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                new_rows = connection.execute(
+                    _LATEST_AUTHOR_POST_REFS_QUERY
+                ).fetchall()
+                old_rows = connection.execute(
+                    """
+                    SELECT latest.pid, latest.lou, metadata.author_uid
+                    FROM (
+                        SELECT pid, lou,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY lou
+                                ORDER BY last_seen_at DESC, id DESC
+                            ) AS row_number
+                        FROM post_versions
+                    ) AS latest
+                    LEFT JOIN post_latest_metadata AS metadata
+                        ON metadata.pid = latest.pid
+                        AND metadata.lou = latest.lou
+                    WHERE latest.row_number = 1
+                    ORDER BY latest.lou
+                    """
+                ).fetchall()
+                query_plan = connection.execute(
+                    f"EXPLAIN QUERY PLAN {_LATEST_AUTHOR_POST_REFS_QUERY}"
+                ).fetchall()
+
+        assert new_rows == old_rows
+        details = [row[3] for row in query_plan]
+        assert sum(
+            "idx_post_versions_latest_covering" in detail
+            for detail in details
+        ) >= 2
+        assert not any("TEMP B-TREE" in detail for detail in details)
 
     def test_reads_first_valid_postdate_after_missing_gap_end(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -593,6 +718,42 @@ class ThreadArchiveStoreTest:
         assert post_seen_counts == [(2,), (2,)]
         assert metadata_seen_counts == [(2,), (2,)]
 
+    def test_repeated_version_does_not_encode_or_overwrite_content_blob(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            page = {
+                "totalPage": 1,
+                "result": [{"lou": 1, "pid": 1001, "content": "same body"}],
+            }
+            store.ingest.upsert_page(
+                1,
+                page,
+                observed_at="2026-07-11T01:00:00+00:00",
+            )
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                blob_before = connection.execute(
+                    "SELECT content FROM post_versions WHERE pid = 1001"
+                ).fetchone()
+
+            with patch(
+                "nga_tools.backup.archive_ingest_store.encode_content",
+                side_effect=AssertionError("existing content was encoded"),
+            ):
+                result = store.ingest.upsert_page(
+                    1,
+                    page,
+                    observed_at="2026-07-11T02:00:00+00:00",
+                )
+
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                blob_after = connection.execute(
+                    "SELECT content, seen_count FROM post_versions WHERE pid = 1001"
+                ).fetchone()
+
+        assert result.post_versions_inserted == 0
+        assert blob_before is not None
+        assert blob_after == (blob_before[0], 2)
+
     def test_page_change_preflight_is_read_only_and_matches_effective_inputs(
         self,
     ) -> None:
@@ -735,6 +896,35 @@ class ThreadArchiveStoreTest:
 
         assert snapshot.current_pagination_state == newer
 
+    def test_older_equal_pagination_state_remains_compatible(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            newer = CurrentPaginationState(
+                page_count=3,
+                author_total_lou_count=27,
+                source_page_number=3,
+                observed_at=datetime(2026, 7, 11, 2, tzinfo=timezone.utc),
+            )
+            older_equal = CurrentPaginationState(
+                page_count=3,
+                author_total_lou_count=27,
+                source_page_number=1,
+                observed_at=datetime(2026, 7, 11, 1, tzinfo=timezone.utc),
+            )
+
+            assert store.state.commit_current_pagination_state(newer)
+            with patch.object(
+                store,
+                "state_read_connection",
+                side_effect=AssertionError("opened a second read connection"),
+            ):
+                assert store.state.commit_current_pagination_state(older_equal)
+
+            snapshot = store.state.read_backup_processing_snapshot()
+
+        assert snapshot.current_pagination_state == newer
+
     def test_floor_state_commit_rejects_changed_current_pagination(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
@@ -834,23 +1024,17 @@ class ThreadArchiveStoreTest:
     def test_upsert_pages_rolls_back_every_page_when_one_write_fails(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))
-            original_upsert = store.ingest._upsert_post_latest_metadata
-            call_count = 0
-
-            def fail_second_post(*args: object, **kwargs: object) -> None:
-                nonlocal call_count
-                call_count += 1
-                if call_count == 2:
-                    raise RuntimeError("second page failed")
-                original_upsert(*args, **kwargs)  # type: ignore[arg-type]
+            def fail_metadata_batch(*args: object, **kwargs: object) -> None:
+                del args, kwargs
+                raise RuntimeError("metadata batch failed")
 
             with (
                 patch.object(
                     store.ingest,
-                    "_upsert_post_latest_metadata",
-                    side_effect=fail_second_post,
+                    "_upsert_post_latest_metadata_batch",
+                    side_effect=fail_metadata_batch,
                 ),
-                pytest.raises(RuntimeError, match="second page failed"),
+                pytest.raises(RuntimeError, match="metadata batch failed"),
             ):
                 store.ingest.upsert_pages(
                     {
@@ -912,6 +1096,51 @@ class ThreadArchiveStoreTest:
             with closing(reader.connect_read()) as connection:
                 with pytest.raises(sqlite3.OperationalError, match="readonly"):
                     connection.execute("DELETE FROM archive_change_state")
+
+    def test_current_schema_write_fast_path_skips_schema_transaction(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            thread_folder = Path(temp_dir_name)
+            ThreadArchiveStore(thread_folder).ensure_schema()
+            reopened = ThreadArchiveStore(thread_folder)
+
+            with patch.object(reopened, "_ensure_schema") as ensure_schema:
+                with closing(reopened.connect_write()) as connection:
+                    assert not connection.in_transaction
+
+            ensure_schema.assert_not_called()
+
+    def test_partial_index_is_write_repaired_but_not_read_repaired(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            thread_folder = Path(temp_dir_name)
+            store = ThreadArchiveStore(thread_folder)
+            store.ensure_schema()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                connection.execute("DROP INDEX idx_floor_map_entries_unresolved")
+                connection.commit()
+
+            reader = ThreadArchiveStore(thread_folder)
+            assert reader.posts.read_page_numbers() == set()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                absent_after_read = connection.execute(
+                    """
+                    SELECT 1 FROM sqlite_schema
+                    WHERE type = 'index'
+                      AND name = 'idx_floor_map_entries_unresolved'
+                    """
+                ).fetchone()
+
+            reader.ensure_schema()
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                present_after_write = connection.execute(
+                    """
+                    SELECT 1 FROM sqlite_schema
+                    WHERE type = 'index'
+                      AND name = 'idx_floor_map_entries_unresolved'
+                    """
+                ).fetchone()
+
+        assert absent_after_read is None
+        assert present_after_write == (1,)
 
     def test_connection_session_reuses_six_read_write_connections(
         self,

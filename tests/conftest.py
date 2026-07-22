@@ -37,6 +37,7 @@ def isolate_default_output_dir(
         image_concurrency=config.DEFAULT_IMAGE_CONCURRENCY,
         audio_concurrency=config.DEFAULT_AUDIO_CONCURRENCY,
         backup_configs_workers=config.DEFAULT_BACKUP_CONFIGS_WORKERS,
+        backup_sqlite_concurrency=config.DEFAULT_BACKUP_SQLITE_CONCURRENCY,
         timing_log_enabled=config.DEFAULT_TIMING_LOG_ENABLED,
         ankebak_full_backup_interval_hours=(
             config.DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS

@@ -21,6 +21,7 @@ from nga_tools.backup.floor_models import RecoveredMissingPost
 from nga_tools.backup.models import PostData
 from nga_tools.backup.post_data import post_data_from_raw, post_source_hash
 from nga_tools.ngaclient.client import PageData
+from nga_tools.timing import time_section
 from nga_tools.word_count import WORD_COUNT_VERSION, TextWordCount, count_post_content
 
 _EMPTY_IMAGE_ATTACHMENTS_JSON = "[]"
@@ -66,27 +67,37 @@ class ArchiveIngestRepository(ArchiveRepository):
             ),
         )
 
-    def _post_version_id(
+    def _read_existing_post_version_keys(
         self,
         connection: sqlite3.Connection,
-        pid: int,
-        lou: int,
-        source_hash: str,
-    ) -> Optional[int]:
-        row = connection.execute(
-            """
-            SELECT id
-            FROM post_versions
-            WHERE pid = ? AND lou = ? AND source_hash = ?
-            """,
-            (pid, lou, source_hash),
-        ).fetchone()
-        if row is None:
-            return None
-        value = row[0]
-        if type(value) is int:
-            return value
-        raise ValueError(f"archive post_versions.id字段无效：{value!r}")
+        keys: set[tuple[int, int, str]],
+    ) -> set[tuple[int, int, str]]:
+        existing: set[tuple[int, int, str]] = set()
+        ordered_keys = sorted(keys)
+        for start in range(0, len(ordered_keys), 800):
+            chunk = ordered_keys[start : start + 800]
+            placeholders = ", ".join("(?, ?, ?)" for _key in chunk)
+            parameters: list[object] = []
+            for key in chunk:
+                parameters.extend(key)
+            rows = connection.execute(
+                f"""
+                SELECT pid, lou, source_hash
+                FROM post_versions
+                WHERE (pid, lou, source_hash) IN ({placeholders})
+                """,
+                parameters,
+            ).fetchall()
+            for row in rows:
+                if (
+                    len(row) != 3
+                    or type(row[0]) is not int
+                    or type(row[1]) is not int
+                    or not isinstance(row[2], str)
+                ):
+                    raise ValueError(f"archive帖子版本键无效：{row!r}")
+                existing.add((row[0], row[1], row[2]))
+        return existing
 
     def _upsert_post_version(
         self,
@@ -97,77 +108,108 @@ class ArchiveIngestRepository(ArchiveRepository):
         count_observation: bool,
         source_hash: str | None = None,
         word_count: TextWordCount | None = None,
-    ) -> tuple[int, bool]:
+        existing_keys: set[tuple[int, int, str]] | None = None,
+    ) -> bool:
         if source_hash is None:
             source_hash = post_source_hash(post)
         if word_count is None:
             word_count = count_post_content(post["content"])
-        inserted = (
-            self._post_version_id(
+        key = (post["pid"], post["lou"], source_hash)
+        if existing_keys is None:
+            existing_keys = self._read_existing_post_version_keys(
                 connection,
-                post["pid"],
-                post["lou"],
-                source_hash,
+                {key},
             )
-            is None
-        )
         seen_increment = 1 if count_observation else 0
-        connection.execute(
+        if key in existing_keys:
+            cursor = connection.execute(
+                """
+                UPDATE post_versions SET
+                    word_count_version = ?,
+                    word_count_chinese_chars = ?,
+                    word_count_chinese_with_punctuation = ?,
+                    first_seen_at = CASE
+                        WHEN first_seen_at > ? THEN ? ELSE first_seen_at
+                    END,
+                    last_seen_at = CASE
+                        WHEN last_seen_at < ? THEN ? ELSE last_seen_at
+                    END,
+                    seen_count = seen_count + ?
+                WHERE pid = ? AND lou = ? AND source_hash = ?
+                """,
+                (
+                    WORD_COUNT_VERSION,
+                    word_count.chinese_chars,
+                    word_count.chinese_with_punctuation,
+                    observed_at,
+                    observed_at,
+                    observed_at,
+                    observed_at,
+                    seen_increment,
+                    *key,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"更新archive帖子版本失败：{key!r}")
+            return False
+
+        cursor = connection.execute(
             """
             INSERT INTO post_versions (
-                pid,
-                lou,
-                source_hash,
-                content,
+                pid, lou, source_hash, content,
                 word_count_version,
                 word_count_chinese_chars,
                 word_count_chinese_with_punctuation,
-                first_seen_at,
-                last_seen_at,
-                seen_count
+                first_seen_at, last_seen_at, seen_count
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(pid, lou, source_hash) DO UPDATE SET
-                content = excluded.content,
-                source_hash = excluded.source_hash,
-                word_count_version = excluded.word_count_version,
-                word_count_chinese_chars = excluded.word_count_chinese_chars,
-                word_count_chinese_with_punctuation =
-                    excluded.word_count_chinese_with_punctuation,
-                first_seen_at = CASE
-                    WHEN post_versions.first_seen_at > excluded.first_seen_at
-                    THEN excluded.first_seen_at
-                    ELSE post_versions.first_seen_at
-                END,
-                last_seen_at = CASE
-                    WHEN post_versions.last_seen_at < excluded.last_seen_at
-                    THEN excluded.last_seen_at
-                    ELSE post_versions.last_seen_at
-                END,
-                seen_count = post_versions.seen_count + ?
+            ON CONFLICT(pid, lou, source_hash) DO NOTHING
             """,
             (
-                post["pid"],
-                post["lou"],
-                source_hash,
+                *key,
                 encode_content(post["content"]),
                 WORD_COUNT_VERSION,
                 word_count.chinese_chars,
                 word_count.chinese_with_punctuation,
                 observed_at,
                 observed_at,
-                seen_increment,
             ),
         )
-        version_id = self._post_version_id(
-            connection,
-            post["pid"],
-            post["lou"],
-            source_hash,
+        if cursor.rowcount == 1:
+            existing_keys.add(key)
+            return True
+
+        existing_keys.add(key)
+        cursor = connection.execute(
+            """
+            UPDATE post_versions SET
+                word_count_version = ?,
+                word_count_chinese_chars = ?,
+                word_count_chinese_with_punctuation = ?,
+                first_seen_at = CASE
+                    WHEN first_seen_at > ? THEN ? ELSE first_seen_at
+                END,
+                last_seen_at = CASE
+                    WHEN last_seen_at < ? THEN ? ELSE last_seen_at
+                END,
+                seen_count = seen_count + ?
+            WHERE pid = ? AND lou = ? AND source_hash = ?
+            """,
+            (
+                WORD_COUNT_VERSION,
+                word_count.chinese_chars,
+                word_count.chinese_with_punctuation,
+                observed_at,
+                observed_at,
+                observed_at,
+                observed_at,
+                seen_increment,
+                *key,
+            ),
         )
-        if version_id is None:
-            raise RuntimeError("写入post_versions后无法读取version id。")
-        return version_id, inserted
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"写入archive帖子版本失败：{key!r}")
+        return False
 
     def _upsert_post_latest_metadata(
         self,
@@ -181,8 +223,31 @@ class ArchiveIngestRepository(ArchiveRepository):
     ) -> None:
         if metadata is None:
             metadata = metadata_from_raw_post(raw_post)
-        seen_increment = 1 if count_observation else 0
-        connection.execute(
+        self._upsert_post_latest_metadata_batch(
+            connection,
+            [(post, observed_at, count_observation, metadata)],
+        )
+
+    @staticmethod
+    def _upsert_post_latest_metadata_batch(
+        connection: sqlite3.Connection,
+        items: list[tuple[PostData, str, bool, ArchivePostMetadata]],
+    ) -> None:
+        rows = [
+            (
+                post["pid"],
+                post["lou"],
+                metadata["author_name"],
+                metadata["author_uid"],
+                metadata["postdate_json"],
+                _EMPTY_IMAGE_ATTACHMENTS_JSON,
+                observed_at,
+                observed_at,
+                1 if count_observation else 0,
+            )
+            for post, observed_at, count_observation, metadata in items
+        ]
+        connection.executemany(
             """
             INSERT INTO post_latest_metadata (
                 pid,
@@ -213,17 +278,7 @@ class ArchiveIngestRepository(ArchiveRepository):
                 END,
                 seen_count = post_latest_metadata.seen_count + ?
             """,
-            (
-                post["pid"],
-                post["lou"],
-                metadata["author_name"],
-                metadata["author_uid"],
-                metadata["postdate_json"],
-                _EMPTY_IMAGE_ATTACHMENTS_JSON,
-                observed_at,
-                observed_at,
-                seen_increment,
-            ),
+            rows,
         )
 
     def _read_effective_processing_inputs(
@@ -355,17 +410,18 @@ class ArchiveIngestRepository(ArchiveRepository):
         observed_at: str | None = None,
         count_observation: bool = True,
     ) -> ArchivePagesUpsertResult:
-        prepared_pages = [
-            self._prepare_archive_page(
-                page_number,
-                page_data_by_page[page_number],
-                observed_at=(
-                    _now_utc_iso() if observed_at is None else observed_at
-                ),
-                count_observation=count_observation,
-            )
-            for page_number in sorted(page_data_by_page)
-        ]
+        with time_section("归档页面准备"):
+            prepared_pages = [
+                self._prepare_archive_page(
+                    page_number,
+                    page_data_by_page[page_number],
+                    observed_at=(
+                        _now_utc_iso() if observed_at is None else observed_at
+                    ),
+                    count_observation=count_observation,
+                )
+                for page_number in sorted(page_data_by_page)
+            ]
         if not prepared_pages:
             return ArchivePagesUpsertResult(
                 pages_processed=0,
@@ -387,47 +443,79 @@ class ArchiveIngestRepository(ArchiveRepository):
         }
         post_versions_inserted = 0
         changed_lous: set[int] = set()
+        prepared_posts = [
+            (page, prepared_post)
+            for page in prepared_pages
+            for prepared_post in page.posts
+        ]
+        version_keys = {
+            (
+                prepared_post.post["pid"],
+                prepared_post.post["lou"],
+                prepared_post.source_hash,
+            )
+            for _page, prepared_post in prepared_posts
+        }
 
         with self._write_connection() as connection:
-            with connection:
-                inputs_before = self._read_effective_processing_inputs(
-                    connection,
-                    affected_lous,
-                )
-                for page in prepared_pages:
-                    self._upsert_archive_page(connection, page)
-                    for prepared_post in page.posts:
-                        post = prepared_post.post
-                        _version_id, version_inserted = self._upsert_post_version(
+            connection.execute("BEGIN")
+            try:
+                with time_section("归档版本预读"):
+                    inputs_before = self._read_effective_processing_inputs(
+                        connection,
+                        affected_lous,
+                    )
+                    existing_version_keys = (
+                        self._read_existing_post_version_keys(
                             connection,
-                            post,
+                            version_keys,
+                        )
+                    )
+                with time_section("归档版本写入"):
+                    for page in prepared_pages:
+                        self._upsert_archive_page(connection, page)
+                    for page, prepared_post in prepared_posts:
+                        version_inserted = self._upsert_post_version(
+                            connection,
+                            prepared_post.post,
                             page.observed_at,
                             count_observation=page.count_observation,
                             source_hash=prepared_post.source_hash,
                             word_count=prepared_post.word_count,
-                        )
-                        self._upsert_post_latest_metadata(
-                            connection,
-                            prepared_post.raw_post,
-                            post,
-                            page.observed_at,
-                            count_observation=page.count_observation,
-                            metadata=prepared_post.metadata,
+                            existing_keys=existing_version_keys,
                         )
                         if version_inserted:
                             post_versions_inserted += 1
-
-                inputs_after = self._read_effective_processing_inputs(
-                    connection,
-                    affected_lous,
-                )
-                changed_lous = {
-                    lou
-                    for lou in affected_lous
-                    if inputs_before.get(lou) != inputs_after.get(lou)
-                }
-                if changed_lous:
-                    self._increment_archive_revision(connection)
+                with time_section("归档元数据写入"):
+                    self._upsert_post_latest_metadata_batch(
+                        connection,
+                        [
+                            (
+                                prepared_post.post,
+                                page.observed_at,
+                                page.count_observation,
+                                prepared_post.metadata,
+                            )
+                            for page, prepared_post in prepared_posts
+                        ],
+                    )
+                with time_section("归档有效输入比较"):
+                    inputs_after = self._read_effective_processing_inputs(
+                        connection,
+                        affected_lous,
+                    )
+                    changed_lous = {
+                        lou
+                        for lou in affected_lous
+                        if inputs_before.get(lou) != inputs_after.get(lou)
+                    }
+                    if changed_lous:
+                        self._increment_archive_revision(connection)
+                with time_section("归档事务提交"):
+                    connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
 
         return ArchivePagesUpsertResult(
             pages_processed=len(prepared_pages),
@@ -506,7 +594,7 @@ class ArchiveIngestRepository(ArchiveRepository):
                         raw_post,
                         source=f"恢复的匿名原帖第{recovered['original_lou']}楼",
                     )
-                    _version_id, inserted = self._upsert_post_version(
+                    inserted = self._upsert_post_version(
                         connection,
                         post,
                         observed_at,

@@ -7,6 +7,7 @@
   "image_concurrency": 50,
   "audio_concurrency": 8,
   "backup_configs_workers": 4,
+  "backup_sqlite_concurrency": 2,
   "timing_log_enabled": true,
   "ankebak_full_backup_interval_hours": 168,
   "ankebak_missing_floor_immediate_retry_hours": 168,

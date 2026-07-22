@@ -62,6 +62,7 @@ class ConfigConcurrencyTest:
             {"image_concurrency": 0},
             {"audio_concurrency": 0},
             {"backup_configs_workers": 0},
+            {"backup_sqlite_concurrency": 0},
             {"timing_log_enabled": "yes"},
             {"ankebak_full_backup_interval_hours": 0},
             {"ankebak_missing_floor_immediate_retry_hours": 0},
