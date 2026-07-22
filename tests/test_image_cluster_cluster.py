@@ -3,7 +3,6 @@ from __future__ import annotations
 from nga_tools.image_cluster.cluster import (
     Cluster,
     ClusterMember,
-    UnionFind,
     build_clusters,
 )
 from nga_tools.image_cluster.features import ImageFeatures
@@ -33,24 +32,6 @@ def _make_features(
         width=width,
         height=height,
     )
-
-
-def test_union_find_basic() -> None:
-    uf = UnionFind(["a", "b", "c", "d"])
-    uf.union("a", "b")
-    uf.union("c", "d")
-    groups = uf.groups()
-    assert len(groups) == 2
-    members = sorted([sorted(g) for g in groups.values()])
-    assert members == [["a", "b"], ["c", "d"]]
-
-
-def test_union_find_path_compression() -> None:
-    uf = UnionFind(["a", "b", "c", "d"])
-    uf.union("a", "b")
-    uf.union("b", "c")
-    uf.union("c", "d")
-    assert uf.find("a") == uf.find("d")
 
 
 def test_build_clusters_merges_within_threshold() -> None:

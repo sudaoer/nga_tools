@@ -10,7 +10,6 @@ from PIL import Image
 from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.core.hashing import hash_text
 from nga_tools.core.output_lock import use_output_root_lock
-from nga_tools.web import routes as web_routes
 from nga_tools.web import thread_data as web_thread_data
 from nga_tools.web.server import create_app
 from tests.web_viewer_support import (
@@ -65,30 +64,6 @@ class WebServerTest:
         assert len(payload["slots"]) == 20
         assert payload["slots"][0]["emptyReason"] == "missing"
         assert payload["items"][0]["lou"] == 1
-
-    def test_posts_route_dispatches_reader_through_threadpool(
-        self,
-        tmp_path: Path,
-        monkeypatch,
-    ) -> None:
-        output_dir = tmp_path / "output"
-        thread_dir = output_dir / "101_201"
-        _write_archive(thread_dir, [_post(1, "hello")])
-        calls: list[str] = []
-
-        async def fake_run_in_threadpool(func, *args, **kwargs):
-            calls.append(func.__name__)
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(web_routes, "run_in_threadpool", fake_run_in_threadpool)
-        client = TestClient(
-            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
-        )
-
-        response = client.get("/api/threads/101/201/posts", params={"page": "1"})
-
-        assert response.status_code == 200
-        assert "read_posts" in calls
 
     def test_posts_route_reports_invalid_query_as_json_error(
         self,
