@@ -17,6 +17,7 @@ from nga_tools.timing import (
     TimingSectionRecord,
     TimingSnapshot,
     record_timing,
+    record_timing_label,
     record_timing_metric,
     time_section,
     use_timing_log,
@@ -140,13 +141,57 @@ class TimingLogTest:
             stage_lines = [
                 line
                 for line in timing_log.path.read_text(encoding="utf-8").splitlines()
-                if line.startswith("阶段：")
+                if line.lstrip().startswith("阶段：")
             ]
 
         assert stage_lines[0].startswith("阶段：父阶段，开始时间：")
-        assert stage_lines[1].startswith("阶段：子阶段，开始时间：")
-        assert stage_lines[2].startswith("阶段：子阶段，结束时间：")
+        assert stage_lines[1].startswith("  阶段：子阶段，开始时间：")
+        assert stage_lines[2].startswith("  阶段：子阶段，结束时间：")
         assert stage_lines[3].startswith("阶段：父阶段，结束时间：")
+
+    def test_three_level_nesting_indents_by_depth(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            log_path = Path(temp_dir_name) / "timing.log"
+
+            with use_timing_log(log_path, task_name="backup sub") as timing_log:
+                assert timing_log is not None
+                with time_section("祖父阶段"):
+                    with time_section("父阶段"):
+                        with time_section("子阶段"):
+                            pass
+
+            stage_lines = [
+                line
+                for line in timing_log.path.read_text(encoding="utf-8").splitlines()
+                if line.lstrip().startswith("阶段：")
+            ]
+
+        assert stage_lines[0].startswith("阶段：祖父阶段，开始时间：")
+        assert stage_lines[1].startswith("  阶段：父阶段，开始时间：")
+        assert stage_lines[2].startswith("    阶段：子阶段，开始时间：")
+        assert stage_lines[3].startswith("    阶段：子阶段，结束时间：")
+        assert stage_lines[4].startswith("  阶段：父阶段，结束时间：")
+        assert stage_lines[5].startswith("阶段：祖父阶段，结束时间：")
+
+    def test_metrics_and_labels_indent_to_current_section_depth(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            log_path = Path(temp_dir_name) / "timing.log"
+
+            with use_timing_log(log_path, task_name="backup sub") as timing_log:
+                assert timing_log is not None
+                record_timing_metric("顶层指标", 1)
+                with time_section("父阶段"):
+                    record_timing_metric("嵌套指标", 2)
+                    record_timing_label("嵌套标签", "hit")
+                    with time_section("子阶段"):
+                        record_timing_metric("深层指标", 3)
+
+            log_text = timing_log.path.read_text(encoding="utf-8")
+
+        assert "指标：顶层指标，值：1\n" in log_text
+        assert "  指标：嵌套指标，值：2\n" in log_text
+        assert "  标签：嵌套标签，值：hit\n" in log_text
+        assert "    指标：深层指标，值：3\n" in log_text
 
     def test_timing_log_keeps_only_five_most_recent_files(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

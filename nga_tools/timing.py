@@ -139,11 +139,15 @@ class TimingLog:
         self._sections: list[TimingSectionRecord] = []
         self._metrics: list[tuple[str, int]] = []
         self._labels: list[tuple[str, str]] = []
+        self._section_depth = 0
         self._write_header(task_name, target, commit_id)
 
     @property
     def path(self) -> Path:
         return self._path
+
+    def _indent(self) -> str:
+        return "  " * self._section_depth
 
     def _write_header(
         self,
@@ -162,9 +166,11 @@ class TimingLog:
 
     def start_section(self, section_name: str, started_at: datetime) -> None:
         self._log_file.write(
-            f"阶段：{section_name}，开始时间：{_format_timestamp(started_at)}\n"
+            f"{self._indent()}阶段：{section_name}，"
+            f"开始时间：{_format_timestamp(started_at)}\n"
         )
         self._log_file.flush()
+        self._section_depth += 1
 
     def finish_section(
         self,
@@ -174,11 +180,12 @@ class TimingLog:
         *,
         status: str,
     ) -> None:
+        self._section_depth -= 1
         self._sections.append(
             TimingSectionRecord(section_name, elapsed_seconds, status)
         )
         self._log_file.write(
-            f"阶段：{section_name}，结束时间：{_format_timestamp(ended_at)}，"
+            f"{self._indent()}阶段：{section_name}，结束时间：{_format_timestamp(ended_at)}，"
             f"耗时：{_format_duration(elapsed_seconds)}，状态：{status}\n"
         )
         self._log_file.flush()
@@ -188,18 +195,18 @@ class TimingLog:
             TimingSectionRecord(section_name, elapsed_seconds, "完成")
         )
         self._log_file.write(
-            f"阶段：{section_name}，耗时：{_format_duration(elapsed_seconds)}\n"
+            f"{self._indent()}阶段：{section_name}，耗时：{_format_duration(elapsed_seconds)}\n"
         )
         self._log_file.flush()
 
     def record_metric(self, metric_name: str, value: int) -> None:
         self._metrics.append((metric_name, value))
-        self._log_file.write(f"指标：{metric_name}，值：{value}\n")
+        self._log_file.write(f"{self._indent()}指标：{metric_name}，值：{value}\n")
         self._log_file.flush()
 
     def record_label(self, label_name: str, value: str) -> None:
         self._labels.append((label_name, value))
-        self._log_file.write(f"标签：{label_name}，值：{value}\n")
+        self._log_file.write(f"{self._indent()}标签：{label_name}，值：{value}\n")
         self._log_file.flush()
 
     def finish(self, status: str) -> TimingSnapshot:
