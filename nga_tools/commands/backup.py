@@ -107,10 +107,15 @@ def run_backup_fetch_batch(
     write_json = optional_bool(args, "write_json")
     force_processing = optional_bool(args, "force_processing")
     worker_count = _batch_worker_count(args, app_config.backup_configs_workers)
+    actual_worker_count = (
+        worker_count
+        if thread_configs is None
+        else max(1, min(worker_count, len(thread_configs)))
+    )
     validation_cache = ImageValidationCache()
     session_pool = ThreadLocalAPISessionPool()
     image_store_workers = effective_image_store_workers(
-        worker_count,
+        actual_worker_count,
         app_config.image_concurrency,
     )
 
@@ -137,7 +142,7 @@ def run_backup_fetch_batch(
         use_image_download_runtime(app_config.image_concurrency),
         use_audio_download_runtime(app_config.audio_concurrency),
         use_image_store_runtime(image_store_workers),
-        use_backup_sqlite_concurrency(worker_count),
+        use_backup_sqlite_concurrency(actual_worker_count),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),
