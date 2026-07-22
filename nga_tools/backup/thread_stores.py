@@ -205,7 +205,7 @@ class ThreadArchiveStateStore:
         return self.db_path.is_file()
 
     def connect_write(self, source_store_id: str) -> sqlite3.Connection:
-        with sqlite_operation():
+        with sqlite_operation("write"):
             new_database = not self.db_path.is_file()
             if not new_database and self._schema_initialized_for != source_store_id:
                 with closing(_open_readonly(self.db_path)) as read_connection:
@@ -253,7 +253,7 @@ class ThreadArchiveStateStore:
             return connection
 
     def connect_read(self, source_store_id: str) -> sqlite3.Connection:
-        with sqlite_operation():
+        with sqlite_operation("read"):
             if not self.exists():
                 raise FileNotFoundError(f"缺少archive_state.sqlite3：{self.db_path}")
             connection = _open_readonly(self.db_path)
@@ -420,7 +420,7 @@ class ThreadArchiveCacheStore:
         return self.db_path.is_file()
 
     def connect_write(self, source_store_id: str) -> sqlite3.Connection:
-        with sqlite_operation():
+        with sqlite_operation("write"):
             new_database = not self.db_path.is_file()
             if not new_database and self._schema_initialized_for != source_store_id:
                 with closing(_open_readonly(self.db_path)) as read_connection:
@@ -466,7 +466,7 @@ class ThreadArchiveCacheStore:
             return connection
 
     def connect_read(self, source_store_id: str) -> sqlite3.Connection:
-        with sqlite_operation():
+        with sqlite_operation("read"):
             if not self.exists():
                 raise FileNotFoundError(f"缺少archive_cache.sqlite3：{self.db_path}")
             connection = _open_readonly(self.db_path)

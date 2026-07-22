@@ -25,6 +25,7 @@ from nga_tools.core.output_lock import (
     use_thread_output_lock,
 )
 from nga_tools.core.paths import timing_log_path, warning_log_path
+from nga_tools.core.sqlite import use_backup_sqlite_concurrency
 from nga_tools.forum.thread_configs import (
     ThreadConfig,
     thread_config_aid,
@@ -136,6 +137,7 @@ def run_backup_fetch_batch(
         use_image_download_runtime(app_config.image_concurrency),
         use_audio_download_runtime(app_config.audio_concurrency),
         use_image_store_runtime(image_store_workers),
+        use_backup_sqlite_concurrency(worker_count),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),
@@ -181,6 +183,7 @@ def backup_all(args: CommandArgs) -> None:
         use_image_download_runtime(app_config.image_concurrency),
         use_audio_download_runtime(app_config.audio_concurrency),
         use_image_store_runtime(1),
+        use_backup_sqlite_concurrency(1),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),
@@ -222,6 +225,7 @@ def backup_sub(args: CommandArgs) -> None:
         use_image_download_runtime(app_config.image_concurrency),
         use_audio_download_runtime(app_config.audio_concurrency),
         use_image_store_runtime(1),
+        use_backup_sqlite_concurrency(1),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),

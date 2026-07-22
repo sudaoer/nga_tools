@@ -339,7 +339,7 @@ class ImageDownloadRuntimeTest:
 
 
 class ImageIndexWriterTest:
-    def test_burst_is_committed_in_at_most_four_transactions(
+    def test_burst_is_committed_in_one_transaction(
         self,
         tmp_path: Path,
     ) -> None:
@@ -363,11 +363,11 @@ class ImageIndexWriterTest:
             metrics = image_index_writer_metrics()
             assert metrics is not None
             assert metrics.rows_written == 1000
-            assert metrics.transactions <= 4
+            assert metrics.transactions == 1
             assert metrics.requests_submitted == 1
-            assert metrics.max_transaction_rows <= 256
+            assert metrics.max_transaction_rows == 1000
             assert metrics.queue_put_seconds >= 0
-            assert metrics.coalesce_wait_seconds >= 0
+            assert metrics.coalesce_wait_seconds == 0
             assert metrics.transaction_seconds >= 0
 
         with sqlite3.connect(output_dir / "image_index.sqlite3") as connection:

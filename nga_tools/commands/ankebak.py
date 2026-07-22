@@ -38,6 +38,7 @@ from nga_tools.core.image_download_runtime import (
     use_audio_download_runtime,
     use_image_download_runtime,
 )
+from nga_tools.core.sqlite import use_backup_sqlite_concurrency
 from nga_tools.backup.image_index_writer import use_image_index_writer
 from nga_tools.backup.image_store_metrics import use_image_store_metrics
 from nga_tools.backup.image_store import use_image_download_coordination
@@ -241,6 +242,7 @@ def backup_auto(args: CommandArgs) -> None:
         use_image_download_runtime(app_config.image_concurrency),
         use_audio_download_runtime(app_config.audio_concurrency),
         use_image_store_runtime(image_store_workers),
+        use_backup_sqlite_concurrency(worker_count),
         use_image_index_writer(),
         use_image_store_metrics(),
         use_image_download_coordination(),

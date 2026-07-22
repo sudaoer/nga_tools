@@ -137,7 +137,7 @@ class ThreadArchiveStore:
         return connection
 
     def connect_write(self) -> sqlite3.Connection:
-        with sqlite_operation():
+        with sqlite_operation("write"):
             new_database = not self.db_path.is_file()
             if (
                 not new_database
@@ -193,7 +193,7 @@ class ThreadArchiveStore:
         return connection
 
     def connect_read(self) -> sqlite3.Connection:
-        with sqlite_operation():
+        with sqlite_operation("read"):
             connection = self._open_read_connection()
             try:
                 metadata = require_current_archive_schema(connection, self.db_path)
@@ -214,7 +214,7 @@ class ThreadArchiveStore:
         validated_factory: Callable[[], sqlite3.Connection],
         unchecked_factory: Callable[[], sqlite3.Connection],
     ) -> Generator[sqlite3.Connection]:
-        with sqlite_operation():
+        with sqlite_operation(validation):
             session = self._connection_session
             if session is None:
                 with closing(validated_factory()) as connection:
@@ -324,7 +324,7 @@ class ThreadArchiveStore:
         finally:
             self._connection_session = None
             try:
-                with sqlite_operation():
+                with sqlite_operation("write"):
                     session.close()
             except sqlite3.Error:
                 if not body_failed:

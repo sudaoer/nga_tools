@@ -16,8 +16,7 @@ from nga_tools.core.sqlite import SQLITE_BUSY_TIMEOUT_SECONDS, configure_connect
 type ImageMappingRow = tuple[str, str]
 
 _QUEUE_CAPACITY = 1024
-_MAX_TRANSACTION_ROWS = 256
-_MAX_COALESCE_SECONDS = 0.050
+_MAX_TRANSACTION_ROWS = 1024
 
 
 @dataclass(frozen=True)
@@ -140,24 +139,11 @@ class ImageIndexWriter:
                     break
                 requests = [first]
                 row_count = len(first.rows)
-                deadline = monotonic() + _MAX_COALESCE_SECONDS
                 while row_count < _MAX_TRANSACTION_ROWS:
-                    remaining = deadline - monotonic()
-                    if remaining <= 0:
-                        break
-                    coalesce_started_at = monotonic()
                     try:
-                        item = self._queue.get(timeout=remaining)
+                        item = self._queue.get_nowait()
                     except queue.Empty:
-                        with self._state_lock:
-                            self._coalesce_wait_seconds += (
-                                monotonic() - coalesce_started_at
-                            )
                         break
-                    with self._state_lock:
-                        self._coalesce_wait_seconds += (
-                            monotonic() - coalesce_started_at
-                        )
                     if isinstance(item, _StopRequest):
                         stop_after_batch = True
                         break
