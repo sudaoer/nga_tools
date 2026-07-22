@@ -347,6 +347,10 @@ def build_and_save_floor_map(
         author_lou_to_pid,
         missing_author_lou_set,
     )
+    # NGA uses pid=0 for the topic root. It cannot be resolved through
+    # read.php?pid=..., but its original floor is known without a request.
+    if author_lou_to_pid.get(0) == 0:
+        found_original_by_author_lou[0] = 0
     original_lou_by_author_lou = {
         **found_original_by_author_lou,
         **existing_missing_originals,
@@ -823,8 +827,16 @@ def _scan_pending_author_pages(
                     if not unresolved_author_lous:
                         break
 
+                    locatable_author_lous = [
+                        author_lou
+                        for author_lou in unresolved_author_lous
+                        if author_lou_to_pid[author_lou] > 0
+                    ]
+                    if not locatable_author_lous:
+                        fallback_reason = "no_locatable_pid"
+                        break
                     selected_author_lous = _spaced_author_lous(
-                        unresolved_author_lous,
+                        locatable_author_lous,
                         batch_size,
                     )
                     selected_pid_by_author_lou = {

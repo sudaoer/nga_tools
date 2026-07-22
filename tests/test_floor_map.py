@@ -394,6 +394,76 @@ class FloorMapPidTargetScanTest:
         assert scanned_pages == {1, 2, 3}
         assert mapped == {1: 10, 2: 11, 3: 12}
 
+    def test_unlocatable_pid_falls_back_without_redirect_request(self) -> None:
+        client = StreamingFakeClient(
+            {
+                1: {"result": [{"pid": 0, "lou": 0}]},
+                2: {"result": []},
+                3: {"result": []},
+            }
+        )
+
+        scanned_pages, _seen_lous, mapped = self._scan(
+            client,
+            {0: [0]},
+            concurrency=1,
+        )
+
+        assert client.pid_calls == []
+        assert client.page_calls == [1, 2, 3]
+        assert scanned_pages == {1, 2, 3}
+        assert mapped == {0: 0}
+
+    def test_zero_pid_topic_root_is_known_without_redirect(self) -> None:
+        author_posts: list[AuthorPostRef] = [
+            {"pid": 0, "author_lou": 0},
+            {"pid": 1001, "author_lou": 1},
+        ]
+        client = StreamingFakeClient(
+            {
+                15: {
+                    "result": [
+                        {"pid": 1001, "lou": 280, "author": {"uid": 42}},
+                    ]
+                }
+            },
+            page_count=20,
+            pid_targets={1001: PidRedirectTarget(tid=123, page_number=15)},
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            store = ThreadArchiveStore(Path(temp_dir))
+            store.ensure_schema()
+            with (
+                patch("builtins.print"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch(
+                    "nga_tools.backup.floor_map.get_api_concurrency",
+                    return_value=2,
+                ),
+            ):
+                result = build_and_save_floor_map(
+                    client,
+                    store,
+                    123,
+                    456,
+                    author_posts,
+                    [],
+                )
+            floor_map = store.floor_maps.read_floor_map()
+
+        assert client.pid_calls == [1001]
+        assert client.page_calls == [15]
+        assert result.floor_labels.original_lou_by_author_lou == {
+            0: 0,
+            1: 280,
+        }
+        assert floor_map is not None
+        assert floor_map.entries == [
+            {"pid": 0, "author_lou": 0, "original_lou": 0},
+            {"pid": 1001, "author_lou": 1, "original_lou": 280},
+        ]
+
     def test_one_pid_target_page_recovers_every_pending_pid(
         self,
         tmp_path: Path,
