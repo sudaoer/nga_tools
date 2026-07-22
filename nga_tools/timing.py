@@ -522,7 +522,7 @@ def write_batch_timing_summary(
     if failed_threads:
         status = "失败"
     elif expected_failed_threads:
-        status = "完成（含隐藏帖跳过）"
+        status = "完成（含状态异常）"
     elif image_failure_count:
         status = "完成（含预期图片下载失败，等待后续重试）"
     else:
@@ -530,7 +530,7 @@ def write_batch_timing_summary(
 
     thread_summary = (
         f"帖子：总数{total_threads}，成功{successful_threads}，"
-        f"隐藏跳过{expected_failed_threads}，失败{failed_threads}"
+        f"状态异常{expected_failed_threads}，失败{failed_threads}"
         if expected_failed_threads
         else f"帖子：总数{total_threads}，成功{successful_threads}，失败{failed_threads}"
     )
@@ -700,7 +700,7 @@ def write_batch_timing_summary(
     else:
         lines.append("线程异常：0")
     if expected_failure_categories:
-        lines.append(f"预期线程跳过：{expected_failed_threads}")
+        lines.append(f"状态异常：{expected_failed_threads}")
         for category, count in sorted(expected_failure_categories.items()):
             lines.append(f"- {category}: {count}")
 

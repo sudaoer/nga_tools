@@ -9,7 +9,12 @@ import requests
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from nga_tools.ngaclient import NGAClient, PidRedirectTarget, parse_pid_redirect_location
+from nga_tools.ngaclient import (
+    NGAClient,
+    PidRedirectTarget,
+    is_thread_status_abnormal_error,
+    parse_pid_redirect_location,
+)
 from nga_tools.ngaclient.client import NGAPageError
 from nga_tools.ngaclient.api_runtime import FairAPIRuntime, use_api_runtime
 from nga_tools.network_limits import configure_network_limits
@@ -196,6 +201,22 @@ class NGAClientForumThreadPageTest:
 
 
 class NGAClientPageErrorTest:
+    @pytest.mark.parametrize(
+        "message",
+        ["帖子被设为隐藏", "帖子被删除", "帖子正等待审核"],
+    )
+    def test_abnormal_thread_status_error_matches_ignored_messages(
+        self,
+        message: str,
+    ) -> None:
+        assert is_thread_status_abnormal_error(NGAPageError(None, message))
+
+    def test_abnormal_thread_status_error_rejects_other_errors(self) -> None:
+        assert not is_thread_status_abnormal_error(
+            NGAPageError(None, "找不到内容 或 没有更多页了")
+        )
+        assert not is_thread_status_abnormal_error(RuntimeError("boom"))
+
     def test_page_error_exposes_code_and_message(self) -> None:
         config = SimpleNamespace(
             base_url="https://bbs.nga.cn",

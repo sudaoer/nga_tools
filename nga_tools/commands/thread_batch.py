@@ -39,7 +39,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_tid,
 )
 from nga_tools.forum.timing import ForumSyncTimingSnapshot
-from nga_tools.ngaclient import is_hidden_thread_error
+from nga_tools.ngaclient import is_thread_status_abnormal_error
 from nga_tools.timing import (
     BatchTimingCollector,
     TimingSnapshot,
@@ -300,15 +300,17 @@ def _print_thread_batch_summary(
     failures: list[ThreadBatchFailure],
     summary_name: str,
 ) -> tuple[list[ThreadBatchFailure], list[ThreadBatchFailure]]:
-    hidden_threads = [item for item in failures if is_hidden_thread_error(item[1])]
+    hidden_threads = [
+        item for item in failures if is_thread_status_abnormal_error(item[1])
+    ]
     unexpected_failures = [
-        item for item in failures if not is_hidden_thread_error(item[1])
+        item for item in failures if not is_thread_status_abnormal_error(item[1])
     ]
     success_count = total - len(failures)
     if hidden_threads:
         report_info(
             f"批量{summary_name}完成：成功{success_count}个，"
-            f"隐藏跳过{len(hidden_threads)}个，"
+            f"状态异常{len(hidden_threads)}个，"
             f"失败{len(unexpected_failures)}个。"
         )
     else:
@@ -318,7 +320,7 @@ def _print_thread_batch_summary(
         )
     if hidden_threads:
         for thread_config, error in hidden_threads:
-            report_info(f"隐藏跳过：{thread_config_label(thread_config)}：{error}")
+            report_info(f"状态异常：{thread_config_label(thread_config)}：{error}")
     if unexpected_failures:
         for thread_config, error in unexpected_failures:
             report_info(f"失败：{thread_config_label(thread_config)}：{error}")
@@ -435,12 +437,12 @@ def run_thread_config_batch(
             thread_failure_categories=Counter(
                 type(error).__name__
                 for _, error in failures
-                if not is_hidden_thread_error(error)
+                if not is_thread_status_abnormal_error(error)
             ),
             expected_thread_failure_categories=Counter(
-                "hidden_thread"
+                "状态异常"
                 for _, error in failures
-                if is_hidden_thread_error(error)
+                if is_thread_status_abnormal_error(error)
             ),
             forum_sync_seconds=forum_sync_seconds,
             forum_sync_timing=forum_sync_timing,

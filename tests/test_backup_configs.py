@@ -621,14 +621,21 @@ class BackupBatchHandlerTest:
         for session in sessions:
             session.close.assert_called_once_with()
 
-    def test_hidden_threads_do_not_make_batch_exit_nonzero(self) -> None:
-        thread_configs = [_thread_config(name="hidden", tid=101, aid=201)]
+    @pytest.mark.parametrize(
+        "status_message",
+        ["帖子被设为隐藏", "帖子被删除", "帖子正等待审核"],
+    )
+    def test_abnormal_thread_statuses_do_not_make_batch_exit_nonzero(
+        self,
+        status_message: str,
+    ) -> None:
+        thread_configs = [_thread_config(name="abnormal", tid=101, aid=201)]
 
         with (
             patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
             patch(
                 "nga_tools.commands.backup.backup_thread_sub",
-                side_effect=NGAPageError(None, "帖子被设为隐藏"),
+                side_effect=NGAPageError(None, status_message),
             ),
             patch(
                 "nga_tools.commands.backup.configure_network_limits_from_args",
@@ -640,8 +647,8 @@ class BackupBatchHandlerTest:
             backup_sub({"all_threads": True})
 
         output_text = output.getvalue()
-        assert "隐藏跳过1个，失败0个" in output_text
-        assert "帖子被设为隐藏" in output_text
+        assert "状态异常1个，失败0个" in output_text
+        assert status_message in output_text
 
     def test_hidden_thread_does_not_mask_other_batch_failure(self) -> None:
         thread_configs = [
@@ -677,7 +684,7 @@ class BackupBatchHandlerTest:
                 backup_sub({"all_threads": True})
 
         assert context.value.code == 1
-        assert "隐藏跳过1个，失败1个" in output.getvalue()
+        assert "状态异常1个，失败1个" in output.getvalue()
 
     def test_backup_fetch_batch_writes_aggregated_timing_summary(
         self,

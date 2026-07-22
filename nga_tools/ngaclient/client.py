@@ -89,6 +89,22 @@ class NGAPageError(Exception):
 
 
 HIDDEN_THREAD_MESSAGE = "帖子被设为隐藏"
+DELETED_THREAD_MESSAGE = "帖子被删除"
+PENDING_MODERATION_THREAD_MESSAGE = "帖子正等待审核"
+THREAD_STATUS_ABNORMAL_MESSAGES = frozenset(
+    {
+        HIDDEN_THREAD_MESSAGE,
+        DELETED_THREAD_MESSAGE,
+        PENDING_MODERATION_THREAD_MESSAGE,
+    }
+)
+
+
+def is_thread_status_abnormal_error(error: Exception) -> bool:
+    return (
+        isinstance(error, NGAPageError)
+        and error.message in THREAD_STATUS_ABNORMAL_MESSAGES
+    )
 
 
 def is_hidden_thread_error(error: Exception) -> bool:

@@ -274,6 +274,28 @@ class TimingLogTest:
                 for text in retained_texts
             )
 
+    def test_batch_timing_summary_reports_abnormal_thread_status(self) -> None:
+        started_at = datetime.now().astimezone()
+
+        with TemporaryDirectory() as temp_dir_name:
+            output_path = write_batch_timing_summary(
+                Path(temp_dir_name) / "batch_timing.log",
+                task_name="backup sub",
+                started_at=started_at,
+                wall_seconds=1.0,
+                total_threads=3,
+                snapshots=(),
+                thread_failure_categories=Counter(),
+                expected_thread_failure_categories=Counter({"状态异常": 2}),
+            )
+            summary = output_path.read_text(encoding="utf-8")
+
+        assert "帖子：总数3，成功1，状态异常2，失败0" in summary
+        assert "状态：完成（含状态异常）" in summary
+        assert "状态异常：2" in summary
+        assert "- 状态异常: 2" in summary
+        assert "隐藏跳过" not in summary
+
     def test_batch_timing_summary_reports_tail_and_slowest_targets(self) -> None:
         started_at = datetime.now().astimezone()
         snapshots = tuple(
