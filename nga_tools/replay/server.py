@@ -47,7 +47,17 @@ async def _bytes_source(payload: bytes, chunk_bytes: int) -> ByteSource:
         yield payload[start : start + chunk_bytes]
 
 
-async def _file_source(path: Path, chunk_bytes: int) -> ByteSource:
+async def _file_source(
+    path: Path,
+    chunk_bytes: int,
+    file_size: int,
+) -> ByteSource:
+    if file_size <= chunk_bytes:
+        payload = await asyncio.to_thread(path.read_bytes)
+        if payload:
+            yield payload
+        return
+
     input_file: BinaryIO = await asyncio.to_thread(path.open, "rb")
     try:
         while True:
@@ -217,7 +227,7 @@ def _image_response(
     return _streaming_response(
         service,
         "image",
-        _file_source(entry.path, service.profile.chunk_bytes),
+        _file_source(entry.path, service.profile.chunk_bytes, entry.size),
         status=200,
         content_type=(
             "application/octet-stream" if content_type is None else content_type
@@ -245,7 +255,7 @@ def _audio_response(
     return _streaming_response(
         service,
         "audio",
-        _file_source(entry.path, service.profile.chunk_bytes),
+        _file_source(entry.path, service.profile.chunk_bytes, entry.size),
         status=200,
         content_type="audio/mpeg",
         content_length=entry.size,

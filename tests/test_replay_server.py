@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,6 +26,7 @@ from nga_tools.replay.profile import (
 )
 from nga_tools.replay.rate_limit import SharedBandwidthLimiter
 from nga_tools.replay.server import create_replay_app
+from nga_tools.replay import server as replay_server
 from nga_tools.storage import ensure_storage_metadata
 
 IMAGE_URL = (
@@ -284,6 +286,32 @@ def _unlimited_profile() -> ReplayProfile:
         ),
         chunk_bytes=4,
     )
+
+
+def test_small_file_source_uses_one_thread_handoff(tmp_path: Path) -> None:
+    media_path = tmp_path / "small.bin"
+    payload = b"small replay payload"
+    media_path.write_bytes(payload)
+
+    async def collect() -> list[bytes]:
+        return [
+            chunk
+            async for chunk in replay_server._file_source(
+                media_path,
+                len(payload),
+                len(payload),
+            )
+        ]
+
+    real_to_thread = asyncio.to_thread
+    with patch(
+        "nga_tools.replay.server.asyncio.to_thread",
+        wraps=real_to_thread,
+    ) as to_thread:
+        chunks = asyncio.run(collect())
+
+    assert chunks == [payload]
+    assert to_thread.call_count == 1
 
 
 class ReplayCorpusTest:

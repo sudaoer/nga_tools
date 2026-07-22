@@ -596,8 +596,56 @@ class ReplayOfflineTest:
             try:
                 assert session.trust_env is False
                 assert "Cookie" not in session.headers
+                retries = session.get_adapter("http://").max_retries
+                assert retries.total == 5
+                assert retries.allowed_methods == frozenset({"GET", "POST"})
+                assert 404 not in retries.status_forcelist
+                assert 500 in retries.status_forcelist
             finally:
                 session.close()
+
+    def test_replay_api_post_retries_transient_disconnect(self) -> None:
+        request_count = 0
+
+        class FlakyHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                nonlocal request_count
+                request_count += 1
+                if request_count == 1:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    self.connection.close()
+                    return
+                payload = b'{"code":0}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, _format: str, *args: object) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FlakyHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        server_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with use_replay_network_policy(server_url):
+                session = create_api_session()
+                try:
+                    response = session.post(
+                        f"{server_url}/app_api.php",
+                        data={"tid": "123"},
+                        timeout=5,
+                    )
+                finally:
+                    session.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        assert response.status_code == 200
+        assert request_count == 2
 
     def test_image_redirect_cannot_escape_replay_origin(
         self,

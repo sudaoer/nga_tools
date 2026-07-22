@@ -10,6 +10,7 @@ from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
+import aiohttp
 import pytest
 from PIL import Image
 
@@ -61,6 +62,78 @@ def _image_url(name: str) -> str:
 
 
 class ImageDownloadRuntimeTest:
+    def test_connection_disconnect_is_retryable_connection_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        class DisconnectContext:
+            async def __aenter__(self):
+                raise aiohttp.ServerDisconnectedError
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        class DisconnectSession:
+            def get(self, *_args: object, **_kwargs: object) -> DisconnectContext:
+                return DisconnectContext()
+
+        runtime = ImageDownloadRuntime(1)
+        try:
+            result = asyncio.run(
+                runtime._download_attempt(
+                    DisconnectSession(),
+                    _download_task("disconnect", tmp_path),
+                    (),
+                )
+            )
+        finally:
+            runtime.close()
+
+        assert isinstance(result, _AttemptFailure)
+        assert result.failure_kind == "connection"
+        assert result.retryable is True
+
+    def test_content_length_mismatch_is_retryable_payload_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        class ShortContent:
+            def iter_chunked(self, _chunk_size: int):
+                async def chunks():
+                    yield b"short"
+
+                return chunks()
+
+        class ShortResponse:
+            status = 200
+            content_length = 10
+            headers: dict[str, str] = {}
+            content = ShortContent()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        class ShortSession:
+            def get(self, *_args: object, **_kwargs: object) -> ShortResponse:
+                return ShortResponse()
+
+        task = _download_task("short-payload", tmp_path)
+        runtime = ImageDownloadRuntime(1)
+        try:
+            result = asyncio.run(
+                runtime._download_attempt(ShortSession(), task, ())
+            )
+        finally:
+            runtime.close()
+
+        assert isinstance(result, _AttemptFailure)
+        assert result.failure_kind == "payload"
+        assert result.retryable is True
+        assert not Path(task["save_path"]).exists()
+
     def test_result_delivery_and_callback_metrics_return_to_zero(
         self,
         tmp_path: Path,

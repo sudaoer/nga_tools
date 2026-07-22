@@ -707,6 +707,20 @@ class DownloadRuntime:
                     temp_file_write_seconds += (
                         perf_counter() - file_close_started_at
                     )
+                content_encoding = response.headers.get(
+                    "Content-Encoding",
+                    "",
+                ).lower()
+                if (
+                    content_encoding in {"", "identity"}
+                    and response.content_length is not None
+                    and downloaded_bytes != response.content_length
+                ):
+                    raise aiohttp.ClientPayloadError(
+                        "响应Content-Length与实际下载字节数不一致："
+                        f"expected={response.content_length}, "
+                        f"actual={downloaded_bytes}"
+                    )
                 replace_started_at = perf_counter()
                 replace_temp_file(temp_path, target_path)
                 atomic_replace_seconds += perf_counter() - replace_started_at
@@ -719,7 +733,7 @@ class DownloadRuntime:
                 "content_bytes": downloaded_bytes,
             }
         except (
-            aiohttp.ClientConnectorError,
+            aiohttp.ClientConnectionError,
             aiohttp.ClientPayloadError,
             aiohttp.ClientResponseError,
             asyncio.TimeoutError,
@@ -739,10 +753,10 @@ class DownloadRuntime:
                     failure_kind = "http_5xx"
             elif isinstance(error, asyncio.TimeoutError):
                 failure_kind = "timeout"
-            elif isinstance(error, aiohttp.ClientConnectorError):
-                failure_kind = "connection"
-            else:
+            elif isinstance(error, aiohttp.ClientPayloadError):
                 failure_kind = "payload"
+            else:
+                failure_kind = "connection"
             return _AttemptFailure(
                 error=error,
                 failure_kind=failure_kind,

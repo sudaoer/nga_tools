@@ -9,6 +9,7 @@ from urllib.parse import urlencode, urlsplit
 from requests import PreparedRequest, Response
 from requests import _types as requests_types  # pyright: ignore[reportPrivateUsage]
 from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.core.nga_audio import normalize_nga_audio_url
@@ -136,6 +137,22 @@ def audio_request_url(logical_url: str) -> str:
 
 
 class ReplayGuardHTTPAdapter(HTTPAdapter):
+    def __init__(self) -> None:
+        super().__init__(
+            max_retries=Retry(
+                total=5,
+                connect=5,
+                read=5,
+                status=5,
+                other=0,
+                allowed_methods=frozenset({"GET", "POST"}),
+                status_forcelist=(429, 500, 502, 503, 504),
+                backoff_factor=0.1,
+                raise_on_status=False,
+                respect_retry_after_header=True,
+            )
+        )
+
     def send(
         self,
         request: PreparedRequest,

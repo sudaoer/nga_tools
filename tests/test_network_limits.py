@@ -35,6 +35,8 @@ class _ChunkedContent:
 
 class _DownloadResponse:
     status = 200
+    content_length = len(b"image")
+    headers: dict[str, str] = {}
     content = _ChunkedContent()
 
     async def __aenter__(self) -> "_DownloadResponse":
