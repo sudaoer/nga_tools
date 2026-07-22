@@ -1541,8 +1541,8 @@ class ForumWatchCommandTest:
         assert '远端抓取1个主题，数据库新增1个，更新0个。' in output_text
         assert '数据库筛查2个主题，匹配2个；新增2个，更新0个，跳过0个，冲突0个。' in output_text
         assert '主题数据库：路径：fake_forum_threads.sqlite3' in output_text
-        assert '[added] rp784-102 (tid=102, aid=456) - 已添加配置' in output_text
-        assert '[added] rp784-101 (tid=101, aid=456) - 已添加配置' in output_text
+        assert '[added] rp784-102（安价库内主题，楼主） - 已添加配置' in output_text
+        assert '[added] rp784-101（安价一号，楼主） - 已添加配置' in output_text
         assert '版面抓取与入库' not in output_text
         assert forum_store.upserts == [(784, [101])]
         assert thread_configs.saved

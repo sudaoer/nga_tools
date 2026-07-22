@@ -37,6 +37,18 @@ from nga_tools.ngaclient import NGAClient
 from nga_tools.ngaclient.client import ForumThread
 from nga_tools.forum.thread_configs import NGAThreadConfigs
 
+_THREAD_SUBJECT_LABEL_MAX_CHARS = 30
+
+
+def _thread_subject_label(thread: ForumThread) -> str:
+    subject = thread["subject"].strip()
+    author = thread["author"].strip()
+    if subject and author:
+        if len(subject) > _THREAD_SUBJECT_LABEL_MAX_CHARS:
+            subject = subject[: _THREAD_SUBJECT_LABEL_MAX_CHARS - 1] + "…"
+        return f"（{subject}，{author}）"
+    return f" (tid={thread['tid']}, aid={thread['authorid']})"
+
 
 @dataclass(frozen=True)
 class DefaultForumSyncResult:
@@ -288,8 +300,8 @@ def sync_default_forum_watch(args: CommandArgs) -> DefaultForumSyncResult:
                 continue
             thread = outcome.match.thread
             report_info(
-                f"[{outcome.status}] {outcome.match.thread_name} "
-                f"(tid={thread['tid']}, aid={thread['authorid']}) - {outcome.message}"
+                f"[{outcome.status}] {outcome.match.thread_name}"
+                f"{_thread_subject_label(thread)} - {outcome.message}"
             )
 
     return DefaultForumSyncResult(
