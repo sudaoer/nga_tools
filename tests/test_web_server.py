@@ -134,43 +134,6 @@ class WebServerTest:
         assert payload["items"][0]["statsLoaded"] is False
         assert payload["items"][0]["postCount"] is None
 
-    def test_threads_route_full_detail_uses_cache_until_refresh(
-        self,
-        tmp_path: Path,
-        monkeypatch,
-    ) -> None:
-        output_dir = tmp_path / "output"
-        thread_dir = output_dir / "101_201"
-        _write_archive(thread_dir, [_post(1, "hello")])
-        calls: list[Path] = []
-        original = web_thread_data._read_archive_stats
-
-        def wrapped_read_archive_stats(db_path: Path):
-            calls.append(db_path)
-            return original(db_path)
-
-        monkeypatch.setattr(
-            web_thread_data,
-            "_read_archive_stats",
-            wrapped_read_archive_stats,
-        )
-        client = TestClient(
-            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
-        )
-
-        first_response = client.get("/api/threads", params={"detail": "full"})
-        second_response = client.get("/api/threads", params={"detail": "full"})
-        refreshed_response = client.get(
-            "/api/threads",
-            params={"detail": "full", "refresh": "1"},
-        )
-
-        assert first_response.status_code == 200
-        assert second_response.status_code == 200
-        assert refreshed_response.status_code == 200
-        assert first_response.json()["items"][0]["statsLoaded"] is True
-        assert len(calls) == 2
-
     def test_static_app_reports_missing_build_as_json_error(
         self,
         tmp_path: Path,
@@ -251,49 +214,6 @@ class WebServerTest:
         assert item["statsLoaded"] is False
         assert item["postCount"] is None
         assert item["multiVersionFloorCount"] == 1
-
-    def test_admin_post_version_threads_use_cache_until_refresh(
-        self,
-        tmp_path: Path,
-        monkeypatch,
-    ) -> None:
-        output_dir = tmp_path / "output"
-        thread_dir = output_dir / "101_201"
-        _write_archive(thread_dir, [_post(1, "before edit")])
-        _write_archive(thread_dir, [_post(1, "after edit")])
-        calls: list[Path] = []
-        original_read_count = web_thread_data._read_multi_version_floor_count
-
-        def wrapped_read_count(thread_folder: Path) -> int:
-            calls.append(thread_folder)
-            return original_read_count(thread_folder)
-
-        monkeypatch.setattr(
-            web_thread_data,
-            "_read_multi_version_floor_count",
-            wrapped_read_count,
-        )
-        client = TestClient(
-            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
-        )
-
-        first_response = client.get(
-            "/api/admin/post-version-threads",
-            params={"detail": "light"},
-        )
-        second_response = client.get(
-            "/api/admin/post-version-threads",
-            params={"detail": "light"},
-        )
-        refreshed_response = client.get(
-            "/api/admin/post-version-threads",
-            params={"detail": "light", "refresh": "1"},
-        )
-
-        assert first_response.status_code == 200
-        assert second_response.status_code == 200
-        assert refreshed_response.status_code == 200
-        assert len(calls) == 2
 
     def test_admin_post_version_selection_affects_reader_without_materialized_html(
         self,

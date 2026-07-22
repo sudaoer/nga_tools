@@ -21,10 +21,6 @@ class ThreadOutputLockError(RuntimeError):
     pass
 
 
-def thread_output_lock_path(tid: int, aid: int | None) -> Path:
-    return output_folder_lock_path(Path(paths.get_folder(tid, aid)))
-
-
 def output_folder_lock_path(folder: Path) -> Path:
     return folder / LOCK_FILENAME
 

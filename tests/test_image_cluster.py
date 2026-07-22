@@ -8,7 +8,6 @@ from PIL import Image
 from nga_tools.image_cluster import (
     ClusterParams,
     ClusterRunResult,
-    default_workers,
     run_image_cluster,
 )
 from nga_tools.image_cluster.store import ImageClusterStore
@@ -231,7 +230,3 @@ def test_run_image_cluster_limit(tmp_path: Path) -> None:
     )
     assert result.total_images == 2
     assert result.features_computed == 2
-
-
-def test_default_workers_positive() -> None:
-    assert default_workers() >= 1

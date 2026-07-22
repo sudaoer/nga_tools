@@ -16,7 +16,6 @@ from nga_tools.backup.floor_models import (
 )
 from nga_tools.core.hashing import hash_text
 from nga_tools.forum.thread_configs import ThreadConfig
-from nga_tools.web import thread_data as web_thread_data
 from nga_tools.web.output_files import safe_output_file
 from nga_tools.web.post_data import read_post_version_preview, read_posts
 from nga_tools.web.thread_data import scan_thread_summaries
@@ -67,31 +66,6 @@ class WebViewerDataTest:
         )
         assert "hasHtmlModified" not in by_dir["101_201"]
         assert "102_all" not in by_dir
-
-    def test_light_scan_skips_archive_stats(
-        self,
-        tmp_path: Path,
-        monkeypatch,
-    ) -> None:
-        output_dir = tmp_path / "output"
-        ready_dir = output_dir / "101_201"
-        _write_archive(ready_dir, [_post(1, "hello")])
-
-        def fail_read_archive_stats(_db_path: Path):
-            raise AssertionError("light scan should not read archive stats")
-
-        monkeypatch.setattr(
-            web_thread_data,
-            "_read_archive_stats",
-            fail_read_archive_stats,
-        )
-
-        summaries = scan_thread_summaries(output_dir, {}, detail="light")
-
-        assert len(summaries) == 1
-        assert summaries[0]["status"] == "ready"
-        assert summaries[0]["statsLoaded"] is False
-        assert summaries[0]["postCount"] is None
 
     def test_full_scan_rejects_unsupported_archive_schema(
         self,

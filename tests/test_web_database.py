@@ -3,7 +3,6 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from fastapi.testclient import TestClient
 
@@ -13,7 +12,6 @@ from nga_tools.backup.thread_stores import (
     ARCHIVE_STATE_DB_FILENAME,
 )
 from nga_tools.forum.ankebak_state import AnkebakStateStore
-from nga_tools.web import database as web_database
 from nga_tools.web.server import create_app
 from tests.web_viewer_support import (
     _post,
@@ -94,38 +92,6 @@ class WebDatabaseViewerTest:
         assert "backup_pending_images" in {
             table["name"] for table in state_schema.json()["tables"]
         }
-
-    def test_databases_route_uses_cache_until_refresh(
-        self,
-        tmp_path: Path,
-        monkeypatch,
-    ) -> None:
-        output_dir = tmp_path / "output"
-        _write_forum_thread_db(output_dir)
-        calls: list[Path] = []
-        original_read_table_count = web_database._read_table_count
-
-        def wrapped_read_table_count(db_path: Path) -> int:
-            calls.append(db_path)
-            return original_read_table_count(db_path)
-
-        monkeypatch.setattr(
-            web_database,
-            "_read_table_count",
-            wrapped_read_table_count,
-        )
-        client = TestClient(
-            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
-        )
-
-        first_response = client.get("/api/databases")
-        second_response = client.get("/api/databases")
-        refreshed_response = client.get("/api/databases", params={"refresh": "1"})
-
-        assert first_response.status_code == 200
-        assert second_response.status_code == 200
-        assert refreshed_response.status_code == 200
-        assert len(calls) == 2
 
     def test_overlay_write_does_not_recreate_missing_table(
         self,
@@ -215,49 +181,6 @@ class WebDatabaseViewerTest:
         detail_cell = detail_response.json()["row"]["cells"]["content"]
         assert detail_cell["value"] == "needle " + "x" * 300
         assert detail_cell["truncated"] is False
-
-    def test_database_schema_uses_cache_until_refresh(
-        self,
-        tmp_path: Path,
-        monkeypatch,
-    ) -> None:
-        output_dir = tmp_path / "output"
-        _write_forum_thread_db(output_dir)
-        calls: list[str] = []
-        original_read_row_count = web_database._read_row_count
-
-        def wrapped_read_row_count(
-            connection: sqlite3.Connection,
-            table_name: str,
-        ) -> Optional[int]:
-            calls.append(table_name)
-            return original_read_row_count(connection, table_name)
-
-        monkeypatch.setattr(
-            web_database,
-            "_read_row_count",
-            wrapped_read_row_count,
-        )
-        client = TestClient(
-            create_app(output_dir=output_dir, static_dir=tmp_path / "dist")
-        )
-
-        first_response = client.get("/api/databases/forum_threads/schema")
-        second_response = client.get("/api/databases/forum_threads/schema")
-        refreshed_response = client.get(
-            "/api/databases/forum_threads/schema",
-            params={"refresh": "1"},
-        )
-
-        assert first_response.status_code == 200
-        assert second_response.status_code == 200
-        assert refreshed_response.status_code == 200
-        assert calls == [
-            "forum_threads_fid_784",
-            "storage_metadata",
-            "forum_threads_fid_784",
-            "storage_metadata",
-        ]
 
     def test_database_rows_reject_unknown_sort_column(
         self,

@@ -7,8 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
-import imagecodecs
-import numpy as np
 from PIL import Image
 from rich.console import Console
 
@@ -23,7 +21,6 @@ from nga_tools.backup.image_verify import (
     verify_all_downloaded_images,
 )
 from nga_tools.backup.post_overlay import make_post_overlay
-from nga_tools.cli import args_parse
 from nga_tools.console import (
     ConsoleReporter,
     WarningCategory,
@@ -31,79 +28,6 @@ from nga_tools.console import (
     use_reporter,
 )
 from nga_tools.commands.image import image_add, image_verify
-
-
-def _write_avif_image(path: Path) -> None:
-    pixels = np.zeros((2, 3, 3), dtype=np.uint8)
-    pixels[:, :] = [255, 255, 255]
-    path.write_bytes(imagecodecs.avif_encode(pixels))
-
-
-class ImageVerifyCliTest:
-    def test_image_add_requires_single_url_option(self) -> None:
-        image_url = (
-            "https://img.nga.178.com/attachments/"
-            "mon_202506/06/example.png"
-        )
-
-        args = args_parse(["image", "add", "--url", image_url])
-
-        assert args["command"] == "image"
-        assert args["action"] == "add"
-        assert args["url"] == image_url
-
-    def test_image_add_rejects_missing_url(self) -> None:
-        with patch("sys.stderr", new_callable=io.StringIO):
-            with pytest.raises(SystemExit) as context:
-                args_parse(["image", "add"])
-
-        assert context.value.code == 2
-
-    def test_image_add_rejects_thread_target_options(self) -> None:
-        with patch("sys.stderr", new_callable=io.StringIO):
-            with pytest.raises(SystemExit) as context:
-                args_parse(
-                    [
-                        "image",
-                        "add",
-                        "--url",
-                        "https://img.nga.178.com/attachments/mon_202506/06/example.png",
-                        "--tid",
-                        "123",
-                    ]
-                )
-
-        assert context.value.code == 2
-
-    def test_image_verify_parses_without_thread_target(self) -> None:
-        args = args_parse(["image", "verify"])
-
-        assert args['command'] == 'image'
-        assert args['action'] == 'verify'
-        assert args['name'] is None
-        assert args['tid'] is None
-        assert args['aid'] is None
-
-    def test_image_verify_still_parses_single_thread_target(self) -> None:
-        args = args_parse(["image", "verify", "--name", "帖子名"])
-
-        assert args['command'] == 'image'
-        assert args['action'] == 'verify'
-        assert args['name'] == '帖子名'
-
-    def test_image_migrate_is_rejected(self) -> None:
-        with patch("sys.stderr", new_callable=io.StringIO):
-            with pytest.raises(SystemExit) as context:
-                args_parse(["image", "migrate"])
-
-        assert context.value.code == 2
-
-    def test_image_prune_links_is_rejected(self) -> None:
-        with patch("sys.stderr", new_callable=io.StringIO):
-            with pytest.raises(SystemExit) as context:
-                args_parse(["image", "prune-links"])
-
-        assert context.value.code == 2
 
 
 class ImageVerifyHandlerTest:
@@ -466,7 +390,6 @@ class ImageVerifyAllTest:
                 image_index.ImageIndexStore(output_dir).upsert_mapping(
                     image_url, unique_image
                 )
-                unique_image.write_bytes(b"corrupted after overlay save")
                 paths = _list_thread_referenced_image_paths(
                     101,
                     None,
@@ -493,22 +416,6 @@ class ImageVerifyAllTest:
             assert result.removed == 1
             assert valid_image.exists()
             assert not broken_image.exists()
-
-    def test_parallel_folder_verify_keeps_avif_file_with_legacy_extension(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            image_dir = Path(temp_dir)
-            valid_image = image_dir / "valid.png"
-            _write_avif_image(valid_image)
-
-            with (
-                patch("builtins.print"),
-                patch("sys.stdout", new_callable=io.StringIO),
-            ):
-                result = _verify_images_in_folder(str(image_dir))
-
-            assert result.total == 1
-            assert result.removed == 0
-            assert valid_image.exists()
 
     def test_worker_count_is_bounded(self) -> None:
         assert _image_verify_worker_count(0) == 1

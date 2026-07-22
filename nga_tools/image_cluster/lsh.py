@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from nga_tools.image_cluster.features import hamming_distance
-
 _HASH_BITS = 64
 
 
@@ -69,20 +67,3 @@ def generate_candidate_pairs(
         (CandidatePair(a=a, b=b) for a, b in seen),
         key=lambda p: (p.a, p.b),
     )
-
-
-def collect_distance_histogram(
-    pairs: list[CandidatePair],
-    hashes: dict[str, str],
-    max_distance: int = _HASH_BITS,
-) -> list[int]:
-    histogram = [0] * (max_distance + 1)
-    for pair in pairs:
-        hash_a = hashes.get(pair.a)
-        hash_b = hashes.get(pair.b)
-        if hash_a is None or hash_b is None:
-            continue
-        distance = hamming_distance(hash_a, hash_b)
-        if distance <= max_distance:
-            histogram[distance] += 1
-    return histogram

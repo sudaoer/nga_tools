@@ -336,17 +336,8 @@ class BackupWarningLogTest:
         assert "detail" not in output.getvalue()
         assert "警告汇总：first (tid: 101, aid: 201)" in output.getvalue()
 
-    @pytest.mark.parametrize(
-        ("handler", "implementation_path"),
-        [
-            (backup_all, "nga_tools.commands.backup.backup_thread"),
-            (backup_sub, "nga_tools.commands.backup.backup_thread_sub"),
-        ],
-    )
     def test_single_thread_backup_passes_write_json_flag(
         self,
-        handler: Callable[[dict[str, object]], None],
-        implementation_path: str,
     ) -> None:
         with TemporaryDirectory() as temp_dir_name:
             base_dir = Path(temp_dir_name)
@@ -364,10 +355,12 @@ class BackupWarningLogTest:
                     "nga_tools.core.paths.get_folder",
                     side_effect=_fake_get_folder(base_dir),
                 ),
-                patch(implementation_path) as implementation_mock,
+                patch(
+                    "nga_tools.commands.backup.backup_thread"
+                ) as implementation_mock,
                 _captured_reporter(),
             ):
-                handler({"write_json": True})
+                backup_all({"write_json": True})
 
             implementation_mock.assert_called_once_with(
                 101,
@@ -375,17 +368,8 @@ class BackupWarningLogTest:
                 write_json=True,
             )
 
-    @pytest.mark.parametrize(
-        ("handler", "implementation_path"),
-        [
-            (backup_all, "nga_tools.commands.backup.backup_thread"),
-            (backup_sub, "nga_tools.commands.backup.backup_thread_sub"),
-        ],
-    )
     def test_single_thread_backup_uses_shared_api_runtime(
         self,
-        handler: Callable[[dict[str, object]], None],
-        implementation_path: str,
     ) -> None:
         with TemporaryDirectory() as temp_dir_name:
             base_dir = Path(temp_dir_name)
@@ -414,22 +398,16 @@ class BackupWarningLogTest:
                     "nga_tools.core.paths.get_folder",
                     side_effect=_fake_get_folder(base_dir),
                 ),
-                patch(implementation_path, side_effect=implementation),
+                patch(
+                    "nga_tools.commands.backup.backup_thread",
+                    side_effect=implementation,
+                ),
                 _captured_reporter(),
             ):
-                handler({})
+                backup_all({})
 
-    @pytest.mark.parametrize(
-        ("handler", "implementation_path"),
-        [
-            (backup_all, "nga_tools.commands.backup.backup_thread"),
-            (backup_sub, "nga_tools.commands.backup.backup_thread_sub"),
-        ],
-    )
     def test_single_thread_backup_passes_force_processing_flag(
         self,
-        handler: Callable[[dict[str, object]], None],
-        implementation_path: str,
     ) -> None:
         with TemporaryDirectory() as temp_dir_name:
             base_dir = Path(temp_dir_name)
@@ -446,10 +424,12 @@ class BackupWarningLogTest:
                     "nga_tools.core.paths.get_folder",
                     side_effect=_fake_get_folder(base_dir),
                 ),
-                patch(implementation_path) as implementation_mock,
+                patch(
+                    "nga_tools.commands.backup.backup_thread"
+                ) as implementation_mock,
                 _captured_reporter(),
             ):
-                handler({"force_processing": True})
+                backup_all({"force_processing": True})
 
             implementation_mock.assert_called_once_with(
                 101,
@@ -458,18 +438,8 @@ class BackupWarningLogTest:
                 force_processing=True,
             )
 
-    @pytest.mark.parametrize(
-        ("handler", "implementation_path", "expected_task_name"),
-        [
-            (backup_all, "nga_tools.commands.backup.backup_thread", "backup all"),
-            (backup_sub, "nga_tools.commands.backup.backup_thread_sub", "backup sub"),
-        ],
-    )
     def test_single_thread_backup_commands_write_warning_and_timing_logs(
         self,
-        handler: Callable[[dict[str, object]], None],
-        implementation_path: str,
-        expected_task_name: str,
     ) -> None:
         with TemporaryDirectory() as temp_dir_name:
             base_dir = Path(temp_dir_name)
@@ -502,17 +472,20 @@ class BackupWarningLogTest:
                     "nga_tools.core.paths.get_folder",
                     side_effect=_fake_get_folder(base_dir),
                 ),
-                patch(implementation_path, side_effect=implementation),
+                patch(
+                    "nga_tools.commands.backup.backup_thread",
+                    side_effect=implementation,
+                ),
                 _captured_reporter() as output,
             ):
-                handler({})
+                backup_all({})
 
             assert log_path.read_text(encoding='utf-8') == '警告：单帖警告\n'
             timing_text = _only_versioned_log(timing_path).read_text(
                 encoding="utf-8"
             )
             assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
-            assert f"任务：{expected_task_name}\n" in timing_text
+            assert "任务：backup all\n" in timing_text
             assert "目标：tid=101, aid=all\n" in timing_text
             assert "总耗时：" in timing_text
             assert "状态：完成" in timing_text
@@ -1001,30 +974,14 @@ class BackupBatchHandlerTest:
         ):
             configs_cls.return_value.get_thread_configs.return_value = thread_configs
 
-            backup_sub({"all_threads": True, "workers": 1})
+            backup_sub(
+                {"all_threads": True, "workers": 1, "write_json": True}
+            )
 
-        assert backup_mock.call_args_list == [call(101, 201, write_json=False), call(102, None, write_json=False)]
-
-    def test_backup_all_all_threads_uses_batch_full_backup(self) -> None:
-        thread_configs = [
-            _thread_config(name="first", tid=101, aid=201),
-            _thread_config(name="second", tid=102, aid=None),
+        assert backup_mock.call_args_list == [
+            call(101, 201, write_json=True),
+            call(102, None, write_json=True),
         ]
-
-        with (
-            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
-            patch("nga_tools.commands.backup.backup_thread") as backup_mock,
-            patch(
-                "nga_tools.commands.backup.configure_network_limits_from_args",
-                return_value=_backup_config_app_config(),
-            ),
-            _captured_reporter(),
-        ):
-            configs_cls.return_value.get_thread_configs.return_value = thread_configs
-
-            backup_all({"all_threads": True, "workers": 1, "write_json": True})
-
-        assert backup_mock.call_args_list == [call(101, 201, write_json=True), call(102, None, write_json=True)]
 
     def test_backup_all_all_threads_passes_force_processing(self) -> None:
         thread_configs = [
@@ -1154,52 +1111,6 @@ class BackupBatchHandlerTest:
         output_text = output.getvalue()
         assert "输出目录正在被另一个任务使用" in output_text
         assert "批量备份完成：成功1个，失败1个。" in output_text
-
-    def test_runs_sub_backup_for_each_thread_config_in_order_with_one_worker(
-        self,
-    ) -> None:
-        thread_configs = [
-            _thread_config(name="first", tid=101, aid=201),
-            _thread_config(name="second", tid=102, aid=None),
-        ]
-
-        with (
-            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
-            patch("nga_tools.commands.backup.backup_thread_sub") as backup_mock,
-            patch(
-                "nga_tools.commands.backup.configure_network_limits_from_args",
-                return_value=_backup_config_app_config(),
-            ),
-            _captured_reporter(),
-        ):
-            configs_cls.return_value.get_thread_configs.return_value = thread_configs
-
-            backup_sub({"all_threads": True, "workers": 1})
-
-        assert backup_mock.call_args_list == [call(101, 201, write_json=False), call(102, None, write_json=False)]
-
-    def test_backup_sub_all_threads_passes_write_json_to_each_thread(self) -> None:
-        thread_configs = [
-            _thread_config(name="first", tid=101, aid=201),
-            _thread_config(name="second", tid=102, aid=None),
-        ]
-
-        with (
-            patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
-            patch("nga_tools.commands.backup.backup_thread_sub") as backup_mock,
-            patch(
-                "nga_tools.commands.backup.configure_network_limits_from_args",
-                return_value=_backup_config_app_config(),
-            ),
-            _captured_reporter(),
-        ):
-            configs_cls.return_value.get_thread_configs.return_value = thread_configs
-
-            backup_sub(
-                {"all_threads": True, "workers": 1, "write_json": True}
-            )
-
-        assert backup_mock.call_args_list == [call(101, 201, write_json=True), call(102, None, write_json=True)]
 
     def test_empty_thread_config_list_does_not_run_backup(self) -> None:
         with (

@@ -6,10 +6,7 @@ import numpy as np
 import imagehash
 from PIL import Image
 
-from nga_tools.image_cluster.normalize import (
-    normalize_image,
-    normalize_image_passthrough,
-)
+from nga_tools.image_cluster.normalize import normalize_image
 
 
 def _save_png(arr: np.ndarray, path: Path, mode: str = "RGB") -> None:
@@ -129,18 +126,6 @@ def test_trim_removes_uniform_border(tmp_path: Path) -> None:
     assert result.trimmed is True
     assert result.width == 20
     assert result.height == 20
-
-
-def test_small_image_returns_min_canvas(tmp_path: Path) -> None:
-    arr = np.full((3, 4, 3), 200, dtype=np.uint8)
-    path = tmp_path / "tiny.png"
-    _save_png(arr, path)
-
-    result = normalize_image_passthrough(path)
-
-    assert result.width == 8
-    assert result.height == 8
-    assert tuple(result.array[0, 0].tolist()) == (255, 255, 255)
 
 
 def test_jpeg_input_works(tmp_path: Path) -> None:

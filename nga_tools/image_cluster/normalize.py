@@ -148,37 +148,3 @@ def normalize_image(path: Path) -> NormalizeResult:
         width=int(composite.shape[1]),
         height=int(composite.shape[0]),
     )
-
-
-def normalize_image_passthrough(path: Path) -> NormalizeResult:
-    with open_image_for_processing(path) as image:
-        converted = image.convert("RGB")
-        arr = np.array(converted)
-    h, w = arr.shape[:2]
-    if h < _MIN_SIDE or w < _MIN_SIDE:
-        canvas = np.full(
-            (_MIN_SIDE, _MIN_SIDE, 3), 0, dtype=np.uint8
-        )
-        canvas[:, :, 0] = _COMPOSITE_BG[0]
-        canvas[:, :, 1] = _COMPOSITE_BG[1]
-        canvas[:, :, 2] = _COMPOSITE_BG[2]
-        return NormalizeResult(
-            array=canvas,
-            has_alpha=False,
-            bg_color=None,
-            trimmed=False,
-            color_histogram="",
-            width=_MIN_SIDE,
-            height=_MIN_SIDE,
-        )
-    fg_mask = np.ones((h, w), dtype=bool)
-    color_histogram = _compute_color_histogram(arr, fg_mask)
-    return NormalizeResult(
-        array=arr,
-        has_alpha=False,
-        bg_color=None,
-        trimmed=False,
-        color_histogram=color_histogram,
-        width=w,
-        height=h,
-    )

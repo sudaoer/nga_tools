@@ -5,7 +5,6 @@ import pytest
 from nga_tools.image_cluster.lsh import (
     CandidatePair,
     LshConfig,
-    collect_distance_histogram,
     generate_candidate_pairs,
 )
 
@@ -69,33 +68,6 @@ def test_candidate_pair_sorted_order() -> None:
     p = CandidatePair.sorted("z.png", "a.png")
     assert p.a == "a.png"
     assert p.b == "z.png"
-
-
-def test_distance_histogram() -> None:
-    hashes = {
-        "a.png": "0000000000000000",
-        "b.png": "0000000000000000",
-        "c.png": "0000000000000001",
-        "d.png": "ffffffffffffffff",
-    }
-    pairs = [
-        CandidatePair(a="a.png", b="b.png"),
-        CandidatePair(a="a.png", b="c.png"),
-        CandidatePair(a="a.png", b="d.png"),
-    ]
-    histogram = collect_distance_histogram(pairs, hashes)
-
-    assert histogram[0] == 1
-    assert histogram[1] == 1
-    assert histogram[64] == 1
-    assert sum(histogram) == 3
-
-
-def test_histogram_skips_missing_hashes() -> None:
-    hashes = {"a.png": "0000000000000000"}
-    pairs = [CandidatePair(a="a.png", b="missing.png")]
-    histogram = collect_distance_histogram(pairs, hashes)
-    assert sum(histogram) == 0
 
 
 def test_pairs_are_sorted_and_deterministic() -> None:

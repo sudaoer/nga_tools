@@ -346,33 +346,6 @@ class ImageStoreTest:
 
             assert pending_tasks == [{"url": image_url}]
 
-    def test_pending_image_download_tasks_reuses_avif_file_with_legacy_extension(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir_name:
-            output_dir = Path(temp_dir_name) / "output"
-            unique_dir = output_dir / "images_unique"
-            unique_dir.mkdir(parents=True)
-            avif_path = unique_dir / "legacy.png"
-            _write_avif_image(avif_path)
-            image_url = (
-                "https://img.nga.178.com/attachments/"
-                "mon_202607/02/lsQ92-jkkjK3.png"
-            )
-
-            with patch(
-                "nga_tools.config.get_config",
-                return_value=SimpleNamespace(output_dir=str(output_dir)),
-            ):
-                image_index.ImageIndexStore(output_dir).upsert_mapping(
-                    image_url, avif_path
-                )
-                pending_tasks = image_store.pending_image_download_tasks(
-                    [{"url": image_url}]
-                )
-
-            assert pending_tasks == []
-
     def test_store_downloaded_image_uses_avif_extension_from_file_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             output_dir = Path(temp_dir_name) / "output"

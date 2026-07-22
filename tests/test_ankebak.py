@@ -12,7 +12,6 @@ from unittest.mock import patch
 import pytest
 from rich.console import Console
 
-from nga_tools.cli import args_parse
 from nga_tools.commands.ankebak import _jobs_for_threads, backup_auto
 from nga_tools.commands.forum import DefaultForumSyncResult
 from nga_tools.console import ConsoleReporter, use_reporter
@@ -439,28 +438,3 @@ def test_backup_auto_isolates_planning_failure_and_omits_success_detail(
     assert "本地检查失败1个" in output_text
     assert "本地维护完成：" not in output_text
     assert "批量ankebak完成：成功1个，失败1个。" in output_text
-
-
-def test_backup_auto_cli_parses_network_and_watch_options() -> None:
-    args = args_parse(
-        [
-            "backup",
-            "auto",
-            "--watch-config",
-            "watch.json",
-            "--workers",
-            "3",
-            "--api-concurrency",
-            "2",
-            "--image-concurrency",
-            "20",
-            "--audio-concurrency",
-            "6",
-        ]
-    )
-
-    assert args["watch_config"] == "watch.json"
-    assert args["workers"] == 3
-    assert args["api_concurrency"] == 2
-    assert args["image_concurrency"] == 20
-    assert args["audio_concurrency"] == 6

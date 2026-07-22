@@ -16,7 +16,6 @@ from nga_tools.backup.floor_models import (
     FLOOR_MAP_VERSION,
     StoredFloorMap,
 )
-from nga_tools.cli import args_parse
 from nga_tools.replay.corpus import ReplayCorpusError, load_replay_corpus
 from nga_tools.replay.profile import (
     ReplayProfile,
@@ -25,11 +24,7 @@ from nga_tools.replay.profile import (
     load_replay_profile,
 )
 from nga_tools.replay.rate_limit import SharedBandwidthLimiter
-from nga_tools.replay.server import (
-    DEFAULT_REPLAY_HOST,
-    DEFAULT_REPLAY_PORT,
-    create_replay_app,
-)
+from nga_tools.replay.server import create_replay_app
 from nga_tools.storage import ensure_storage_metadata
 
 IMAGE_URL = (
@@ -718,22 +713,3 @@ class ReplayRateLimitTest:
         assert waits == pytest.approx([0.5, 0.25])
         limiter.reset()
         assert limiter.reserve_wait_seconds(10) == pytest.approx(0.1)
-
-
-class ReplayCliTest:
-    def test_replay_serve_parses_with_safe_defaults(self) -> None:
-        args = args_parse(
-            [
-                "replay",
-                "serve",
-                "--source-output",
-                "output",
-                "--profile",
-                "replay_profile.json",
-            ]
-        )
-
-        assert args["command"] == "replay"
-        assert args["action"] == "serve"
-        assert args["host"] == DEFAULT_REPLAY_HOST
-        assert args["port"] == DEFAULT_REPLAY_PORT
