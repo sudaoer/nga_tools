@@ -96,10 +96,10 @@ class ArchiveFloorMapRepository(ArchiveRepository):
                     f"author_lou={raw_author_lou}, pid={raw_latest_pid!r}"
                 )
             if raw_author_uid != -1:
-                raise ValueError(
-                    "archive缺失楼存在非匿名或缺少元数据的本地正文："
-                    f"author_lou={raw_author_lou}, author_uid={raw_author_uid!r}"
-                )
+                # 缺失楼的 author_lou 处出现了非匿名或缺少元数据的本地正文，
+                # 通常意味着NGA将此楼通过了审核、floor_map 已过期。
+                # 此处从raise改为continue，交由后续 floor_map 重生成自愈。
+                continue
             if raw_original_pid is None:
                 repairable[raw_author_lou] = (
                     raw_original_lou,

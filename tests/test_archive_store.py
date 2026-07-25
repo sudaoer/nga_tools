@@ -617,7 +617,7 @@ class ThreadArchiveStoreTest:
             "original_pid": 2002,
         }
 
-    def test_recovered_missing_floor_repair_rejects_non_anonymous_content(
+    def test_recovered_missing_floor_repair_skips_non_anonymous_content(
         self,
         tmp_path: Path,
     ) -> None:
@@ -644,10 +644,14 @@ class ThreadArchiveStoreTest:
         )
         before = store.state.read_backup_processing_snapshot().change_state
 
-        with pytest.raises(ValueError, match="非匿名或缺少元数据"):
-            store.floor_maps.repair_recovered_missing_floor_entries()
-
+        repairable = (
+            store.floor_maps.read_repairable_recovered_missing_floor_entries()
+        )
+        repaired = store.floor_maps.repair_recovered_missing_floor_entries()
         after = store.state.read_backup_processing_snapshot().change_state
+
+        assert repairable == {}
+        assert repaired == 0
         assert after == before
 
     def test_applies_missing_floor_attempt_delta_without_replacing_deferred(
