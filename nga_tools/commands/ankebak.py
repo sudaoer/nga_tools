@@ -256,6 +256,7 @@ def backup_auto(args: CommandArgs) -> None:
             worker_count=worker_count,
             write_timing_log=True,
             timing_log_enabled=app_config.timing_log_enabled,
+            timing_log_retention_days=app_config.timing_log_retention_days,
             task_name="backup auto",
             write_batch_timing_log=True,
             thread_configs=[job.thread_config for job in jobs],

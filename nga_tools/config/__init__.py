@@ -21,6 +21,7 @@ DEFAULT_AUDIO_CONCURRENCY = 8
 DEFAULT_BACKUP_CONFIGS_WORKERS = 4
 DEFAULT_BACKUP_SQLITE_CONCURRENCY = 2
 DEFAULT_TIMING_LOG_ENABLED = True
+DEFAULT_TIMING_LOG_RETENTION_DAYS = 7
 DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS = 168
 DEFAULT_ANKEBAK_MISSING_FLOOR_IMMEDIATE_RETRY_HOURS = 168
 DEFAULT_ANKEBAK_MISSING_FLOOR_RETRY_MAX_INTERVAL_HOURS = 720
@@ -53,6 +54,7 @@ class AppConfig:
     backup_configs_workers: int
     backup_sqlite_concurrency: int
     timing_log_enabled: bool
+    timing_log_retention_days: int
     ankebak_full_backup_interval_hours: int
     ankebak_missing_floor_immediate_retry_hours: int
     ankebak_missing_floor_retry_max_interval_hours: int
@@ -344,6 +346,12 @@ def load_config(
             resolved_config_path,
             DEFAULT_TIMING_LOG_ENABLED,
         ),
+        timing_log_retention_days=_optional_positive_int(
+            config_data,
+            "timing_log_retention_days",
+            resolved_config_path,
+            DEFAULT_TIMING_LOG_RETENTION_DAYS,
+        ),
         ankebak_full_backup_interval_hours=_optional_positive_int(
             config_data,
             "ankebak_full_backup_interval_hours",
@@ -388,6 +396,22 @@ def load_timing_log_enabled(config_path: Optional[PathValue] = None) -> bool:
         "timing_log_enabled",
         resolved_config_path,
         DEFAULT_TIMING_LOG_ENABLED,
+    )
+
+
+def load_timing_log_retention_days(
+    config_path: Optional[PathValue] = None,
+) -> int:
+    resolved_config_path = _path_or_default(config_path, DEFAULT_CONFIG_PATH)
+    try:
+        config_data = _read_json_object(resolved_config_path)
+    except FileNotFoundError:
+        return DEFAULT_TIMING_LOG_RETENTION_DAYS
+    return _optional_positive_int(
+        config_data,
+        "timing_log_retention_days",
+        resolved_config_path,
+        DEFAULT_TIMING_LOG_RETENTION_DAYS,
     )
 
 

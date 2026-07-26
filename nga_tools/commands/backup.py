@@ -9,7 +9,11 @@ from nga_tools.backup.image_validation import (
     ImageValidationCache,
     use_image_validation_cache,
 )
-from nga_tools.config import get_config, load_timing_log_enabled
+from nga_tools.config import (
+    get_config,
+    load_timing_log_enabled,
+    load_timing_log_retention_days,
+)
 from nga_tools.console import use_thread_warning_summary, use_warning_log
 from nga_tools.backup.pdf import PdfRenderPool, generate_pdf
 from nga_tools.commands.network import configure_network_limits_from_args
@@ -76,6 +80,7 @@ def _use_thread_output_logs(
     tid: int,
     aid: int | None,
     timing_log_enabled: bool,
+    timing_log_retention_days: int,
 ) -> Generator[None]:
     with ExitStack() as stack:
         stack.enter_context(use_thread_output_lock(tid, aid))
@@ -89,6 +94,7 @@ def _use_thread_output_logs(
                 task_name=task_name,
                 target=_thread_target_label(tid, aid),
                 enabled=timing_log_enabled,
+                retention_days=timing_log_retention_days,
             )
         )
         yield
@@ -155,6 +161,7 @@ def run_backup_fetch_batch(
             worker_count=worker_count,
             write_timing_log=True,
             timing_log_enabled=app_config.timing_log_enabled,
+            timing_log_retention_days=app_config.timing_log_retention_days,
             task_name=task_name,
             write_batch_timing_log=True,
             thread_configs=thread_configs,
@@ -182,6 +189,7 @@ def backup_all(args: CommandArgs) -> None:
             tid=thread_tid,
             aid=thread_aid,
             timing_log_enabled=app_config.timing_log_enabled,
+            timing_log_retention_days=app_config.timing_log_retention_days,
         ),
         use_api_runtime(app_config.api_concurrency),
         use_image_validation_cache(),
@@ -224,6 +232,7 @@ def backup_sub(args: CommandArgs) -> None:
             tid=thread_tid,
             aid=thread_aid,
             timing_log_enabled=app_config.timing_log_enabled,
+            timing_log_retention_days=app_config.timing_log_retention_days,
         ),
         use_api_runtime(app_config.api_concurrency),
         use_image_validation_cache(),
@@ -274,6 +283,7 @@ def pdf_generate(args: CommandArgs) -> None:
                 worker_count=worker_count,
                 write_timing_log=True,
                 timing_log_enabled=app_config.timing_log_enabled,
+                timing_log_retention_days=app_config.timing_log_retention_days,
                 task_name="backup pdf --all-threads",
             )
         return
@@ -284,6 +294,7 @@ def pdf_generate(args: CommandArgs) -> None:
         tid=thread_tid,
         aid=thread_aid,
         timing_log_enabled=load_timing_log_enabled(),
+        timing_log_retention_days=load_timing_log_retention_days(),
     ):
         generate_pdf(
             tid=thread_tid,

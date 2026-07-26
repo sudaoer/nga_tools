@@ -5,7 +5,10 @@ from nga_tools.backup.image_verify import (
     verify_all_downloaded_images,
     verify_downloaded_images,
 )
-from nga_tools.config import load_timing_log_enabled
+from nga_tools.config import (
+    load_timing_log_enabled,
+    load_timing_log_retention_days,
+)
 from nga_tools.console import (
     report_info,
     use_thread_warning_summary,
@@ -84,6 +87,7 @@ def image_verify(args: CommandArgs) -> None:
             task_name="image verify",
             target=f"tid={thread_tid}, aid={aid_text}",
             enabled=load_timing_log_enabled(),
+            retention_days=load_timing_log_retention_days(),
         ),
     ):
         verify_downloaded_images(thread_tid, thread_aid)

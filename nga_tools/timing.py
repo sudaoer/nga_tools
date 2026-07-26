@@ -9,17 +9,17 @@ from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from functools import cache
 from pathlib import Path
 from time import perf_counter
 from typing import TextIO
 
+from nga_tools.config import DEFAULT_TIMING_LOG_RETENTION_DAYS
 from nga_tools.core.atomic import write_text_atomically
 from nga_tools.forum.timing import ForumSyncTimingSnapshot
 
 
-TIMING_LOG_RETENTION_COUNT = 5
 _COMMIT_ID_RE = re.compile(r"^[0-9a-f]{40}$")
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,14 +44,13 @@ def git_commit_id() -> str | None:
     return commit_id
 
 
-def _timestamped_log_path(path: Path, started_at: datetime) -> Path:
-    timestamp = started_at.strftime("%Y%m%dT%H%M%S%f")
-    base_name = f"{path.stem}-{timestamp}"
-    candidate = path.with_name(f"{base_name}{path.suffix}")
+def _new_log_path(path: Path, started_at: datetime) -> Path:
+    timestamp = started_at.strftime("%Y%m%d-%H%M%S")
+    candidate = path.parent / f"{path.stem}-{timestamp}{path.suffix}"
     collision_index = 2
     while candidate.exists():
-        candidate = path.with_name(
-            f"{base_name}-{collision_index}{path.suffix}"
+        candidate = path.parent / (
+            f"{path.stem}-{timestamp}-{collision_index}{path.suffix}"
         )
         collision_index += 1
     return candidate
@@ -68,18 +67,64 @@ def _timing_log_candidates(path: Path) -> list[Path]:
     return candidates
 
 
-def _prune_timing_logs(path: Path) -> None:
-    candidates: list[tuple[int, str, Path]] = []
-    for candidate in _timing_log_candidates(path):
+def _log_date_from_name(path: Path, candidate: Path) -> date | None:
+    if candidate == path:
+        return None
+    prefix = f"{path.stem}-"
+    suffix = path.suffix
+    if not candidate.name.startswith(prefix) or not candidate.name.endswith(
+        suffix
+    ):
+        return None
+
+    timestamp = (
+        candidate.name[len(prefix) : -len(suffix)]
+        if suffix
+        else candidate.name[len(prefix) :]
+    )
+    for timestamp_format in ("%Y%m%d-%H%M%S", "%Y%m%dT%H%M%S%f"):
         try:
-            modified_ns = candidate.stat().st_mtime_ns
-        except OSError:
+            return datetime.strptime(timestamp, timestamp_format).date()
+        except ValueError:
             continue
-        candidates.append((modified_ns, candidate.name, candidate))
-    candidates.sort(reverse=True)
-    for _, _, stale_path in candidates[TIMING_LOG_RETENTION_COUNT:]:
+
+    timestamp = re.sub(r"-\d+$", "", timestamp)
+    for timestamp_format in ("%Y%m%d-%H%M%S", "%Y%m%dT%H%M%S%f"):
         try:
-            stale_path.unlink()
+            return datetime.strptime(timestamp, timestamp_format).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _file_local_date(path: Path) -> date | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).astimezone().date()
+    except OSError:
+        return None
+
+
+def _validate_retention_days(retention_days: int) -> None:
+    if type(retention_days) is not int or retention_days <= 0:
+        raise ValueError("日志保留天数必须是大于0的整数。")
+
+
+def _prune_timing_logs(path: Path, retention_days: int) -> None:
+    _validate_retention_days(retention_days)
+    cutoff_date = datetime.now().astimezone().date() - timedelta(
+        days=retention_days - 1
+    )
+    for candidate in _timing_log_candidates(path):
+        if candidate == path:
+            log_date = _file_local_date(candidate)
+        else:
+            log_date = _log_date_from_name(path, candidate)
+            if log_date is None:
+                continue
+        if log_date is None or log_date >= cutoff_date:
+            continue
+        try:
+            candidate.unlink()
         except OSError:
             continue
 
@@ -254,6 +299,7 @@ def use_timing_log(
     task_name: str,
     target: str | None = None,
     enabled: bool = True,
+    retention_days: int = DEFAULT_TIMING_LOG_RETENTION_DAYS,
     on_finish: Callable[[TimingSnapshot], None] | None = None,
 ) -> Generator[TimingLog | None]:
     if not enabled:
@@ -263,7 +309,8 @@ def use_timing_log(
     base_log_path = Path(path)
     base_log_path.parent.mkdir(parents=True, exist_ok=True)
     started_at = datetime.now().astimezone()
-    log_path = _timestamped_log_path(base_log_path, started_at)
+    _validate_retention_days(retention_days)
+    log_path = _new_log_path(base_log_path, started_at)
     try:
         with log_path.open("x", encoding="utf-8") as log_file:
             timing_log = TimingLog(
@@ -289,7 +336,7 @@ def use_timing_log(
             finally:
                 _CURRENT_TIMING_LOG.reset(token)
     finally:
-        _prune_timing_logs(base_log_path)
+        _prune_timing_logs(base_log_path, retention_days)
 
 
 @contextmanager
@@ -476,6 +523,7 @@ def write_batch_timing_summary(
     total_threads: int,
     snapshots: Iterable[TimingSnapshot],
     thread_failure_categories: Counter[str],
+    retention_days: int = DEFAULT_TIMING_LOG_RETENTION_DAYS,
     expected_thread_failure_categories: Counter[str] | None = None,
     forum_sync_seconds: float | None = None,
     forum_sync_timing: ForumSyncTimingSnapshot | None = None,
@@ -704,7 +752,8 @@ def write_batch_timing_summary(
         for category, count in sorted(expected_failure_categories.items()):
             lines.append(f"- {category}: {count}")
 
-    started_log_path = _timestamped_log_path(path, started_at)
+    _validate_retention_days(retention_days)
+    started_log_path = _new_log_path(path, started_at)
     write_text_atomically(started_log_path, "\n".join(lines) + "\n")
-    _prune_timing_logs(path)
+    _prune_timing_logs(path, retention_days)
     return started_log_path

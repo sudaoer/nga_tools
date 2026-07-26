@@ -296,12 +296,13 @@ CLI 命令结束时会输出警告总数、涉及帖子数和分类合计；没�
 小计，命令总计仍会显示 0 条。
 
 启用 `timing_log_enabled` 时，每帖计时日志使用
-`timing-YYYYMMDDTHHMMSSffffff.log`，批量计时摘要使用
-`output/batch_timing-YYYYMMDDTHHMMSSffffff.log`。每个帖子目录独立保留最近
-5 份计时日志，`output` 根目录也独立保留最近 5 份批量摘要；旧的固定名
-`timing.log`、`batch_timing.log` 会计入这 5 份并随时间自然淘汰。若运行时能
-从 Git 仓库取得当前提交，日志头会包含完整的 `Commit ID`；无法取得时省略该
-字段，不影响任务执行。关闭计时日志后不会创建、轮转或删除任何计时文件。
+`timing-YYYYMMDD-HHMMSS.log`，批量计时摘要使用
+`output/batch_timing-YYYYMMDD-HHMMSS.log`；同一秒内的冲突文件名会使用数字后缀。
+日志按自然日清理，默认由 `timing_log_retention_days` 保留最近 7 天，帖子目录和
+`output` 根目录分别清理。旧的固定名 `timing.log`、`batch_timing.log` 和旧格式
+时间戳日志也会按日期自然淘汰。若运行时能从 Git 仓库取得当前提交，日志头会包含
+完整的 `Commit ID`；无法取得时省略该字段，不影响任务执行。关闭计时日志后不会
+创建、轮转或删除任何计时文件。
 `backup auto` 的批量摘要还会把论坛同步拆分为版面页请求、限流等待、水位读取、
 SQLite 读写、库内本地筛选、只看作者请求和配置保存，并记录请求页数、重试数与
 筛查记录数；独立运行 `forum sync` 时控制台输出保持简洁，不打印这份耗时明细。

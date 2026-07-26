@@ -25,6 +25,7 @@ from nga_tools.console import (
     use_thread_warning_summary,
     use_warning_log,
 )
+from nga_tools.config import DEFAULT_TIMING_LOG_RETENTION_DAYS
 from nga_tools.core.output_lock import use_thread_output_lock
 from nga_tools.core.paths import (
     batch_timing_log_path,
@@ -113,6 +114,7 @@ def _run_thread_config_with_progress(
     write_warning_log: bool,
     write_timing_log: bool,
     timing_log_enabled: bool,
+    timing_log_retention_days: int,
     task_name: str,
     lock_thread_output: bool,
     timing_snapshot_callback: Callable[[TimingSnapshot], None] | None,
@@ -151,6 +153,7 @@ def _run_thread_config_with_progress(
                         task_name=task_name,
                         target=label,
                         enabled=timing_log_enabled,
+                        retention_days=timing_log_retention_days,
                         on_finish=timing_snapshot_callback,
                     )
                 )
@@ -178,6 +181,7 @@ def _run_thread_configs_sequential(
     write_warning_log: bool,
     write_timing_log: bool,
     timing_log_enabled: bool,
+    timing_log_retention_days: int,
     task_name: str,
     lock_thread_output: bool,
     timing_snapshot_callback: Callable[[TimingSnapshot], None] | None,
@@ -200,6 +204,7 @@ def _run_thread_configs_sequential(
                 write_warning_log=write_warning_log,
                 write_timing_log=write_timing_log,
                 timing_log_enabled=timing_log_enabled,
+                timing_log_retention_days=timing_log_retention_days,
                 task_name=task_name,
                 lock_thread_output=lock_thread_output,
                 timing_snapshot_callback=timing_snapshot_callback,
@@ -226,6 +231,7 @@ def _run_thread_configs_parallel(
     write_warning_log: bool,
     write_timing_log: bool,
     timing_log_enabled: bool,
+    timing_log_retention_days: int,
     task_name: str,
     lock_thread_output: bool,
     timing_snapshot_callback: Callable[[TimingSnapshot], None] | None,
@@ -263,6 +269,7 @@ def _run_thread_configs_parallel(
                 write_warning_log=write_warning_log,
                 write_timing_log=write_timing_log,
                 timing_log_enabled=timing_log_enabled,
+                timing_log_retention_days=timing_log_retention_days,
                 task_name=task_name,
                 lock_thread_output=lock_thread_output,
                 timing_snapshot_callback=timing_snapshot_callback,
@@ -337,6 +344,7 @@ def run_thread_config_batch(
     write_warning_log: bool = True,
     write_timing_log: bool = False,
     timing_log_enabled: bool = True,
+    timing_log_retention_days: int = DEFAULT_TIMING_LOG_RETENTION_DAYS,
     task_name: str | None = None,
     lock_thread_output: bool = True,
     write_batch_timing_log: bool = False,
@@ -385,6 +393,7 @@ def run_thread_config_batch(
                 write_warning_log=write_warning_log,
                 write_timing_log=write_timing_log,
                 timing_log_enabled=timing_log_enabled,
+                timing_log_retention_days=timing_log_retention_days,
                 task_name=effective_task_name,
                 lock_thread_output=lock_thread_output,
                 timing_snapshot_callback=(
@@ -405,6 +414,7 @@ def run_thread_config_batch(
                 write_warning_log=write_warning_log,
                 write_timing_log=write_timing_log,
                 timing_log_enabled=timing_log_enabled,
+                timing_log_retention_days=timing_log_retention_days,
                 task_name=effective_task_name,
                 lock_thread_output=lock_thread_output,
                 timing_snapshot_callback=(
@@ -439,6 +449,7 @@ def run_thread_config_batch(
                 for _, error in failures
                 if not is_thread_status_abnormal_error(error)
             ),
+            retention_days=timing_log_retention_days,
             expected_thread_failure_categories=Counter(
                 "状态异常"
                 for _, error in failures

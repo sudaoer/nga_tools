@@ -39,6 +39,7 @@ def isolate_default_output_dir(
         backup_configs_workers=config.DEFAULT_BACKUP_CONFIGS_WORKERS,
         backup_sqlite_concurrency=config.DEFAULT_BACKUP_SQLITE_CONCURRENCY,
         timing_log_enabled=config.DEFAULT_TIMING_LOG_ENABLED,
+        timing_log_retention_days=config.DEFAULT_TIMING_LOG_RETENTION_DAYS,
         ankebak_full_backup_interval_hours=(
             config.DEFAULT_ANKEBAK_FULL_BACKUP_INTERVAL_HOURS
         ),

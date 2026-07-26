@@ -145,6 +145,7 @@ def _backup_config_app_config(
         audio_concurrency=8,
         backup_configs_workers=workers,
         timing_log_enabled=timing_log_enabled,
+        timing_log_retention_days=7,
     )
 
 

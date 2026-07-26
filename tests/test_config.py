@@ -8,6 +8,7 @@ from pathlib import Path
 from nga_tools.config import (
     load_config,
     load_timing_log_enabled,
+    load_timing_log_retention_days,
 )
 
 
@@ -64,6 +65,7 @@ class ConfigConcurrencyTest:
             {"backup_configs_workers": 0},
             {"backup_sqlite_concurrency": 0},
             {"timing_log_enabled": "yes"},
+            {"timing_log_retention_days": 0},
             {"ankebak_full_backup_interval_hours": 0},
             {"ankebak_missing_floor_immediate_retry_hours": 0},
             {"ankebak_missing_floor_retry_max_interval_hours": 0},
@@ -99,3 +101,40 @@ class ConfigConcurrencyTest:
             missing_path = Path(temp_dir_name) / "missing.json"
 
             assert load_timing_log_enabled(missing_path) is True
+
+    def test_load_timing_log_retention_days_reads_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            config_path = Path(temp_dir_name) / "config.json"
+            config_path.write_text(
+                json.dumps(_config_data(timing_log_retention_days=14)),
+                encoding="utf-8",
+            )
+
+            assert load_timing_log_retention_days(config_path) == 14
+
+    def test_load_timing_log_retention_days_defaults_without_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            missing_path = Path(temp_dir_name) / "missing.json"
+
+            assert load_timing_log_retention_days(missing_path) == 7
+
+    def test_load_config_defaults_timing_log_retention_to_seven_days(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            config_path, secrets_path = self._write_config_files(
+                Path(temp_dir_name)
+            )
+
+            loaded = load_config(config_path, secrets_path)
+
+            assert loaded.timing_log_retention_days == 7
+
+    def test_load_config_reads_timing_log_retention_days(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            config_path, secrets_path = self._write_config_files(
+                Path(temp_dir_name),
+                {"timing_log_retention_days": 14},
+            )
+
+            loaded = load_config(config_path, secrets_path)
+
+            assert loaded.timing_log_retention_days == 14

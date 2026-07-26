@@ -9,6 +9,7 @@
   "backup_configs_workers": 4,
   "backup_sqlite_concurrency": 2,
   "timing_log_enabled": true,
+  "timing_log_retention_days": 7,
   "ankebak_full_backup_interval_hours": 168,
   "ankebak_missing_floor_immediate_retry_hours": 168,
   "ankebak_missing_floor_retry_max_interval_hours": 720,

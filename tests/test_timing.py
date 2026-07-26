@@ -16,6 +16,7 @@ from nga_tools.forum.timing import (
 from nga_tools.timing import (
     TimingSectionRecord,
     TimingSnapshot,
+    _new_log_path,
     record_timing,
     record_timing_label,
     record_timing_metric,
@@ -76,7 +77,7 @@ class TimingLogTest:
             legacy_text = log_path.read_text(encoding="utf-8")
 
         assert legacy_text == "旧日志\n"
-        assert re.fullmatch(r"timing-\d{8}T\d{12}\.log", timing_log.path.name)
+        assert re.fullmatch(r"timing-\d{8}-\d{6}(?:-\d+)?\.log", timing_log.path.name)
         assert "任务：backup sub\n" in log_text
         assert "目标：tid=101, aid=all\n" in log_text
         assert "阶段：固定阶段，耗时：1.235s\n" in log_text
@@ -193,23 +194,66 @@ class TimingLogTest:
         assert "  标签：嵌套标签，值：hit\n" in log_text
         assert "    指标：深层指标，值：3\n" in log_text
 
-    def test_timing_log_keeps_only_five_most_recent_files(self) -> None:
+    def test_timing_log_keeps_all_files_within_retention_days(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             log_path = Path(temp_dir_name) / "timing.log"
             log_path.write_text("旧日志\n", encoding="utf-8")
 
             created_paths: list[Path] = []
-            for _ in range(6):
-                with use_timing_log(log_path, task_name="backup sub") as timing_log:
+            for _ in range(8):
+                with use_timing_log(
+                    log_path,
+                    task_name="backup sub",
+                    retention_days=7,
+                ) as timing_log:
                     assert timing_log is not None
                     created_paths.append(timing_log.path)
 
             retained_paths = sorted(log_path.parent.glob("timing-*.log"))
-            assert len(retained_paths) == 5
-            assert log_path not in retained_paths
-            assert not log_path.exists()
-            assert not created_paths[0].exists()
-            assert all(path.exists() for path in created_paths[-5:])
+            assert len(retained_paths) == 8
+            assert log_path.exists()
+            assert all(path.exists() for path in created_paths)
+
+    def test_timing_log_prunes_by_calendar_date(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            log_path = Path(temp_dir_name) / "timing.log"
+            today = datetime.now().astimezone()
+            recent_path = log_path.parent / (
+                f"timing-{(today - timedelta(days=6)).strftime('%Y%m%d')}-120000.log"
+            )
+            stale_path = log_path.parent / (
+                f"timing-{(today - timedelta(days=7)).strftime('%Y%m%d')}-120000.log"
+            )
+            legacy_path = log_path.parent / "timing-20200101T120000000000.log"
+            unrelated_path = log_path.parent / "timing-not-a-date.log"
+            for candidate in (recent_path, stale_path, legacy_path, unrelated_path):
+                candidate.write_text("历史日志\n", encoding="utf-8")
+            log_path.write_text("旧固定名日志\n", encoding="utf-8")
+
+            with use_timing_log(
+                log_path,
+                task_name="backup sub",
+                retention_days=7,
+            ):
+                pass
+
+            assert recent_path.exists()
+            assert not stale_path.exists()
+            assert not legacy_path.exists()
+            assert unrelated_path.exists()
+            assert log_path.exists()
+
+    def test_new_log_path_uses_numeric_suffix_for_same_second_collision(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            base_path = Path(temp_dir_name) / "timing.log"
+            started_at = datetime(2026, 7, 26, 12, 34, 56)
+
+            first_path = _new_log_path(base_path, started_at)
+            first_path.touch()
+            second_path = _new_log_path(base_path, started_at)
+
+        assert first_path.name == "timing-20260726-123456.log"
+        assert second_path.name == "timing-20260726-123456-2.log"
 
     def test_timing_log_writes_commit_id_when_available(self) -> None:
         commit_id = "a" * 40
@@ -238,7 +282,7 @@ class TimingLogTest:
 
         assert "Commit ID：" not in log_text
 
-    def test_batch_timing_summary_is_versioned_and_keeps_five(self) -> None:
+    def test_batch_timing_summary_is_versioned_and_keeps_recent_files(self) -> None:
         commit_id = "b" * 40
         with TemporaryDirectory() as temp_dir_name:
             batch_path = Path(temp_dir_name) / "batch_timing.log"
@@ -253,7 +297,7 @@ class TimingLogTest:
                     write_batch_timing_summary(
                         batch_path,
                         task_name="backup sub --all-threads",
-                        started_at=started_at + timedelta(microseconds=index),
+                        started_at=started_at + timedelta(seconds=index),
                         wall_seconds=1.0,
                         total_threads=0,
                         snapshots=(),
@@ -267,8 +311,15 @@ class TimingLogTest:
                 path.read_text(encoding="utf-8") for path in retained_paths
             ]
 
-            assert len(retained_paths) == 5
-            assert not batch_path.exists()
+            assert len(retained_paths) == 6
+            assert batch_path.exists()
+            assert all(
+                re.fullmatch(
+                    r"batch_timing-\d{8}-\d{6}(?:-\d+)?\.log",
+                    path.name,
+                )
+                for path in retained_paths
+            )
             assert all(
                 f"Commit ID：{commit_id}\n" in text
                 for text in retained_texts

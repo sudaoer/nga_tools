@@ -378,6 +378,7 @@ def test_backup_auto_isolates_planning_failure_and_omits_success_detail(
         audio_concurrency=8,
         backup_configs_workers=1,
         timing_log_enabled=False,
+        timing_log_retention_days=7,
         ankebak_full_backup_interval_hours=168,
     )
     forum_result = DefaultForumSyncResult((), 0, 0, 0, 0, 0)
