@@ -127,7 +127,6 @@ class ImageStoreTest:
             assert unique_path.parent.samefile(output_dir / 'images_unique')
             assert re.search('^[0-9a-f]{64}\\.png$', unique_path.name) is not None
             assert mapping is not None
-            assert mapping is not None
             assert mapping.unique_rel_path == f'images_unique/{unique_path.name}'
             assert not (output_dir / 'images').exists()
             assert (output_dir / 'image_index.sqlite3').exists()

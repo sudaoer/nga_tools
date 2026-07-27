@@ -16,12 +16,6 @@ class CandidatePair:
     a: str
     b: str
 
-    @classmethod
-    def sorted(cls, a: str, b: str) -> CandidatePair:
-        if a <= b:
-            return cls(a=a, b=b)
-        return cls(a=b, b=a)
-
 
 def _validate_bands(bands: int) -> int:
     if bands <= 0:

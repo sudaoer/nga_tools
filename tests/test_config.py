@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 import json
-import tempfile
 from pathlib import Path
 
 from nga_tools.config import (
@@ -76,65 +75,75 @@ class ConfigConcurrencyTest:
     def test_load_config_rejects_invalid_optional_values(
         self,
         config_overrides: dict[str, object],
+        tmp_path: Path,
     ) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir_name:
-            config_path, secrets_path = self._write_config_files(
-                Path(temp_dir_name),
-                config_overrides,
-            )
+        config_path, secrets_path = self._write_config_files(
+            tmp_path,
+            config_overrides,
+        )
 
-            with pytest.raises(ValueError):
-                load_config(config_path, secrets_path)
+        with pytest.raises(ValueError):
+            load_config(config_path, secrets_path)
 
-    def test_load_timing_log_enabled_reads_config_without_secrets(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir_name:
-            config_path = Path(temp_dir_name) / "config.json"
-            config_path.write_text(
-                json.dumps(_config_data(timing_log_enabled=False)),
-                encoding="utf-8",
-            )
+    def test_load_timing_log_enabled_reads_config_without_secrets(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps(_config_data(timing_log_enabled=False)),
+            encoding="utf-8",
+        )
 
-            assert load_timing_log_enabled(config_path) is False
+        assert load_timing_log_enabled(config_path) is False
 
-    def test_load_timing_log_enabled_defaults_to_enabled_without_config(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir_name:
-            missing_path = Path(temp_dir_name) / "missing.json"
+    def test_load_timing_log_enabled_defaults_to_enabled_without_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        missing_path = tmp_path / "missing.json"
 
-            assert load_timing_log_enabled(missing_path) is True
+        assert load_timing_log_enabled(missing_path) is True
 
-    def test_load_timing_log_retention_days_reads_config(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir_name:
-            config_path = Path(temp_dir_name) / "config.json"
-            config_path.write_text(
-                json.dumps(_config_data(timing_log_retention_days=14)),
-                encoding="utf-8",
-            )
+    def test_load_timing_log_retention_days_reads_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps(_config_data(timing_log_retention_days=14)),
+            encoding="utf-8",
+        )
 
-            assert load_timing_log_retention_days(config_path) == 14
+        assert load_timing_log_retention_days(config_path) == 14
 
-    def test_load_timing_log_retention_days_defaults_without_config(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir_name:
-            missing_path = Path(temp_dir_name) / "missing.json"
+    def test_load_timing_log_retention_days_defaults_without_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        missing_path = tmp_path / "missing.json"
 
-            assert load_timing_log_retention_days(missing_path) == 7
+        assert load_timing_log_retention_days(missing_path) == 7
 
-    def test_load_config_defaults_timing_log_retention_to_seven_days(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir_name:
-            config_path, secrets_path = self._write_config_files(
-                Path(temp_dir_name)
-            )
+    def test_load_config_defaults_timing_log_retention_to_seven_days(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config_path, secrets_path = self._write_config_files(tmp_path)
 
-            loaded = load_config(config_path, secrets_path)
+        loaded = load_config(config_path, secrets_path)
 
-            assert loaded.timing_log_retention_days == 7
+        assert loaded.timing_log_retention_days == 7
 
-    def test_load_config_reads_timing_log_retention_days(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir_name:
-            config_path, secrets_path = self._write_config_files(
-                Path(temp_dir_name),
-                {"timing_log_retention_days": 14},
-            )
+    def test_load_config_reads_timing_log_retention_days(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config_path, secrets_path = self._write_config_files(
+            tmp_path,
+            {"timing_log_retention_days": 14},
+        )
 
-            loaded = load_config(config_path, secrets_path)
+        loaded = load_config(config_path, secrets_path)
 
-            assert loaded.timing_log_retention_days == 14
+        assert loaded.timing_log_retention_days == 14

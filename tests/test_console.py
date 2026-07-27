@@ -116,7 +116,9 @@ class BackupConfigsProgressDisplayTest:
             "警告汇总：first：共1条；图片下载1条。" in output.getvalue()
         )
 
-    def test_stage_completion_does_not_finish_thread_task(self) -> None:
+    def test_stage_updates_keep_thread_visible_until_explicit_finish(
+        self,
+    ) -> None:
         output = io.StringIO()
         console = Console(
             file=output,
@@ -127,44 +129,20 @@ class BackupConfigsProgressDisplayTest:
 
         with BackupConfigsProgressDisplay(1, console=console) as display:
             reporter = display.start_thread(index=1, total=1, label="first")
-            task = display._progress.tasks[reporter.task_id]
 
             reporter.progress("页面获取完成", completed=1, total=1)
-
-            assert task.total is None
-            assert task.completed == 0
-            assert task.fields["stage_completed"] == 1
-            assert task.fields["stage_total"] == 1
-            assert task.finished is False
-            assert task.finished_time is None
-
+            assert display.visible_task_descriptions() == [
+                "总进度",
+                "[1/1] first",
+            ]
             reporter.progress("继续处理")
-
-            assert task.fields["stage_completed"] is None
-            assert task.fields["stage_total"] is None
-            assert task.fields["progress_text"] == ""
-            assert task.finished is False
-
-    def test_zero_total_stage_does_not_finish_thread_task(self) -> None:
-        output = io.StringIO()
-        console = Console(
-            file=output,
-            force_terminal=False,
-            color_system=None,
-            width=160,
-        )
-
-        with BackupConfigsProgressDisplay(1, console=console) as display:
-            reporter = display.start_thread(index=1, total=1, label="first")
-            task = display._progress.tasks[reporter.task_id]
-
             reporter.progress("没有图片", completed=0, total=0)
-
-            assert task.total is None
-            assert task.completed == 0
-            assert task.fields["progress_text"] == "0/0"
-            assert task.finished is False
-            assert task.finished_time is None
+            assert display.visible_task_descriptions() == [
+                "总进度",
+                "[1/1] first",
+            ]
+            display.finish_thread(reporter, status="完成")
+            assert display.visible_task_descriptions() == ["总进度"]
 
     def test_progress_runtime_text_is_rendered_without_markup_parsing(
         self,

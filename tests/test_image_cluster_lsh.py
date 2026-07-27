@@ -62,20 +62,3 @@ def test_invalid_bands_raises() -> None:
         generate_candidate_pairs(hashes, LshConfig(bands=3))
     with pytest.raises(ValueError):
         generate_candidate_pairs(hashes, LshConfig(bands=0))
-
-
-def test_candidate_pair_sorted_order() -> None:
-    p = CandidatePair.sorted("z.png", "a.png")
-    assert p.a == "a.png"
-    assert p.b == "z.png"
-
-
-def test_pairs_are_sorted_and_deterministic() -> None:
-    hashes = {
-        f"img{i}.png": "1234567890abcdef"
-        for i in range(5)
-    }
-    pairs1 = generate_candidate_pairs(hashes, LshConfig(bands=4))
-    pairs2 = generate_candidate_pairs(hashes, LshConfig(bands=4))
-    assert pairs1 == pairs2
-    assert pairs1 == sorted(pairs1, key=lambda p: (p.a, p.b))

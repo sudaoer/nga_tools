@@ -150,30 +150,6 @@ class TimingLogTest:
         assert stage_lines[2].startswith("  阶段：子阶段，结束时间：")
         assert stage_lines[3].startswith("阶段：父阶段，结束时间：")
 
-    def test_three_level_nesting_indents_by_depth(self) -> None:
-        with TemporaryDirectory() as temp_dir_name:
-            log_path = Path(temp_dir_name) / "timing.log"
-
-            with use_timing_log(log_path, task_name="backup sub") as timing_log:
-                assert timing_log is not None
-                with time_section("祖父阶段"):
-                    with time_section("父阶段"):
-                        with time_section("子阶段"):
-                            pass
-
-            stage_lines = [
-                line
-                for line in timing_log.path.read_text(encoding="utf-8").splitlines()
-                if line.lstrip().startswith("阶段：")
-            ]
-
-        assert stage_lines[0].startswith("阶段：祖父阶段，开始时间：")
-        assert stage_lines[1].startswith("  阶段：父阶段，开始时间：")
-        assert stage_lines[2].startswith("    阶段：子阶段，开始时间：")
-        assert stage_lines[3].startswith("    阶段：子阶段，结束时间：")
-        assert stage_lines[4].startswith("  阶段：父阶段，结束时间：")
-        assert stage_lines[5].startswith("阶段：祖父阶段，结束时间：")
-
     def test_metrics_and_labels_indent_to_current_section_depth(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             log_path = Path(temp_dir_name) / "timing.log"

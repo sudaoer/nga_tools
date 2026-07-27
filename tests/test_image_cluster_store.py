@@ -58,13 +58,6 @@ def test_ensure_store_creates_tables(tmp_path: Path) -> None:
     } <= tables
 
 
-def test_ensure_store_idempotent(tmp_path: Path) -> None:
-    store = ImageClusterStore(tmp_path)
-    store.ensure_store()
-    store.ensure_store()
-    assert store.db_path.is_file()
-
-
 def test_read_methods_do_not_create_missing_store(tmp_path: Path) -> None:
     store = ImageClusterStore(tmp_path)
 

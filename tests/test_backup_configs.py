@@ -5,9 +5,9 @@ import io
 from pathlib import Path
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from tempfile import TemporaryDirectory
+from contextlib import AbstractContextManager, contextmanager
 from types import SimpleNamespace
+from typing import Protocol
 from unittest.mock import MagicMock, call, patch
 
 from rich.console import Console
@@ -181,6 +181,58 @@ def _captured_reporter() -> Iterator[io.StringIO]:
         yield output
 
 
+class _BackupCommandEnvironment(Protocol):
+    def __call__(
+        self,
+        *,
+        aid: int | None = None,
+        timing_log_enabled: bool = True,
+        workers: int = 4,
+        base_dir: Path | None = None,
+    ) -> AbstractContextManager[io.StringIO]: ...
+
+
+@pytest.fixture
+def backup_command_environment(
+    tmp_path: Path,
+) -> _BackupCommandEnvironment:
+    @contextmanager
+    def environment(
+        *,
+        aid: int | None = None,
+        timing_log_enabled: bool = True,
+        workers: int = 4,
+        base_dir: Path | None = None,
+    ) -> Iterator[io.StringIO]:
+        with (
+            patch(
+                "nga_tools.commands.backup.configure_network_limits_from_args",
+                return_value=_backup_config_app_config(
+                    workers=workers,
+                    timing_log_enabled=timing_log_enabled,
+                ),
+            ),
+            patch(
+                "nga_tools.commands.backup.resolve_command_thread_target",
+                return_value=(101, aid),
+            ),
+            patch(
+                "nga_tools.core.paths.get_folder",
+                side_effect=_fake_get_folder(
+                    tmp_path if base_dir is None else base_dir
+                ),
+            ),
+            patch(
+                "nga_tools.commands.backup.load_timing_log_enabled",
+                return_value=timing_log_enabled,
+            ),
+            _captured_reporter() as output,
+        ):
+            yield output
+
+    return environment
+
+
 class BackupWarningLogTest:
     def test_thread_config_label_uses_subject_author_and_truncates_subject(self) -> None:
         thread_config = _thread_config(name="sample", tid=101, aid=201)
@@ -235,192 +287,133 @@ class BackupWarningLogTest:
 
     def test_single_thread_backup_passes_write_json_flag(
         self,
+        backup_command_environment: _BackupCommandEnvironment,
     ) -> None:
-        with TemporaryDirectory() as temp_dir_name:
-            base_dir = Path(temp_dir_name)
+        with (
+            patch(
+                "nga_tools.commands.backup.backup_thread"
+            ) as implementation_mock,
+            backup_command_environment(),
+        ):
+            backup_all({"write_json": True})
 
-            with (
-                patch(
-                    "nga_tools.commands.backup.configure_network_limits_from_args",
-                    return_value=_backup_config_app_config(),
-                ),
-                patch(
-                    "nga_tools.commands.backup.resolve_command_thread_target",
-                    return_value=(101, None),
-                ),
-                patch(
-                    "nga_tools.core.paths.get_folder",
-                    side_effect=_fake_get_folder(base_dir),
-                ),
-                patch(
-                    "nga_tools.commands.backup.backup_thread"
-                ) as implementation_mock,
-                _captured_reporter(),
-            ):
-                backup_all({"write_json": True})
-
-            implementation_mock.assert_called_once_with(
-                101,
-                None,
-                write_json=True,
-            )
+        implementation_mock.assert_called_once_with(
+            101,
+            None,
+            write_json=True,
+        )
 
     def test_single_thread_backup_uses_shared_api_runtime(
         self,
+        backup_command_environment: _BackupCommandEnvironment,
     ) -> None:
-        with TemporaryDirectory() as temp_dir_name:
-            base_dir = Path(temp_dir_name)
+        def implementation(
+            tid: int,
+            aid: int | None,
+            **kwargs: object,
+        ) -> None:
+            assert (tid, aid) == (101, None)
+            assert kwargs == {"write_json": False}
+            runtime = current_api_runtime()
+            assert runtime is not None
+            assert runtime.capacity == 4
 
-            def implementation(
-                tid: int,
-                aid: int | None,
-                **kwargs: object,
-            ) -> None:
-                assert (tid, aid) == (101, None)
-                assert kwargs == {"write_json": False}
-                runtime = current_api_runtime()
-                assert runtime is not None
-                assert runtime.capacity == 4
-
-            with (
-                patch(
-                    "nga_tools.commands.backup.configure_network_limits_from_args",
-                    return_value=_backup_config_app_config(),
-                ),
-                patch(
-                    "nga_tools.commands.backup.resolve_command_thread_target",
-                    return_value=(101, None),
-                ),
-                patch(
-                    "nga_tools.core.paths.get_folder",
-                    side_effect=_fake_get_folder(base_dir),
-                ),
-                patch(
-                    "nga_tools.commands.backup.backup_thread",
-                    side_effect=implementation,
-                ),
-                _captured_reporter(),
-            ):
-                backup_all({})
+        with (
+            patch(
+                "nga_tools.commands.backup.backup_thread",
+                side_effect=implementation,
+            ),
+            backup_command_environment(),
+        ):
+            backup_all({})
 
     def test_single_thread_backup_passes_force_processing_flag(
         self,
+        backup_command_environment: _BackupCommandEnvironment,
     ) -> None:
-        with TemporaryDirectory() as temp_dir_name:
-            base_dir = Path(temp_dir_name)
-            with (
-                patch(
-                    "nga_tools.commands.backup.configure_network_limits_from_args",
-                    return_value=_backup_config_app_config(),
-                ),
-                patch(
-                    "nga_tools.commands.backup.resolve_command_thread_target",
-                    return_value=(101, None),
-                ),
-                patch(
-                    "nga_tools.core.paths.get_folder",
-                    side_effect=_fake_get_folder(base_dir),
-                ),
-                patch(
-                    "nga_tools.commands.backup.backup_thread"
-                ) as implementation_mock,
-                _captured_reporter(),
-            ):
-                backup_all({"force_processing": True})
+        with (
+            patch(
+                "nga_tools.commands.backup.backup_thread"
+            ) as implementation_mock,
+            backup_command_environment(),
+        ):
+            backup_all({"force_processing": True})
 
-            implementation_mock.assert_called_once_with(
-                101,
-                None,
-                write_json=False,
-                force_processing=True,
-            )
+        implementation_mock.assert_called_once_with(
+            101,
+            None,
+            write_json=False,
+            force_processing=True,
+        )
 
     def test_single_thread_backup_commands_write_warning_and_timing_logs(
         self,
+        tmp_path: Path,
+        backup_command_environment: _BackupCommandEnvironment,
     ) -> None:
-        with TemporaryDirectory() as temp_dir_name:
-            base_dir = Path(temp_dir_name)
-            thread_dir = base_dir / "101_all"
-            thread_dir.mkdir()
-            log_path = thread_dir / "warnings.log"
-            log_path.write_text("旧日志\n", encoding="utf-8")
-            timing_path = thread_dir / "timing.log"
-            timing_path.write_text("旧耗时\n", encoding="utf-8")
+        thread_dir = tmp_path / "101_all"
+        thread_dir.mkdir()
+        log_path = thread_dir / "warnings.log"
+        log_path.write_text("旧日志\n", encoding="utf-8")
+        timing_path = thread_dir / "timing.log"
+        timing_path.write_text("旧耗时\n", encoding="utf-8")
 
-            def implementation(
-                tid: int,
-                aid: int | None,
-                **kwargs: object,
-            ) -> None:
-                assert (tid, aid) == (101, None)
-                assert kwargs == {'write_json': False}
-                report_warning(WarningCategory.POST_CONTENT, "单帖警告")
+        def implementation(
+            tid: int,
+            aid: int | None,
+            **kwargs: object,
+        ) -> None:
+            assert (tid, aid) == (101, None)
+            assert kwargs == {'write_json': False}
+            report_warning(WarningCategory.POST_CONTENT, "单帖警告")
 
-            with (
-                patch(
-                    "nga_tools.commands.backup.configure_network_limits_from_args",
-                    return_value=_backup_config_app_config(),
-                ),
-                patch(
-                    "nga_tools.commands.backup.resolve_command_thread_target",
-                    return_value=(101, None),
-                ),
-                patch(
-                    "nga_tools.core.paths.get_folder",
-                    side_effect=_fake_get_folder(base_dir),
-                ),
-                patch(
-                    "nga_tools.commands.backup.backup_thread",
-                    side_effect=implementation,
-                ),
-                _captured_reporter() as output,
-            ):
-                backup_all({})
+        with (
+            patch(
+                "nga_tools.commands.backup.backup_thread",
+                side_effect=implementation,
+            ),
+            backup_command_environment() as output,
+        ):
+            backup_all({})
 
-            assert log_path.read_text(encoding='utf-8') == '警告：单帖警告\n'
-            timing_text = _only_versioned_log(timing_path).read_text(
-                encoding="utf-8"
-            )
-            assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
-            assert "任务：backup all\n" in timing_text
-            assert "目标：tid=101, aid=all\n" in timing_text
-            assert "总耗时：" in timing_text
-            assert "状态：完成" in timing_text
-            assert "警告：单帖警告" not in output.getvalue()
-            assert (
-                "警告汇总：tid=101, aid=all：共1条；帖子内容1条。"
-                in output.getvalue()
-            )
+        assert log_path.read_text(encoding='utf-8') == '警告：单帖警告\n'
+        timing_text = _only_versioned_log(timing_path).read_text(
+            encoding="utf-8"
+        )
+        assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
+        assert "任务：backup all\n" in timing_text
+        assert "目标：tid=101, aid=all\n" in timing_text
+        assert "总耗时：" in timing_text
+        assert "状态：完成" in timing_text
+        assert "警告：单帖警告" not in output.getvalue()
+        assert (
+            "警告汇总：tid=101, aid=all：共1条；帖子内容1条。"
+            in output.getvalue()
+        )
 
-    def test_single_thread_backup_respects_disabled_timing_log(self) -> None:
-        with TemporaryDirectory() as temp_dir_name:
-            base_dir = Path(temp_dir_name)
-            thread_dir = base_dir / "101_all"
-            thread_dir.mkdir()
-            timing_path = thread_dir / "timing.log"
-            timing_path.write_text("旧耗时\n", encoding="utf-8")
+    def test_single_thread_backup_respects_disabled_timing_log(
+        self,
+        tmp_path: Path,
+        backup_command_environment: _BackupCommandEnvironment,
+    ) -> None:
+        thread_dir = tmp_path / "101_all"
+        thread_dir.mkdir()
+        timing_path = thread_dir / "timing.log"
+        timing_path.write_text("旧耗时\n", encoding="utf-8")
 
-            with (
-                patch(
-                    "nga_tools.commands.backup.configure_network_limits_from_args",
-                    return_value=_backup_config_app_config(timing_log_enabled=False),
-                ),
-                patch(
-                    "nga_tools.commands.backup.resolve_command_thread_target",
-                    return_value=(101, None),
-                ),
-                patch(
-                    "nga_tools.core.paths.get_folder",
-                    side_effect=_fake_get_folder(base_dir),
-                ),
-                patch("nga_tools.commands.backup.backup_thread_sub"),
-                _captured_reporter(),
-            ):
-                backup_sub({})
+        with (
+            patch("nga_tools.commands.backup.backup_thread_sub"),
+            backup_command_environment(timing_log_enabled=False),
+        ):
+            backup_sub({})
 
-            assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
+        assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
 
-    def test_backup_sub_batch_writes_per_thread_warning_and_timing_logs(self) -> None:
+    def test_backup_sub_batch_writes_per_thread_warning_and_timing_logs(
+        self,
+        tmp_path: Path,
+        backup_command_environment: _BackupCommandEnvironment,
+    ) -> None:
         first_thread_config = _thread_config(name="first", tid=101, aid=201)
         first_thread_config["subject"] = "first subject"
         first_thread_config["author"] = "first author"
@@ -432,133 +425,120 @@ class BackupWarningLogTest:
             second_thread_config,
         ]
 
-        with TemporaryDirectory() as temp_dir_name:
-            base_dir = Path(temp_dir_name)
-            (base_dir / "101_201").mkdir()
-            (base_dir / "102_all").mkdir()
-            (base_dir / "101_201" / "warnings.log").write_text(
-                "旧日志\n",
-                encoding="utf-8",
+        (tmp_path / "101_201").mkdir()
+        (tmp_path / "102_all").mkdir()
+        (tmp_path / "101_201" / "warnings.log").write_text(
+            "旧日志\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "102_all" / "warnings.log").write_text(
+            "旧日志\n",
+            encoding="utf-8",
+        )
+
+        def backup_side_effect(
+            tid: int,
+            aid: int | None,
+            *,
+            write_json: bool,
+        ) -> None:
+            assert write_json is False
+            report_warning(
+                WarningCategory.POST_CONTENT,
+                f"warning {tid} {aid}",
             )
-            (base_dir / "102_all" / "warnings.log").write_text(
-                "旧日志\n",
-                encoding="utf-8",
+
+        with (
+            patch(
+                "nga_tools.commands.thread_batch.NGAThreadConfigs"
+            ) as configs_cls,
+            patch(
+                "nga_tools.commands.backup.backup_thread_sub",
+                side_effect=backup_side_effect,
+            ),
+            backup_command_environment(workers=2) as output,
+            use_command_warning_summary(),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = (
+                thread_configs
             )
+            backup_sub({"all_threads": True})
 
-            def backup_side_effect(
-                tid: int,
-                aid: int | None,
-                *,
-                write_json: bool,
-            ) -> None:
-                assert write_json is False
-                report_warning(
-                    WarningCategory.POST_CONTENT,
-                    f"warning {tid} {aid}",
-                )
+        assert (
+            tmp_path / "101_201" / "warnings.log"
+        ).read_text(encoding="utf-8") == "警告：warning 101 201\n"
+        assert (
+            tmp_path / "102_all" / "warnings.log"
+        ).read_text(encoding="utf-8") == "警告：warning 102 None\n"
+        assert "警告：warning" not in output.getvalue()
+        assert output.getvalue().count("警告汇总：") == 2
+        assert (
+            "警告汇总：first：（first subject，first author）：共1条；"
+            "帖子内容1条。"
+            in output.getvalue()
+        )
+        assert (
+            "警告总计：共2条，涉及2个帖子；帖子内容2条。"
+            in output.getvalue()
+        )
+        first_timing = _only_versioned_log(
+            tmp_path / "101_201" / "timing.log"
+        ).read_text(encoding="utf-8")
+        second_timing = _only_versioned_log(
+            tmp_path / "102_all" / "timing.log"
+        ).read_text(encoding="utf-8")
+        assert "任务：backup sub --all-threads\n" in first_timing
+        assert "目标：first：（first subject，first author）\n" in first_timing
+        assert "总耗时：" in first_timing
+        assert "状态：完成" in first_timing
+        assert "任务：backup sub --all-threads\n" in second_timing
+        assert "目标：second：（second subject，second author）\n" in second_timing
 
-            with (
-                patch("nga_tools.commands.thread_batch.NGAThreadConfigs") as configs_cls,
-                patch(
-                    "nga_tools.commands.backup.backup_thread_sub",
-                    side_effect=backup_side_effect,
-                ),
-                patch(
-                    "nga_tools.commands.backup.configure_network_limits_from_args",
-                    return_value=_backup_config_app_config(workers=2),
-                ),
-                patch(
-                    "nga_tools.core.paths.get_folder",
-                    side_effect=_fake_get_folder(base_dir),
-                ),
-                _captured_reporter() as output,
-                use_command_warning_summary(),
-            ):
-                configs_cls.return_value.get_thread_configs.return_value = thread_configs
+    def test_pdf_generate_writes_thread_warning_and_timing_logs(
+        self,
+        tmp_path: Path,
+        backup_command_environment: _BackupCommandEnvironment,
+    ) -> None:
+        thread_dir = tmp_path / "101_201"
+        thread_dir.mkdir()
+        log_path = thread_dir / "warnings.log"
+        log_path.write_text("旧日志\n", encoding="utf-8")
+        timing_path = thread_dir / "timing.log"
+        timing_path.write_text("旧耗时\n", encoding="utf-8")
 
-                backup_sub({"all_threads": True})
+        def generate_pdf_side_effect(
+            *,
+            tid: int,
+            aid: int | None,
+            lou_per_pdf: int,
+            pdf_workers: int | None,
+        ) -> None:
+            assert (tid, aid, lou_per_pdf, pdf_workers) == (101, 201, 50, 2)
+            report_warning(WarningCategory.PDF, "PDF告警")
 
-            assert (base_dir / '101_201' / 'warnings.log').read_text(encoding='utf-8') == '警告：warning 101 201\n'
-            assert (base_dir / '102_all' / 'warnings.log').read_text(encoding='utf-8') == '警告：warning 102 None\n'
-            assert "警告：warning" not in output.getvalue()
-            assert output.getvalue().count("警告汇总：") == 2
-            assert (
-                "警告汇总：first：（first subject，first author）：共1条；"
-                "帖子内容1条。"
-                in output.getvalue()
-            )
-            assert (
-                "警告总计：共2条，涉及2个帖子；帖子内容2条。"
-                in output.getvalue()
-            )
-            first_timing = _only_versioned_log(
-                base_dir / "101_201" / "timing.log"
-            ).read_text(encoding="utf-8")
-            second_timing = _only_versioned_log(
-                base_dir / "102_all" / "timing.log"
-            ).read_text(encoding="utf-8")
-            assert "任务：backup sub --all-threads\n" in first_timing
-            assert "目标：first：（first subject，first author）\n" in first_timing
-            assert "总耗时：" in first_timing
-            assert "状态：完成" in first_timing
-            assert "任务：backup sub --all-threads\n" in second_timing
-            assert "目标：second：（second subject，second author）\n" in second_timing
+        with (
+            patch(
+                "nga_tools.commands.backup.generate_pdf",
+                side_effect=generate_pdf_side_effect,
+            ),
+            backup_command_environment(aid=201) as output,
+        ):
+            pdf_generate({"lou_per_pdf": 50, "pdf_workers": 2})
 
-    def test_pdf_generate_writes_thread_warning_and_timing_logs(self) -> None:
-        with TemporaryDirectory() as temp_dir_name:
-            base_dir = Path(temp_dir_name)
-            thread_dir = base_dir / "101_201"
-            thread_dir.mkdir()
-            log_path = thread_dir / "warnings.log"
-            log_path.write_text("旧日志\n", encoding="utf-8")
-            timing_path = thread_dir / "timing.log"
-            timing_path.write_text("旧耗时\n", encoding="utf-8")
-
-            def generate_pdf_side_effect(
-                *,
-                tid: int,
-                aid: int | None,
-                lou_per_pdf: int,
-                pdf_workers: int | None,
-            ) -> None:
-                assert (tid, aid, lou_per_pdf, pdf_workers) == (101, 201, 50, 2)
-                report_warning(WarningCategory.PDF, "PDF告警")
-
-            with (
-                patch(
-                    "nga_tools.commands.backup.resolve_command_thread_target",
-                    return_value=(101, 201),
-                ),
-                patch(
-                    "nga_tools.commands.backup.generate_pdf",
-                    side_effect=generate_pdf_side_effect,
-                ),
-                patch(
-                    "nga_tools.core.paths.get_folder",
-                    side_effect=_fake_get_folder(base_dir),
-                ),
-                patch(
-                    "nga_tools.commands.backup.load_timing_log_enabled",
-                    return_value=True,
-                ),
-                _captured_reporter() as output,
-            ):
-                pdf_generate({"lou_per_pdf": 50, "pdf_workers": 2})
-
-            assert log_path.read_text(encoding='utf-8') == '警告：PDF告警\n'
-            timing_text = _only_versioned_log(timing_path).read_text(
-                encoding="utf-8"
-            )
-            assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
-            assert "任务：backup pdf\n" in timing_text
-            assert "目标：tid=101, aid=201\n" in timing_text
-            assert "总耗时：" in timing_text
-            assert "状态：完成" in timing_text
-            assert "警告：PDF告警" not in output.getvalue()
-            assert (
-                "警告汇总：tid=101, aid=201：共1条；PDF生成1条。"
-                in output.getvalue()
-            )
+        assert log_path.read_text(encoding='utf-8') == '警告：PDF告警\n'
+        timing_text = _only_versioned_log(timing_path).read_text(
+            encoding="utf-8"
+        )
+        assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
+        assert "任务：backup pdf\n" in timing_text
+        assert "目标：tid=101, aid=201\n" in timing_text
+        assert "总耗时：" in timing_text
+        assert "状态：完成" in timing_text
+        assert "警告：PDF告警" not in output.getvalue()
+        assert (
+            "警告汇总：tid=101, aid=201：共1条；PDF生成1条。"
+            in output.getvalue()
+        )
 
 
 class BackupBatchHandlerTest:
@@ -817,7 +797,10 @@ class BackupBatchHandlerTest:
         batch_path_mock.assert_not_called()
         assert batch_path.read_text(encoding="utf-8") == "旧汇总\n"
 
-    def test_parallel_fetch_batch_shares_one_image_validation_cache(self) -> None:
+    def test_parallel_fetch_batch_shares_one_image_validation_cache(
+        self,
+        backup_command_environment: _BackupCommandEnvironment,
+    ) -> None:
         thread_configs = [
             _thread_config(name="first", tid=101, aid=201),
             _thread_config(name="second", tid=102, aid=None),
@@ -835,28 +818,20 @@ class BackupBatchHandlerTest:
             assert validation_cache is not None
             validation_cache_ids.append(id(validation_cache))
 
-        with TemporaryDirectory() as temp_dir_name:
-            base_dir = Path(temp_dir_name)
-            with (
-                patch(
-                    "nga_tools.commands.thread_batch.NGAThreadConfigs"
-                ) as configs_cls,
-                patch(
-                    "nga_tools.commands.backup.backup_thread_sub",
-                    side_effect=capture_validation_cache,
-                ),
-                patch(
-                    "nga_tools.commands.backup.configure_network_limits_from_args",
-                    return_value=_backup_config_app_config(workers=2),
-                ),
-                patch(
-                    "nga_tools.core.paths.get_folder",
-                    side_effect=_fake_get_folder(base_dir),
-                ),
-                _captured_reporter(),
-            ):
-                configs_cls.return_value.get_thread_configs.return_value = thread_configs
-                backup_sub({"all_threads": True, "workers": 2})
+        with (
+            patch(
+                "nga_tools.commands.thread_batch.NGAThreadConfigs"
+            ) as configs_cls,
+            patch(
+                "nga_tools.commands.backup.backup_thread_sub",
+                side_effect=capture_validation_cache,
+            ),
+            backup_command_environment(workers=2),
+        ):
+            configs_cls.return_value.get_thread_configs.return_value = (
+                thread_configs
+            )
+            backup_sub({"all_threads": True, "workers": 2})
 
         assert len(validation_cache_ids) == 2
         assert len(set(validation_cache_ids)) == 1
