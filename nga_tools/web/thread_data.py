@@ -20,6 +20,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_name,
     thread_config_tid,
 )
+from nga_tools.web.errors import WebConflict, WebNotFound
 from nga_tools.web.sqlite_access import open_readonly_connection
 from nga_tools.word_count import DEFAULT_MIN_BODY_CHARS, WORD_COUNT_VERSION
 
@@ -83,12 +84,12 @@ class ArchiveStats:
 
 
 
-class ThreadNotFoundError(Exception):
+class ThreadNotFoundError(WebNotFound):
     pass
 
 
 
-class ThreadUnavailableError(Exception):
+class ThreadUnavailableError(WebConflict):
     pass
 
 

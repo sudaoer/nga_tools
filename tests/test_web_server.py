@@ -21,6 +21,31 @@ from tests.web_viewer_support import (
 
 
 class WebServerTest:
+    def test_unexpected_value_error_is_not_mapped_to_bad_request(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        app = create_app(
+            output_dir=tmp_path / "output",
+            static_dir=tmp_path / "dist",
+        )
+
+        def fail_unexpectedly() -> None:
+            raise ValueError("unexpected bug")
+
+        app.add_api_route(
+            "/api/test-unexpected-value-error",
+            fail_unexpectedly,
+            methods=["GET"],
+        )
+        test_route = app.router.routes.pop()
+        app.router.routes.insert(-1, test_route)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/api/test-unexpected-value-error")
+
+        assert response.status_code == 500
+
     def test_output_file_serves_audio_byte_ranges(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
         audio_url = (

@@ -29,6 +29,7 @@ from nga_tools.forum.thread_store import (
     require_current_forum_schema,
 )
 from nga_tools.storage import UnsupportedStorageFormatError
+from nga_tools.web.errors import WebConflict, WebNotFound
 from nga_tools.web.thread_data import parse_thread_dir_name
 
 
@@ -182,19 +183,19 @@ class DatabaseRef:
     path: Path
 
 
-class DatabaseNotFoundError(Exception):
+class DatabaseNotFoundError(WebNotFound):
     pass
 
 
-class DatabaseUnavailableError(Exception):
+class DatabaseUnavailableError(WebConflict):
     pass
 
 
-class TableNotFoundError(Exception):
+class TableNotFoundError(WebNotFound):
     pass
 
 
-class RowNotFoundError(Exception):
+class RowNotFoundError(WebNotFound):
     pass
 
 

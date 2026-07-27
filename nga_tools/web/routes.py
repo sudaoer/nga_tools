@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from _thread import LockType
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import Annotated, Literal, Optional, cast
@@ -13,27 +14,22 @@ from fastapi.responses import FileResponse, JSONResponse
 from nga_tools.backup.floor_models import ORIGINAL_POSTS_PER_PAGE
 from nga_tools.core.output_lock import ThreadOutputLockError, use_output_root_lock
 from nga_tools.web.database import (
-    DatabaseNotFoundError,
     DatabaseSchema,
     DatabaseSummary,
-    DatabaseUnavailableError,
-    RowNotFoundError,
-    TableNotFoundError,
     TableRowDetail,
     TableRows,
     read_table_row_detail,
     read_table_rows,
 )
+from nga_tools.web.errors import WebBadRequest, WebConflict, WebNotFound
 from nga_tools.web.image_problem_markup import annotate_image_problem_html
 from nga_tools.web.image_usage import (
-    ImageIndexUnavailableError,
     ImageProblemFilter,
     ImageProblemIssueItem,
     ImageProblemPostReference,
     ImageProblemPostItem,
     ImageProblemsResult,
     ImageUsageDetailResult,
-    ImageUsageNotFoundError,
     ImageUsageRepliesResult,
     ImageUsageReplyItem,
     ImageUsageResult,
@@ -82,7 +78,6 @@ from nga_tools.web.thread_data import (
     ThreadNotFoundError,
     ThreadSummary,
     ThreadSummaryDetail,
-    ThreadUnavailableError,
     load_thread_metadata,
     read_thread_summary,
     scan_thread_summaries,
@@ -98,10 +93,19 @@ def _context(request: Request) -> ViewerContext:
     return cast(ViewerContext, request.app.state.viewer_context)
 
 
-
 def _error_response(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
 
+
+async def _run_with_bad_request[**Params, ResultT](
+    operation: Callable[Params, ResultT],
+    *args: Params.args,
+    **kwargs: Params.kwargs,
+) -> ResultT:
+    try:
+        return await run_in_threadpool(operation, *args, **kwargs)
+    except ValueError as error:
+        raise WebBadRequest(str(error)) from error
 
 
 def _list_threads_sync(
@@ -120,7 +124,6 @@ def _list_threads_sync(
             )
         }
     return {"items": cache.read(output_dir, metadata_by_key, refresh=refresh)}
-
 
 
 def _list_post_version_threads_sync(
@@ -144,7 +147,6 @@ def _list_post_version_threads_sync(
     return {"items": items}
 
 
-
 def _read_thread_summary_sync(
     output_dir: Path,
     tid: int,
@@ -158,10 +160,8 @@ def _read_thread_summary_sync(
     )
 
 
-
 def _thread_folder_for_lock(context: ViewerContext, tid: int, aid_key: str) -> Path:
     return context.output_dir / f"{tid}_{aid_key}"
-
 
 
 def _select_post_version_locked(
@@ -177,7 +177,6 @@ def _select_post_version_locked(
             return select_post_version(output_dir, tid, aid_key, lou, version_id)
 
 
-
 def _clear_post_version_selection_locked(
     lock: LockType,
     output_dir: Path,
@@ -188,7 +187,6 @@ def _clear_post_version_selection_locked(
     with use_output_root_lock(output_dir):
         with lock:
             return clear_post_version_selection(output_dir, tid, aid_key, lou)
-
 
 
 def _save_post_overlay_locked(
@@ -204,7 +202,6 @@ def _save_post_overlay_locked(
             return save_thread_post_overlay(output_dir, tid, aid_key, lou, bbcode)
 
 
-
 def _clear_post_overlay_locked(
     lock: LockType,
     output_dir: Path,
@@ -217,7 +214,6 @@ def _clear_post_overlay_locked(
             return clear_thread_post_overlay(output_dir, tid, aid_key, lou)
 
 
-
 async def http_exception_handler(
     _request: Request,
     exception: Exception,
@@ -227,13 +223,11 @@ async def http_exception_handler(
     return _error_response("请求失败。", 500)
 
 
-
 async def validation_exception_handler(
     _request: Request,
     _exception: Exception,
 ) -> JSONResponse:
     return _error_response("请求参数无效。", 422)
-
 
 
 async def health(request: Request) -> dict[str, object]:
@@ -242,7 +236,6 @@ async def health(request: Request) -> dict[str, object]:
         "ok": True,
         "outputDir": str(context.output_dir),
     }
-
 
 
 async def list_threads(
@@ -258,7 +251,6 @@ async def list_threads(
         detail,
         refresh,
     )
-
 
 
 async def list_post_version_threads(
@@ -278,25 +270,18 @@ async def list_post_version_threads(
     )
 
 
-
 async def thread_detail(
     request: Request,
     tid: int,
     aid_key: str,
 ) -> ThreadSummary:
     context = _context(request)
-    try:
-        return await run_in_threadpool(
-            _read_thread_summary_sync,
-            context.output_dir,
-            tid,
-            aid_key,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except ThreadNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-
+    return await _run_with_bad_request(
+        _read_thread_summary_sync,
+        context.output_dir,
+        tid,
+        aid_key,
+    )
 
 
 async def thread_posts(
@@ -317,24 +302,16 @@ async def thread_posts(
     resolved_page = page
     if offset is not None and page == 1:
         resolved_page = offset // ORIGINAL_POSTS_PER_PAGE + 1
-    try:
-        return await run_in_threadpool(
-            read_posts,
-            context.output_dir,
-            tid,
-            aid_key,
-            page=resolved_page,
-            query=q,
-            lou_from=lou_from,
-            lou_to=lou_to,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except ThreadNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except ThreadUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+    return await _run_with_bad_request(
+        read_posts,
+        context.output_dir,
+        tid,
+        aid_key,
+        page=resolved_page,
+        query=q,
+        lou_from=lou_from,
+        lou_to=lou_to,
+    )
 
 
 async def post_version_groups(
@@ -343,20 +320,12 @@ async def post_version_groups(
     aid_key: str,
 ) -> PostVersionGroupsResult:
     context = _context(request)
-    try:
-        return await run_in_threadpool(
-            read_post_version_groups,
-            context.output_dir,
-            tid,
-            aid_key,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except ThreadNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except ThreadUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+    return await _run_with_bad_request(
+        read_post_version_groups,
+        context.output_dir,
+        tid,
+        aid_key,
+    )
 
 
 async def post_version_preview(
@@ -366,21 +335,13 @@ async def post_version_preview(
     version_id: int,
 ) -> PostVersionPreview:
     context = _context(request)
-    try:
-        return await run_in_threadpool(
-            read_post_version_preview,
-            context.output_dir,
-            tid,
-            aid_key,
-            version_id,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except ThreadNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except ThreadUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+    return await _run_with_bad_request(
+        read_post_version_preview,
+        context.output_dir,
+        tid,
+        aid_key,
+        version_id,
+    )
 
 
 async def put_post_version_selection(
@@ -392,13 +353,13 @@ async def put_post_version_selection(
 ) -> PostVersionSelectionResult:
     raw_version_id = payload.get("versionId")
     if type(raw_version_id) is not int:
-        raise HTTPException(status_code=400, detail="versionId必须是整数。")
+        raise WebBadRequest("versionId必须是整数。")
     context = _context(request)
     lock = context.post_version_selection_locks.for_thread(
         _thread_folder_for_lock(context, tid, aid_key)
     )
     try:
-        return await run_in_threadpool(
+        return await _run_with_bad_request(
             _select_post_version_locked,
             lock,
             context.output_dir,
@@ -408,14 +369,7 @@ async def put_post_version_selection(
             raw_version_id,
         )
     except ThreadOutputLockError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except ThreadNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except ThreadUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+        raise WebConflict(str(error)) from error
 
 
 async def delete_post_version_selection(
@@ -429,7 +383,7 @@ async def delete_post_version_selection(
         _thread_folder_for_lock(context, tid, aid_key)
     )
     try:
-        return await run_in_threadpool(
+        return await _run_with_bad_request(
             _clear_post_version_selection_locked,
             lock,
             context.output_dir,
@@ -438,14 +392,7 @@ async def delete_post_version_selection(
             lou,
         )
     except ThreadOutputLockError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except ThreadNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except ThreadUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+        raise WebConflict(str(error)) from error
 
 
 async def post_overlay_detail(
@@ -455,21 +402,13 @@ async def post_overlay_detail(
     lou: int,
 ) -> PostOverlayDetail:
     context = _context(request)
-    try:
-        return await run_in_threadpool(
-            read_post_overlay,
-            context.output_dir,
-            tid,
-            aid_key,
-            lou,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except ThreadNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except ThreadUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+    return await _run_with_bad_request(
+        read_post_overlay,
+        context.output_dir,
+        tid,
+        aid_key,
+        lou,
+    )
 
 
 async def post_overlay_preview(
@@ -481,24 +420,16 @@ async def post_overlay_preview(
 ) -> PostOverlayPreview:
     raw_bbcode = payload.get("bbcode")
     if not isinstance(raw_bbcode, str):
-        raise HTTPException(status_code=400, detail="bbcode必须是字符串。")
+        raise WebBadRequest("bbcode必须是字符串。")
     context = _context(request)
-    try:
-        return await run_in_threadpool(
-            preview_post_overlay,
-            context.output_dir,
-            tid,
-            aid_key,
-            lou,
-            raw_bbcode,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except ThreadNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except ThreadUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+    return await _run_with_bad_request(
+        preview_post_overlay,
+        context.output_dir,
+        tid,
+        aid_key,
+        lou,
+        raw_bbcode,
+    )
 
 
 async def put_post_overlay(
@@ -510,13 +441,13 @@ async def put_post_overlay(
 ) -> PostOverlayDetail:
     raw_bbcode = payload.get("bbcode")
     if not isinstance(raw_bbcode, str):
-        raise HTTPException(status_code=400, detail="bbcode必须是字符串。")
+        raise WebBadRequest("bbcode必须是字符串。")
     context = _context(request)
     lock = context.post_version_selection_locks.for_thread(
         _thread_folder_for_lock(context, tid, aid_key)
     )
     try:
-        return await run_in_threadpool(
+        return await _run_with_bad_request(
             _save_post_overlay_locked,
             lock,
             context.output_dir,
@@ -526,14 +457,7 @@ async def put_post_overlay(
             raw_bbcode,
         )
     except ThreadOutputLockError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except ThreadNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except ThreadUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+        raise WebConflict(str(error)) from error
 
 
 async def delete_post_overlay(
@@ -547,7 +471,7 @@ async def delete_post_overlay(
         _thread_folder_for_lock(context, tid, aid_key)
     )
     try:
-        return await run_in_threadpool(
+        return await _run_with_bad_request(
             _clear_post_overlay_locked,
             lock,
             context.output_dir,
@@ -556,14 +480,7 @@ async def delete_post_overlay(
             lou,
         )
     except ThreadOutputLockError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except ThreadNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except ThreadUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+        raise WebConflict(str(error)) from error
 
 
 async def list_databases(
@@ -579,7 +496,6 @@ async def list_databases(
     return {"items": summaries}
 
 
-
 async def list_image_usage(
     request: Request,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -588,16 +504,12 @@ async def list_image_usage(
     refresh: bool = False,
 ) -> ImageUsageResult:
     context = _context(request)
-    try:
-        snapshot = await run_in_threadpool(
-            context.image_usage_cache.read,
-            context.output_dir,
-            refresh=refresh,
-        )
-    except ImageIndexUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
+    snapshot = await run_in_threadpool(
+        context.image_usage_cache.read,
+        context.output_dir,
+        refresh=refresh,
+    )
     return image_usage_result(snapshot, offset=offset, limit=limit, sort=sort)
-
 
 
 def _image_problem_post_item(
@@ -669,7 +581,6 @@ def _image_problem_post_item(
     }
 
 
-
 def _read_image_problems_sync(
     output_dir: Path,
     snapshot: ImageUsageSnapshot,
@@ -735,7 +646,6 @@ def _read_image_problems_sync(
     }
 
 
-
 async def list_image_problems(
     request: Request,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -760,11 +670,8 @@ async def list_image_problems(
             kind,
             q,
         )
-    except ImageIndexUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    except (ThreadNotFoundError, ThreadUnavailableError) as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+    except ThreadNotFoundError as error:
+        raise WebConflict(str(error)) from error
 
 
 async def image_usage_detail_route(
@@ -772,18 +679,12 @@ async def image_usage_detail_route(
     relative_path: Annotated[str, Query(min_length=1)],
 ) -> ImageUsageDetailResult:
     context = _context(request)
-    try:
-        snapshot = await run_in_threadpool(
-            context.image_usage_cache.read,
-            context.output_dir,
-            refresh=False,
-        )
-        return image_usage_detail(snapshot, relative_path)
-    except ImageIndexUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    except ImageUsageNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-
+    snapshot = await run_in_threadpool(
+        context.image_usage_cache.read,
+        context.output_dir,
+        refresh=False,
+    )
+    return image_usage_detail(snapshot, relative_path)
 
 
 def _read_image_usage_replies_sync(
@@ -850,7 +751,6 @@ def _read_image_usage_replies_sync(
     }
 
 
-
 async def image_usage_replies_route(
     request: Request,
     relative_path: Annotated[str, Query(min_length=1)],
@@ -874,13 +774,8 @@ async def image_usage_replies_route(
             offset,
             limit,
         )
-    except ImageIndexUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    except ImageUsageNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except (ThreadNotFoundError, ThreadUnavailableError) as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+    except ThreadNotFoundError as error:
+        raise WebConflict(str(error)) from error
 
 
 async def database_schema(
@@ -889,18 +784,12 @@ async def database_schema(
     refresh: bool = False,
 ) -> DatabaseSchema:
     context = _context(request)
-    try:
-        return await run_in_threadpool(
-            context.database_schema_cache.read,
-            context.output_dir,
-            db_id,
-            refresh=refresh,
-        )
-    except DatabaseNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except DatabaseUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+    return await run_in_threadpool(
+        context.database_schema_cache.read,
+        context.output_dir,
+        db_id,
+        refresh=refresh,
+    )
 
 
 async def database_table_rows(
@@ -914,25 +803,17 @@ async def database_table_rows(
     sort_direction: Literal["asc", "desc"] = "asc",
 ) -> TableRows:
     context = _context(request)
-    try:
-        return await run_in_threadpool(
-            read_table_rows,
-            context.output_dir,
-            db_id,
-            table_name,
-            offset=offset,
-            limit=limit,
-            query=q,
-            sort_by=sort_by,
-            sort_direction=sort_direction,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except (DatabaseNotFoundError, TableNotFoundError) as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except DatabaseUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+    return await _run_with_bad_request(
+        read_table_rows,
+        context.output_dir,
+        db_id,
+        table_name,
+        offset=offset,
+        limit=limit,
+        query=q,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+    )
 
 
 async def database_row_detail(
@@ -942,21 +823,13 @@ async def database_row_detail(
     rowid: int,
 ) -> TableRowDetail:
     context = _context(request)
-    try:
-        return await run_in_threadpool(
-            read_table_row_detail,
-            context.output_dir,
-            db_id,
-            table_name,
-            rowid,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except (DatabaseNotFoundError, TableNotFoundError, RowNotFoundError) as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except DatabaseUnavailableError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
+    return await _run_with_bad_request(
+        read_table_row_detail,
+        context.output_dir,
+        db_id,
+        table_name,
+        rowid,
+    )
 
 
 async def list_clusters(
@@ -1003,7 +876,6 @@ async def cluster_stats(
     )
 
 
-
 async def output_file(
     request: Request,
     relative_path: str,
@@ -1011,9 +883,8 @@ async def output_file(
     context = _context(request)
     path = await run_in_threadpool(safe_output_file, context.output_dir, relative_path)
     if path is None:
-        raise HTTPException(status_code=404, detail="文件不存在或不允许访问。")
+        raise WebNotFound("文件不存在或不允许访问。")
     return FileResponse(path)
-
 
 
 async def static_app(

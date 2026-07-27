@@ -27,6 +27,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_name,
     thread_config_tid,
 )
+from nga_tools.web.errors import WebConflict, WebNotFound
 
 ImageUsageSort = Literal["usage", "threads"]
 
@@ -226,11 +227,11 @@ class ImageUsageSnapshot:
     skipped_archives: list[SkippedImageUsageArchive]
 
 
-class ImageIndexUnavailableError(Exception):
+class ImageIndexUnavailableError(WebConflict):
     pass
 
 
-class ImageUsageNotFoundError(Exception):
+class ImageUsageNotFoundError(WebNotFound):
     pass
 
 

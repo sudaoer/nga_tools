@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from nga_tools.config import get_config
 from nga_tools.console import report_info
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
+from nga_tools.web.errors import WebError, web_error_handler
 from nga_tools.web.routes import (
     cluster_detail,
     cluster_stats,
@@ -72,6 +73,7 @@ def create_app(
     app = FastAPI()
     app.state.viewer_context = context
     app.add_exception_handler(HTTPException, http_exception_handler)
+    app.add_exception_handler(WebError, web_error_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_api_route("/api/health", health, methods=["GET"])
     app.add_api_route("/api/threads", list_threads, methods=["GET"])
