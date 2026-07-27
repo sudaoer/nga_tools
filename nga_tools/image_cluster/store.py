@@ -229,7 +229,7 @@ class ImageClusterStore:
                     self._require_current(connection)
             return self._db_path
 
-    def _connect_writable(self) -> sqlite3.Connection:
+    def _open_writable_connection(self) -> sqlite3.Connection:
         self.ensure_store()
         connection = sqlite3.connect(
             self._db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS
@@ -237,7 +237,7 @@ class ImageClusterStore:
         configure_connection(connection)
         return connection
 
-    def _connect_readonly(self) -> sqlite3.Connection:
+    def _open_readonly_connection(self) -> sqlite3.Connection:
         if not self._db_path.is_file():
             raise FileNotFoundError(self._db_path)
         connection = sqlite3.connect(
@@ -255,7 +255,7 @@ class ImageClusterStore:
 
     def load_feature_fingerprints(self) -> dict[str, tuple[int, int]]:
         try:
-            with closing(self._connect_readonly()) as connection:
+            with closing(self._open_readonly_connection()) as connection:
                 rows = connection.execute(
                     "SELECT relative_path, size, mtime_ns FROM image_features"
                 ).fetchall()
@@ -284,7 +284,7 @@ class ImageClusterStore:
                     return 0
 
         with _LOCK:
-            with closing(self._connect_writable()) as connection:
+            with closing(self._open_writable_connection()) as connection:
                 with connection:
                     row = connection.execute(
                         "SELECT COUNT(*) FROM image_features"
@@ -320,7 +320,7 @@ class ImageClusterStore:
             for f in features
         ]
         with _LOCK:
-            with closing(self._connect_writable()) as connection:
+            with closing(self._open_writable_connection()) as connection:
                 with connection:
                     connection.executemany(
                         """
@@ -348,7 +348,7 @@ class ImageClusterStore:
 
     def load_all_features(self) -> dict[str, ImageFeatures]:
         try:
-            with closing(self._connect_readonly()) as connection:
+            with closing(self._open_readonly_connection()) as connection:
                 rows = connection.execute(
                     """
                     SELECT relative_path, size, mtime_ns, phash, dhash,
@@ -372,7 +372,7 @@ class ImageClusterStore:
         features: dict[str, ImageFeatures],
     ) -> dict[PairKey, float]:
         try:
-            with closing(self._connect_readonly()) as connection:
+            with closing(self._open_readonly_connection()) as connection:
                 rows = connection.execute(
                     """
                     SELECT path_a, path_b, size_a, mtime_ns_a,
@@ -443,7 +443,7 @@ class ImageClusterStore:
             for score in scores
         ]
         with _LOCK:
-            with closing(self._connect_writable()) as connection:
+            with closing(self._open_writable_connection()) as connection:
                 with connection:
                     connection.executemany(
                         """
@@ -469,7 +469,7 @@ class ImageClusterStore:
             return
         with _LOCK:
             try:
-                with closing(self._connect_writable()) as connection:
+                with closing(self._open_writable_connection()) as connection:
                     with connection:
                         for chunk in iter_in_clause_chunks(sorted(paths)):
                             placeholders = ",".join("?" for _ in chunk)
@@ -498,7 +498,7 @@ class ImageClusterStore:
         now = _now_iso()
         member_rows: list[tuple[int, int, int, str, int]] = []
         with _LOCK:
-            with closing(self._connect_writable()) as connection:
+            with closing(self._open_writable_connection()) as connection:
                 with connection:
                     cursor = connection.execute(
                         "INSERT INTO cluster_runs (created_at, params) VALUES (?, ?)",
@@ -534,7 +534,7 @@ class ImageClusterStore:
 
     def latest_run_id(self) -> int | None:
         try:
-            with closing(self._connect_readonly()) as connection:
+            with closing(self._open_readonly_connection()) as connection:
                 row = connection.execute(
                     "SELECT MAX(run_id) FROM cluster_runs"
                 ).fetchone()
@@ -547,7 +547,7 @@ class ImageClusterStore:
 
     def load_clusters(self, run_id: int) -> list[Cluster]:
         try:
-            with closing(self._connect_readonly()) as connection:
+            with closing(self._open_readonly_connection()) as connection:
                 rows = connection.execute(
                     """
                     SELECT cluster_id, ordinal, relative_path, is_source_candidate
@@ -580,7 +580,7 @@ class ImageClusterStore:
 
     def load_run_params(self, run_id: int) -> object:
         try:
-            with closing(self._connect_readonly()) as connection:
+            with closing(self._open_readonly_connection()) as connection:
                 row = connection.execute(
                     "SELECT params FROM cluster_runs WHERE run_id = ?",
                     (run_id,),

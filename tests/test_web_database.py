@@ -12,6 +12,7 @@ from nga_tools.backup.thread_stores import (
     ARCHIVE_STATE_DB_FILENAME,
 )
 from nga_tools.forum.ankebak_state import AnkebakStateStore
+from nga_tools.web.database import DatabaseId, DatabaseKind
 from nga_tools.web.server import create_app
 from tests.web_viewer_support import (
     _post,
@@ -24,6 +25,23 @@ from tests.web_viewer_support import (
 
 
 class WebDatabaseViewerTest:
+    def test_database_ids_preserve_wire_format_and_reject_invalid_ids(
+        self,
+    ) -> None:
+        global_id = DatabaseId.parse("image_index")
+        thread_id = DatabaseId.parse("archive_state:101_all")
+
+        assert global_id == DatabaseId(DatabaseKind.IMAGE_INDEX)
+        assert thread_id == DatabaseId(
+            DatabaseKind.ARCHIVE_STATE,
+            "101_all",
+        )
+        assert str(global_id) == "image_index"
+        assert str(thread_id) == "archive_state:101_all"
+        assert DatabaseId.parse("archive") is None
+        assert DatabaseId.parse("image_index:101_all") is None
+        assert DatabaseId.parse("archive:invalid") is None
+
     def test_databases_route_lists_project_sqlite_sources(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"
         _write_forum_thread_db(output_dir)

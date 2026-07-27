@@ -8,9 +8,9 @@ from bs4.element import NavigableString
 from nga_tools.web.image_usage import ImageProblemIssue, ImageProblemKind
 
 _KIND_LABELS: dict[ImageProblemKind, str] = {
-    "invalid_url": "链接无效",
-    "unmapped": "未建立本地映射",
-    "missing_file": "本地文件缺失",
+    ImageProblemKind.INVALID_URL: "链接无效",
+    ImageProblemKind.UNMAPPED: "未建立本地映射",
+    ImageProblemKind.MISSING_FILE: "本地文件缺失",
 }
 
 

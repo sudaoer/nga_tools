@@ -275,7 +275,7 @@ def test_readonly_access(tmp_path: Path) -> None:
     store.ensure_store()
     store.upsert_features([_make_features("a.png")])
 
-    with closing(store._connect_readonly()) as conn:
+    with closing(store._open_readonly_connection()) as conn:
         row = conn.execute(
             "SELECT relative_path FROM image_features"
         ).fetchone()

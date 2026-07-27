@@ -102,7 +102,7 @@ class ForumThreadStore:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = forum_thread_db_path() if db_path is None else db_path
 
-    def _connect_write(self) -> sqlite3.Connection:
+    def _open_write_connection(self) -> sqlite3.Connection:
         new_database = not self.db_path.is_file()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
@@ -119,7 +119,7 @@ class ForumThreadStore:
             raise
         return connection
 
-    def _connect_read(self) -> sqlite3.Connection:
+    def _open_read_connection(self) -> sqlite3.Connection:
         if not self.db_path.is_file():
             raise FileNotFoundError(self.db_path)
         connection = sqlite3.connect(
@@ -181,7 +181,7 @@ class ForumThreadStore:
         forum_thread_table_name(fid)
         if not self.db_path.is_file():
             return set()
-        with closing(self._connect_read()) as connection:
+        with closing(self._open_read_connection()) as connection:
             table_name = self._existing_table_name(connection, fid)
             if table_name is None:
                 return set()
@@ -198,7 +198,7 @@ class ForumThreadStore:
         forum_thread_table_name(fid)
         if not self.db_path.is_file():
             return None
-        with closing(self._connect_read()) as connection:
+        with closing(self._open_read_connection()) as connection:
             table_name = self._existing_table_name(connection, fid)
             if table_name is None:
                 return None
@@ -210,7 +210,7 @@ class ForumThreadStore:
         page_threads: Iterable[Iterable[ForumThread]],
     ) -> list[ForumThreadUpsertResult]:
         results: list[ForumThreadUpsertResult] = []
-        with closing(self._connect_write()) as connection:
+        with closing(self._open_write_connection()) as connection:
             with connection:
                 self._ensure_table(connection, fid)
                 for threads in page_threads:
@@ -240,7 +240,7 @@ class ForumThreadStore:
         forum_thread_table_name(fid)
         if not self.db_path.is_file():
             return []
-        with closing(self._connect_read()) as connection:
+        with closing(self._open_read_connection()) as connection:
             table_name = self._existing_table_name(connection, fid)
             if table_name is None:
                 return []
@@ -333,7 +333,7 @@ class ForumThreadStore:
                 updated_count=len(existing_tids),
             )
 
-        with closing(self._connect_write()) as own_connection:
+        with closing(self._open_write_connection()) as own_connection:
             with own_connection:
                 table_name = self._ensure_table(own_connection, fid)
                 existing_tids = self._existing_tids_in_connection(

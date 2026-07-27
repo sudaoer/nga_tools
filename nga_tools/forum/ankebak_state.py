@@ -100,7 +100,7 @@ class AnkebakStateStore:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = backup_state_db_path() if db_path is None else db_path
 
-    def _connect_write(self) -> sqlite3.Connection:
+    def _open_write_connection(self) -> sqlite3.Connection:
         new_database = not self.db_path.is_file()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(
@@ -121,7 +121,7 @@ class AnkebakStateStore:
             raise
         return connection
 
-    def _connect_read(self) -> sqlite3.Connection:
+    def _open_read_connection(self) -> sqlite3.Connection:
         if not self.db_path.is_file():
             raise FileNotFoundError(self.db_path)
         connection = sqlite3.connect(
@@ -162,7 +162,7 @@ class AnkebakStateStore:
     def load_states(self) -> dict[str, AnkebakThreadState]:
         if not self.db_path.is_file():
             return {}
-        with closing(self._connect_read()) as connection:
+        with closing(self._open_read_connection()) as connection:
             rows = connection.execute(
                 """
                 SELECT
@@ -228,7 +228,7 @@ class AnkebakStateStore:
         lastpost = None if forum_thread is None else forum_thread["lastpost"]
         full_completed_text = completed_text if full_backup else None
 
-        with closing(self._connect_write()) as connection:
+        with closing(self._open_write_connection()) as connection:
             with connection:
                 connection.execute(
                     """

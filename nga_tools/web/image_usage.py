@@ -6,6 +6,7 @@ import sqlite3
 from collections import Counter, defaultdict
 from contextlib import closing
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Optional, TypedDict, cast
 from urllib.parse import quote
@@ -28,7 +29,14 @@ from nga_tools.forum.thread_configs import (
 )
 
 ImageUsageSort = Literal["usage", "threads"]
-ImageProblemKind = Literal["invalid_url", "unmapped", "missing_file"]
+
+
+class ImageProblemKind(StrEnum):
+    INVALID_URL = "invalid_url"
+    UNMAPPED = "unmapped"
+    MISSING_FILE = "missing_file"
+
+
 ImageProblemFilter = Literal[
     "all",
     "invalid_url",
@@ -38,9 +46,9 @@ ImageProblemFilter = Literal[
 PostDate = int | str
 _THREAD_DIR_RE = re.compile(r"^(\d+)_(all|\d+)$")
 _IMAGE_PROBLEM_KINDS: tuple[ImageProblemKind, ...] = (
-    "invalid_url",
-    "unmapped",
-    "missing_file",
+    ImageProblemKind.INVALID_URL,
+    ImageProblemKind.UNMAPPED,
+    ImageProblemKind.MISSING_FILE,
 )
 _IMAGE_BBCODE_OPEN_RE = re.compile(r"\[img\]", re.IGNORECASE)
 _IMAGE_BBCODE_CLOSE_RE = re.compile(r"\[/img\]", re.IGNORECASE)
@@ -290,13 +298,13 @@ def _thread_title(
     return f"tid {tid}"
 
 
-def _image_index_connection(output_dir: Path) -> sqlite3.Connection:
+def _open_image_index_connection(output_dir: Path) -> sqlite3.Connection:
     store = image_index.ImageIndexStore(output_dir)
     db_path = store.db_path
     if not db_path.is_file():
         raise ImageIndexUnavailableError(f"缺少{image_index.IMAGE_INDEX_FILENAME}。")
     try:
-        return store.connect_readonly()
+        return store.open_readonly_connection()
     except FileNotFoundError as error:
         raise ImageIndexUnavailableError(
             f"缺少{image_index.IMAGE_INDEX_FILENAME}。"
@@ -426,16 +434,16 @@ def _problem_issues_for_references(
     ] = defaultdict(list)
     for reference in references:
         if not reference.valid:
-            image_indexes_by_issue[("invalid_url", reference.url, None)].append(
-                reference.image_index
-            )
+            image_indexes_by_issue[
+                (ImageProblemKind.INVALID_URL, reference.url, None)
+            ].append(reference.image_index)
             continue
 
         relative_path = image_paths.get(reference.url)
         if relative_path is None:
-            image_indexes_by_issue[("unmapped", reference.url, None)].append(
-                reference.image_index
-            )
+            image_indexes_by_issue[
+                (ImageProblemKind.UNMAPPED, reference.url, None)
+            ].append(reference.image_index)
             continue
         if not _mapped_image_file_exists(
             images_root,
@@ -443,12 +451,16 @@ def _problem_issues_for_references(
             availability_cache,
         ):
             image_indexes_by_issue[
-                ("missing_file", reference.url, relative_path)
+                (
+                    ImageProblemKind.MISSING_FILE,
+                    reference.url,
+                    relative_path,
+                )
             ].append(reference.image_index)
 
     for invalid_source in invalid_sources:
         source_indexes_by_issue[
-            ("invalid_url", invalid_source.url, None)
+            (ImageProblemKind.INVALID_URL, invalid_source.url, None)
         ].append(invalid_source.source_index)
 
     kind_order = {kind: index for index, kind in enumerate(_IMAGE_PROBLEM_KINDS)}
@@ -726,16 +738,20 @@ def image_problem_kind_counts(
         post_counts.update(kinds_in_post)
     return {
         "invalid_url": {
-            "postCount": post_counts["invalid_url"],
-            "occurrenceCount": occurrence_counts["invalid_url"],
+            "postCount": post_counts[ImageProblemKind.INVALID_URL],
+            "occurrenceCount": occurrence_counts[
+                ImageProblemKind.INVALID_URL
+            ],
         },
         "unmapped": {
-            "postCount": post_counts["unmapped"],
-            "occurrenceCount": occurrence_counts["unmapped"],
+            "postCount": post_counts[ImageProblemKind.UNMAPPED],
+            "occurrenceCount": occurrence_counts[ImageProblemKind.UNMAPPED],
         },
         "missing_file": {
-            "postCount": post_counts["missing_file"],
-            "occurrenceCount": occurrence_counts["missing_file"],
+            "postCount": post_counts[ImageProblemKind.MISSING_FILE],
+            "occurrenceCount": occurrence_counts[
+                ImageProblemKind.MISSING_FILE
+            ],
         },
     }
 
@@ -748,7 +764,7 @@ def build_image_usage_snapshot(output_dir: Path) -> ImageUsageSnapshot:
         for tid, paths in thread_groups.items()
     }
     try:
-        with closing(_image_index_connection(output_dir)) as connection:
+        with closing(_open_image_index_connection(output_dir)) as connection:
             scan_result = _scan_references(
                 connection,
                 thread_groups,
@@ -906,14 +922,19 @@ def copy_image_problem_kind_counts(
     counts: ImageProblemKindCounts,
 ) -> ImageProblemKindCounts:
     def copy_count(kind: ImageProblemKind) -> ImageProblemKindCount:
-        count = counts[kind]
+        if kind is ImageProblemKind.INVALID_URL:
+            count = counts["invalid_url"]
+        elif kind is ImageProblemKind.UNMAPPED:
+            count = counts["unmapped"]
+        else:
+            count = counts["missing_file"]
         return {
             "postCount": count["postCount"],
             "occurrenceCount": count["occurrenceCount"],
         }
 
     return {
-        "invalid_url": copy_count("invalid_url"),
-        "unmapped": copy_count("unmapped"),
-        "missing_file": copy_count("missing_file"),
+        "invalid_url": copy_count(ImageProblemKind.INVALID_URL),
+        "unmapped": copy_count(ImageProblemKind.UNMAPPED),
+        "missing_file": copy_count(ImageProblemKind.MISSING_FILE),
     }

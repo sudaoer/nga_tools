@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Literal, Optional
 
 import nga_tools.config as config
@@ -56,55 +57,50 @@ from nga_tools.ngaclient import NGAClient
 from nga_tools.timing import record_timing_label, record_timing_metric, time_section
 
 
-ProcessingStateReuseReason = Literal[
-    "hit",
-    "forced",
-    "local_pages_incomplete",
-    "state_invalid",
-    "state_missing",
-    "processing_version_changed",
-    "archive_changed",
-    "floor_map_changed",
-    "page_count_changed",
-    "author_total_changed",
-    "post_overlays_changed",
-    "post_version_selections_changed",
-    "missing_floor_recovered",
-    "state_changed_during_image_retry",
-]
+class ProcessingStateReuseReason(StrEnum):
+    HIT = "hit"
+    FORCED = "forced"
+    LOCAL_PAGES_INCOMPLETE = "local_pages_incomplete"
+    STATE_INVALID = "state_invalid"
+    STATE_MISSING = "state_missing"
+    PROCESSING_VERSION_CHANGED = "processing_version_changed"
+    ARCHIVE_CHANGED = "archive_changed"
+    FLOOR_MAP_CHANGED = "floor_map_changed"
+    PAGE_COUNT_CHANGED = "page_count_changed"
+    AUTHOR_TOTAL_CHANGED = "author_total_changed"
+    POST_OVERLAYS_CHANGED = "post_overlays_changed"
+    POST_VERSION_SELECTIONS_CHANGED = "post_version_selections_changed"
+    MISSING_FLOOR_RECOVERED = "missing_floor_recovered"
+    STATE_CHANGED_DURING_IMAGE_RETRY = "state_changed_during_image_retry"
+
+
 MissingFloorRetryMode = Literal["immediate", "scheduled"]
-FloorStateMismatchReason = Literal[
-    "state_missing",
-    "current_pagination_missing",
-    "format_version",
-    "archive_revision",
-    "floor_map_revision",
-    "page_count",
-    "author_total_lou_count",
-    "floor_map_contract",
-]
+
+
+class FloorStateMismatchReason(StrEnum):
+    STATE_MISSING = "state_missing"
+    CURRENT_PAGINATION_MISSING = "current_pagination_missing"
+    FORMAT_VERSION = "format_version"
+    ARCHIVE_REVISION = "archive_revision"
+    FLOOR_MAP_REVISION = "floor_map_revision"
+    PAGE_COUNT = "page_count"
+    AUTHOR_TOTAL_LOU_COUNT = "author_total_lou_count"
+    FLOOR_MAP_CONTRACT = "floor_map_contract"
 
 
 @dataclass(frozen=True)
-
-
 class FloorMapProcessingResult:
     build_result: FloorMapBuildResult
     cacheable: bool
 
 
-
 @dataclass(frozen=True)
-
-
 class _RecordProcessingResult:
     records: list[PostRecord]
     unresolved_missing_lous: list[int]
 
 
 @dataclass(frozen=True)
-
-
 class _FloorStateRefreshResult:
     succeeded: bool
     snapshot: BackupProcessingSnapshot
@@ -112,10 +108,7 @@ class _FloorStateRefreshResult:
     added_lous: frozenset[int]
 
 
-
 @dataclass(frozen=True)
-
-
 class ProcessingStateReuseResult:
     hit: bool
     reason: ProcessingStateReuseReason
@@ -205,7 +198,6 @@ def _store_missing_floor_attempt_result(
     archive_store.state.replace_pending_missing_floor_retries(retries_after)
 
 
-
 def _build_floor_map_for_post_refs(
     client: NGAClient,
     archive_store: ThreadArchiveStore,
@@ -261,7 +253,6 @@ def _build_floor_map_for_post_refs(
             FloorMapBuildResult(floor_labels, {}),
             cacheable=False,
         )
-
 
 
 def _author_post_refs_and_missing_lous(
@@ -325,7 +316,6 @@ def _post_refs_and_missing_lous(
     )
 
 
-
 def _records_with_recovered_and_missing_posts(
     archive_store: ThreadArchiveStore,
     floor_map_result: FloorMapBuildResult,
@@ -378,7 +368,6 @@ def _new_floor_state(
     )
 
 
-
 def floor_state_mismatch_reasons(
     snapshot: BackupProcessingSnapshot,
     *,
@@ -387,27 +376,27 @@ def floor_state_mismatch_reasons(
 ) -> tuple[FloorStateMismatchReason, ...]:
     state = snapshot.floor_state
     if state is None:
-        return ("state_missing",)
+        return (FloorStateMismatchReason.STATE_MISSING,)
     reasons: list[FloorStateMismatchReason] = []
     if state.format_version != FLOOR_PROCESSING_STATE_VERSION:
-        reasons.append("format_version")
+        reasons.append(FloorStateMismatchReason.FORMAT_VERSION)
     if state.processed_archive_revision != snapshot.change_state.archive_revision:
-        reasons.append("archive_revision")
+        reasons.append(FloorStateMismatchReason.ARCHIVE_REVISION)
     if (
         state.processed_floor_map_revision
         != snapshot.change_state.floor_map_revision
     ):
-        reasons.append("floor_map_revision")
+        reasons.append(FloorStateMismatchReason.FLOOR_MAP_REVISION)
     if state.page_count != page_count:
-        reasons.append("page_count")
+        reasons.append(FloorStateMismatchReason.PAGE_COUNT)
     if state.author_total_lou_count != author_total_lou_count:
-        reasons.append("author_total_lou_count")
+        reasons.append(FloorStateMismatchReason.AUTHOR_TOTAL_LOU_COUNT)
     if (
         state.floor_map_format_version != FLOOR_MAP_VERSION
         or state.floor_map_generation_version != FLOOR_MAP_GENERATION_VERSION
         or state.floor_map_hash_algorithm != FLOOR_MAP_HASH_ALGORITHM
     ):
-        reasons.append("floor_map_contract")
+        reasons.append(FloorStateMismatchReason.FLOOR_MAP_CONTRACT)
     return tuple(reasons)
 
 
@@ -765,7 +754,10 @@ def _try_processing_state_reuse(
     incremental_changes: ArchiveIncrementalChanges | None = None,
 ) -> ProcessingStateReuseResult:
     if not local_pages_cover_remote:
-        return ProcessingStateReuseResult(False, "local_pages_incomplete")
+        return ProcessingStateReuseResult(
+            False,
+            ProcessingStateReuseReason.LOCAL_PAGES_INCOMPLETE,
+        )
 
     try:
         if processing_snapshot is None:
@@ -779,7 +771,10 @@ def _try_processing_state_reuse(
             f"处理状态无效，改为完整处理：{error}",
         )
         archive_store.state.clear_backup_processing_state()
-        return ProcessingStateReuseResult(False, "state_invalid")
+        return ProcessingStateReuseResult(
+            False,
+            ProcessingStateReuseReason.STATE_INVALID,
+        )
     post_overlays_hash = archive_store.overlays.post_overlays_fingerprint()
     post_version_selections_hash = (
         archive_store.posts.post_version_selections_fingerprint()
@@ -796,7 +791,7 @@ def _try_processing_state_reuse(
     )
     if snapshot.current_pagination_state is None:
         floor_mismatch_reasons = (
-            "current_pagination_missing",
+            FloorStateMismatchReason.CURRENT_PAGINATION_MISSING,
             *floor_mismatch_reasons,
         )
     floor_hit = not floor_mismatch_reasons
@@ -810,7 +805,10 @@ def _try_processing_state_reuse(
         )
         if aid is None or snapshot.floor_state is None:
             record_timing_label("楼层状态复用结果", "rebuild_required")
-            return ProcessingStateReuseResult(False, "state_missing")
+            return ProcessingStateReuseResult(
+                False,
+                ProcessingStateReuseReason.STATE_MISSING,
+            )
         with time_section("楼层派生状态刷新"):
             floor_refresh = _refresh_author_floor_state(
                 client,
@@ -824,7 +822,10 @@ def _try_processing_state_reuse(
             )
             snapshot = floor_refresh.snapshot
             if not floor_refresh.succeeded:
-                return ProcessingStateReuseResult(False, "floor_map_changed")
+                return ProcessingStateReuseResult(
+                    False,
+                    ProcessingStateReuseReason.FLOOR_MAP_CHANGED,
+                )
             changes = ArchiveIncrementalChanges(
                 changes.previous_snapshot,
                 changes.changed_lous | floor_refresh.changed_lous,
@@ -867,7 +868,7 @@ def _try_processing_state_reuse(
                     if not floor_refresh.succeeded:
                         return ProcessingStateReuseResult(
                             False,
-                            "floor_map_changed",
+                            ProcessingStateReuseReason.FLOOR_MAP_CHANGED,
                         )
                     changes = ArchiveIncrementalChanges(
                         changes.previous_snapshot,
@@ -903,7 +904,10 @@ def _try_processing_state_reuse(
                 f"image_collection_{incremental_mode}",
             )
             record_timing_label("图片引用处理模式", incremental_mode)
-            return ProcessingStateReuseResult(True, "hit")
+            return ProcessingStateReuseResult(
+                True,
+                ProcessingStateReuseReason.HIT,
+            )
         record_timing_label(
             "图片引用状态复用结果",
             "image_collection_rebuilt",
@@ -917,8 +921,14 @@ def _try_processing_state_reuse(
             post_version_selections_hash=post_version_selections_hash,
             pending_image_retries=snapshot.pending_image_retries,
         ):
-            return ProcessingStateReuseResult(False, "archive_changed")
-        return ProcessingStateReuseResult(True, "hit")
+            return ProcessingStateReuseResult(
+                False,
+                ProcessingStateReuseReason.ARCHIVE_CHANGED,
+            )
+        return ProcessingStateReuseResult(
+            True,
+            ProcessingStateReuseReason.HIT,
+        )
 
     record_timing_label(
         "图片引用状态复用结果",
@@ -941,14 +951,19 @@ def _try_processing_state_reuse(
         snapshot.image_state,
         download_result.pending_image_retries,
     ):
-        return ProcessingStateReuseResult(True, "hit")
+        return ProcessingStateReuseResult(
+            True,
+            ProcessingStateReuseReason.HIT,
+        )
 
     report_warning(
         WarningCategory.PROCESSING_STATE,
         "处理状态在图片重试期间发生变化，改为完整处理。",
     )
-    return ProcessingStateReuseResult(False, "state_changed_during_image_retry")
-
+    return ProcessingStateReuseResult(
+        False,
+        ProcessingStateReuseReason.STATE_CHANGED_DURING_IMAGE_RETRY,
+    )
 
 
 def _commit_completed_processing_state(
@@ -1007,7 +1022,6 @@ def _commit_completed_processing_state(
             f"仍有{len(unresolved_missing_lous)}个缺失楼未恢复，"
             "已保存处理状态，下次仅重试缺失楼。"
         )
-
 
 
 def run_full_processing(
@@ -1113,7 +1127,6 @@ def run_full_processing(
     )
 
 
-
 def reuse_processing_state_after_page_refresh(
     client: NGAClient,
     tid: int,
@@ -1147,7 +1160,10 @@ def reuse_processing_state_after_page_refresh(
     with time_section("处理状态复用判定"):
         if force_processing:
             report_info("已要求强制重处理，跳过处理状态复用。")
-            result = ProcessingStateReuseResult(False, "forced")
+            result = ProcessingStateReuseResult(
+                False,
+                ProcessingStateReuseReason.FORCED,
+            )
         else:
             result = _try_processing_state_reuse(
                 client,

@@ -107,7 +107,7 @@ class ImageIndexStore:
             _INITIALIZED_IMAGE_INDEX_PATHS.add(db_path)
         return db_path
 
-    def connect_writable(self) -> sqlite3.Connection:
+    def open_writable_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
             self._initialize(),
             timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
@@ -115,7 +115,7 @@ class ImageIndexStore:
         configure_connection(connection)
         return connection
 
-    def connect_readonly(self) -> sqlite3.Connection:
+    def open_readonly_connection(self) -> sqlite3.Connection:
         db_path = self.db_path
         if not db_path.is_file():
             raise FileNotFoundError(db_path)
@@ -164,7 +164,7 @@ class ImageIndexStore:
             future = Future[None]()
             with _IMAGE_INDEX_LOCK:
                 try:
-                    with closing(self.connect_writable()) as connection:
+                    with closing(self.open_writable_connection()) as connection:
                         with connection:
                             connection.executemany(
                                 """
@@ -204,7 +204,7 @@ class ImageIndexStore:
         normalized_url = normalize_nga_image_url(url)
         if not NGA_img_link_verify(normalized_url) or not self.db_path.is_file():
             return None
-        with closing(self.connect_readonly()) as connection:
+        with closing(self.open_readonly_connection()) as connection:
             row = connection.execute(
                 "SELECT unique_rel_path FROM image_mappings WHERE url = ?",
                 (normalized_url,),
@@ -216,7 +216,7 @@ class ImageIndexStore:
     def mappings_by_url(self) -> dict[str, ImageMapping]:
         if not self.db_path.is_file():
             return {}
-        with closing(self.connect_readonly()) as connection:
+        with closing(self.open_readonly_connection()) as connection:
             rows = connection.execute(
                 "SELECT url, unique_rel_path FROM image_mappings"
             ).fetchall()
@@ -241,7 +241,7 @@ class ImageIndexStore:
         )
         if not normalized_urls or not self.db_path.is_file():
             return {}
-        with closing(self.connect_readonly()) as connection:
+        with closing(self.open_readonly_connection()) as connection:
             return self.mappings_for_urls_in_connection(
                 connection,
                 normalized_urls,

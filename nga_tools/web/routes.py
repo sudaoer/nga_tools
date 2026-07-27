@@ -305,7 +305,10 @@ async def thread_posts(
     aid_key: str,
     page: Annotated[int, Query(ge=1)] = 1,
     offset: Annotated[Optional[int], Query(ge=0)] = None,
-    limit: Annotated[Optional[int], Query(gt=0, le=_MAX_POST_LIMIT)] = None,
+    _limit: Annotated[
+        Optional[int],
+        Query(alias="limit", gt=0, le=_MAX_POST_LIMIT),
+    ] = None,
     q: str = "",
     lou_from: Optional[int] = None,
     lou_to: Optional[int] = None,
@@ -314,7 +317,6 @@ async def thread_posts(
     resolved_page = page
     if offset is not None and page == 1:
         resolved_page = offset // ORIGINAL_POSTS_PER_PAGE + 1
-    del limit
     try:
         return await run_in_threadpool(
             read_posts,

@@ -4,6 +4,7 @@ import datetime
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Optional, TypeAlias, TypedDict, cast
 from urllib.parse import quote
@@ -30,33 +31,85 @@ from nga_tools.forum.thread_store import (
 from nga_tools.storage import UnsupportedStorageFormatError
 from nga_tools.web.thread_data import parse_thread_dir_name
 
-DatabaseKind: TypeAlias = Literal[
-    "forum_threads",
-    "backup_state",
-    "image_index",
-    "image_cache",
-    "audio_index",
-    "archive",
-    "archive_state",
-    "archive_cache",
-]
+
+class DatabaseKind(StrEnum):
+    FORUM_THREADS = "forum_threads"
+    BACKUP_STATE = "backup_state"
+    IMAGE_INDEX = "image_index"
+    IMAGE_CACHE = "image_cache"
+    AUDIO_INDEX = "audio_index"
+    ARCHIVE = "archive"
+    ARCHIVE_STATE = "archive_state"
+    ARCHIVE_CACHE = "archive_cache"
+
+
+_THREAD_DATABASE_KINDS = frozenset(
+    {
+        DatabaseKind.ARCHIVE,
+        DatabaseKind.ARCHIVE_STATE,
+        DatabaseKind.ARCHIVE_CACHE,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseId:
+    kind: DatabaseKind
+    thread_dir_name: str | None = None
+
+    def __post_init__(self) -> None:
+        is_thread_database = self.kind in _THREAD_DATABASE_KINDS
+        if is_thread_database != (self.thread_dir_name is not None):
+            raise ValueError("数据库ID与数据库类型不匹配。")
+        if (
+            self.thread_dir_name is not None
+            and parse_thread_dir_name(self.thread_dir_name) is None
+        ):
+            raise ValueError("数据库ID中的主题目录无效。")
+
+    def __str__(self) -> str:
+        if self.thread_dir_name is None:
+            return self.kind.value
+        return f"{self.kind.value}:{self.thread_dir_name}"
+
+    @classmethod
+    def parse(cls, raw_id: str) -> DatabaseId | None:
+        raw_kind, separator, thread_dir_name = raw_id.partition(":")
+        try:
+            kind = DatabaseKind(raw_kind)
+        except ValueError:
+            return None
+        if kind in _THREAD_DATABASE_KINDS:
+            if (
+                not separator
+                or parse_thread_dir_name(thread_dir_name) is None
+            ):
+                return None
+            return cls(kind=kind, thread_dir_name=thread_dir_name)
+        if separator:
+            return None
+        return cls(kind=kind)
+
+
 DatabaseStatus: TypeAlias = Literal["ready", "invalid"]
 TableKind: TypeAlias = Literal["table", "view"]
 SortDirection: TypeAlias = Literal["asc", "desc"]
 DbCellKind: TypeAlias = Literal["null", "integer", "real", "text", "blob", "other"]
 DbCellValue: TypeAlias = str | int | float | None
 
-_DATABASE_ID_FORUM_THREADS = "forum_threads"
-_DATABASE_ID_BACKUP_STATE = "backup_state"
-_DATABASE_ID_IMAGE_INDEX = "image_index"
-_DATABASE_ID_IMAGE_CACHE = "image_cache"
-_DATABASE_ID_AUDIO_INDEX = "audio_index"
-_ARCHIVE_DATABASE_PREFIX = "archive:"
-_ARCHIVE_STATE_DATABASE_PREFIX = "archive_state:"
-_ARCHIVE_CACHE_DATABASE_PREFIX = "archive_cache:"
 _ROW_PREVIEW_TEXT_LIMIT = 240
 _ROW_PREVIEW_BLOB_BYTES = 64
 _POST_CONTENT_DECODE_FUNCTION = "nga_decode_post_content"
+_DATABASE_FILENAMES: dict[DatabaseKind, str] = {
+    DatabaseKind.FORUM_THREADS: FORUM_THREAD_DB_FILENAME,
+    DatabaseKind.BACKUP_STATE: BACKUP_STATE_DB_FILENAME,
+    DatabaseKind.IMAGE_INDEX: image_index.IMAGE_INDEX_FILENAME,
+    DatabaseKind.IMAGE_CACHE: image_validation_store.IMAGE_CACHE_FILENAME,
+    DatabaseKind.AUDIO_INDEX: audio_store.AUDIO_INDEX_FILENAME,
+    DatabaseKind.ARCHIVE: ARCHIVE_DB_FILENAME,
+    DatabaseKind.ARCHIVE_STATE: ARCHIVE_STATE_DB_FILENAME,
+    DatabaseKind.ARCHIVE_CACHE: ARCHIVE_CACHE_DB_FILENAME,
+}
 
 
 def _decode_database_content(value: object) -> str:
@@ -123,7 +176,7 @@ class TableRowDetail(TypedDict):
 
 @dataclass(frozen=True)
 class DatabaseRef:
-    id: str
+    id: DatabaseId
     kind: DatabaseKind
     label: str
     path: Path
@@ -145,7 +198,7 @@ class RowNotFoundError(Exception):
     pass
 
 
-def _connect_readonly(db_path: Path) -> sqlite3.Connection:
+def _open_readonly_connection(db_path: Path) -> sqlite3.Connection:
     resolved_path = db_path.resolve()
     uri = f"file:{quote(str(resolved_path), safe='/:')}?mode=ro"
     connection = sqlite3.connect(uri, uri=True)
@@ -205,28 +258,28 @@ def _require_current_database_ref(
     connection: sqlite3.Connection,
     ref: DatabaseRef,
 ) -> None:
-    if ref.kind == "forum_threads":
+    if ref.kind is DatabaseKind.FORUM_THREADS:
         require_current_forum_schema(connection, ref.path)
-    elif ref.kind == "backup_state":
+    elif ref.kind is DatabaseKind.BACKUP_STATE:
         require_current_backup_state_schema(connection, ref.path)
-    elif ref.kind == "image_index":
+    elif ref.kind is DatabaseKind.IMAGE_INDEX:
         image_index.require_current_image_index(connection, ref.path)
-    elif ref.kind == "image_cache":
+    elif ref.kind is DatabaseKind.IMAGE_CACHE:
         image_validation_store.require_current_image_cache(connection, ref.path)
-    elif ref.kind == "audio_index":
+    elif ref.kind is DatabaseKind.AUDIO_INDEX:
         audio_store.require_current_audio_index(connection, ref.path)
-    elif ref.kind == "archive":
+    elif ref.kind is DatabaseKind.ARCHIVE:
         require_current_archive_schema(connection, ref.path)
     else:
         source_store_id = ThreadArchiveStore(ref.path.parent).archive_store_id()
-        if ref.kind == "archive_state":
+        if ref.kind is DatabaseKind.ARCHIVE_STATE:
             require_current_archive_state_schema(connection, source_store_id)
         else:
             require_current_archive_cache_schema(connection, source_store_id)
 
 
 def _read_table_count(ref: DatabaseRef) -> int:
-    with closing(_connect_readonly(ref.path)) as connection:
+    with closing(_open_readonly_connection(ref.path)) as connection:
         _require_current_database_ref(connection, ref)
         return len(_read_table_names(connection))
 
@@ -242,7 +295,7 @@ def _database_summary_for_ref(output_dir: Path, ref: DatabaseRef) -> DatabaseSum
         message = f"SQLite数据库格式无效或无法读取：{error}"
 
     return {
-        "id": ref.id,
+        "id": str(ref.id),
         "kind": ref.kind,
         "label": ref.label,
         "relativePath": _relative_path(output_dir, ref.path),
@@ -258,11 +311,13 @@ def _thread_database_ref(
     thread_dir: Path,
     *,
     database_kind: DatabaseKind,
-    database_prefix: str,
-    filename: str,
 ) -> DatabaseRef:
+    filename = _DATABASE_FILENAMES[database_kind]
     return DatabaseRef(
-        id=f"{database_prefix}{thread_dir.name}",
+        id=DatabaseId(
+            kind=database_kind,
+            thread_dir_name=thread_dir.name,
+        ),
         kind=database_kind,
         label=f"{thread_dir.name} / {filename}",
         path=thread_dir / filename,
@@ -273,58 +328,36 @@ def _archive_refs(thread_dir: Path) -> tuple[DatabaseRef, ...]:
     return (
         _thread_database_ref(
             thread_dir,
-            database_kind="archive",
-            database_prefix=_ARCHIVE_DATABASE_PREFIX,
-            filename=ARCHIVE_DB_FILENAME,
+            database_kind=DatabaseKind.ARCHIVE,
         ),
         _thread_database_ref(
             thread_dir,
-            database_kind="archive_state",
-            database_prefix=_ARCHIVE_STATE_DATABASE_PREFIX,
-            filename=ARCHIVE_STATE_DB_FILENAME,
+            database_kind=DatabaseKind.ARCHIVE_STATE,
         ),
         _thread_database_ref(
             thread_dir,
-            database_kind="archive_cache",
-            database_prefix=_ARCHIVE_CACHE_DATABASE_PREFIX,
-            filename=ARCHIVE_CACHE_DB_FILENAME,
+            database_kind=DatabaseKind.ARCHIVE_CACHE,
         ),
     )
 
 
 def list_database_refs(output_dir: Path) -> list[DatabaseRef]:
     refs: list[DatabaseRef] = []
-    global_refs = (
+    global_kinds = (
+        DatabaseKind.FORUM_THREADS,
+        DatabaseKind.BACKUP_STATE,
+        DatabaseKind.IMAGE_INDEX,
+        DatabaseKind.IMAGE_CACHE,
+        DatabaseKind.AUDIO_INDEX,
+    )
+    global_refs = tuple(
         DatabaseRef(
-            id=_DATABASE_ID_FORUM_THREADS,
-            kind="forum_threads",
-            label=FORUM_THREAD_DB_FILENAME,
-            path=output_dir / FORUM_THREAD_DB_FILENAME,
-        ),
-        DatabaseRef(
-            id=_DATABASE_ID_BACKUP_STATE,
-            kind="backup_state",
-            label=BACKUP_STATE_DB_FILENAME,
-            path=output_dir / BACKUP_STATE_DB_FILENAME,
-        ),
-        DatabaseRef(
-            id=_DATABASE_ID_IMAGE_INDEX,
-            kind="image_index",
-            label=image_index.IMAGE_INDEX_FILENAME,
-            path=output_dir / image_index.IMAGE_INDEX_FILENAME,
-        ),
-        DatabaseRef(
-            id=_DATABASE_ID_IMAGE_CACHE,
-            kind="image_cache",
-            label=image_validation_store.IMAGE_CACHE_FILENAME,
-            path=output_dir / image_validation_store.IMAGE_CACHE_FILENAME,
-        ),
-        DatabaseRef(
-            id=_DATABASE_ID_AUDIO_INDEX,
-            kind="audio_index",
-            label=audio_store.AUDIO_INDEX_FILENAME,
-            path=output_dir / audio_store.AUDIO_INDEX_FILENAME,
-        ),
+            id=DatabaseId(kind),
+            kind=kind,
+            label=_DATABASE_FILENAMES[kind],
+            path=output_dir / _DATABASE_FILENAMES[kind],
+        )
+        for kind in global_kinds
     )
     for ref in global_refs:
         if ref.path.is_file():
@@ -351,68 +384,22 @@ def list_database_summaries(output_dir: Path) -> list[DatabaseSummary]:
 
 
 def _ref_for_database_id(output_dir: Path, database_id: str) -> DatabaseRef:
-    if database_id == _DATABASE_ID_FORUM_THREADS:
-        return DatabaseRef(
-            id=database_id,
-            kind="forum_threads",
-            label=FORUM_THREAD_DB_FILENAME,
-            path=output_dir / FORUM_THREAD_DB_FILENAME,
-        )
-    if database_id == _DATABASE_ID_BACKUP_STATE:
-        return DatabaseRef(
-            id=database_id,
-            kind="backup_state",
-            label=BACKUP_STATE_DB_FILENAME,
-            path=output_dir / BACKUP_STATE_DB_FILENAME,
-        )
-    if database_id == _DATABASE_ID_IMAGE_INDEX:
-        return DatabaseRef(
-            id=database_id,
-            kind="image_index",
-            label=image_index.IMAGE_INDEX_FILENAME,
-            path=output_dir / image_index.IMAGE_INDEX_FILENAME,
-        )
-    if database_id == _DATABASE_ID_IMAGE_CACHE:
-        return DatabaseRef(
-            id=database_id,
-            kind="image_cache",
-            label=image_validation_store.IMAGE_CACHE_FILENAME,
-            path=output_dir / image_validation_store.IMAGE_CACHE_FILENAME,
-        )
-    if database_id == _DATABASE_ID_AUDIO_INDEX:
-        return DatabaseRef(
-            id=database_id,
-            kind="audio_index",
-            label=audio_store.AUDIO_INDEX_FILENAME,
-            path=output_dir / audio_store.AUDIO_INDEX_FILENAME,
-        )
-
-    thread_database_specs: tuple[tuple[str, DatabaseKind, str], ...] = (
-        (_ARCHIVE_DATABASE_PREFIX, "archive", ARCHIVE_DB_FILENAME),
-        (
-            _ARCHIVE_STATE_DATABASE_PREFIX,
-            "archive_state",
-            ARCHIVE_STATE_DB_FILENAME,
-        ),
-        (
-            _ARCHIVE_CACHE_DATABASE_PREFIX,
-            "archive_cache",
-            ARCHIVE_CACHE_DB_FILENAME,
-        ),
+    parsed_id = DatabaseId.parse(database_id)
+    if parsed_id is None:
+        raise DatabaseNotFoundError("未知数据库。")
+    filename = _DATABASE_FILENAMES[parsed_id.kind]
+    if parsed_id.thread_dir_name is None:
+        path = output_dir / filename
+        label = filename
+    else:
+        path = output_dir / parsed_id.thread_dir_name / filename
+        label = f"{parsed_id.thread_dir_name} / {filename}"
+    return DatabaseRef(
+        id=parsed_id,
+        kind=parsed_id.kind,
+        label=label,
+        path=path,
     )
-    for prefix, kind, filename in thread_database_specs:
-        if not database_id.startswith(prefix):
-            continue
-        thread_dir_name = database_id.removeprefix(prefix)
-        if parse_thread_dir_name(thread_dir_name) is None:
-            break
-        return _thread_database_ref(
-            output_dir / thread_dir_name,
-            database_kind=kind,
-            database_prefix=prefix,
-            filename=filename,
-        )
-    raise DatabaseNotFoundError("未知数据库。")
 
 
 def resolve_database(output_dir: Path, database_id: str) -> DatabaseRef:
@@ -523,7 +510,7 @@ def read_database_schema(output_dir: Path, database_id: str) -> DatabaseSchema:
         raise DatabaseUnavailableError(database["message"] or "数据库无法读取。")
 
     try:
-        with closing(_connect_readonly(ref.path)) as connection:
+        with closing(_open_readonly_connection(ref.path)) as connection:
             _require_current_database_ref(connection, ref)
             tables = [
                 _read_table_summary(connection, table_name, table_type)
@@ -542,6 +529,20 @@ def _escaped_like_pattern(query: str) -> str:
         .replace("_", "\\_")
     )
     return f"%{escaped}%"
+
+
+def _decoded_columns_for_ref(
+    ref: DatabaseRef,
+    table_name: str,
+    column_names: list[str],
+) -> frozenset[str]:
+    if (
+        ref.kind is DatabaseKind.ARCHIVE
+        and table_name == "post_versions"
+        and "content" in column_names
+    ):
+        return frozenset({"content"})
+    return frozenset()
 
 
 def _search_sql(
@@ -669,19 +670,17 @@ def read_table_rows(
 
     ref = resolve_database(output_dir, database_id)
     try:
-        with closing(_connect_readonly(ref.path)) as connection:
+        with closing(_open_readonly_connection(ref.path)) as connection:
             _require_current_database_ref(connection, ref)
             _table_type, columns = _require_columns(connection, table_name)
             column_names = [column["name"] for column in columns]
             if sort_by is not None and sort_by not in column_names:
                 raise ValueError("sort_by必须是当前表字段。")
 
-            decoded_columns: frozenset[str] = (
-                frozenset({"content"})
-                if ref.kind == "archive"
-                and table_name == "post_versions"
-                and "content" in column_names
-                else frozenset()
+            decoded_columns = _decoded_columns_for_ref(
+                ref,
+                table_name,
+                column_names,
             )
             where_sql, params = _search_sql(
                 columns,
@@ -771,18 +770,16 @@ def read_table_row_detail(
 
     ref = resolve_database(output_dir, database_id)
     try:
-        with closing(_connect_readonly(ref.path)) as connection:
+        with closing(_open_readonly_connection(ref.path)) as connection:
             _require_current_database_ref(connection, ref)
             _table_type, columns = _require_columns(connection, table_name)
             if not _table_has_rowid(connection, table_name):
                 raise DatabaseUnavailableError("此表不支持rowid详情。")
             column_names = [column["name"] for column in columns]
-            decoded_columns: frozenset[str] = (
-                frozenset({"content"})
-                if ref.kind == "archive"
-                and table_name == "post_versions"
-                and "content" in column_names
-                else frozenset()
+            decoded_columns = _decoded_columns_for_ref(
+                ref,
+                table_name,
+                column_names,
             )
             select_columns = ", ".join(
                 (

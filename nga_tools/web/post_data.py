@@ -4,6 +4,7 @@ import math
 import re
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional, TypedDict, cast
 from urllib.parse import quote
@@ -38,7 +39,7 @@ from nga_tools.web.thread_data import (
     ThreadUnavailableError,
     parse_aid_key,
 )
-from nga_tools.web.sqlite_access import connect_readonly
+from nga_tools.web.sqlite_access import open_readonly_connection
 
 PostEmptyReason = Literal["missing", "filtered"]
 _IMG_BBCODE_RE = re.compile(r"\[img\](.*?)\[/img\]", re.IGNORECASE | re.DOTALL)
@@ -128,6 +129,12 @@ class PostOverlayDetail(TypedDict):
 
 class PostOverlayPreview(TypedDict):
     html: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ThreadArchiveContext:
+    store: ThreadArchiveStore
+    aid: int | None
 
 
 
@@ -565,11 +572,11 @@ def read_posts(
 
 
 
-def _archive_store_for_thread(
+def _thread_archive_context(
     output_dir: Path,
     tid: int,
     raw_aid_key: str,
-) -> tuple[ThreadArchiveStore, Path, Optional[int]]:
+) -> _ThreadArchiveContext:
     aid = parse_aid_key(raw_aid_key)
     thread_folder = output_dir / f"{tid}_{raw_aid_key}"
     if not thread_folder.is_dir():
@@ -577,8 +584,10 @@ def _archive_store_for_thread(
     db_path = thread_folder / ARCHIVE_DB_FILENAME
     if not db_path.is_file():
         raise ThreadUnavailableError("缺少archive.sqlite3。")
-    archive_store = ThreadArchiveStore(thread_folder)
-    return archive_store, thread_folder, aid
+    return _ThreadArchiveContext(
+        store=ThreadArchiveStore(thread_folder),
+        aid=aid,
+    )
 
 
 
@@ -599,13 +608,14 @@ def read_post_overlay(
     raw_aid_key: str,
     lou: int,
 ) -> PostOverlayDetail:
-    archive_store, _thread_folder, aid = _archive_store_for_thread(
+    context = _thread_archive_context(
         output_dir,
         tid,
         raw_aid_key,
     )
+    archive_store = context.store
     row = _read_effective_row_for_lou(archive_store, lou)
-    floor_labels = _load_floor_labels(archive_store, aid)
+    floor_labels = _load_floor_labels(archive_store, context.aid)
     overlay = archive_store.overlays.read_post_overlays({lou}).get(lou)
     if overlay is None:
         return {
@@ -633,12 +643,12 @@ def preview_post_overlay(
     lou: int,
     bbcode: str,
 ) -> PostOverlayPreview:
-    archive_store, _thread_folder, _aid = _archive_store_for_thread(
+    context = _thread_archive_context(
         output_dir,
         tid,
         raw_aid_key,
     )
-    _read_effective_row_for_lou(archive_store, lou)
+    _read_effective_row_for_lou(context.store, lou)
     return {
         "html": _render_overlay_for_web(
             bbcode,
@@ -656,11 +666,12 @@ def save_thread_post_overlay(
     lou: int,
     bbcode: str,
 ) -> PostOverlayDetail:
-    archive_store, _thread_folder, _aid = _archive_store_for_thread(
+    context = _thread_archive_context(
         output_dir,
         tid,
         raw_aid_key,
     )
+    archive_store = context.store
     _read_effective_row_for_lou(archive_store, lou)
     _render_overlay_for_web(
         bbcode,
@@ -678,11 +689,12 @@ def clear_thread_post_overlay(
     raw_aid_key: str,
     lou: int,
 ) -> PostOverlayDetail:
-    archive_store, _thread_folder, _aid = _archive_store_for_thread(
+    context = _thread_archive_context(
         output_dir,
         tid,
         raw_aid_key,
     )
+    archive_store = context.store
     _read_effective_row_for_lou(archive_store, lou)
     archive_store.overlays.delete_post_overlay(lou)
     return read_post_overlay(output_dir, tid, raw_aid_key, lou)
@@ -702,14 +714,15 @@ def read_post_version_groups(
     tid: int,
     raw_aid_key: str,
 ) -> PostVersionGroupsResult:
-    archive_store, _thread_folder, aid = _archive_store_for_thread(
+    context = _thread_archive_context(
         output_dir,
         tid,
         raw_aid_key,
     )
+    archive_store = context.store
     selected_by_lou = archive_store.posts.read_valid_post_version_selections()
-    floor_labels = _load_floor_labels(archive_store, aid)
-    with closing(connect_readonly(archive_store.db_path)) as connection:
+    floor_labels = _load_floor_labels(archive_store, context.aid)
+    with closing(open_readonly_connection(archive_store.db_path)) as connection:
         rows = cast(
             list[tuple[int, int, str, object, str, str, int, int]],
             connection.execute(
@@ -811,11 +824,12 @@ def read_post_version_preview(
     raw_aid_key: str,
     version_id: int,
 ) -> PostVersionPreview:
-    archive_store, _thread_folder, aid = _archive_store_for_thread(
+    context = _thread_archive_context(
         output_dir,
         tid,
         raw_aid_key,
     )
+    archive_store = context.store
     row = archive_store.posts.read_post_row_for_version(version_id)
     if row is None:
         raise ValueError("未知帖子正文版本。")
@@ -830,7 +844,7 @@ def read_post_version_preview(
         "item": _post_item_from_row(
             row,
             output_dir,
-            _load_floor_labels(archive_store, aid),
+            _load_floor_labels(archive_store, context.aid),
             image_mappings,
             audio_mappings,
         )
@@ -845,12 +859,12 @@ def select_post_version(
     lou: int,
     version_id: int,
 ) -> PostVersionSelectionResult:
-    archive_store, _thread_folder, _aid = _archive_store_for_thread(
+    context = _thread_archive_context(
         output_dir,
         tid,
         raw_aid_key,
     )
-    archive_store.posts.upsert_post_version_selection(lou, version_id)
+    context.store.posts.upsert_post_version_selection(lou, version_id)
     return {
         "lou": lou,
         "selectedVersionId": version_id,
@@ -865,12 +879,14 @@ def clear_post_version_selection(
     raw_aid_key: str,
     lou: int,
 ) -> PostVersionSelectionResult:
-    archive_store, _thread_folder, _aid = _archive_store_for_thread(
+    context = _thread_archive_context(
         output_dir,
         tid,
         raw_aid_key,
     )
-    latest_version_id = archive_store.posts.delete_post_version_selection(lou)
+    latest_version_id = (
+        context.store.posts.delete_post_version_selection(lou)
+    )
     return {
         "lou": lou,
         "selectedVersionId": None,

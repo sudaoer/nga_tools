@@ -175,7 +175,7 @@ def ensure_audio_index(output_root: Path | None = None) -> Path:
     return _initialize_audio_index(root)
 
 
-def _connect_readonly(db_path: Path) -> sqlite3.Connection:
+def _open_readonly_connection(db_path: Path) -> sqlite3.Connection:
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
     connection = sqlite3.connect(
         uri,
@@ -280,7 +280,7 @@ def audio_mappings_for_urls(
 
     mappings: dict[str, AudioMapping] = {}
     try:
-        with closing(_connect_readonly(db_path)) as connection:
+        with closing(_open_readonly_connection(db_path)) as connection:
             for chunk in iter_in_clause_chunks(normalized_urls):
                 placeholders = ",".join("?" for _item in chunk)
                 rows = connection.execute(

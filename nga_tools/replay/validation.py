@@ -51,7 +51,7 @@ class ValidationStats:
         return cast(dict[str, object], asdict(self))
 
 
-def _connect_readonly(
+def _open_readonly_connection(
     path: Path,
     *,
     immutable: bool = False,
@@ -68,7 +68,7 @@ def _connect_readonly(
 
 
 def _quick_check(path: Path) -> None:
-    with closing(_connect_readonly(path)) as connection:
+    with closing(_open_readonly_connection(path)) as connection:
         rows = connection.execute("PRAGMA quick_check").fetchall()
     if rows != [("ok",)]:
         raise RuntimeError(f"目标数据库quick_check失败：{path}: {rows}")
@@ -85,7 +85,9 @@ def _latest_post_signature(
     *,
     immutable: bool,
 ) -> tuple[int, str]:
-    with closing(_connect_readonly(path, immutable=immutable)) as connection:
+    with closing(
+        _open_readonly_connection(path, immutable=immutable)
+    ) as connection:
         require_current_archive_schema(connection, path)
         rows = connection.execute(
             """
@@ -122,7 +124,9 @@ def _floor_map_rows(
     *,
     immutable: bool,
 ) -> tuple[list[tuple[object, ...]], list[tuple[object, ...]]]:
-    with closing(_connect_readonly(path, immutable=immutable)) as connection:
+    with closing(
+        _open_readonly_connection(path, immutable=immutable)
+    ) as connection:
         require_current_archive_schema(connection, path)
         entries = cast(
             list[tuple[object, ...]],
@@ -148,7 +152,9 @@ def _floor_map_rows(
 
 
 def _post_version_count(path: Path, *, immutable: bool) -> int:
-    with closing(_connect_readonly(path, immutable=immutable)) as connection:
+    with closing(
+        _open_readonly_connection(path, immutable=immutable)
+    ) as connection:
         require_current_archive_schema(connection, path)
         row = connection.execute("SELECT COUNT(*) FROM post_versions").fetchone()
     if row is None or type(row[0]) is not int:
@@ -159,7 +165,9 @@ def _post_version_count(path: Path, *, immutable: bool) -> int:
 def _image_mappings(path: Path, *, immutable: bool) -> dict[str, str]:
     if not path.is_file():
         return {}
-    with closing(_connect_readonly(path, immutable=immutable)) as connection:
+    with closing(
+        _open_readonly_connection(path, immutable=immutable)
+    ) as connection:
         require_current_image_index(connection, path)
         return dict(
             ImageIndexStore(path.parent).iter_mapping_rows(connection)
@@ -169,7 +177,9 @@ def _image_mappings(path: Path, *, immutable: bool) -> dict[str, str]:
 def _audio_mappings(path: Path, *, immutable: bool) -> dict[str, str]:
     if not path.is_file():
         return {}
-    with closing(_connect_readonly(path, immutable=immutable)) as connection:
+    with closing(
+        _open_readonly_connection(path, immutable=immutable)
+    ) as connection:
         require_current_audio_index(connection, path)
         rows = connection.execute(
             "SELECT url, unique_rel_path FROM audio_mappings"

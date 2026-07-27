@@ -20,7 +20,7 @@ from nga_tools.forum.thread_configs import (
     thread_config_name,
     thread_config_tid,
 )
-from nga_tools.web.sqlite_access import connect_readonly
+from nga_tools.web.sqlite_access import open_readonly_connection
 from nga_tools.word_count import DEFAULT_MIN_BODY_CHARS, WORD_COUNT_VERSION
 
 ThreadStatus = Literal["ready", "invalid"]
@@ -179,7 +179,7 @@ def _read_archive_stats(db_path: Path) -> ArchiveStats:
                 AND post_latest_metadata.lou = post_versions.lou
         )
     """
-    with closing(connect_readonly(db_path)) as connection:
+    with closing(open_readonly_connection(db_path)) as connection:
         require_current_archive_schema(connection, db_path)
         post_row = cast(
             tuple[int, Optional[int], Optional[int]],
@@ -494,7 +494,7 @@ def _read_multi_version_floor_count(thread_folder: Path) -> int:
     if not archive_db_path.is_file():
         return 0
     try:
-        with closing(connect_readonly(archive_db_path)) as connection:
+        with closing(open_readonly_connection(archive_db_path)) as connection:
             row = connection.execute(
                 """
                 SELECT COUNT(*)

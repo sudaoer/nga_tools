@@ -38,25 +38,18 @@ from nga_tools.timing import record_timing_metric, time_section
 
 
 @dataclass(frozen=True)
-
-
 class ImageRecordProcessingResult:
     pending_image_retries: tuple[PendingMediaRetry, ...]
     manifest_posts: tuple[ImageReferenceManifestPost, ...]
 
 
-
 @dataclass(frozen=True)
-
-
 class _ScheduledImageDownloadResult:
     pending_image_retries: tuple[PendingMediaRetry, ...]
 
 
-
 def _thread_retry_target_key(tid: int, aid: Optional[int]) -> str:
     return f"{tid}:{'all' if aid is None else aid}"
-
 
 
 def select_pending_image_retries(
@@ -76,7 +69,6 @@ def select_pending_image_retries(
         ),
         force=force,
     )
-
 
 
 def download_images_with_retry_policy(
@@ -132,7 +124,6 @@ def download_images_with_retry_policy(
     return _ScheduledImageDownloadResult(retries_after)
 
 
-
 def download_images_for_records(
     tid: int,
     aid: Optional[int],
@@ -173,7 +164,6 @@ def download_images_for_records(
     )
 
 
-
 def image_state_is_current(
     snapshot: BackupProcessingSnapshot,
     *,
@@ -190,7 +180,6 @@ def image_state_is_current(
         and state.image_reference_extractor_version
         == IMAGE_REFERENCE_EXTRACTOR_VERSION
     )
-
 
 
 def rebuild_image_reference_state(
@@ -249,7 +238,6 @@ def rebuild_image_reference_state(
     )
 
 
-
 def _new_image_reference_state(
     snapshot: BackupProcessingSnapshot,
     *,
@@ -264,7 +252,6 @@ def _new_image_reference_state(
         image_reference_extractor_version=IMAGE_REFERENCE_EXTRACTOR_VERSION,
         completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
-
 
 
 def _manifest_reference_summary(
@@ -286,7 +273,6 @@ def _manifest_reference_summary(
     return counts, validity_by_url
 
 
-
 def _image_floor_labels(
     archive_store: ThreadArchiveStore,
     aid: Optional[int],
@@ -303,10 +289,8 @@ def _image_floor_labels(
         return FloorLabels.plain()
 
 
-
 def _image_tasks_for_urls(urls: set[str]) -> list[ImageDownloadTask]:
     return [{"url": url} for url in sorted(urls)]
-
 
 
 def _incremental_image_reference_prerequisites_hold(
@@ -335,7 +319,6 @@ def _incremental_image_reference_prerequisites_hold(
         + changes.archive_revision_increments
     )
     return snapshot.change_state.archive_revision == expected_revision
-
 
 
 def try_incremental_image_reference_update(
