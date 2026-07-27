@@ -2257,6 +2257,81 @@ class ThreadArchiveStoreTest:
             (shared_url, 2, True),
         )
 
+    def test_incremental_manifest_failure_rolls_back_the_whole_commit(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            store = ThreadArchiveStore(Path(temp_dir_name))
+            store.ensure_schema()
+            initial = store.state.read_backup_processing_snapshot()
+            old_state = ImageReferenceState(
+                format_version=1,
+                processed_archive_revision=initial.change_state.archive_revision,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
+                image_reference_extractor_version=1,
+                completed_at="2026-07-11T00:00:00+00:00",
+            )
+            old_url = "https://example.invalid/incremental-old.png"
+            shared_url = "https://example.invalid/incremental-shared.png"
+            old_retry = _pending_retry(old_url)
+            old_posts = (
+                ImageReferenceManifestPost(
+                    1,
+                    "cache-old-1",
+                    (ImageReferenceManifestEntry(1, old_url, True),),
+                ),
+                ImageReferenceManifestPost(
+                    2,
+                    "cache-old-2",
+                    (ImageReferenceManifestEntry(1, shared_url, True),),
+                ),
+            )
+            assert store.state.commit_image_reference_state(
+                old_state,
+                (old_retry,),
+                manifest_posts=old_posts,
+            )
+            store.ingest.upsert_page(
+                1,
+                {
+                    "totalPage": 1,
+                    "result": [{"lou": 1, "pid": 1001, "content": "changed"}],
+                },
+            )
+            current = store.state.read_backup_processing_snapshot()
+            new_state = ImageReferenceState(
+                format_version=1,
+                processed_archive_revision=current.change_state.archive_revision,
+                post_overlays_fingerprint="overlay-hash",
+                post_version_selections_fingerprint="selection-hash",
+                image_reference_extractor_version=1,
+                completed_at="2026-07-11T01:00:00+00:00",
+            )
+            changed_posts = (
+                ImageReferenceManifestPost(
+                    1,
+                    "cache-new-1",
+                    (ImageReferenceManifestEntry(1, shared_url, False),),
+                ),
+            )
+            manifest_before = store.state.read_image_reference_manifest()
+
+            with pytest.raises(ValueError, match="URL计数无效"):
+                store.state.commit_incremental_image_reference_state(
+                    old_state,
+                    new_state,
+                    (_pending_retry(shared_url),),
+                    changed_posts,
+                )
+
+            snapshot_after = store.state.read_backup_processing_snapshot()
+            manifest_after = store.state.read_image_reference_manifest()
+
+        assert snapshot_after.image_state == old_state
+        assert snapshot_after.pending_image_retries == (old_retry,)
+        assert manifest_after == manifest_before
+
     def test_bootstrap_manifest_commit_requires_absent_manifest(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             store = ThreadArchiveStore(Path(temp_dir_name))

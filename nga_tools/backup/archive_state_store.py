@@ -1459,6 +1459,211 @@ class ArchiveStateRepository:
             self._read_current_archive_change_state().archive_revision
             == state.processed_archive_revision
         )
+
+    @staticmethod
+    def _stored_image_reference_manifest_state_matches(
+        connection: sqlite3.Connection,
+        expected_archive_revision: int,
+    ) -> bool:
+        row = connection.execute(
+            """
+            SELECT format_version, processed_archive_revision
+            FROM backup_image_reference_manifest_state
+            WHERE singleton = 1
+            """
+        ).fetchone()
+        return row == (
+            IMAGE_REFERENCE_MANIFEST_VERSION,
+            expected_archive_revision,
+        )
+
+    @staticmethod
+    def _read_image_reference_counts_for_lous(
+        connection: sqlite3.Connection,
+        changed_lous: list[int],
+    ) -> tuple[Counter[str], dict[str, bool]]:
+        reference_counts: Counter[str] = Counter()
+        validity_by_url: dict[str, bool] = {}
+        for chunk in iter_in_clause_chunks(changed_lous):
+            placeholders = ",".join("?" for _value in chunk)
+            rows = cast(
+                list[tuple[object, object]],
+                connection.execute(
+                    """
+                    SELECT url, valid
+                    FROM backup_image_reference_manifest_entries
+                    WHERE lou IN ("""
+                    + placeholders
+                    + ")",
+                    chunk,
+                ).fetchall(),
+            )
+            for url, valid in rows:
+                if (
+                    not isinstance(url, str)
+                    or type(valid) is not int
+                    or valid not in (0, 1)
+                ):
+                    raise ValueError(
+                        f"图片引用清单引用行无效：{(url, valid)!r}"
+                    )
+                reference_counts[url] += 1
+                previous_validity = validity_by_url.setdefault(
+                    url,
+                    bool(valid),
+                )
+                if previous_validity != bool(valid):
+                    raise ValueError(
+                        f"图片引用清单URL合法性冲突：{url}"
+                    )
+        return reference_counts, validity_by_url
+
+    @staticmethod
+    def _remove_image_reference_url_counts(
+        connection: sqlite3.Connection,
+        reference_counts: Counter[str],
+        validity_by_url: dict[str, bool],
+    ) -> None:
+        for url, removed_count in reference_counts.items():
+            stored_row = connection.execute(
+                """
+                SELECT reference_count, valid
+                FROM backup_image_reference_manifest_urls
+                WHERE url = ?
+                """,
+                (url,),
+            ).fetchone()
+            if (
+                stored_row is None
+                or type(stored_row[0]) is not int
+                or stored_row[0] < removed_count
+                or type(stored_row[1]) is not int
+                or stored_row[1] not in (0, 1)
+                or bool(stored_row[1]) != validity_by_url[url]
+            ):
+                raise ValueError(f"图片引用清单URL计数无效：{url}")
+            remaining_count = stored_row[0] - removed_count
+            if remaining_count == 0:
+                connection.execute(
+                    """
+                    DELETE FROM backup_image_reference_manifest_urls
+                    WHERE url = ?
+                    """,
+                    (url,),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE backup_image_reference_manifest_urls
+                    SET reference_count = ?
+                    WHERE url = ?
+                    """,
+                    (remaining_count, url),
+                )
+
+    @staticmethod
+    def _replace_changed_image_reference_posts(
+        connection: sqlite3.Connection,
+        changed_lous: list[int],
+        ordered_posts: tuple[ImageReferenceManifestPost, ...],
+    ) -> None:
+        connection.executemany(
+            """
+            DELETE FROM backup_image_reference_manifest_entries
+            WHERE lou = ?
+            """,
+            [(lou,) for lou in changed_lous],
+        )
+        connection.executemany(
+            """
+            DELETE FROM backup_image_reference_manifest_posts
+            WHERE lou = ?
+            """,
+            [(lou,) for lou in changed_lous],
+        )
+        connection.executemany(
+            """
+            INSERT INTO backup_image_reference_manifest_posts
+            (lou, cache_key) VALUES (?, ?)
+            """,
+            [(post.lou, post.cache_key) for post in ordered_posts],
+        )
+        connection.executemany(
+            """
+            INSERT INTO backup_image_reference_manifest_entries
+            (lou, image_index, url, valid) VALUES (?, ?, ?, ?)
+            """,
+            [
+                (
+                    post.lou,
+                    reference.image_index,
+                    reference.url,
+                    int(reference.valid),
+                )
+                for post in ordered_posts
+                for reference in post.references
+            ],
+        )
+
+    @staticmethod
+    def _add_image_reference_url_counts(
+        connection: sqlite3.Connection,
+        reference_counts: Counter[str],
+        validity_by_url: dict[str, bool],
+    ) -> None:
+        for url, added_count in reference_counts.items():
+            stored_row = connection.execute(
+                """
+                SELECT reference_count, valid
+                FROM backup_image_reference_manifest_urls
+                WHERE url = ?
+                """,
+                (url,),
+            ).fetchone()
+            if stored_row is None:
+                connection.execute(
+                    """
+                    INSERT INTO backup_image_reference_manifest_urls
+                    (url, reference_count, valid) VALUES (?, ?, ?)
+                    """,
+                    (url, added_count, int(validity_by_url[url])),
+                )
+                continue
+            if (
+                type(stored_row[0]) is not int
+                or stored_row[0] <= 0
+                or type(stored_row[1]) is not int
+                or stored_row[1] not in (0, 1)
+                or bool(stored_row[1]) != validity_by_url[url]
+            ):
+                raise ValueError(f"图片引用清单URL计数无效：{url}")
+            connection.execute(
+                """
+                UPDATE backup_image_reference_manifest_urls
+                SET reference_count = reference_count + ?
+                WHERE url = ?
+                """,
+                (added_count, url),
+            )
+
+    @classmethod
+    def _finish_incremental_image_reference_commit(
+        cls,
+        connection: sqlite3.Connection,
+        state: ImageReferenceState,
+        pending_image_retries: tuple[PendingMediaRetry, ...],
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE backup_image_reference_manifest_state
+            SET processed_archive_revision = ?
+            WHERE singleton = 1
+            """,
+            (state.processed_archive_revision,),
+        )
+        cls._replace_image_reference_state(connection, state)
+        cls._replace_pending_images(connection, pending_image_retries)
+
     def commit_incremental_image_reference_state(
         self,
         expected_state: ImageReferenceState,
@@ -1486,173 +1691,43 @@ class ArchiveStateRepository:
                     expected_state,
                 ):
                     return False
-                manifest_state = connection.execute(
-                    """
-                    SELECT format_version, processed_archive_revision
-                    FROM backup_image_reference_manifest_state
-                    WHERE singleton = 1
-                    """
-                ).fetchone()
-                if manifest_state != (
-                    IMAGE_REFERENCE_MANIFEST_VERSION,
+                if not self._stored_image_reference_manifest_state_matches(
+                    connection,
                     expected_state.processed_archive_revision,
                 ):
                     return False
 
-                old_reference_counts: Counter[str] = Counter()
-                old_validity_by_url: dict[str, bool] = {}
-                for chunk in iter_in_clause_chunks(changed_lous):
-                    placeholders = ",".join("?" for _value in chunk)
-                    old_rows = cast(
-                        list[tuple[object, object]],
-                        connection.execute(
-                            """
-                            SELECT url, valid
-                            FROM backup_image_reference_manifest_entries
-                            WHERE lou IN ("""
-                            + placeholders
-                            + ")",
-                            chunk,
-                        ).fetchall(),
+                old_reference_counts, old_validity_by_url = (
+                    self._read_image_reference_counts_for_lous(
+                        connection,
+                        changed_lous,
                     )
-                    for url, valid in old_rows:
-                        if (
-                            not isinstance(url, str)
-                            or type(valid) is not int
-                            or valid not in (0, 1)
-                        ):
-                            raise ValueError(
-                                f"图片引用清单引用行无效："
-                                f"{(url, valid)!r}"
-                            )
-                        old_reference_counts[url] += 1
-                        previous_validity = old_validity_by_url.setdefault(
-                            url,
-                            bool(valid),
-                        )
-                        if previous_validity != bool(valid):
-                            raise ValueError(
-                                f"图片引用清单URL合法性冲突：{url}"
-                            )
-
-                for url, removed_count in old_reference_counts.items():
-                    stored_row = connection.execute(
-                        """
-                        SELECT reference_count, valid
-                        FROM backup_image_reference_manifest_urls
-                        WHERE url = ?
-                        """,
-                        (url,),
-                    ).fetchone()
-                    if (
-                        stored_row is None
-                        or type(stored_row[0]) is not int
-                        or stored_row[0] < removed_count
-                        or type(stored_row[1]) is not int
-                        or stored_row[1] not in (0, 1)
-                        or bool(stored_row[1]) != old_validity_by_url[url]
-                    ):
-                        raise ValueError(
-                            f"图片引用清单URL计数无效：{url}"
-                        )
-                    remaining_count = stored_row[0] - removed_count
-                    if remaining_count == 0:
-                        connection.execute(
-                            "DELETE FROM backup_image_reference_manifest_urls WHERE url = ?",
-                            (url,),
-                        )
-                    else:
-                        connection.execute(
-                            """
-                            UPDATE backup_image_reference_manifest_urls
-                            SET reference_count = ?
-                            WHERE url = ?
-                            """,
-                            (remaining_count, url),
-                        )
-
-                connection.executemany(
-                    "DELETE FROM backup_image_reference_manifest_entries WHERE lou = ?",
-                    [(lou,) for lou in changed_lous],
                 )
-                connection.executemany(
-                    "DELETE FROM backup_image_reference_manifest_posts WHERE lou = ?",
-                    [(lou,) for lou in changed_lous],
+                self._remove_image_reference_url_counts(
+                    connection,
+                    old_reference_counts,
+                    old_validity_by_url,
                 )
-                connection.executemany(
-                    """
-                    INSERT INTO backup_image_reference_manifest_posts
-                    (lou, cache_key) VALUES (?, ?)
-                    """,
-                    [(post.lou, post.cache_key) for post in ordered_posts],
+                self._replace_changed_image_reference_posts(
+                    connection,
+                    changed_lous,
+                    ordered_posts,
                 )
-                connection.executemany(
-                    """
-                    INSERT INTO backup_image_reference_manifest_entries
-                    (lou, image_index, url, valid) VALUES (?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            post.lou,
-                            reference.image_index,
-                            reference.url,
-                            int(reference.valid),
-                        )
-                        for post in ordered_posts
-                        for reference in post.references
-                    ],
+                self._add_image_reference_url_counts(
+                    connection,
+                    new_reference_counts,
+                    new_validity_by_url,
                 )
-                for url, added_count in new_reference_counts.items():
-                    stored_row = connection.execute(
-                        """
-                        SELECT reference_count, valid
-                        FROM backup_image_reference_manifest_urls
-                        WHERE url = ?
-                        """,
-                        (url,),
-                    ).fetchone()
-                    if stored_row is None:
-                        connection.execute(
-                            """
-                            INSERT INTO backup_image_reference_manifest_urls
-                            (url, reference_count, valid) VALUES (?, ?, ?)
-                            """,
-                            (url, added_count, int(new_validity_by_url[url])),
-                        )
-                    else:
-                        if (
-                            type(stored_row[0]) is not int
-                            or stored_row[0] <= 0
-                            or type(stored_row[1]) is not int
-                            or stored_row[1] not in (0, 1)
-                            or bool(stored_row[1]) != new_validity_by_url[url]
-                        ):
-                            raise ValueError(
-                                f"图片引用清单URL计数无效：{url}"
-                            )
-                        connection.execute(
-                            """
-                            UPDATE backup_image_reference_manifest_urls
-                            SET reference_count = reference_count + ?
-                            WHERE url = ?
-                            """,
-                            (added_count, url),
-                        )
-
-                connection.execute(
-                    """
-                    UPDATE backup_image_reference_manifest_state
-                    SET processed_archive_revision = ?
-                    WHERE singleton = 1
-                    """,
-                    (state.processed_archive_revision,),
+                self._finish_incremental_image_reference_commit(
+                    connection,
+                    state,
+                    pending_image_retries,
                 )
-                self._replace_image_reference_state(connection, state)
-                self._replace_pending_images(connection, pending_image_retries)
         return (
             self._read_current_archive_change_state().archive_revision
             == state.processed_archive_revision
         )
+
     def replace_pending_images_for_image_state(
         self,
         expected_state: ImageReferenceState,
