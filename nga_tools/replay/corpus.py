@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from collections.abc import Callable
 from contextlib import closing
@@ -17,7 +18,11 @@ from nga_tools.backup.audio_store import (
     AUDIO_UNIQUE_DIRNAME,
     require_current_audio_index,
 )
-from nga_tools.backup.image_index import ImageIndexStore, require_current_image_index
+from nga_tools.backup.image_index import (
+    IMAGE_INDEX_FILENAME,
+    ImageIndexStore,
+    require_current_image_index,
+)
 from nga_tools.core.hashing import hash_text, sha256
 from nga_tools.core.nga_audio import normalize_nga_audio_url
 from nga_tools.core.sqlite import configure_readonly_connection
@@ -851,53 +856,256 @@ def _normalize_image_url(url: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class _ImageLoadResult:
-    images_by_url: dict[str, ImageReplayEntry]
+class _MediaMapping:
+    normalized_url: str
+    relative_path: str
+    expected_hash: str | None = None
+    expected_size: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _MediaLoadResult:
+    entries_by_url: dict[str, ImageReplayEntry]
     mapping_count: int
     unavailable_mapping_count: int
     unique_file_count: int
     unique_file_bytes: int
 
 
-def _load_images(source_output: Path, hasher: _Hasher) -> _ImageLoadResult:
-    index_path = source_output / "image_index.sqlite3"
-    images_root = (source_output / "images_unique").resolve()
+type _ReadMediaRows = Callable[
+    [sqlite3.Connection, Path, Path],
+    list[tuple[object, ...]],
+]
+type _ParseMediaRow = Callable[
+    [tuple[object, ...], Path],
+    _MediaMapping,
+]
+type _MediaFileValidator = Callable[
+    [Path, os.stat_result, _MediaMapping],
+    bool,
+]
+type _HashMediaMapping = Callable[
+    [_Hasher, _MediaMapping, ImageReplayEntry | None],
+    None,
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _MediaIndexSpec:
+    label: str
+    index_filename: str
+    unique_dirname: str
+    require_schema: Callable[[sqlite3.Connection, Path], None]
+    read_rows: _ReadMediaRows
+    parse_row: _ParseMediaRow
+    file_is_available: _MediaFileValidator
+    hash_mapping: _HashMediaMapping
+    missing_index_hash_fields: tuple[object, ...] | None = None
+
+
+def _read_image_mapping_rows(
+    connection: sqlite3.Connection,
+    _index_path: Path,
+    source_output: Path,
+) -> list[tuple[object, ...]]:
+    return cast(
+        list[tuple[object, ...]],
+        list(
+            ImageIndexStore(source_output).iter_raw_mapping_rows(
+                connection,
+                order_by_url=True,
+            )
+        ),
+    )
+
+
+def _read_audio_mapping_rows(
+    connection: sqlite3.Connection,
+    _index_path: Path,
+    _source_output: Path,
+) -> list[tuple[object, ...]]:
+    return cast(
+        list[tuple[object, ...]],
+        connection.execute(
+            """
+            SELECT url, unique_rel_path, content_sha256, content_bytes
+            FROM audio_mappings
+            ORDER BY url
+            """
+        ).fetchall(),
+    )
+
+
+def _parse_image_mapping_row(
+    row: tuple[object, ...],
+    index_path: Path,
+) -> _MediaMapping:
+    if (
+        len(row) != 2
+        or not isinstance(row[0], str)
+        or not isinstance(row[1], str)
+    ):
+        raise ReplayCorpusError(f"重放图片索引行无效：{index_path}")
+    return _MediaMapping(
+        normalized_url=_normalize_image_url(row[0]),
+        relative_path=row[1],
+    )
+
+
+def _parse_audio_mapping_row(
+    row: tuple[object, ...],
+    index_path: Path,
+) -> _MediaMapping:
+    if (
+        len(row) != 4
+        or not isinstance(row[0], str)
+        or not isinstance(row[1], str)
+        or not isinstance(row[2], str)
+        or type(row[3]) is not int
+        or row[3] <= 0
+    ):
+        raise ReplayCorpusError(f"重放音频索引行无效：{index_path}")
+    normalized_url = normalize_nga_audio_url(row[0])
+    if normalized_url is None:
+        raise ReplayCorpusError(f"重放音频索引URL无效：{row[0]}")
+    return _MediaMapping(
+        normalized_url=normalized_url,
+        relative_path=row[1],
+        expected_hash=row[2],
+        expected_size=row[3],
+    )
+
+
+def _image_file_is_available(
+    path: Path,
+    _stat_result: os.stat_result,
+    _mapping: _MediaMapping,
+) -> bool:
+    return path.is_file()
+
+
+def _audio_file_is_available(
+    path: Path,
+    stat_result: os.stat_result,
+    mapping: _MediaMapping,
+) -> bool:
+    content_hash = sha256(str(path))
+    return (
+        path.is_file()
+        and stat_result.st_size == mapping.expected_size
+        and content_hash == mapping.expected_hash
+    )
+
+
+def _hash_image_mapping(
+    hasher: _Hasher,
+    mapping: _MediaMapping,
+    entry: ImageReplayEntry | None,
+) -> None:
+    _hash_fields(
+        hasher,
+        "image",
+        mapping.normalized_url,
+        mapping.relative_path,
+        "missing" if entry is None else entry.size,
+        "missing" if entry is None else entry.mtime_ns,
+    )
+
+
+def _hash_audio_mapping(
+    hasher: _Hasher,
+    mapping: _MediaMapping,
+    entry: ImageReplayEntry | None,
+) -> None:
+    _hash_fields(
+        hasher,
+        "audio",
+        mapping.normalized_url,
+        mapping.relative_path,
+        mapping.expected_hash,
+        mapping.expected_size,
+        "missing" if entry is None else entry.mtime_ns,
+    )
+
+
+_IMAGE_INDEX_SPEC = _MediaIndexSpec(
+    label="图片",
+    index_filename=IMAGE_INDEX_FILENAME,
+    unique_dirname="images_unique",
+    require_schema=require_current_image_index,
+    read_rows=_read_image_mapping_rows,
+    parse_row=_parse_image_mapping_row,
+    file_is_available=_image_file_is_available,
+    hash_mapping=_hash_image_mapping,
+)
+_AUDIO_INDEX_SPEC = _MediaIndexSpec(
+    label="音频",
+    index_filename=AUDIO_INDEX_FILENAME,
+    unique_dirname=AUDIO_UNIQUE_DIRNAME,
+    require_schema=require_current_audio_index,
+    read_rows=_read_audio_mapping_rows,
+    parse_row=_parse_audio_mapping_row,
+    file_is_available=_audio_file_is_available,
+    hash_mapping=_hash_audio_mapping,
+    missing_index_hash_fields=("audio_index", "missing"),
+)
+
+
+def _load_media_index(
+    source_output: Path,
+    hasher: _Hasher,
+    spec: _MediaIndexSpec,
+) -> _MediaLoadResult:
+    index_path = source_output / spec.index_filename
+    media_root = (source_output / spec.unique_dirname).resolve()
+    if (
+        not index_path.is_file()
+        and spec.missing_index_hash_fields is not None
+    ):
+        _hash_fields(hasher, *spec.missing_index_hash_fields)
+        return _MediaLoadResult({}, 0, 0, 0, 0)
+
     try:
         connection, database_state = _connect_frozen(index_path)
         with closing(connection):
-            require_current_image_index(connection, index_path)
-            rows = list(
-                ImageIndexStore(source_output).iter_raw_mapping_rows(
-                    connection,
-                    order_by_url=True,
-                )
-            )
+            spec.require_schema(connection, index_path)
+            rows = spec.read_rows(connection, index_path, source_output)
         _verify_frozen(index_path, database_state)
     except (sqlite3.Error, ValueError) as error:
-        raise ReplayCorpusError(f"无法读取重放图片索引：{index_path}: {error}") from error
+        raise ReplayCorpusError(
+            f"无法读取重放{spec.label}索引：{index_path}: {error}"
+        ) from error
 
-    images_by_url: dict[str, ImageReplayEntry] = {}
+    entries_by_url: dict[str, ImageReplayEntry] = {}
     entries_by_relative_path: dict[str, ImageReplayEntry | None] = {}
     unavailable_mapping_count = 0
     unique_file_bytes = 0
-    for raw_url, raw_relative_path in rows:
-        if not isinstance(raw_url, str) or not isinstance(raw_relative_path, str):
-            raise ReplayCorpusError(f"重放图片索引行无效：{index_path}")
-        relative_path = Path(raw_relative_path)
+    for row in rows:
+        mapping = spec.parse_row(row, index_path)
+        relative_path = Path(mapping.relative_path)
         if (
             relative_path.is_absolute()
             or not relative_path.parts
-            or relative_path.parts[0] != "images_unique"
+            or relative_path.parts[0] != spec.unique_dirname
         ):
-            raise ReplayCorpusError(f"重放图片索引路径越界：{raw_relative_path}")
+            raise ReplayCorpusError(
+                f"重放{spec.label}索引路径越界：{mapping.relative_path}"
+            )
         resolved_path = (source_output / relative_path).resolve()
-        if not resolved_path.is_relative_to(images_root):
-            raise ReplayCorpusError(f"重放图片索引路径越界：{raw_relative_path}")
+        if not resolved_path.is_relative_to(media_root):
+            raise ReplayCorpusError(
+                f"重放{spec.label}索引路径越界：{mapping.relative_path}"
+            )
 
-        entry = entries_by_relative_path.get(raw_relative_path)
-        if raw_relative_path not in entries_by_relative_path:
+        entry = entries_by_relative_path.get(mapping.relative_path)
+        if mapping.relative_path not in entries_by_relative_path:
             try:
                 stat_result = resolved_path.stat()
+                available = spec.file_is_available(
+                    resolved_path,
+                    stat_result,
+                    mapping,
+                )
             except OSError:
                 entry = None
             else:
@@ -907,147 +1115,27 @@ def _load_images(source_output: Path, hasher: _Hasher) -> _ImageLoadResult:
                         size=stat_result.st_size,
                         mtime_ns=stat_result.st_mtime_ns,
                     )
-                    if resolved_path.is_file()
+                    if available
                     else None
                 )
-            entries_by_relative_path[raw_relative_path] = entry
+            entries_by_relative_path[mapping.relative_path] = entry
             if entry is not None:
                 unique_file_bytes += entry.size
 
-        normalized_url = _normalize_image_url(raw_url)
-        existing_entry = images_by_url.get(normalized_url)
+        existing_entry = entries_by_url.get(mapping.normalized_url)
         if entry is None:
             unavailable_mapping_count += 1
         elif existing_entry is not None and existing_entry != entry:
-            raise ReplayCorpusError(f"规范化图片URL映射冲突：{normalized_url}")
-        else:
-            images_by_url[normalized_url] = entry
-        _hash_fields(
-            hasher,
-            "image",
-            normalized_url,
-            raw_relative_path,
-            "missing" if entry is None else entry.size,
-            "missing" if entry is None else entry.mtime_ns,
-        )
-
-    return _ImageLoadResult(
-        images_by_url=images_by_url,
-        mapping_count=len(rows),
-        unavailable_mapping_count=unavailable_mapping_count,
-        unique_file_count=sum(
-            entry is not None for entry in entries_by_relative_path.values()
-        ),
-        unique_file_bytes=unique_file_bytes,
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class _AudioLoadResult:
-    audio_by_url: dict[str, AudioReplayEntry]
-    mapping_count: int
-    unavailable_mapping_count: int
-    unique_file_count: int
-    unique_file_bytes: int
-
-
-def _load_audio(source_output: Path, hasher: _Hasher) -> _AudioLoadResult:
-    index_path = source_output / AUDIO_INDEX_FILENAME
-    audio_root = (source_output / AUDIO_UNIQUE_DIRNAME).resolve()
-    if not index_path.is_file():
-        _hash_fields(hasher, "audio_index", "missing")
-        return _AudioLoadResult({}, 0, 0, 0, 0)
-    try:
-        connection, database_state = _connect_frozen(index_path)
-        with closing(connection):
-            require_current_audio_index(connection, index_path)
-            rows = cast(
-                list[tuple[object, object, object, object]],
-                connection.execute(
-                    """
-                    SELECT url, unique_rel_path, content_sha256, content_bytes
-                    FROM audio_mappings
-                    ORDER BY url
-                    """
-                ).fetchall(),
+            raise ReplayCorpusError(
+                f"规范化{spec.label}URL映射冲突："
+                f"{mapping.normalized_url}"
             )
-        _verify_frozen(index_path, database_state)
-    except (sqlite3.Error, ValueError) as error:
-        raise ReplayCorpusError(
-            f"无法读取重放音频索引：{index_path}: {error}"
-        ) from error
-
-    audio_by_url: dict[str, AudioReplayEntry] = {}
-    entries_by_relative_path: dict[str, AudioReplayEntry | None] = {}
-    unavailable_mapping_count = 0
-    unique_file_bytes = 0
-    for raw_url, raw_relative_path, raw_hash, raw_size in rows:
-        if (
-            not isinstance(raw_url, str)
-            or not isinstance(raw_relative_path, str)
-            or not isinstance(raw_hash, str)
-            or type(raw_size) is not int
-            or raw_size <= 0
-        ):
-            raise ReplayCorpusError(f"重放音频索引行无效：{index_path}")
-        normalized_url = normalize_nga_audio_url(raw_url)
-        if normalized_url is None:
-            raise ReplayCorpusError(f"重放音频索引URL无效：{raw_url}")
-        relative_path = Path(raw_relative_path)
-        if (
-            relative_path.is_absolute()
-            or not relative_path.parts
-            or relative_path.parts[0] != AUDIO_UNIQUE_DIRNAME
-        ):
-            raise ReplayCorpusError(f"重放音频索引路径越界：{raw_relative_path}")
-        resolved_path = (source_output / relative_path).resolve()
-        if not resolved_path.is_relative_to(audio_root):
-            raise ReplayCorpusError(f"重放音频索引路径越界：{raw_relative_path}")
-
-        entry = entries_by_relative_path.get(raw_relative_path)
-        if raw_relative_path not in entries_by_relative_path:
-            try:
-                stat_result = resolved_path.stat()
-                content_hash = sha256(str(resolved_path))
-            except OSError:
-                entry = None
-            else:
-                entry = (
-                    AudioReplayEntry(
-                        path=resolved_path,
-                        size=stat_result.st_size,
-                        mtime_ns=stat_result.st_mtime_ns,
-                    )
-                    if (
-                        resolved_path.is_file()
-                        and stat_result.st_size == raw_size
-                        and content_hash == raw_hash
-                    )
-                    else None
-                )
-            entries_by_relative_path[raw_relative_path] = entry
-            if entry is not None:
-                unique_file_bytes += entry.size
-
-        existing_entry = audio_by_url.get(normalized_url)
-        if entry is None:
-            unavailable_mapping_count += 1
-        elif existing_entry is not None and existing_entry != entry:
-            raise ReplayCorpusError(f"规范化音频URL映射冲突：{normalized_url}")
         else:
-            audio_by_url[normalized_url] = entry
-        _hash_fields(
-            hasher,
-            "audio",
-            normalized_url,
-            raw_relative_path,
-            raw_hash,
-            raw_size,
-            "missing" if entry is None else entry.mtime_ns,
-        )
+            entries_by_url[mapping.normalized_url] = entry
+        spec.hash_mapping(hasher, mapping, entry)
 
-    return _AudioLoadResult(
-        audio_by_url=audio_by_url,
+    return _MediaLoadResult(
+        entries_by_url=entries_by_url,
         mapping_count=len(rows),
         unavailable_mapping_count=unavailable_mapping_count,
         unique_file_count=sum(
@@ -1055,11 +1143,223 @@ def _load_audio(source_output: Path, hasher: _Hasher) -> _AudioLoadResult:
         ),
         unique_file_bytes=unique_file_bytes,
     )
+
+
+def _load_images(source_output: Path, hasher: _Hasher) -> _MediaLoadResult:
+    return _load_media_index(source_output, hasher, _IMAGE_INDEX_SPEC)
+
+
+def _load_audio(source_output: Path, hasher: _Hasher) -> _MediaLoadResult:
+    return _load_media_index(source_output, hasher, _AUDIO_INDEX_SPEC)
 
 
 def _archive_path(source_output: Path, tid: int, aid: Optional[int]) -> Path:
     aid_key = str(aid) if aid is not None else "all"
     return source_output / f"{tid}_{aid_key}" / "archive.sqlite3"
+
+
+@dataclass(slots=True)
+class _ReplayCorpusAccumulator:
+    hasher: _Hasher
+    content_pages: dict[PageKey, bytes]
+    floor_map_original_threads: dict[int, _FloorMapOriginalThread]
+    pid_targets: dict[int, ReplayPidTarget]
+    archive_content_post_count: int = 0
+    archive_content_page_payload_bytes: int = 0
+
+    def add_archive_content(self, content: _ArchiveContent) -> None:
+        self.archive_content_post_count += len(content.posts_by_lou)
+
+    def register_content_pages(
+        self,
+        *,
+        tid: int,
+        aid: int | None,
+        posts_by_lou: dict[int, _ReplayPost],
+        row_count: int,
+    ) -> None:
+        page_payloads = _content_page_payloads(
+            posts_by_lou,
+            row_count=row_count,
+        )
+        for page_number, payload in page_payloads.items():
+            key = (tid, aid, page_number)
+            if key in self.content_pages:
+                raise ReplayCorpusError(f"重放语料包含重复分页：{key}")
+            self.content_pages[key] = payload
+            self.archive_content_page_payload_bytes += len(payload)
+            _hash_fields(
+                self.hasher,
+                "archive_content_page",
+                tid,
+                aid,
+                page_number,
+                hashlib.sha256(payload).hexdigest(),
+            )
+
+    def register_pid_targets(
+        self,
+        targets: dict[int, ReplayPidTarget],
+    ) -> None:
+        for pid, target in targets.items():
+            existing = self.pid_targets.get(pid)
+            if existing is not None and existing != target:
+                raise ReplayCorpusError(
+                    f"重放语料PID {pid} 映射到多个目标："
+                    f"{existing}、{target}"
+                )
+            self.pid_targets[pid] = target
+
+    def build_corpus(
+        self,
+        *,
+        source_output: Path,
+        thread_config_path: Path,
+        thread_count: int,
+        image_result: _MediaLoadResult,
+        audio_result: _MediaLoadResult,
+    ) -> ReplayCorpus:
+        manifest = ReplayManifest(
+            corpus_id=self.hasher.hexdigest(),
+            source_output=str(source_output),
+            thread_config=str(thread_config_path),
+            thread_count=thread_count,
+            archive_content_post_count=self.archive_content_post_count,
+            archive_content_page_count=len(self.content_pages),
+            archive_content_page_payload_bytes=(
+                self.archive_content_page_payload_bytes
+            ),
+            floor_map_original_thread_count=len(
+                self.floor_map_original_threads
+            ),
+            floor_map_original_page_count=sum(
+                thread.page_count
+                for thread in self.floor_map_original_threads.values()
+            ),
+            locatable_pid_count=len(self.pid_targets),
+            image_mapping_count=image_result.mapping_count,
+            available_image_mapping_count=len(image_result.entries_by_url),
+            unavailable_image_mapping_count=(
+                image_result.unavailable_mapping_count
+            ),
+            unique_image_file_count=image_result.unique_file_count,
+            unique_image_file_bytes=image_result.unique_file_bytes,
+            audio_mapping_count=audio_result.mapping_count,
+            available_audio_mapping_count=len(audio_result.entries_by_url),
+            unavailable_audio_mapping_count=(
+                audio_result.unavailable_mapping_count
+            ),
+            unique_audio_file_count=audio_result.unique_file_count,
+            unique_audio_file_bytes=audio_result.unique_file_bytes,
+        )
+        return ReplayCorpus(
+            content_pages=self.content_pages,
+            floor_map_original_threads=self.floor_map_original_threads,
+            pid_targets=self.pid_targets,
+            images_by_url=image_result.entries_by_url,
+            audio_by_url=audio_result.entries_by_url,
+            manifest=manifest,
+        )
+
+
+def _load_thread_replay_data(
+    source_output: Path,
+    config: _ThreadReplayConfig,
+    accumulator: _ReplayCorpusAccumulator,
+) -> None:
+    configured_archive = _archive_path(
+        source_output,
+        config.tid,
+        config.aid,
+    )
+    configured_content = _read_archive_content(configured_archive)
+    accumulator.add_archive_content(configured_content)
+    if config.aid is None:
+        configured_rows = 0 if config.replies is None else config.replies + 1
+        content_rows = (
+            0
+            if not configured_content.posts_by_lou
+            else max(configured_content.posts_by_lou) + 1
+        )
+        accumulator.register_content_pages(
+            tid=config.tid,
+            aid=None,
+            posts_by_lou=configured_content.posts_by_lou,
+            row_count=max(configured_rows, content_rows),
+        )
+        return
+
+    original_archive = _archive_path(source_output, config.tid, None)
+    has_original_archive = original_archive.is_file()
+    floor_map = _read_floor_map(
+        configured_archive,
+        config,
+        accumulator.hasher,
+        expected_database_state=configured_content.database_state,
+        required=not has_original_archive,
+    )
+    if floor_map is not None:
+        accumulator.register_pid_targets(
+            _pid_targets_from_floor_map(
+                config,
+                floor_map,
+                accumulator.hasher,
+            )
+        )
+
+    author_posts = {
+        lou: post
+        for lou, post in configured_content.posts_by_lou.items()
+        if post.author_uid != -1
+    }
+    author_content_rows = 0 if not author_posts else max(author_posts) + 1
+    accumulator.register_content_pages(
+        tid=config.tid,
+        aid=config.aid,
+        posts_by_lou=author_posts,
+        row_count=max(
+            0 if floor_map is None else floor_map.author_row_count,
+            author_content_rows,
+        ),
+    )
+
+    if has_original_archive:
+        original_content = _read_archive_content(original_archive)
+        accumulator.add_archive_content(original_content)
+        if floor_map is not None:
+            _validate_original_archive_content(
+                original_archive,
+                original_content,
+                configured_content,
+                floor_map,
+            )
+        configured_rows = 0 if config.replies is None else config.replies + 1
+        original_content_rows = (
+            0
+            if not original_content.posts_by_lou
+            else max(original_content.posts_by_lou) + 1
+        )
+        accumulator.register_content_pages(
+            tid=config.tid,
+            aid=None,
+            posts_by_lou=original_content.posts_by_lou,
+            row_count=max(configured_rows, original_content_rows),
+        )
+        return
+
+    if floor_map is None:
+        raise ReplayCorpusError(
+            f"缺少原帖归档和楼层映射，无法合成原帖：{configured_archive}"
+        )
+    accumulator.floor_map_original_threads[config.tid] = (
+        _build_floor_map_original_thread(
+            configured_archive,
+            config,
+            configured_content,
+            floor_map,
+            accumulator.hasher,
+        )
+    )
 
 
 def load_replay_corpus(
@@ -1076,140 +1376,23 @@ def load_replay_corpus(
     hasher = hashlib.sha256()
     _hash_fields(hasher, "corpus_format", _CORPUS_FORMAT_VERSION)
     configs = _read_thread_configs(resolved_thread_config, hasher)
-    content_pages: dict[PageKey, bytes] = {}
-    floor_map_original_threads: dict[int, _FloorMapOriginalThread] = {}
-    pid_targets: dict[int, ReplayPidTarget] = {}
-    archive_content_post_count = 0
-    archive_content_page_payload_bytes = 0
+    accumulator = _ReplayCorpusAccumulator(
+        hasher=hasher,
+        content_pages={},
+        floor_map_original_threads={},
+        pid_targets={},
+    )
     total_configs = len(configs)
     total_work_items = total_configs + 2
-
-    def register_content_pages(
-        *,
-        tid: int,
-        aid: int | None,
-        posts_by_lou: dict[int, _ReplayPost],
-        row_count: int,
-    ) -> None:
-        nonlocal archive_content_page_payload_bytes
-        page_payloads = _content_page_payloads(
-            posts_by_lou,
-            row_count=row_count,
-        )
-        for page_number, payload in page_payloads.items():
-            key = (tid, aid, page_number)
-            if key in content_pages:
-                raise ReplayCorpusError(f"重放语料包含重复分页：{key}")
-            content_pages[key] = payload
-            archive_content_page_payload_bytes += len(payload)
-            _hash_fields(
-                hasher,
-                "archive_content_page",
-                tid,
-                aid,
-                page_number,
-                hashlib.sha256(payload).hexdigest(),
-            )
 
     for index, config in enumerate(configs, start=1):
         if on_progress is not None:
             on_progress(index - 1, total_work_items, f"读取 tid={config.tid}")
-        configured_archive = _archive_path(
+        _load_thread_replay_data(
             resolved_output,
-            config.tid,
-            config.aid,
-        )
-        configured_content = _read_archive_content(configured_archive)
-        archive_content_post_count += len(configured_content.posts_by_lou)
-        if config.aid is None:
-            configured_rows = 0 if config.replies is None else config.replies + 1
-            content_rows = (
-                0
-                if not configured_content.posts_by_lou
-                else max(configured_content.posts_by_lou) + 1
-            )
-            register_content_pages(
-                tid=config.tid,
-                aid=None,
-                posts_by_lou=configured_content.posts_by_lou,
-                row_count=max(configured_rows, content_rows),
-            )
-            continue
-
-        original_archive = _archive_path(resolved_output, config.tid, None)
-        has_original_archive = original_archive.is_file()
-        floor_map = _read_floor_map(
-            configured_archive,
             config,
-            hasher,
-            expected_database_state=configured_content.database_state,
-            required=not has_original_archive,
+            accumulator,
         )
-        archive_pid_targets = (
-            {}
-            if floor_map is None
-            else _pid_targets_from_floor_map(config, floor_map, hasher)
-        )
-        for pid, target in archive_pid_targets.items():
-            existing = pid_targets.get(pid)
-            if existing is not None and existing != target:
-                raise ReplayCorpusError(
-                    f"重放语料PID {pid} 映射到多个目标：{existing}、{target}"
-                )
-            pid_targets[pid] = target
-
-        author_posts = {
-            lou: post
-            for lou, post in configured_content.posts_by_lou.items()
-            if post.author_uid != -1
-        }
-        author_content_rows = 0 if not author_posts else max(author_posts) + 1
-        register_content_pages(
-            tid=config.tid,
-            aid=config.aid,
-            posts_by_lou=author_posts,
-            row_count=max(
-                0 if floor_map is None else floor_map.author_row_count,
-                author_content_rows,
-            ),
-        )
-
-        if has_original_archive:
-            original_content = _read_archive_content(original_archive)
-            archive_content_post_count += len(original_content.posts_by_lou)
-            if floor_map is not None:
-                _validate_original_archive_content(
-                    original_archive,
-                    original_content,
-                    configured_content,
-                    floor_map,
-                )
-            configured_rows = 0 if config.replies is None else config.replies + 1
-            original_content_rows = (
-                0
-                if not original_content.posts_by_lou
-                else max(original_content.posts_by_lou) + 1
-            )
-            register_content_pages(
-                tid=config.tid,
-                aid=None,
-                posts_by_lou=original_content.posts_by_lou,
-                row_count=max(configured_rows, original_content_rows),
-            )
-        else:
-            if floor_map is None:
-                raise ReplayCorpusError(
-                    f"缺少原帖归档和楼层映射，无法合成原帖：{configured_archive}"
-                )
-            floor_map_original_threads[config.tid] = (
-                _build_floor_map_original_thread(
-                    configured_archive,
-                    config,
-                    configured_content,
-                    floor_map,
-                    hasher,
-                )
-            )
 
     if on_progress is not None:
         on_progress(total_configs, total_work_items, "读取图片索引")
@@ -1219,35 +1402,10 @@ def load_replay_corpus(
     audio_result = _load_audio(resolved_output, hasher)
     if on_progress is not None:
         on_progress(total_work_items, total_work_items, "重放语料读取完成")
-    manifest = ReplayManifest(
-        corpus_id=hasher.hexdigest(),
-        source_output=str(resolved_output),
-        thread_config=str(resolved_thread_config),
+    return accumulator.build_corpus(
+        source_output=resolved_output,
+        thread_config_path=resolved_thread_config,
         thread_count=total_configs,
-        archive_content_post_count=archive_content_post_count,
-        archive_content_page_count=len(content_pages),
-        archive_content_page_payload_bytes=archive_content_page_payload_bytes,
-        floor_map_original_thread_count=len(floor_map_original_threads),
-        floor_map_original_page_count=sum(
-            thread.page_count for thread in floor_map_original_threads.values()
-        ),
-        locatable_pid_count=len(pid_targets),
-        image_mapping_count=image_result.mapping_count,
-        available_image_mapping_count=len(image_result.images_by_url),
-        unavailable_image_mapping_count=image_result.unavailable_mapping_count,
-        unique_image_file_count=image_result.unique_file_count,
-        unique_image_file_bytes=image_result.unique_file_bytes,
-        audio_mapping_count=audio_result.mapping_count,
-        available_audio_mapping_count=len(audio_result.audio_by_url),
-        unavailable_audio_mapping_count=audio_result.unavailable_mapping_count,
-        unique_audio_file_count=audio_result.unique_file_count,
-        unique_audio_file_bytes=audio_result.unique_file_bytes,
-    )
-    return ReplayCorpus(
-        content_pages=content_pages,
-        floor_map_original_threads=floor_map_original_threads,
-        pid_targets=pid_targets,
-        images_by_url=image_result.images_by_url,
-        audio_by_url=audio_result.audio_by_url,
-        manifest=manifest,
+        image_result=image_result,
+        audio_result=audio_result,
     )

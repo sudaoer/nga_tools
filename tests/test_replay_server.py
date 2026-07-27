@@ -566,6 +566,73 @@ class ReplayCorpusTest:
         with pytest.raises(ReplayCorpusError, match="路径越界"):
             load_replay_corpus(output_dir, thread_config)
 
+    def test_allows_missing_audio_index(self, tmp_path: Path) -> None:
+        output_dir, thread_config, _image_path = _build_source(tmp_path)
+        (output_dir / "audio_index.sqlite3").unlink()
+
+        corpus = load_replay_corpus(output_dir, thread_config)
+
+        assert corpus.audio(AUDIO_URL) is None
+        assert corpus.manifest.audio_mapping_count == 0
+        assert corpus.manifest.available_audio_mapping_count == 0
+        assert corpus.manifest.unavailable_audio_mapping_count == 0
+        assert corpus.manifest.unique_audio_file_count == 0
+        assert corpus.manifest.unique_audio_file_bytes == 0
+
+    def test_rejects_audio_mapping_outside_audio_unique(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir, thread_config, _image_path = _build_source(tmp_path)
+        with sqlite3.connect(output_dir / "audio_index.sqlite3") as connection:
+            connection.execute(
+                """
+                UPDATE audio_mappings
+                SET unique_rel_path = '../outside.mp3'
+                WHERE url = ?
+                """,
+                (AUDIO_URL,),
+            )
+
+        with pytest.raises(ReplayCorpusError, match="音频索引路径越界"):
+            load_replay_corpus(output_dir, thread_config)
+
+    @pytest.mark.parametrize("invalid_metadata", ["hash", "size"])
+    def test_treats_audio_with_invalid_content_metadata_as_unavailable(
+        self,
+        tmp_path: Path,
+        invalid_metadata: str,
+    ) -> None:
+        output_dir, thread_config, _image_path = _build_source(tmp_path)
+        with sqlite3.connect(output_dir / "audio_index.sqlite3") as connection:
+            if invalid_metadata == "hash":
+                connection.execute(
+                    """
+                    UPDATE audio_mappings
+                    SET content_sha256 = ?
+                    WHERE url = ?
+                    """,
+                    ("f" * 64, AUDIO_URL),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE audio_mappings
+                    SET content_bytes = 1
+                    WHERE url = ?
+                    """,
+                    (AUDIO_URL,),
+                )
+
+        corpus = load_replay_corpus(output_dir, thread_config)
+
+        assert corpus.audio(AUDIO_URL) is None
+        assert corpus.manifest.audio_mapping_count == 2
+        assert corpus.manifest.available_audio_mapping_count == 0
+        assert corpus.manifest.unavailable_audio_mapping_count == 2
+        assert corpus.manifest.unique_audio_file_count == 0
+        assert corpus.manifest.unique_audio_file_bytes == 0
+
 
 class ReplayServerTest:
     def test_serves_api_images_metrics_and_reset(self, tmp_path: Path) -> None:
