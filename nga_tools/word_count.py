@@ -67,7 +67,7 @@ def _is_chinese_punctuation(char: str) -> bool:
     return char in CHINESE_PUNCTUATION
 
 
-def count_chinese_text(text: str) -> TextWordCount:
+def _count_chinese_text(text: str) -> TextWordCount:
     chinese_chars = 0
     chinese_with_punctuation = 0
     for char in text:
@@ -115,7 +115,7 @@ def _remove_html_noise(text: str) -> str:
     return soup.get_text("\n")
 
 
-def clean_post_content(content: str) -> str:
+def _clean_post_content(content: str) -> str:
     text = html.unescape(content)
     text = IMG_BBCODE_RE.sub("\n", text)
     text = _strip_reply_quote_blocks(text)
@@ -136,4 +136,4 @@ def clean_post_content(content: str) -> str:
 
 
 def count_post_content(content: str) -> TextWordCount:
-    return count_chinese_text(clean_post_content(content))
+    return _count_chinese_text(_clean_post_content(content))

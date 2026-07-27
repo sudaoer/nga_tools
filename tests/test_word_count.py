@@ -4,12 +4,12 @@ import warnings
 
 from bs4 import MarkupResemblesLocatorWarning
 
-from nga_tools.word_count import clean_post_content, count_chinese_text
+from nga_tools.word_count import count_post_content
 
 
 class WordCountCleaningTest:
     def test_count_chinese_and_chinese_punctuation_separately(self) -> None:
-        count = count_chinese_text("中文，test123。全角Ａ１！々")
+        count = count_post_content("中文，test123。全角Ａ１！々")
 
         assert count.chinese_chars == 4
         assert count.chinese_with_punctuation == 7
@@ -22,14 +22,7 @@ class WordCountCleaningTest:
             "[s:ac:哭笑][@某人][uid=123]用户名[/uid]"
         )
 
-        cleaned = clean_post_content(content)
-
-        assert '链接文本' in cleaned
-        assert '正文' in cleaned
-        assert 'https' not in cleaned
-        assert '哭笑' not in cleaned
-        assert '某人' not in cleaned
-        assert '用户名' not in cleaned
+        assert count_post_content(content) == count_post_content("链接文本正文")
 
     def test_removes_reply_quote_but_keeps_author_answer(self) -> None:
         content = (
@@ -39,18 +32,16 @@ class WordCountCleaningTest:
             "楼主自己的回答，应该保留。"
         )
 
-        cleaned = clean_post_content(content)
-
-        assert '被引用的问题' not in cleaned
-        assert '楼主自己的回答，应该保留。' in cleaned
+        assert count_post_content(content) == count_post_content(
+            "楼主自己的回答，应该保留。"
+        )
 
     def test_keeps_visible_text_in_regular_quote(self) -> None:
         content = "[quote]<br/><b>[序章设定]</b><br/>这里是正文设定。[/quote]"
 
-        cleaned = clean_post_content(content)
-
-        assert '[序章设定]' in cleaned
-        assert '这里是正文设定。' in cleaned
+        assert count_post_content(content) == count_post_content(
+            "序章设定这里是正文设定。"
+        )
 
     def test_removes_html_reply_header_only(self) -> None:
         content = (
@@ -59,23 +50,20 @@ class WordCountCleaningTest:
             "地点什么的不要细想，总之大家都在学校就可以了。"
         )
 
-        cleaned = clean_post_content(content)
-
-        assert '读者' not in cleaned
-        assert '地点什么的不要细想' in cleaned
+        assert count_post_content(content) == count_post_content(
+            "地点什么的不要细想，总之大家都在学校就可以了。"
+        )
 
     def test_removes_dice_expressions(self) -> None:
         content = (
-            "[quote]<b> d=[1d100=49]=49 </b>[/quote]"
-            ".r1d50+50=83 "
+            "[quote]<b> d=[1d100=骰点结果] </b>[/quote]"
+            ".r1d50+50=另一个骰点结果 "
             "骰子后面的剧情正文，应该只留下中文。"
         )
 
-        cleaned = clean_post_content(content)
-
-        assert '1d100' not in cleaned
-        assert 'r1d50' not in cleaned
-        assert '骰子后面的剧情正文' in cleaned
+        assert count_post_content(content) == count_post_content(
+            "骰子后面的剧情正文，应该只留下中文。"
+        )
 
     def test_strips_bbcode_tags_with_library_parser(self) -> None:
         content = (
@@ -86,26 +74,18 @@ class WordCountCleaningTest:
             "[url=https://example.com]链接文本[/url]"
         )
 
-        cleaned = clean_post_content(content)
-
-        assert '字号正文' in cleaned
-        assert '字体正文' in cleaned
-        assert '居中正文' in cleaned
-        assert '折叠正文' in cleaned
-        assert '链接文本' in cleaned
-        assert '[size' not in cleaned
-        assert '[font' not in cleaned
-        assert '[align' not in cleaned
-        assert '[collapse' not in cleaned
-        assert 'https://example.com' not in cleaned
+        assert count_post_content(content) == count_post_content(
+            "字号正文字体正文居中正文折叠正文链接文本"
+        )
 
     def test_plain_url_content_does_not_emit_markup_locator_warning(self) -> None:
         with warnings.catch_warnings(record=True) as caught_warnings:
             warnings.simplefilter("always")
 
-            cleaned = clean_post_content("https://example.com/path")
+            count = count_post_content("https://example.com/path")
 
-        assert cleaned == "https://example.com/path"
+        assert count.chinese_chars == 0
+        assert count.chinese_with_punctuation == 0
         assert not any(
             issubclass(warning.category, MarkupResemblesLocatorWarning)
             for warning in caught_warnings

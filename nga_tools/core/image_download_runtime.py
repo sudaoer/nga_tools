@@ -843,9 +843,6 @@ class DownloadRuntime:
         self._thread.join()
 
 
-ImageDownloadRuntime = DownloadRuntime
-ImageDownloadRuntimeMetrics = DownloadRuntimeMetrics
-
 _runtime_lock = threading.RLock()
 _active_runtimes: dict[DownloadResourceKind, DownloadRuntime] = {}
 _runtime_scope_depths: dict[DownloadResourceKind, int] = {
@@ -865,25 +862,25 @@ def current_download_runtime(
         return _active_runtimes.get(resource_kind)
 
 
-def current_image_download_runtime() -> ImageDownloadRuntime | None:
+def _current_image_download_runtime() -> DownloadRuntime | None:
     return current_download_runtime("image")
 
 
-def current_audio_download_runtime() -> DownloadRuntime | None:
+def _current_audio_download_runtime() -> DownloadRuntime | None:
     return current_download_runtime("audio")
 
 
 def active_image_download_runtime_capacity() -> int | None:
-    runtime = current_image_download_runtime()
+    runtime = _current_image_download_runtime()
     return None if runtime is None else runtime.capacity
 
 
 def active_audio_download_runtime_capacity() -> int | None:
-    runtime = current_audio_download_runtime()
+    runtime = _current_audio_download_runtime()
     return None if runtime is None else runtime.capacity
 
 
-def image_download_runtime_metrics() -> ImageDownloadRuntimeMetrics | None:
+def image_download_runtime_metrics() -> DownloadRuntimeMetrics | None:
     with _runtime_lock:
         runtime = _active_runtimes.get("image")
         if runtime is not None:
@@ -935,7 +932,7 @@ def use_download_runtime(
 @contextmanager
 def use_image_download_runtime(
     capacity: int,
-) -> Generator[ImageDownloadRuntime]:
+) -> Generator[DownloadRuntime]:
     with use_download_runtime("image", capacity) as runtime:
         yield runtime
 

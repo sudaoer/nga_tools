@@ -31,7 +31,7 @@ from nga_tools.backup.image_store_runtime import (
     use_image_store_runtime,
 )
 from nga_tools.core.image_download_runtime import (
-    ImageDownloadRuntime,
+    DownloadRuntime,
     _AttemptFailure,
 )
 from nga_tools.core.download_types import DownloadFileResult, DownloadTask
@@ -77,7 +77,7 @@ class ImageDownloadRuntimeTest:
             def get(self, *_args: object, **_kwargs: object) -> DisconnectContext:
                 return DisconnectContext()
 
-        runtime = ImageDownloadRuntime(1)
+        runtime = DownloadRuntime(1)
         try:
             result = asyncio.run(
                 runtime._download_attempt(
@@ -121,7 +121,7 @@ class ImageDownloadRuntimeTest:
                 return ShortResponse()
 
         task = _download_task("short-payload", tmp_path)
-        runtime = ImageDownloadRuntime(1)
+        runtime = DownloadRuntime(1)
         try:
             result = asyncio.run(
                 runtime._download_attempt(ShortSession(), task, ())
@@ -139,14 +139,14 @@ class ImageDownloadRuntimeTest:
         tmp_path: Path,
     ) -> None:
         async def fake_attempt(
-            _runtime: ImageDownloadRuntime,
+            _runtime: DownloadRuntime,
             _session: object,
             item: DownloadTask,
             _retry_statuses: tuple[int, ...],
         ) -> DownloadFileResult:
             return _success_result(item)
 
-        runtime = ImageDownloadRuntime(2)
+        runtime = DownloadRuntime(2)
         runtime._download_attempt = MethodType(fake_attempt, runtime)
         try:
             runtime.download_streaming(
@@ -171,7 +171,7 @@ class ImageDownloadRuntimeTest:
         tmp_path: Path,
     ) -> None:
         async def fake_attempt(
-            _runtime: ImageDownloadRuntime,
+            _runtime: DownloadRuntime,
             _session: object,
             item: DownloadTask,
             _retry_statuses: tuple[int, ...],
@@ -185,7 +185,7 @@ class ImageDownloadRuntimeTest:
         ) -> None:
             raise RuntimeError("stop consuming")
 
-        runtime = ImageDownloadRuntime(4)
+        runtime = DownloadRuntime(4)
         runtime._download_attempt = MethodType(fake_attempt, runtime)
         with pytest.raises(RuntimeError, match="stop consuming"):
             runtime.download_streaming(
@@ -214,7 +214,7 @@ class ImageDownloadRuntimeTest:
             return original_create_task(coroutine)
 
         async def fake_attempt(
-            _runtime: ImageDownloadRuntime,
+            _runtime: DownloadRuntime,
             _session: object,
             item: DownloadTask,
             _retry_statuses: tuple[int, ...],
@@ -225,7 +225,7 @@ class ImageDownloadRuntimeTest:
             "nga_tools.core.image_download_runtime.asyncio.create_task",
             side_effect=counted_create_task,
         ):
-            runtime = ImageDownloadRuntime(4)
+            runtime = DownloadRuntime(4)
             runtime._download_attempt = MethodType(fake_attempt, runtime)
             try:
                 summary = runtime.download(
@@ -252,7 +252,7 @@ class ImageDownloadRuntimeTest:
         tmp_path: Path,
     ) -> None:
         async def fake_attempt(
-            _runtime: ImageDownloadRuntime,
+            _runtime: DownloadRuntime,
             _session: object,
             item: DownloadTask,
             _retry_statuses: tuple[int, ...],
@@ -270,7 +270,7 @@ class ImageDownloadRuntimeTest:
             completed = current
             assert total == 500
 
-        runtime = ImageDownloadRuntime(4)
+        runtime = DownloadRuntime(4)
         runtime._download_attempt = MethodType(fake_attempt, runtime)
         try:
             result = runtime.download_streaming(
@@ -294,7 +294,7 @@ class ImageDownloadRuntimeTest:
         start_lock = threading.Lock()
 
         async def fake_attempt(
-            _runtime: ImageDownloadRuntime,
+            _runtime: DownloadRuntime,
             _session: object,
             item: DownloadTask,
             _retry_statuses: tuple[int, ...],
@@ -308,7 +308,7 @@ class ImageDownloadRuntimeTest:
                     await asyncio.sleep(0.001)
             return _success_result(item)
 
-        runtime = ImageDownloadRuntime(4)
+        runtime = DownloadRuntime(4)
         runtime._download_attempt = MethodType(fake_attempt, runtime)
         try:
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -354,7 +354,7 @@ class ImageDownloadRuntimeTest:
         attempts: dict[str, int] = {}
 
         async def fake_attempt(
-            _runtime: ImageDownloadRuntime,
+            _runtime: DownloadRuntime,
             _session: object,
             item: DownloadTask,
             _retry_statuses: tuple[int, ...],
@@ -374,7 +374,7 @@ class ImageDownloadRuntimeTest:
 
         callback_threads: list[int] = []
         caller_thread = threading.get_ident()
-        runtime = ImageDownloadRuntime(1)
+        runtime = DownloadRuntime(1)
         runtime._download_attempt = MethodType(fake_attempt, runtime)
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:

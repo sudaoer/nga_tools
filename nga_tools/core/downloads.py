@@ -4,17 +4,16 @@ import os
 
 from nga_tools import network_limits
 from nga_tools.core.download_types import (
-    DOWNLOAD_FAILURE_KINDS as DOWNLOAD_FAILURE_KINDS,
     DownloadFailureKind as DownloadFailureKind,
     DownloadFileResult as DownloadFileResult,
-    DownloadProgressCallback as DownloadProgressCallback,
-    DownloadResourceKind as DownloadResourceKind,
     DownloadSummary as DownloadSummary,
-    DownloadTask as DownloadTask,
+    DownloadProgressCallback as _DownloadProgressCallback,
+    DownloadResourceKind as _DownloadResourceKind,
+    DownloadTask as _DownloadTask,
 )
 
 
-def _configured_download_concurrency(resource_kind: DownloadResourceKind) -> int:
+def _configured_download_concurrency(resource_kind: _DownloadResourceKind) -> int:
     if resource_kind == "audio":
         return network_limits.get_audio_concurrency()
     return network_limits.get_image_concurrency()
@@ -23,7 +22,7 @@ def _configured_download_concurrency(resource_kind: DownloadResourceKind) -> int
 def effective_download_concurrency(
     max_concurrency: int | None,
     *,
-    resource_kind: DownloadResourceKind = "image",
+    resource_kind: _DownloadResourceKind = "image",
 ) -> int:
     configured_concurrency = _configured_download_concurrency(resource_kind)
     if max_concurrency is None:
@@ -34,13 +33,13 @@ def effective_download_concurrency(
 
 
 def download_files(
-    url_filename_lists: list[DownloadTask],
+    url_filename_lists: list[_DownloadTask],
     retries: int = 5,
     backoff_factor: float = 0.5,
     retry_statuses: tuple[int, ...] = (429, 500, 502, 503, 504),
     max_concurrency: int | None = None,
-    on_progress: DownloadProgressCallback | None = None,
-    resource_kind: DownloadResourceKind = "image",
+    on_progress: _DownloadProgressCallback | None = None,
+    resource_kind: _DownloadResourceKind = "image",
 ) -> DownloadSummary:
     pending_downloads = [
         item for item in url_filename_lists if not os.path.exists(item["save_path"])
@@ -82,13 +81,13 @@ def download_files(
 
 
 def download_files_streaming(
-    url_filename_lists: list[DownloadTask],
+    url_filename_lists: list[_DownloadTask],
     retries: int = 5,
     backoff_factor: float = 0.5,
     retry_statuses: tuple[int, ...] = (429, 500, 502, 503, 504),
     max_concurrency: int | None = None,
-    on_progress: DownloadProgressCallback | None = None,
-    resource_kind: DownloadResourceKind = "image",
+    on_progress: _DownloadProgressCallback | None = None,
+    resource_kind: _DownloadResourceKind = "image",
 ) -> None:
     """Download files while delivering results only through ``on_progress``."""
     pending_downloads = [
