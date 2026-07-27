@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
+import threading
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ from nga_tools.storage import ensure_storage_metadata, require_storage_metadata
 from nga_tools.storage.schema import require_exact_columns, require_table_names
 
 FORUM_THREAD_DB_FILENAME = "forum_threads.sqlite3"
+_FORUM_SCHEMA_LOCK = threading.RLock()
+_VALIDATED_FORUM_SCHEMA_PATHS: set[Path] = set()
 _FORUM_THREAD_COLUMNS = (
     ("tid", "INTEGER"), ("aid", "INTEGER"), ("author", "TEXT"),
     ("subject", "TEXT"), ("postdate", "INTEGER"),
@@ -54,6 +57,20 @@ def require_current_forum_schema(
                 _FORUM_THREAD_COLUMNS,
                 source=source,
             )
+
+
+def _require_current_forum_schema_once(
+    connection: sqlite3.Connection,
+    db_path: Path,
+    *,
+    force: bool = False,
+) -> None:
+    resolved_path = db_path.resolve()
+    with _FORUM_SCHEMA_LOCK:
+        if not force and resolved_path in _VALIDATED_FORUM_SCHEMA_PATHS:
+            return
+        require_current_forum_schema(connection, db_path)
+        _VALIDATED_FORUM_SCHEMA_PATHS.add(resolved_path)
 
 
 @dataclass(frozen=True)
@@ -111,9 +128,11 @@ class ForumThreadStore:
             with connection:
                 if new_database:
                     ensure_storage_metadata(connection, role="forum_data")
-                else:
-                    require_storage_metadata(connection, role="forum_data")
-                require_current_forum_schema(connection, self.db_path)
+                _require_current_forum_schema_once(
+                    connection,
+                    self.db_path,
+                    force=new_database,
+                )
         except BaseException:
             connection.close()
             raise
@@ -129,7 +148,7 @@ class ForumThreadStore:
         )
         configure_readonly_connection(connection)
         try:
-            require_current_forum_schema(connection, self.db_path)
+            _require_current_forum_schema_once(connection, self.db_path)
         except BaseException:
             connection.close()
             raise

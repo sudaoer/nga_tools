@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from nga_tools.cli import args_parse
 from nga_tools.commands.forum import handle_forum_sync, sync_default_forum_watch
+from nga_tools.forum import thread_store as thread_store_module
 from nga_tools.forum.export import (
     sync_default_forum_threads_to_db,
     sync_postdate_forum_threads_to_db,
@@ -24,6 +25,7 @@ from nga_tools.forum.thread_store import (
     forum_thread_table_name,
     timestamp_text,
 )
+from nga_tools.storage import UnsupportedStorageFormatError, ensure_storage_metadata
 from nga_tools.forum.watch import (
     ForumWatchConfig,
     MatchedForumThread,
@@ -982,6 +984,74 @@ class ForumThreadStoreTest:
                 """
             ).fetchone()
         assert missing_fid_table is None
+
+    def test_schema_validation_is_cached_across_connections_and_instances(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        db_path = tmp_path / "forum_threads.sqlite3"
+        store = ForumThreadStore(db_path)
+
+        with patch(
+            "nga_tools.forum.thread_store.require_current_forum_schema",
+            wraps=thread_store_module.require_current_forum_schema,
+        ) as require_schema:
+            store.upsert_threads(784, [_thread(tid=101)])
+            assert ForumThreadStore(db_path).existing_tids(784) == {101}
+            assert [
+                thread["tid"]
+                for thread in ForumThreadStore(db_path).list_threads(
+                    784,
+                    forumname="rp784",
+                )
+            ] == [101]
+            ForumThreadStore(db_path).upsert_threads(859, [_thread(tid=102)])
+
+        assert require_schema.call_count == 1
+
+    def test_schema_validation_cache_revalidates_recreated_database(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        db_path = tmp_path / "forum_threads.sqlite3"
+        ForumThreadStore(db_path).upsert_threads(784, [_thread(tid=101)])
+        db_path.unlink()
+
+        with patch(
+            "nga_tools.forum.thread_store.require_current_forum_schema",
+            wraps=thread_store_module.require_current_forum_schema,
+        ) as require_schema:
+            recreated = ForumThreadStore(db_path)
+            recreated.upsert_threads(784, [_thread(tid=102)])
+
+        assert require_schema.call_count == 1
+        assert recreated.existing_tids(784) == {102}
+
+    def test_failed_schema_validation_is_not_cached(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "forum_threads.sqlite3"
+        with closing(sqlite3.connect(db_path)) as connection:
+            ensure_storage_metadata(connection, role="forum_data")
+            connection.execute(
+                """
+                CREATE TABLE forum_threads_fid_784 (
+                    tid INTEGER PRIMARY KEY
+                )
+                """
+            )
+            connection.commit()
+
+        with patch(
+            "nga_tools.forum.thread_store.require_current_forum_schema",
+            wraps=thread_store_module.require_current_forum_schema,
+        ) as require_schema:
+            for _attempt in range(2):
+                with pytest.raises(UnsupportedStorageFormatError):
+                    ForumThreadStore(db_path).existing_tids(784)
+
+        assert require_schema.call_count == 2
+        assert db_path.resolve() not in (
+            thread_store_module._VALIDATED_FORUM_SCHEMA_PATHS
+        )
 
     def test_upsert_uses_tid_primary_key_and_updates_thread_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
