@@ -628,6 +628,76 @@ class FloorMapPidTargetScanTest:
         assert scanned_pages == set(range(1, 17))
         assert mapped == {1: 10, 2: 300, 3: 280}
 
+    def test_failed_pid_target_scan_does_not_apply_partial_state(self) -> None:
+        class FailingStreamingClient(StreamingFakeClient):
+            def iter_pages(
+                self,
+                tid: int,
+                aid: None,
+                pages: Sequence[int],
+                *,
+                on_page_complete: (
+                    Callable[[int, int, int], None] | None
+                ) = None,
+            ) -> Generator[tuple[int, PageData]]:
+                page_number = pages[0]
+                page_data = self.get_page(tid, aid, page_number)
+                if on_page_complete is not None:
+                    on_page_complete(page_number, 1, len(pages))
+                yield page_number, page_data
+                raise RuntimeError("target page fetch failed")
+
+        client = FailingStreamingClient(
+            {
+                2: {"result": [{"pid": 1001, "lou": 20}]},
+                3: {"result": [{"pid": 1002, "lou": 40}]},
+            },
+            page_count=4,
+            pid_targets={
+                1001: PidRedirectTarget(tid=123, page_number=2),
+                1002: PidRedirectTarget(tid=123, page_number=3),
+            },
+        )
+        scanned_pages = {9}
+        seen_original_lous = {90}
+        original_posts_by_lou: dict[int, OriginalPostSnapshot] = {
+            90: {
+                "pid": 9000,
+                "lou": 90,
+                "author_uid": 9,
+                "content": "existing",
+                "raw_post": {"pid": 9000, "lou": 90},
+            }
+        }
+        original_lou_by_author_lou = {9: 90}
+
+        with (
+            patch("builtins.print"),
+            patch("sys.stdout", new_callable=io.StringIO),
+            patch(
+                "nga_tools.backup.floor_map.get_api_concurrency",
+                return_value=2,
+            ),
+            pytest.raises(RuntimeError, match="target page fetch failed"),
+        ):
+            _scan_pending_author_pages(
+                client,
+                123,
+                [1, 2, 3, 4],
+                4,
+                scanned_pages,
+                seen_original_lous,
+                original_posts_by_lou,
+                {1001: [1], 1002: [2]},
+                original_lou_by_author_lou,
+                3,
+            )
+
+        assert scanned_pages == {9}
+        assert seen_original_lous == {90}
+        assert set(original_posts_by_lou) == {90}
+        assert original_lou_by_author_lou == {9: 90}
+
 
 class FloorMapMissingInferenceTest:
     def _build_floor_map(

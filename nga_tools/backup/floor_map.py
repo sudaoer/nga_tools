@@ -302,6 +302,14 @@ def load_floor_map_build_result_if_current(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _FinalizedFloorMap:
+    entries: list[FloorMapEntry]
+    original_lou_by_author_lou: dict[int, int]
+    candidate_original_lous_by_author_lou: dict[int, list[int]]
+    recovered_missing_posts_by_author_lou: dict[int, RecoveredMissingPost]
+
+
 def build_and_save_floor_map(
     client: NGAClient,
     archive_store: ThreadArchiveStore,
@@ -359,6 +367,88 @@ def build_and_save_floor_map(
     original_posts_by_lou: dict[int, OriginalPostSnapshot] = {}
     scanned_pages: set[int] = set()
 
+    _scan_known_author_floors(
+        client,
+        tid,
+        author_lou_to_pid,
+        found_original_by_author_lou,
+        original_lou_by_author_lou,
+        scanned_pages,
+        seen_original_lous,
+        original_posts_by_lou,
+        author_post_count=len(author_posts),
+        strict=strict,
+    )
+
+    missing_inference = _infer_missing_original_lous(
+        client,
+        tid,
+        original_lou_by_author_lou,
+        seen_original_lous,
+        original_posts_by_lou,
+        scanned_pages,
+        missing_author_lous,
+        existing_candidates,
+        retry_missing_author_lou_set,
+    )
+    inferred_missing_originals = missing_inference.exact_original_by_author_lou
+    candidate_missing_originals = missing_inference.candidate_originals_by_author_lou
+    if inferred_missing_originals:
+        report_info(f"已补全{len(inferred_missing_originals)}个缺失楼的原帖楼层。")
+    if candidate_missing_originals:
+        report_info(f"已记录{len(candidate_missing_originals)}个缺失楼的候选原帖楼层。")
+
+    finalized = _finalize_floor_map(
+        client,
+        tid,
+        author_lou_to_pid,
+        missing_author_lous,
+        retry_missing_author_lou_set,
+        original_lou_by_author_lou,
+        inferred_missing_originals,
+        candidate_missing_originals,
+        existing_recovered_original_pids,
+        scanned_pages,
+        seen_original_lous,
+        original_posts_by_lou,
+    )
+
+    _write_floor_map(
+        archive_store,
+        tid,
+        aid,
+        finalized.entries,
+        input_signature=input_signature,
+    )
+    return FloorMapBuildResult(
+        floor_labels=FloorLabels(
+            original_lou_by_author_lou=(
+                finalized.original_lou_by_author_lou
+            ),
+            candidate_original_lous_by_author_lou=(
+                finalized.candidate_original_lous_by_author_lou
+            ),
+            show_original=True,
+        ),
+        recovered_missing_posts_by_author_lou=(
+            finalized.recovered_missing_posts_by_author_lou
+        ),
+    )
+
+
+def _scan_known_author_floors(
+    client: NGAClient,
+    tid: int,
+    author_lou_to_pid: dict[int, int],
+    found_original_by_author_lou: dict[int, int],
+    original_lou_by_author_lou: dict[int, int],
+    scanned_pages: set[int],
+    seen_original_lous: set[int],
+    original_posts_by_lou: dict[int, OriginalPostSnapshot],
+    *,
+    author_post_count: int,
+    strict: bool,
+) -> None:
     pending_author_lous = sorted(
         author_lou
         for author_lou in author_lou_to_pid
@@ -390,13 +480,8 @@ def build_and_save_floor_map(
                 author_lou_to_pid,
             ),
             original_lou_by_author_lou,
-            len(author_posts),
+            author_post_count,
         )
-        found_original_by_author_lou = {
-            author_lou: original_lou_by_author_lou[author_lou]
-            for author_lou in author_lou_to_pid
-            if author_lou in original_lou_by_author_lou
-        }
     else:
         report_info("已有楼层映射覆盖所有非缺失楼层。")
 
@@ -405,33 +490,34 @@ def build_and_save_floor_map(
         for author_lou in author_lou_to_pid
         if author_lou not in original_lou_by_author_lou
     )
-    if unmapped_author_lous:
-        preview = ", ".join(str(lou) for lou in unmapped_author_lous[:10])
-        if len(unmapped_author_lous) > 10:
-            preview += ", ..."
-        message = f"有{len(unmapped_author_lous)}个只看作者楼层未找到原帖楼层：{preview}。"
-        if strict:
-            raise RuntimeError(message)
-        report_warning(WarningCategory.FLOOR_MAP, message)
-
-    missing_inference = _infer_missing_original_lous(
-        client,
-        tid,
-        original_lou_by_author_lou,
-        seen_original_lous,
-        original_posts_by_lou,
-        scanned_pages,
-        missing_author_lous,
-        existing_candidates,
-        retry_missing_author_lou_set,
+    if not unmapped_author_lous:
+        return
+    preview = ", ".join(str(lou) for lou in unmapped_author_lous[:10])
+    if len(unmapped_author_lous) > 10:
+        preview += ", ..."
+    message = (
+        f"有{len(unmapped_author_lous)}个只看作者楼层未找到原帖楼层："
+        f"{preview}。"
     )
-    inferred_missing_originals = missing_inference.exact_original_by_author_lou
-    candidate_missing_originals = missing_inference.candidate_originals_by_author_lou
-    if inferred_missing_originals:
-        report_info(f"已补全{len(inferred_missing_originals)}个缺失楼的原帖楼层。")
-    if candidate_missing_originals:
-        report_info(f"已记录{len(candidate_missing_originals)}个缺失楼的候选原帖楼层。")
+    if strict:
+        raise RuntimeError(message)
+    report_warning(WarningCategory.FLOOR_MAP, message)
 
+
+def _finalize_floor_map(
+    client: NGAClient,
+    tid: int,
+    author_lou_to_pid: dict[int, int],
+    missing_author_lous: Sequence[int],
+    retry_missing_author_lou_set: set[int],
+    original_lou_by_author_lou: dict[int, int],
+    inferred_missing_originals: dict[int, int],
+    candidate_missing_originals: dict[int, list[int]],
+    existing_recovered_original_pids: dict[int, int],
+    scanned_pages: set[int],
+    seen_original_lous: set[int],
+    original_posts_by_lou: dict[int, OriginalPostSnapshot],
+) -> _FinalizedFloorMap:
     all_original_by_author_lou = {
         **original_lou_by_author_lou,
         **inferred_missing_originals,
@@ -466,12 +552,11 @@ def build_and_save_floor_map(
 
     entries: list[FloorMapEntry] = []
     for author_lou in sorted(author_lou_to_pid):
-        original_lou = original_lou_by_author_lou.get(author_lou)
         entries.append(
             {
                 "pid": author_lou_to_pid[author_lou],
                 "author_lou": author_lou,
-                "original_lou": original_lou,
+                "original_lou": original_lou_by_author_lou.get(author_lou),
             }
         )
     for author_lou in sorted(exact_missing_originals):
@@ -512,19 +597,11 @@ def build_and_save_floor_map(
             }
         )
     entries.sort(key=lambda entry: entry["author_lou"])
-
-    _write_floor_map(
-        archive_store,
-        tid,
-        aid,
-        entries,
-        input_signature=input_signature,
-    )
-    return FloorMapBuildResult(
-        floor_labels=FloorLabels(
-            original_lou_by_author_lou=all_original_by_author_lou,
-            candidate_original_lous_by_author_lou=final_candidate_missing_originals,
-            show_original=True,
+    return _FinalizedFloorMap(
+        entries=entries,
+        original_lou_by_author_lou=all_original_by_author_lou,
+        candidate_original_lous_by_author_lou=(
+            final_candidate_missing_originals
         ),
         recovered_missing_posts_by_author_lou=recovered_missing_posts,
     )
@@ -749,6 +826,355 @@ def _spaced_author_lous(author_lous: Sequence[int], count: int) -> list[int]:
     return [author_lous[index] for index in dict.fromkeys(indices)]
 
 
+@dataclass(slots=True)
+class _PendingScanState:
+    scanned_pages: set[int]
+    seen_original_lous: set[int]
+    original_posts_by_lou: dict[int, OriginalPostSnapshot]
+    original_lou_by_author_lou: dict[int, int]
+
+
+@dataclass(slots=True)
+class _PendingScanMetrics:
+    targeted_pages: int = 0
+    range_pages: int = 0
+    pid_requests: int = 0
+    pid_hits: int = 0
+    recovered_author_lous: int = 0
+    peak_page_recovery: int = 0
+    fallback_reason: str = "none"
+
+
+class _PendingAuthorPageScanner:
+    def __init__(
+        self,
+        client: NGAClient,
+        tid: int,
+        page_numbers: Sequence[int],
+        page_count: int,
+        scanned_pages: set[int],
+        seen_original_lous: set[int],
+        original_posts_by_lou: dict[int, OriginalPostSnapshot],
+        pid_to_author_lous: dict[int, list[int]],
+        original_lou_by_author_lou: dict[int, int],
+        author_post_count: int,
+    ) -> None:
+        self._client = client
+        self._tid = tid
+        self._page_count = page_count
+        self._pid_to_author_lous = pid_to_author_lous
+        self._author_post_count = author_post_count
+        self._output_state = _PendingScanState(
+            scanned_pages=scanned_pages,
+            seen_original_lous=seen_original_lous,
+            original_posts_by_lou=original_posts_by_lou,
+            original_lou_by_author_lou=original_lou_by_author_lou,
+        )
+        self._state = _PendingScanState(
+            scanned_pages=set(scanned_pages),
+            seen_original_lous=set(seen_original_lous),
+            original_posts_by_lou=dict(original_posts_by_lou),
+            original_lou_by_author_lou=dict(original_lou_by_author_lou),
+        )
+        self._pages_to_scan = list(
+            dict.fromkeys(
+                page_number
+                for page_number in page_numbers
+                if page_number not in scanned_pages
+            )
+        )
+        self._pages_in_scan = set(self._pages_to_scan)
+        self._target_author_lous = {
+            author_lou
+            for author_lous in pid_to_author_lous.values()
+            for author_lou in author_lous
+        }
+        self._initially_matched_target_count = sum(
+            author_lou in original_lou_by_author_lou
+            for author_lou in self._target_author_lous
+        )
+        self._author_lou_to_pid = {
+            author_lou: pid
+            for pid, author_lous in pid_to_author_lous.items()
+            for author_lou in author_lous
+        }
+        self._batch_size = get_api_concurrency()
+        self._metrics = _PendingScanMetrics()
+
+    def run(self) -> None:
+        report_progress(
+            f"准备构建原帖楼层映射，候选{len(self._pages_to_scan)}页，"
+            f"匹配{len(self._target_author_lous)}个未映射楼层",
+            completed=0,
+            total=len(self._pages_to_scan),
+        )
+
+        try:
+            with time_section("原帖页面PID定点扫描"):
+                self._scan_by_pid_targets()
+                if self._metrics.fallback_reason != "none":
+                    self._scan_range_fallback()
+        finally:
+            self._record_metrics()
+
+        self._commit()
+        report_progress(
+            "原帖作者楼层扫描完成",
+            completed=len(self._state.scanned_pages),
+            total=len(self._pages_to_scan),
+        )
+
+    def _scan_by_pid_targets(self) -> None:
+        if len(self._target_author_lous) >= len(self._pages_to_scan):
+            self._metrics.fallback_reason = "request_bound"
+            return
+
+        probe_target_pages = min(
+            128,
+            max(self._batch_size * 2, len(self._pages_to_scan) // 40),
+        )
+        direct_request_bound = (
+            2 * len(self._target_author_lous) <= len(self._pages_to_scan)
+        )
+        direct_recovered_author_lous = 0
+
+        while True:
+            unresolved_author_lous = sorted(
+                author_lou
+                for author_lou in self._target_author_lous
+                if author_lou not in self._state.original_lou_by_author_lou
+            )
+            if not unresolved_author_lous:
+                return
+
+            locatable_author_lous = [
+                author_lou
+                for author_lou in unresolved_author_lous
+                if self._author_lou_to_pid[author_lou] > 0
+            ]
+            if not locatable_author_lous:
+                self._metrics.fallback_reason = "no_locatable_pid"
+                return
+            selected_author_lous = _spaced_author_lous(
+                locatable_author_lous,
+                self._batch_size,
+            )
+            selected_pids = [
+                self._author_lou_to_pid[author_lou]
+                for author_lou in selected_author_lous
+            ]
+            self._metrics.pid_requests += len(selected_pids)
+            expected_pids_by_page = self._redirect_target_pages(selected_pids)
+            if expected_pids_by_page is None:
+                return
+
+            direct_recovered_author_lous += self._scan_pid_target_pages(
+                expected_pids_by_page
+            )
+            if self._metrics.fallback_reason != "none":
+                return
+
+            unresolved_count = sum(
+                author_lou not in self._state.original_lou_by_author_lou
+                for author_lou in self._target_author_lous
+            )
+            if unresolved_count == 0:
+                return
+            if direct_request_bound or (
+                self._metrics.targeted_pages < probe_target_pages
+            ):
+                continue
+            if self._probe_cost_requires_range(
+                unresolved_count,
+                direct_recovered_author_lous,
+            ):
+                self._metrics.fallback_reason = "probe_cost"
+                return
+
+    def _redirect_target_pages(
+        self,
+        selected_pids: list[int],
+    ) -> dict[int, set[int]] | None:
+        try:
+            targets = self._client.get_pid_redirect_targets(selected_pids)
+        except requests.RequestException as error:
+            self._metrics.fallback_reason = (
+                f"request_error:{type(error).__name__}"
+            )
+            return None
+
+        expected_pids_by_page: dict[int, set[int]] = {}
+        for pid in selected_pids:
+            target = targets.get(pid)
+            if target is None:
+                self._metrics.fallback_reason = "no_redirect"
+                return None
+            if target.tid != self._tid:
+                self._metrics.fallback_reason = "wrong_thread"
+                return None
+            if target.page_number < 1 or target.page_number > self._page_count:
+                self._metrics.fallback_reason = "invalid_page"
+                return None
+            if target.page_number not in self._pages_in_scan:
+                self._metrics.fallback_reason = "target_outside_scan"
+                return None
+            if target.page_number in self._state.scanned_pages:
+                self._metrics.fallback_reason = "target_page_already_scanned"
+                return None
+            expected_pids_by_page.setdefault(
+                target.page_number,
+                set(),
+            ).add(pid)
+        return expected_pids_by_page
+
+    def _scan_pid_target_pages(
+        self,
+        expected_pids_by_page: dict[int, set[int]],
+    ) -> int:
+        newly_recovered_author_lous = 0
+        target_pages = sorted(expected_pids_by_page)
+        page_iterator = self._client.iter_pages(
+            self._tid,
+            None,
+            target_pages,
+        )
+        try:
+            for page_number, page_data in page_iterator:
+                self._state.scanned_pages.add(page_number)
+                self._metrics.targeted_pages += 1
+                application = _apply_original_page(
+                    page_data,
+                    page_number,
+                    self._state.seen_original_lous,
+                    self._state.original_posts_by_lou,
+                    self._pid_to_author_lous,
+                    self._state.original_lou_by_author_lou,
+                )
+                expected_pids = expected_pids_by_page[page_number]
+                matched_expected_pids = expected_pids & application.post_pids
+                self._metrics.pid_hits += len(matched_expected_pids)
+                if matched_expected_pids != expected_pids:
+                    self._metrics.fallback_reason = "target_pid_missing"
+                newly_matched = application.newly_matched_author_lous
+                newly_recovered_author_lous += newly_matched
+                self._metrics.recovered_author_lous += newly_matched
+                self._metrics.peak_page_recovery = max(
+                    self._metrics.peak_page_recovery,
+                    newly_matched,
+                )
+                matched_count = (
+                    self._author_post_count
+                    - len(self._target_author_lous)
+                    + sum(
+                        author_lou
+                        in self._state.original_lou_by_author_lou
+                        for author_lou in self._target_author_lous
+                    )
+                )
+                report_progress(
+                    f"PID定点处理原帖第{page_number}页，"
+                    f"已匹配{matched_count}/{self._author_post_count}楼",
+                    completed=len(self._state.scanned_pages),
+                    total=len(self._pages_to_scan),
+                )
+        finally:
+            page_iterator.close()
+        return newly_recovered_author_lous
+
+    def _probe_cost_requires_range(
+        self,
+        unresolved_count: int,
+        direct_recovered_author_lous: int,
+    ) -> bool:
+        recovery_per_page = (
+            direct_recovered_author_lous / self._metrics.targeted_pages
+        )
+        locator_requests_per_page = (
+            self._metrics.pid_requests / self._metrics.targeted_pages
+        )
+        estimated_target_pages = unresolved_count / recovery_per_page
+        estimated_direct_requests = estimated_target_pages * (
+            1.0 + locator_requests_per_page
+        )
+        remaining_range_pages = sum(
+            page_number not in self._state.scanned_pages
+            for page_number in self._pages_to_scan
+        )
+        return estimated_direct_requests >= remaining_range_pages * 1.05
+
+    def _scan_range_fallback(self) -> None:
+        normal_cost_fallback = self._metrics.fallback_reason in {
+            "request_bound",
+            "probe_cost",
+        }
+        message = (
+            "PID定点取页成本不低于顺扫，回退原帖范围扫描："
+            if normal_cost_fallback
+            else "PID定位不可用，回退原帖范围扫描："
+        )
+        if normal_cost_fallback:
+            report_info(
+                f"{message}tid={self._tid}，"
+                f"原因={self._metrics.fallback_reason}。"
+            )
+        else:
+            report_warning(
+                WarningCategory.FLOOR_MAP,
+                f"{message}tid={self._tid}，"
+                f"原因={self._metrics.fallback_reason}。",
+            )
+        scanned_before_range = len(self._state.scanned_pages)
+        _scan_original_pages(
+            self._client,
+            self._tid,
+            self._pages_to_scan,
+            self._state.scanned_pages,
+            self._state.seen_original_lous,
+            self._state.original_posts_by_lou,
+            self._pid_to_author_lous,
+            self._state.original_lou_by_author_lou,
+            self._author_post_count,
+        )
+        self._metrics.range_pages = (
+            len(self._state.scanned_pages) - scanned_before_range
+        )
+
+    def _record_metrics(self) -> None:
+        self._metrics.recovered_author_lous = max(
+            self._metrics.recovered_author_lous,
+            sum(
+                author_lou in self._state.original_lou_by_author_lou
+                for author_lou in self._target_author_lous
+            )
+            - self._initially_matched_target_count,
+        )
+        _record_pending_scan_metrics(
+            targeted_pages=self._metrics.targeted_pages,
+            range_pages=self._metrics.range_pages,
+            pid_requests=self._metrics.pid_requests,
+            pid_hits=self._metrics.pid_hits,
+            recovered_author_lous=self._metrics.recovered_author_lous,
+            peak_page_recovery=self._metrics.peak_page_recovery,
+            fallback_reason=self._metrics.fallback_reason,
+        )
+
+    def _commit(self) -> None:
+        self._output_state.scanned_pages.clear()
+        self._output_state.scanned_pages.update(self._state.scanned_pages)
+        self._output_state.seen_original_lous.clear()
+        self._output_state.seen_original_lous.update(
+            self._state.seen_original_lous
+        )
+        self._output_state.original_posts_by_lou.clear()
+        self._output_state.original_posts_by_lou.update(
+            self._state.original_posts_by_lou
+        )
+        self._output_state.original_lou_by_author_lou.clear()
+        self._output_state.original_lou_by_author_lou.update(
+            self._state.original_lou_by_author_lou
+        )
+
+
 def _scan_pending_author_pages(
     client: NGAClient,
     tid: int,
@@ -761,257 +1187,18 @@ def _scan_pending_author_pages(
     original_lou_by_author_lou: dict[int, int],
     author_post_count: int,
 ) -> None:
-    pages_to_scan = list(
-        dict.fromkeys(
-            page_number
-            for page_number in page_numbers
-            if page_number not in scanned_pages
-        )
-    )
-    pages_in_scan = set(pages_to_scan)
-    target_author_lous = {
-        author_lou
-        for author_lous in pid_to_author_lous.values()
-        for author_lou in author_lous
-    }
-    initially_matched_target_count = sum(
-        author_lou in original_lou_by_author_lou
-        for author_lou in target_author_lous
-    )
-    author_lou_to_pid = {
-        author_lou: pid
-        for pid, author_lous in pid_to_author_lous.items()
-        for author_lou in author_lous
-    }
-
-    next_scanned_pages = set(scanned_pages)
-    next_seen_original_lous = set(seen_original_lous)
-    next_original_posts_by_lou = dict(original_posts_by_lou)
-    next_original_lou_by_author_lou = dict(original_lou_by_author_lou)
-    targeted_pages = 0
-    range_pages = 0
-    pid_requests = 0
-    pid_hits = 0
-    recovered_author_lous = 0
-    peak_page_recovery = 0
-    fallback_reason = "none"
-    batch_size = get_api_concurrency()
-
-    report_progress(
-        f"准备构建原帖楼层映射，候选{len(pages_to_scan)}页，"
-        f"匹配{len(target_author_lous)}个未映射楼层",
-        completed=0,
-        total=len(pages_to_scan),
-    )
-
-    try:
-        with time_section("原帖页面PID定点扫描"):
-            if len(target_author_lous) >= len(pages_to_scan):
-                fallback_reason = "request_bound"
-            else:
-                probe_target_pages = min(
-                    128,
-                    max(batch_size * 2, len(pages_to_scan) // 40),
-                )
-                direct_request_bound = 2 * len(target_author_lous) <= len(
-                    pages_to_scan
-                )
-                direct_recovered_author_lous = 0
-
-                while True:
-                    unresolved_author_lous = sorted(
-                        author_lou
-                        for author_lou in target_author_lous
-                        if author_lou not in next_original_lou_by_author_lou
-                    )
-                    if not unresolved_author_lous:
-                        break
-
-                    locatable_author_lous = [
-                        author_lou
-                        for author_lou in unresolved_author_lous
-                        if author_lou_to_pid[author_lou] > 0
-                    ]
-                    if not locatable_author_lous:
-                        fallback_reason = "no_locatable_pid"
-                        break
-                    selected_author_lous = _spaced_author_lous(
-                        locatable_author_lous,
-                        batch_size,
-                    )
-                    selected_pid_by_author_lou = {
-                        author_lou: author_lou_to_pid[author_lou]
-                        for author_lou in selected_author_lous
-                    }
-                    selected_pids = list(selected_pid_by_author_lou.values())
-                    pid_requests += len(selected_pids)
-                    try:
-                        targets = client.get_pid_redirect_targets(selected_pids)
-                    except requests.RequestException as error:
-                        fallback_reason = f"request_error:{type(error).__name__}"
-                        break
-
-                    expected_pids_by_page: dict[int, set[int]] = {}
-                    for pid in selected_pids:
-                        target = targets.get(pid)
-                        if target is None:
-                            fallback_reason = "no_redirect"
-                            break
-                        if target.tid != tid:
-                            fallback_reason = "wrong_thread"
-                            break
-                        if target.page_number < 1 or target.page_number > page_count:
-                            fallback_reason = "invalid_page"
-                            break
-                        if target.page_number not in pages_in_scan:
-                            fallback_reason = "target_outside_scan"
-                            break
-                        if target.page_number in next_scanned_pages:
-                            fallback_reason = "target_page_already_scanned"
-                            break
-                        expected_pids_by_page.setdefault(
-                            target.page_number,
-                            set(),
-                        ).add(pid)
-                    if fallback_reason != "none":
-                        break
-
-                    target_pages = sorted(expected_pids_by_page)
-                    page_iterator = client.iter_pages(tid, None, target_pages)
-                    try:
-                        for page_number, page_data in page_iterator:
-                            next_scanned_pages.add(page_number)
-                            targeted_pages += 1
-                            application = _apply_original_page(
-                                page_data,
-                                page_number,
-                                next_seen_original_lous,
-                                next_original_posts_by_lou,
-                                pid_to_author_lous,
-                                next_original_lou_by_author_lou,
-                            )
-                            expected_pids = expected_pids_by_page[page_number]
-                            matched_expected_pids = (
-                                expected_pids & application.post_pids
-                            )
-                            pid_hits += len(matched_expected_pids)
-                            if matched_expected_pids != expected_pids:
-                                fallback_reason = "target_pid_missing"
-                            newly_matched = application.newly_matched_author_lous
-                            direct_recovered_author_lous += newly_matched
-                            recovered_author_lous += newly_matched
-                            peak_page_recovery = max(
-                                peak_page_recovery,
-                                newly_matched,
-                            )
-                            matched_count = (
-                                author_post_count
-                                - len(target_author_lous)
-                                + sum(
-                                    author_lou in next_original_lou_by_author_lou
-                                    for author_lou in target_author_lous
-                                )
-                            )
-                            report_progress(
-                                f"PID定点处理原帖第{page_number}页，"
-                                f"已匹配{matched_count}/{author_post_count}楼",
-                                completed=len(next_scanned_pages),
-                                total=len(pages_to_scan),
-                            )
-                    finally:
-                        page_iterator.close()
-                    if fallback_reason != "none":
-                        break
-
-                    unresolved_count = sum(
-                        author_lou not in next_original_lou_by_author_lou
-                        for author_lou in target_author_lous
-                    )
-                    if unresolved_count == 0:
-                        break
-                    if direct_request_bound or targeted_pages < probe_target_pages:
-                        continue
-
-                    recovery_per_page = (
-                        direct_recovered_author_lous / targeted_pages
-                    )
-                    locator_requests_per_page = pid_requests / targeted_pages
-                    estimated_target_pages = (
-                        unresolved_count / recovery_per_page
-                    )
-                    estimated_direct_requests = estimated_target_pages * (
-                        1.0 + locator_requests_per_page
-                    )
-                    remaining_range_pages = sum(
-                        page_number not in next_scanned_pages
-                        for page_number in pages_to_scan
-                    )
-                    if estimated_direct_requests >= remaining_range_pages * 1.05:
-                        fallback_reason = "probe_cost"
-                        break
-
-            if fallback_reason != "none":
-                normal_cost_fallback = fallback_reason in {
-                    "request_bound",
-                    "probe_cost",
-                }
-                message = (
-                    "PID定点取页成本不低于顺扫，回退原帖范围扫描："
-                    if normal_cost_fallback
-                    else "PID定位不可用，回退原帖范围扫描："
-                )
-                if normal_cost_fallback:
-                    report_info(f"{message}tid={tid}，原因={fallback_reason}。")
-                else:
-                    report_warning(
-                        WarningCategory.FLOOR_MAP,
-                        f"{message}tid={tid}，原因={fallback_reason}。",
-                    )
-                scanned_before_range = len(next_scanned_pages)
-                _scan_original_pages(
-                    client,
-                    tid,
-                    pages_to_scan,
-                    next_scanned_pages,
-                    next_seen_original_lous,
-                    next_original_posts_by_lou,
-                    pid_to_author_lous,
-                    next_original_lou_by_author_lou,
-                    author_post_count,
-                )
-                range_pages = len(next_scanned_pages) - scanned_before_range
-    finally:
-        recovered_author_lous = max(
-            recovered_author_lous,
-            sum(
-                author_lou in next_original_lou_by_author_lou
-                for author_lou in target_author_lous
-            )
-            - initially_matched_target_count,
-        )
-        _record_pending_scan_metrics(
-            targeted_pages=targeted_pages,
-            range_pages=range_pages,
-            pid_requests=pid_requests,
-            pid_hits=pid_hits,
-            recovered_author_lous=recovered_author_lous,
-            peak_page_recovery=peak_page_recovery,
-            fallback_reason=fallback_reason,
-        )
-
-    scanned_pages.clear()
-    scanned_pages.update(next_scanned_pages)
-    seen_original_lous.clear()
-    seen_original_lous.update(next_seen_original_lous)
-    original_posts_by_lou.clear()
-    original_posts_by_lou.update(next_original_posts_by_lou)
-    original_lou_by_author_lou.clear()
-    original_lou_by_author_lou.update(next_original_lou_by_author_lou)
-    report_progress(
-        "原帖作者楼层扫描完成",
-        completed=len(next_scanned_pages),
-        total=len(pages_to_scan),
-    )
+    _PendingAuthorPageScanner(
+        client,
+        tid,
+        page_numbers,
+        page_count,
+        scanned_pages,
+        seen_original_lous,
+        original_posts_by_lou,
+        pid_to_author_lous,
+        original_lou_by_author_lou,
+        author_post_count,
+    ).run()
 
 
 def _scan_original_pages(
