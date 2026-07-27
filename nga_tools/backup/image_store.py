@@ -9,6 +9,7 @@ from concurrent.futures import Future
 from contextlib import contextmanager
 from collections.abc import Generator
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from time import perf_counter
 from typing import Iterable, NotRequired, TypedDict
@@ -687,58 +688,85 @@ def _copy_claim_result(
     return copied
 
 
-def _run_download_image_tasks(
-    image_tasks: list[ImageDownloadTask],
-    on_progress: DownloadProgressCallback | None,
-    *,
-    collect_successes: bool,
-) -> tuple[
-    int,
-    list[DownloadFileResult],
-    list[DownloadFileResult],
-]:
-    if not image_tasks:
-        return 0, [], []
+type _ImageOwner = tuple[
+    ImageDownloadTask,
+    _ImageClaimKey,
+    _ImageURLClaim,
+]
+type _ImageWaiter = tuple[ImageDownloadTask, _ImageURLClaim]
 
-    succeeded_count = 0
-    succeeded: list[DownloadFileResult] = []
-    failed: list[DownloadFileResult] = []
-    owners: list[tuple[ImageDownloadTask, _ImageClaimKey, _ImageURLClaim]] = []
-    waiters: list[tuple[ImageDownloadTask, _ImageURLClaim]] = []
-    for image_task in image_tasks:
-        claim_key, claim, is_owner = _claim_image_url(image_task["url"])
-        if is_owner:
-            owners.append((image_task, claim_key, claim))
-        else:
-            waiters.append((image_task, claim))
 
-    completed = 0
+class _ImageDownloadPipeline:
+    def __init__(
+        self,
+        image_tasks: list[ImageDownloadTask],
+        on_progress: DownloadProgressCallback | None,
+        *,
+        collect_successes: bool,
+    ) -> None:
+        self._image_tasks = image_tasks
+        self._on_progress = on_progress
+        self._collect_successes = collect_successes
+        self._succeeded_count = 0
+        self._succeeded: list[DownloadFileResult] = []
+        self._failed: list[DownloadFileResult] = []
+        self._owners: list[_ImageOwner] = []
+        self._waiters: list[_ImageWaiter] = []
+        self._completed = 0
+        self._pending_store_results: deque[_PendingImageStore] = deque()
+        self._pending_mapping_results: list[_PendingImageMapping] = []
+        self._pending_mapping_batches: deque[_PendingImageMappingBatch] = deque()
+        self._owner_by_temp_path: dict[str, _ImageOwner] = {}
 
-    def emit_result(result: DownloadFileResult) -> None:
-        nonlocal completed, succeeded_count
-        completed += 1
+    def run(
+        self,
+    ) -> tuple[
+        int,
+        list[DownloadFileResult],
+        list[DownloadFileResult],
+    ]:
+        if not self._image_tasks:
+            return 0, [], []
+
+        self._claim_tasks()
+        self._download_owned_tasks()
+        self._finish_waiters()
+        return self._succeeded_count, self._succeeded, self._failed
+
+    def _claim_tasks(self) -> None:
+        for image_task in self._image_tasks:
+            claim_key, claim, is_owner = _claim_image_url(image_task["url"])
+            if is_owner:
+                self._owners.append((image_task, claim_key, claim))
+            else:
+                self._waiters.append((image_task, claim))
+
+    def _emit_result(self, result: DownloadFileResult) -> None:
+        self._completed += 1
         if result["success"]:
-            succeeded_count += 1
-            if collect_successes:
-                succeeded.append(result)
+            self._succeeded_count += 1
+            if self._collect_successes:
+                self._succeeded.append(result)
         else:
-            failed.append(result)
-        if on_progress is not None:
-            on_progress(completed, len(image_tasks), result)
+            self._failed.append(result)
+        if self._on_progress is not None:
+            self._on_progress(
+                self._completed,
+                len(self._image_tasks),
+                result,
+            )
 
-    pending_store_results: deque[_PendingImageStore] = deque()
-    pending_mapping_results: list[_PendingImageMapping] = []
-    pending_mapping_batches: deque[_PendingImageMappingBatch] = deque()
-
-    def release_owner(
+    def _release_owner(
+        self,
         claim_key: _ImageClaimKey,
         claim: _ImageURLClaim,
         result: DownloadFileResult,
     ) -> None:
         _release_image_url_claim(claim_key, claim, result=result)
-        emit_result(result)
+        self._emit_result(result)
 
-    def mapping_failure_result(
+    @staticmethod
+    def _mapping_failure_result(
         pending: _PendingImageMapping,
         error: BaseException,
     ) -> DownloadFileResult:
@@ -750,7 +778,8 @@ def _run_download_image_tasks(
             "failure_kind": "image_store",
         }
 
-    def store_failure_result(
+    @staticmethod
+    def _store_failure_result(
         pending: _PendingImageStore,
         error: BaseException,
     ) -> DownloadFileResult:
@@ -762,7 +791,8 @@ def _run_download_image_tasks(
             "failure_kind": "image_store",
         }
 
-    def release_remaining_without_progress(
+    @staticmethod
+    def _release_remaining_without_progress(
         pending_batch: tuple[_PendingImageMapping, ...],
         *,
         results: tuple[DownloadFileResult, ...] | None = None,
@@ -776,7 +806,8 @@ def _run_download_image_tasks(
                 error=error,
             )
 
-    def finish_mapping_batch(
+    def _finish_mapping_batch(
+        self,
         pending_batch: _PendingImageMappingBatch,
         *,
         emit_progress: bool,
@@ -787,7 +818,7 @@ def _run_download_image_tasks(
         except BaseException as mapping_error:
             if emit_progress and isinstance(mapping_error, Exception):
                 failed_results = tuple(
-                    mapping_failure_result(pending, mapping_error)
+                    self._mapping_failure_result(pending, mapping_error)
                     for pending in pending_batch.items
                 )
                 for index, (pending, failed_result) in enumerate(
@@ -799,15 +830,15 @@ def _run_download_image_tasks(
                         result=failed_result,
                     )
                     try:
-                        emit_result(failed_result)
+                        self._emit_result(failed_result)
                     except BaseException:
-                        release_remaining_without_progress(
+                        self._release_remaining_without_progress(
                             pending_batch.items[index + 1 :],
                             results=failed_results[index + 1 :],
                         )
                         raise
                 return
-            release_remaining_without_progress(
+            self._release_remaining_without_progress(
                 pending_batch.items,
                 error=mapping_error,
             )
@@ -816,7 +847,7 @@ def _run_download_image_tasks(
             return
 
         if not emit_progress:
-            release_remaining_without_progress(
+            self._release_remaining_without_progress(
                 pending_batch.items,
                 results=tuple(
                     pending.result for pending in pending_batch.items
@@ -830,9 +861,9 @@ def _run_download_image_tasks(
                 result=pending.result,
             )
             try:
-                emit_result(pending.result)
+                self._emit_result(pending.result)
             except BaseException:
-                release_remaining_without_progress(
+                self._release_remaining_without_progress(
                     pending_batch.items[index + 1 :],
                     results=tuple(
                         remaining.result
@@ -841,7 +872,8 @@ def _run_download_image_tasks(
                 )
                 raise
 
-    def drain_mapping_batches(
+    def _drain_mapping_batches(
+        self,
         *,
         block: bool,
         emit_progress: bool,
@@ -849,25 +881,25 @@ def _run_download_image_tasks(
         maximum: int | None = None,
     ) -> None:
         drained = 0
-        while pending_mapping_batches and (
+        while self._pending_mapping_batches and (
             maximum is None or drained < maximum
         ):
-            pending_batch = pending_mapping_batches[0]
+            pending_batch = self._pending_mapping_batches[0]
             if not block and not pending_batch.future.done():
                 return
-            pending_mapping_batches.popleft()
-            finish_mapping_batch(
+            self._pending_mapping_batches.popleft()
+            self._finish_mapping_batch(
                 pending_batch,
                 emit_progress=emit_progress,
                 suppress_mapping_error=suppress_mapping_error,
             )
             drained += 1
 
-    def submit_pending_mapping_results(*, emit_progress: bool) -> None:
-        if not pending_mapping_results:
+    def _submit_pending_mapping_results(self, *, emit_progress: bool) -> None:
+        if not self._pending_mapping_results:
             return
-        pending_batch = tuple(pending_mapping_results)
-        pending_mapping_results.clear()
+        pending_batch = tuple(self._pending_mapping_results)
+        self._pending_mapping_results.clear()
         try:
             _mappings, mapping_future = _enqueue_image_mappings(
                 [pending.mapping for pending in pending_batch]
@@ -875,34 +907,39 @@ def _run_download_image_tasks(
         except BaseException as error:
             mapping_future = Future[None]()
             mapping_future.set_exception(error)
-        pending_mapping_batches.append(
+        self._pending_mapping_batches.append(
             _PendingImageMappingBatch(pending_batch, mapping_future)
         )
-        if len(pending_mapping_batches) >= _MAX_PENDING_IMAGE_MAPPING_BATCHES:
-            drain_mapping_batches(
+        if (
+            len(self._pending_mapping_batches)
+            >= _MAX_PENDING_IMAGE_MAPPING_BATCHES
+        ):
+            self._drain_mapping_batches(
                 block=True,
                 emit_progress=emit_progress,
                 maximum=1,
             )
         else:
-            drain_mapping_batches(
+            self._drain_mapping_batches(
                 block=False,
                 emit_progress=emit_progress,
             )
 
-    def flush_all_mappings(
+    def _flush_all_mappings(
+        self,
         *,
         emit_progress: bool,
         suppress_mapping_error: bool = False,
     ) -> None:
-        submit_pending_mapping_results(emit_progress=emit_progress)
-        drain_mapping_batches(
+        self._submit_pending_mapping_results(emit_progress=emit_progress)
+        self._drain_mapping_batches(
             block=True,
             emit_progress=emit_progress,
             suppress_mapping_error=suppress_mapping_error,
         )
 
-    def finish_store_result(
+    def _finish_store_result(
+        self,
         pending: _PendingImageStore,
         *,
         emit_progress: bool,
@@ -911,13 +948,17 @@ def _run_download_image_tasks(
         try:
             stored_image = pending.future.result()
         except BaseException as error:
-            flush_all_mappings(
+            self._flush_all_mappings(
                 emit_progress=emit_progress,
                 suppress_mapping_error=suppress_store_error,
             )
             if emit_progress and isinstance(error, Exception):
-                result = store_failure_result(pending, error)
-                release_owner(pending.claim_key, pending.claim, result)
+                result = self._store_failure_result(pending, error)
+                self._release_owner(
+                    pending.claim_key,
+                    pending.claim,
+                    result,
+                )
                 return
             _release_image_url_claim(
                 pending.claim_key,
@@ -933,7 +974,7 @@ def _run_download_image_tasks(
             "save_path": stored_image["unique_path"],
             "success": True,
         }
-        pending_mapping_results.append(
+        self._pending_mapping_results.append(
             _PendingImageMapping(
                 result=result,
                 mapping=(
@@ -944,10 +985,14 @@ def _run_download_image_tasks(
                 claim=pending.claim,
             )
         )
-        if len(pending_mapping_results) >= _MAX_PENDING_IMAGE_MAPPING_RESULTS:
-            submit_pending_mapping_results(emit_progress=emit_progress)
+        if (
+            len(self._pending_mapping_results)
+            >= _MAX_PENDING_IMAGE_MAPPING_RESULTS
+        ):
+            self._submit_pending_mapping_results(emit_progress=emit_progress)
 
-    def drain_store_results(
+    def _drain_store_results(
+        self,
         *,
         block: bool,
         emit_progress: bool,
@@ -955,130 +1000,153 @@ def _run_download_image_tasks(
         maximum: int | None = None,
     ) -> None:
         drained = 0
-        while pending_store_results and (
+        while self._pending_store_results and (
             maximum is None or drained < maximum
         ):
-            pending = pending_store_results[0]
+            pending = self._pending_store_results[0]
             if not block and not pending.future.done():
                 return
-            pending_store_results.popleft()
-            finish_store_result(
+            self._pending_store_results.popleft()
+            self._finish_store_result(
                 pending,
                 emit_progress=emit_progress,
                 suppress_store_error=suppress_store_error,
             )
             drained += 1
 
-    with tempfile.TemporaryDirectory(prefix="nga_image_download_") as temp_dir_name:
-        temp_dir = Path(temp_dir_name)
+    def _prepare_download_tasks(self, temp_dir: Path) -> list[DownloadTask]:
         download_tasks: list[DownloadTask] = []
-        owner_by_temp_path: dict[
-            str,
-            tuple[ImageDownloadTask, _ImageClaimKey, _ImageURLClaim],
-        ] = {}
-        for index, owner in enumerate(owners):
-            image_task, claim_key, claim = owner
-            temp_path = temp_dir / f"image_{index}"
-            temp_path_str = str(temp_path)
-            owner_by_temp_path[temp_path_str] = owner
+        for index, owner in enumerate(self._owners):
+            image_task, _claim_key, _claim = owner
+            temp_path_text = str(temp_dir / f"image_{index}")
+            self._owner_by_temp_path[temp_path_text] = owner
             download_tasks.append(
                 {
                     "url": image_task["url"],
-                    "save_path": temp_path_str,
+                    "save_path": temp_path_text,
                 }
             )
-        owners.clear()
+        self._owners.clear()
+        return download_tasks
 
-        def handle_progress(
-            _completed: int,
-            _total: int,
-            download_result: DownloadFileResult,
-        ) -> None:
-            image_task, claim_key, claim = owner_by_temp_path[
-                download_result["save_path"]
-            ]
-            if download_result["success"]:
-                if len(pending_store_results) >= image_store_pending_limit():
-                    drain_store_results(
-                        block=True,
-                        emit_progress=True,
-                        maximum=1,
-                    )
-                source_path = Path(download_result["save_path"])
-                pending_store_results.append(
-                    _PendingImageStore(
-                        download_result=download_result,
-                        image_task=image_task,
-                        claim_key=claim_key,
-                        claim=claim,
-                        future=submit_image_store_work(
-                            lambda source_path=source_path,
-                            image_task=image_task,
-                            download_result=download_result: (
-                                _store_image_file_without_mapping(
-                                    source_path,
-                                    image_task,
-                                    move_source=True,
-                                    download_result=download_result,
-                                )
-                            )
-                        ),
-                    )
+    def _handle_download_progress(
+        self,
+        _completed: int,
+        _total: int,
+        download_result: DownloadFileResult,
+    ) -> None:
+        image_task, claim_key, claim = self._owner_by_temp_path[
+            download_result["save_path"]
+        ]
+        if download_result["success"]:
+            if (
+                len(self._pending_store_results)
+                >= image_store_pending_limit()
+            ):
+                self._drain_store_results(
+                    block=True,
+                    emit_progress=True,
+                    maximum=1,
                 )
-                owner_by_temp_path.pop(download_result["save_path"])
-                drain_store_results(block=False, emit_progress=True)
-                return
-
-            drain_store_results(block=True, emit_progress=True)
-            flush_all_mappings(emit_progress=True)
-            result: DownloadFileResult = {
-                "url": image_task["url"],
-                "save_path": str(unique_images_dir()),
-                "success": False,
-                "error": download_result.get("error", "unknown"),
-                "failure_kind": download_result.get(
-                    "failure_kind",
-                    "unexpected_download",
-                ),
-            }
-            if "http_status" in download_result:
-                result["http_status"] = download_result["http_status"]
-            owner_by_temp_path.pop(download_result["save_path"])
-            release_owner(claim_key, claim, result)
-
-        try:
-            if download_tasks:
-                downloads.download_files_streaming(
-                    download_tasks,
-                    on_progress=handle_progress,
+            source_path = Path(download_result["save_path"])
+            self._pending_store_results.append(
+                _PendingImageStore(
+                    download_result=download_result,
+                    image_task=image_task,
+                    claim_key=claim_key,
+                    claim=claim,
+                    future=submit_image_store_work(
+                        partial(
+                            _store_image_file_without_mapping,
+                            source_path,
+                            image_task,
+                            move_source=True,
+                            download_result=download_result,
+                        )
+                    ),
                 )
-            drain_store_results(block=True, emit_progress=True)
-            flush_all_mappings(emit_progress=True)
-        except BaseException as error:
-            drain_store_results(
-                block=True,
-                emit_progress=False,
-                suppress_store_error=True,
             )
-            flush_all_mappings(
-                emit_progress=False,
-                suppress_mapping_error=True,
+            self._owner_by_temp_path.pop(download_result["save_path"])
+            self._drain_store_results(block=False, emit_progress=True)
+            return
+
+        self._drain_store_results(block=True, emit_progress=True)
+        self._flush_all_mappings(emit_progress=True)
+        result: DownloadFileResult = {
+            "url": image_task["url"],
+            "save_path": str(unique_images_dir()),
+            "success": False,
+            "error": download_result.get("error", "unknown"),
+            "failure_kind": download_result.get(
+                "failure_kind",
+                "unexpected_download",
+            ),
+        }
+        if "http_status" in download_result:
+            result["http_status"] = download_result["http_status"]
+        self._owner_by_temp_path.pop(download_result["save_path"])
+        self._release_owner(claim_key, claim, result)
+
+    def _download_owned_tasks(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="nga_image_download_"
+        ) as temp_dir_name:
+            download_tasks = self._prepare_download_tasks(Path(temp_dir_name))
+            try:
+                if download_tasks:
+                    downloads.download_files_streaming(
+                        download_tasks,
+                        on_progress=self._handle_download_progress,
+                    )
+                self._drain_store_results(block=True, emit_progress=True)
+                self._flush_all_mappings(emit_progress=True)
+            except BaseException as error:
+                self._drain_store_results(
+                    block=True,
+                    emit_progress=False,
+                    suppress_store_error=True,
+                )
+                self._flush_all_mappings(
+                    emit_progress=False,
+                    suppress_mapping_error=True,
+                )
+                for _task, claim_key, claim in (
+                    self._owner_by_temp_path.values()
+                ):
+                    _release_image_url_claim(claim_key, claim, error=error)
+                raise
+
+    def _finish_waiters(self) -> None:
+        for image_task, claim in self._waiters:
+            _wait_image_url_claim(claim)
+            if claim.error is not None:
+                raise RuntimeError(
+                    f"共享图片下载失败：{image_task['url']}"
+                ) from claim.error
+            if claim.result is None:
+                raise RuntimeError(
+                    f"共享图片下载没有结果：{image_task['url']}"
+                )
+            self._emit_result(
+                _copy_claim_result(image_task["url"], claim.result)
             )
-            for _task, claim_key, claim in owner_by_temp_path.values():
-                _release_image_url_claim(claim_key, claim, error=error)
-            raise
 
-    for image_task, claim in waiters:
-        _wait_image_url_claim(claim)
-        if claim.error is not None:
-            raise RuntimeError(
-                f"共享图片下载失败：{image_task['url']}"
-            ) from claim.error
-        if claim.result is None:
-            raise RuntimeError(f"共享图片下载没有结果：{image_task['url']}")
-        emit_result(_copy_claim_result(image_task["url"], claim.result))
 
-    return succeeded_count, succeeded, failed
+def _run_download_image_tasks(
+    image_tasks: list[ImageDownloadTask],
+    on_progress: DownloadProgressCallback | None,
+    *,
+    collect_successes: bool,
+) -> tuple[
+    int,
+    list[DownloadFileResult],
+    list[DownloadFileResult],
+]:
+    return _ImageDownloadPipeline(
+        image_tasks,
+        on_progress,
+        collect_successes=collect_successes,
+    ).run()
 
 
 def download_image_tasks(
