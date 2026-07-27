@@ -740,70 +740,115 @@ def _refresh_author_floor_state(
     )
 
 
-def _try_processing_state_reuse(
-    client: NGAClient,
-    tid: int,
-    aid: Optional[int],
-    archive_store: ThreadArchiveStore,
-    *,
-    page_count: int,
-    author_total_lou_count: int | None,
-    local_pages_cover_remote: bool,
-    missing_floor_retry_mode: MissingFloorRetryMode,
-    processing_snapshot: BackupProcessingSnapshot | None = None,
-    incremental_changes: ArchiveIncrementalChanges | None = None,
-) -> ProcessingStateReuseResult:
-    if not local_pages_cover_remote:
-        return ProcessingStateReuseResult(
-            False,
-            ProcessingStateReuseReason.LOCAL_PAGES_INCOMPLETE,
+class _ProcessingStateReuseAttempt:
+    def __init__(
+        self,
+        client: NGAClient,
+        tid: int,
+        aid: Optional[int],
+        archive_store: ThreadArchiveStore,
+        *,
+        page_count: int,
+        author_total_lou_count: int | None,
+        missing_floor_retry_mode: MissingFloorRetryMode,
+        processing_snapshot: BackupProcessingSnapshot | None,
+        incremental_changes: ArchiveIncrementalChanges | None,
+    ) -> None:
+        self._client = client
+        self._tid = tid
+        self._aid = aid
+        self._archive_store = archive_store
+        self._page_count = page_count
+        self._author_total_lou_count = author_total_lou_count
+        self._missing_floor_retry_mode: MissingFloorRetryMode = (
+            missing_floor_retry_mode
+        )
+        self._snapshot = processing_snapshot
+        self._changes = (
+            ArchiveIncrementalChanges(None, frozenset(), frozenset(), 0)
+            if incremental_changes is None
+            else incremental_changes
         )
 
-    try:
-        if processing_snapshot is None:
+    def run(
+        self,
+        *,
+        local_pages_cover_remote: bool,
+    ) -> ProcessingStateReuseResult:
+        if not local_pages_cover_remote:
+            return ProcessingStateReuseResult(
+                False,
+                ProcessingStateReuseReason.LOCAL_PAGES_INCOMPLETE,
+            )
+
+        invalid_result = self._load_snapshot()
+        if invalid_result is not None:
+            return invalid_result
+        post_overlays_hash = (
+            self._archive_store.overlays.post_overlays_fingerprint()
+        )
+        post_version_selections_hash = (
+            self._archive_store.posts.post_version_selections_fingerprint()
+        )
+
+        floor_result = self._reuse_floor_state()
+        if floor_result is not None:
+            return floor_result
+        return self._reuse_image_state(
+            post_overlays_hash=post_overlays_hash,
+            post_version_selections_hash=post_version_selections_hash,
+        )
+
+    def _load_snapshot(self) -> ProcessingStateReuseResult | None:
+        if self._snapshot is not None:
+            return None
+        try:
             with time_section("处理状态元数据读取"):
-                snapshot = archive_store.state.read_backup_processing_snapshot()
-        else:
-            snapshot = processing_snapshot
-    except ValueError as error:
-        report_warning(
-            WarningCategory.PROCESSING_STATE,
-            f"处理状态无效，改为完整处理：{error}",
+                self._snapshot = (
+                    self._archive_store.state.read_backup_processing_snapshot()
+                )
+        except ValueError as error:
+            report_warning(
+                WarningCategory.PROCESSING_STATE,
+                f"处理状态无效，改为完整处理：{error}",
+            )
+            self._archive_store.state.clear_backup_processing_state()
+            return ProcessingStateReuseResult(
+                False,
+                ProcessingStateReuseReason.STATE_INVALID,
+            )
+        return None
+
+    def _current_snapshot(self) -> BackupProcessingSnapshot:
+        if self._snapshot is None:
+            raise RuntimeError("处理状态复用尚未读取快照。")
+        return self._snapshot
+
+    def _reuse_floor_state(self) -> ProcessingStateReuseResult | None:
+        snapshot = self._current_snapshot()
+        mismatch_reasons = floor_state_mismatch_reasons(
+            snapshot,
+            page_count=self._page_count,
+            author_total_lou_count=self._author_total_lou_count,
         )
-        archive_store.state.clear_backup_processing_state()
-        return ProcessingStateReuseResult(
-            False,
-            ProcessingStateReuseReason.STATE_INVALID,
-        )
-    post_overlays_hash = archive_store.overlays.post_overlays_fingerprint()
-    post_version_selections_hash = (
-        archive_store.posts.post_version_selections_fingerprint()
-    )
-    changes = (
-        ArchiveIncrementalChanges(None, frozenset(), frozenset(), 0)
-        if incremental_changes is None
-        else incremental_changes
-    )
-    floor_mismatch_reasons = floor_state_mismatch_reasons(
-        snapshot,
-        page_count=page_count,
-        author_total_lou_count=author_total_lou_count,
-    )
-    if snapshot.current_pagination_state is None:
-        floor_mismatch_reasons = (
-            FloorStateMismatchReason.CURRENT_PAGINATION_MISSING,
-            *floor_mismatch_reasons,
-        )
-    floor_hit = not floor_mismatch_reasons
-    record_timing_metric("楼层状态复用命中", int(floor_hit))
-    if not floor_hit:
+        if snapshot.current_pagination_state is None:
+            mismatch_reasons = (
+                FloorStateMismatchReason.CURRENT_PAGINATION_MISSING,
+                *mismatch_reasons,
+            )
+        floor_hit = not mismatch_reasons
+        record_timing_metric("楼层状态复用命中", int(floor_hit))
+        if floor_hit:
+            record_timing_label("楼层状态复用结果", "hit")
+            return self._retry_pending_missing_floors()
+
         _record_floor_state_mismatch(
             snapshot,
-            floor_mismatch_reasons,
-            page_count=page_count,
-            author_total_lou_count=author_total_lou_count,
+            mismatch_reasons,
+            page_count=self._page_count,
+            author_total_lou_count=self._author_total_lou_count,
         )
-        if aid is None or snapshot.floor_state is None:
+        if self._aid is None or snapshot.floor_state is None:
             record_timing_label("楼层状态复用结果", "rebuild_required")
             return ProcessingStateReuseResult(
                 False,
@@ -811,92 +856,130 @@ def _try_processing_state_reuse(
             )
         with time_section("楼层派生状态刷新"):
             floor_refresh = _refresh_author_floor_state(
-                client,
-                archive_store,
-                tid,
-                aid,
-                page_count=page_count,
-                author_total_lou_count=author_total_lou_count,
+                self._client,
+                self._archive_store,
+                self._tid,
+                self._aid,
+                page_count=self._page_count,
+                author_total_lou_count=self._author_total_lou_count,
                 expected_snapshot=snapshot,
-                missing_floor_retry_mode=missing_floor_retry_mode,
+                missing_floor_retry_mode=self._missing_floor_retry_mode,
             )
-            snapshot = floor_refresh.snapshot
-            if not floor_refresh.succeeded:
+            if not self._apply_floor_refresh(floor_refresh):
                 return ProcessingStateReuseResult(
                     False,
                     ProcessingStateReuseReason.FLOOR_MAP_CHANGED,
                 )
-            changes = ArchiveIncrementalChanges(
-                changes.previous_snapshot,
-                changes.changed_lous | floor_refresh.changed_lous,
-                changes.added_lous | floor_refresh.added_lous,
-                changes.archive_revision_increments
-                + int(bool(floor_refresh.changed_lous)),
-            )
         record_timing_label("楼层状态复用结果", "floor_only_refresh")
-    else:
-        record_timing_label("楼层状态复用结果", "hit")
-        if aid is not None:
-            with time_section("未完成缺失楼重试"):
-                before_archive_revision = snapshot.change_state.archive_revision
-                if not snapshot.pending_missing_floor_retries:
-                    _record_empty_missing_floor_retry()
-                else:
-                    floor_refresh = _try_incremental_exact_missing_floor_repair(
-                        client,
-                        archive_store,
-                        tid,
-                        aid,
-                        page_count=page_count,
-                        author_total_lou_count=author_total_lou_count,
-                        expected_snapshot=snapshot,
-                        missing_floor_retry_mode=missing_floor_retry_mode,
-                    )
-                    if floor_refresh is None:
-                        floor_refresh = _refresh_author_floor_state(
-                            client,
-                            archive_store,
-                            tid,
-                            aid,
-                            page_count=page_count,
-                            author_total_lou_count=author_total_lou_count,
-                            expected_snapshot=snapshot,
-                            missing_floor_retry_mode=missing_floor_retry_mode,
-                            commit_even_if_unchanged=False,
-                        )
-                    snapshot = floor_refresh.snapshot
-                    if not floor_refresh.succeeded:
-                        return ProcessingStateReuseResult(
-                            False,
-                            ProcessingStateReuseReason.FLOOR_MAP_CHANGED,
-                        )
-                    changes = ArchiveIncrementalChanges(
-                        changes.previous_snapshot,
-                        changes.changed_lous | floor_refresh.changed_lous,
-                        changes.added_lous | floor_refresh.added_lous,
-                        changes.archive_revision_increments
-                        + int(bool(floor_refresh.changed_lous)),
-                    )
-                record_timing_metric(
-                    "缺失楼重试引发完整处理",
-                    int(snapshot.change_state.archive_revision != before_archive_revision),
-                )
+        return None
 
-    image_hit = archive_image_processing.image_state_is_current(
-        snapshot,
-        post_overlays_hash=post_overlays_hash,
-        post_version_selections_hash=post_version_selections_hash,
-    )
-    record_timing_metric("图片引用状态复用命中", int(image_hit))
-    if not image_hit or snapshot.image_state is None:
-        incremental_mode = archive_image_processing.try_incremental_image_reference_update(
-            tid,
-            aid,
-            archive_store,
-            snapshot=snapshot,
-            changes=changes,
+    def _retry_pending_missing_floors(
+        self,
+    ) -> ProcessingStateReuseResult | None:
+        if self._aid is None:
+            return None
+
+        with time_section("未完成缺失楼重试"):
+            snapshot = self._current_snapshot()
+            before_archive_revision = snapshot.change_state.archive_revision
+            if not snapshot.pending_missing_floor_retries:
+                _record_empty_missing_floor_retry()
+            else:
+                floor_refresh = _try_incremental_exact_missing_floor_repair(
+                    self._client,
+                    self._archive_store,
+                    self._tid,
+                    self._aid,
+                    page_count=self._page_count,
+                    author_total_lou_count=self._author_total_lou_count,
+                    expected_snapshot=snapshot,
+                    missing_floor_retry_mode=self._missing_floor_retry_mode,
+                )
+                if floor_refresh is None:
+                    floor_refresh = _refresh_author_floor_state(
+                        self._client,
+                        self._archive_store,
+                        self._tid,
+                        self._aid,
+                        page_count=self._page_count,
+                        author_total_lou_count=self._author_total_lou_count,
+                        expected_snapshot=snapshot,
+                        missing_floor_retry_mode=(
+                            self._missing_floor_retry_mode
+                        ),
+                        commit_even_if_unchanged=False,
+                    )
+                if not self._apply_floor_refresh(floor_refresh):
+                    return ProcessingStateReuseResult(
+                        False,
+                        ProcessingStateReuseReason.FLOOR_MAP_CHANGED,
+                    )
+            record_timing_metric(
+                "缺失楼重试引发完整处理",
+                int(
+                    self._current_snapshot().change_state.archive_revision
+                    != before_archive_revision
+                ),
+            )
+        return None
+
+    def _apply_floor_refresh(
+        self,
+        floor_refresh: _FloorStateRefreshResult,
+    ) -> bool:
+        self._snapshot = floor_refresh.snapshot
+        if not floor_refresh.succeeded:
+            return False
+        self._changes = ArchiveIncrementalChanges(
+            self._changes.previous_snapshot,
+            self._changes.changed_lous | floor_refresh.changed_lous,
+            self._changes.added_lous | floor_refresh.added_lous,
+            self._changes.archive_revision_increments
+            + int(bool(floor_refresh.changed_lous)),
+        )
+        return True
+
+    def _reuse_image_state(
+        self,
+        *,
+        post_overlays_hash: str,
+        post_version_selections_hash: str,
+    ) -> ProcessingStateReuseResult:
+        snapshot = self._current_snapshot()
+        image_hit = archive_image_processing.image_state_is_current(
+            snapshot,
             post_overlays_hash=post_overlays_hash,
             post_version_selections_hash=post_version_selections_hash,
+        )
+        record_timing_metric("图片引用状态复用命中", int(image_hit))
+        if not image_hit or snapshot.image_state is None:
+            return self._refresh_image_state(
+                post_overlays_hash=post_overlays_hash,
+                post_version_selections_hash=(
+                    post_version_selections_hash
+                ),
+            )
+        return self._retry_pending_images(snapshot)
+
+    def _refresh_image_state(
+        self,
+        *,
+        post_overlays_hash: str,
+        post_version_selections_hash: str,
+    ) -> ProcessingStateReuseResult:
+        snapshot = self._current_snapshot()
+        incremental_mode = (
+            archive_image_processing.try_incremental_image_reference_update(
+                self._tid,
+                self._aid,
+                self._archive_store,
+                snapshot=snapshot,
+                changes=self._changes,
+                post_overlays_hash=post_overlays_hash,
+                post_version_selections_hash=(
+                    post_version_selections_hash
+                ),
+            )
         )
         if incremental_mode is not None:
             record_timing_label(
@@ -908,15 +991,16 @@ def _try_processing_state_reuse(
                 True,
                 ProcessingStateReuseReason.HIT,
             )
+
         record_timing_label(
             "图片引用状态复用结果",
             "image_collection_rebuilt",
         )
         record_timing_label("图片引用处理模式", "full")
         if not archive_image_processing.rebuild_image_reference_state(
-            tid,
-            aid,
-            archive_store,
+            self._tid,
+            self._aid,
+            self._archive_store,
             post_overlays_hash=post_overlays_hash,
             post_version_selections_hash=post_version_selections_hash,
             pending_image_retries=snapshot.pending_image_retries,
@@ -930,40 +1014,74 @@ def _try_processing_state_reuse(
             ProcessingStateReuseReason.HIT,
         )
 
-    record_timing_label(
-        "图片引用状态复用结果",
-        "image_collection_hit",
-    )
-    record_timing_label("图片引用处理模式", "hit")
-    report_info("归档与派生输入未变化，跳过完整处理。")
-    pending_tasks: list[ImageDownloadTask] = [
-        {"url": retry.url} for retry in snapshot.pending_image_retries
-    ]
-    with time_section("未完成图片重试"):
-        download_result = archive_image_processing.download_images_with_retry_policy(
-            tid,
-            aid,
-            pending_tasks,
-            snapshot.pending_image_retries,
-            force=False,
+    def _retry_pending_images(
+        self,
+        snapshot: BackupProcessingSnapshot,
+    ) -> ProcessingStateReuseResult:
+        if snapshot.image_state is None:
+            raise RuntimeError("图片引用状态复用缺少图片状态。")
+        record_timing_label(
+            "图片引用状态复用结果",
+            "image_collection_hit",
         )
-    if archive_store.state.replace_pending_images_for_image_state(
-        snapshot.image_state,
-        download_result.pending_image_retries,
-    ):
+        record_timing_label("图片引用处理模式", "hit")
+        report_info("归档与派生输入未变化，跳过完整处理。")
+        pending_tasks: list[ImageDownloadTask] = [
+            {"url": retry.url} for retry in snapshot.pending_image_retries
+        ]
+        with time_section("未完成图片重试"):
+            download_result = (
+                archive_image_processing.download_images_with_retry_policy(
+                    self._tid,
+                    self._aid,
+                    pending_tasks,
+                    snapshot.pending_image_retries,
+                    force=False,
+                )
+            )
+        if self._archive_store.state.replace_pending_images_for_image_state(
+            snapshot.image_state,
+            download_result.pending_image_retries,
+        ):
+            return ProcessingStateReuseResult(
+                True,
+                ProcessingStateReuseReason.HIT,
+            )
+
+        report_warning(
+            WarningCategory.PROCESSING_STATE,
+            "处理状态在图片重试期间发生变化，改为完整处理。",
+        )
         return ProcessingStateReuseResult(
-            True,
-            ProcessingStateReuseReason.HIT,
+            False,
+            ProcessingStateReuseReason.STATE_CHANGED_DURING_IMAGE_RETRY,
         )
 
-    report_warning(
-        WarningCategory.PROCESSING_STATE,
-        "处理状态在图片重试期间发生变化，改为完整处理。",
-    )
-    return ProcessingStateReuseResult(
-        False,
-        ProcessingStateReuseReason.STATE_CHANGED_DURING_IMAGE_RETRY,
-    )
+
+def _try_processing_state_reuse(
+    client: NGAClient,
+    tid: int,
+    aid: Optional[int],
+    archive_store: ThreadArchiveStore,
+    *,
+    page_count: int,
+    author_total_lou_count: int | None,
+    local_pages_cover_remote: bool,
+    missing_floor_retry_mode: MissingFloorRetryMode,
+    processing_snapshot: BackupProcessingSnapshot | None = None,
+    incremental_changes: ArchiveIncrementalChanges | None = None,
+) -> ProcessingStateReuseResult:
+    return _ProcessingStateReuseAttempt(
+        client,
+        tid,
+        aid,
+        archive_store,
+        page_count=page_count,
+        author_total_lou_count=author_total_lou_count,
+        missing_floor_retry_mode=missing_floor_retry_mode,
+        processing_snapshot=processing_snapshot,
+        incremental_changes=incremental_changes,
+    ).run(local_pages_cover_remote=local_pages_cover_remote)
 
 
 def _commit_completed_processing_state(
