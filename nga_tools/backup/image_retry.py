@@ -10,18 +10,18 @@ from nga_tools.backup.media_retry import (
     shared_media_retry_ticket,
     uses_probabilistic_backoff as uses_probabilistic_backoff,
 )
-from nga_tools.backup.processing_state import PendingImageRetry
+from nga_tools.backup.processing_state import PendingMediaRetry
 from nga_tools.core.download_types import DownloadFileResult
 
 
 _IMAGE_RETRY_NAMESPACE = "backup-image-retry"
 
 
-type ImageRetrySelection = MediaRetrySelection[PendingImageRetry]
+type ImageRetrySelection = MediaRetrySelection
 
 
 def select_image_retries(
-    retries: tuple[PendingImageRetry, ...],
+    retries: tuple[PendingMediaRetry, ...],
     *,
     thread_target_key: str,
     now: datetime,
@@ -43,17 +43,14 @@ def select_image_retries(
 
 
 def pending_image_retries_after_attempt(
-    deferred: tuple[PendingImageRetry, ...],
+    deferred: tuple[PendingMediaRetry, ...],
     failed: Sequence[DownloadFileResult],
     *,
     attempted_at: datetime,
-) -> tuple[PendingImageRetry, ...]:
+) -> tuple[PendingMediaRetry, ...]:
     return pending_media_retries_after_attempt(
         deferred,
         failed,
         attempted_at=attempted_at,
         media_label="图片",
-        retry_factory=lambda url, last_attempt_at, failure_kind, http_status: (
-            PendingImageRetry(url, last_attempt_at, failure_kind, http_status)
-        ),
     )

@@ -78,7 +78,7 @@ class ImageReferenceManifestSnapshot:
 
 
 @dataclass(frozen=True)
-class PendingImageRetry:
+class PendingMediaRetry:
     url: str
     last_attempt_at: datetime | None
     failure_kind: DownloadFailureKind | None
@@ -100,20 +100,12 @@ class AudioProcessingState:
 
 
 @dataclass(frozen=True)
-class PendingAudioRetry:
-    url: str
-    last_attempt_at: datetime | None
-    failure_kind: DownloadFailureKind | None
-    http_status: int | None
-
-
-@dataclass(frozen=True)
 class BackupProcessingSnapshot:
     change_state: ArchiveChangeState
-    pending_image_retries: tuple[PendingImageRetry, ...]
+    pending_image_retries: tuple[PendingMediaRetry, ...]
     current_pagination_state: CurrentPaginationState | None = None
     floor_state: FloorProcessingState | None = None
     image_state: ImageReferenceState | None = None
     audio_state: AudioProcessingState | None = None
-    pending_audio_retries: tuple[PendingAudioRetry, ...] = ()
+    pending_audio_retries: tuple[PendingMediaRetry, ...] = ()
     pending_missing_floor_retries: tuple[PendingMissingFloorRetry, ...] = ()

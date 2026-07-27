@@ -48,7 +48,7 @@ from nga_tools.backup.processing_state import (
     FloorProcessingState,
     ImageReferenceManifestPost,
     ImageReferenceState,
-    PendingImageRetry,
+    PendingMediaRetry,
     PendingMissingFloorRetry,
 )
 from nga_tools.console import WarningCategory, report_info, report_warning
@@ -960,7 +960,7 @@ def _commit_completed_processing_state(
     floor_map_processing: FloorMapProcessingResult,
     unresolved_missing_lous: list[int],
     fingerprints_before: tuple[str, str],
-    pending_image_retries: tuple[PendingImageRetry, ...],
+    pending_image_retries: tuple[PendingMediaRetry, ...],
     manifest_posts: tuple[ImageReferenceManifestPost, ...],
 ) -> None:
     if aid is not None and not floor_map_processing.cacheable:

@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Protocol, TypeVar
 
-from nga_tools.core.download_types import (
-    DownloadFailureKind,
-    DownloadFileResult,
-)
+from nga_tools.backup.processing_state import PendingMediaRetry
+from nga_tools.core.download_types import DownloadFileResult
 from nga_tools.core.retry_schedule import (
     retry_schedule_decision,
     retry_schedule_decision_for_ticket,
@@ -16,27 +13,10 @@ from nga_tools.core.retry_schedule import (
 )
 
 
-class PendingMediaRetry(Protocol):
-    @property
-    def url(self) -> str: ...
-
-    @property
-    def last_attempt_at(self) -> datetime | None: ...
-
-    @property
-    def failure_kind(self) -> DownloadFailureKind | None: ...
-
-    @property
-    def http_status(self) -> int | None: ...
-
-
-RetryT = TypeVar("RetryT", bound=PendingMediaRetry)
-
-
 @dataclass(frozen=True)
-class MediaRetrySelection[RetryT: PendingMediaRetry]:
-    due: tuple[RetryT, ...]
-    deferred: tuple[RetryT, ...]
+class MediaRetrySelection:
+    due: tuple[PendingMediaRetry, ...]
+    deferred: tuple[PendingMediaRetry, ...]
 
 
 def uses_probabilistic_backoff(retry: PendingMediaRetry) -> bool:
@@ -48,7 +28,7 @@ def uses_probabilistic_backoff(retry: PendingMediaRetry) -> bool:
 
 
 def select_media_retries(
-    retries: tuple[RetryT, ...],
+    retries: tuple[PendingMediaRetry, ...],
     *,
     namespace: str,
     thread_target_key: str,
@@ -56,9 +36,9 @@ def select_media_retries(
     max_interval: timedelta,
     force: bool,
     shared_ticket: float | None = None,
-) -> MediaRetrySelection[RetryT]:
-    due: list[RetryT] = []
-    deferred: list[RetryT] = []
+) -> MediaRetrySelection:
+    due: list[PendingMediaRetry] = []
+    deferred: list[PendingMediaRetry] = []
     for retry in retries:
         if force or not uses_probabilistic_backoff(retry):
             due.append(retry)
@@ -93,16 +73,12 @@ def shared_media_retry_ticket(*, namespace: str, thread_target_key: str) -> floa
 
 
 def pending_media_retries_after_attempt(
-    deferred: tuple[RetryT, ...],
+    deferred: tuple[PendingMediaRetry, ...],
     failed: Sequence[DownloadFileResult],
     *,
     attempted_at: datetime,
     media_label: str,
-    retry_factory: Callable[
-        [str, datetime, DownloadFailureKind, int | None],
-        RetryT,
-    ],
-) -> tuple[RetryT, ...]:
+) -> tuple[PendingMediaRetry, ...]:
     if attempted_at.tzinfo is None or attempted_at.utcoffset() is None:
         raise ValueError(f"{media_label}重试时间必须包含时区。")
     retries_by_url = {retry.url: retry for retry in deferred}
@@ -110,10 +86,10 @@ def pending_media_retries_after_attempt(
         url = item["url"]
         if url in retries_by_url:
             raise ValueError(f"延后{media_label}不应同时产生下载结果：{url}")
-        retries_by_url[url] = retry_factory(
-            url,
-            attempted_at,
-            item.get("failure_kind", "unexpected_download"),
-            item.get("http_status"),
+        retries_by_url[url] = PendingMediaRetry(
+            url=url,
+            last_attempt_at=attempted_at,
+            failure_kind=item.get("failure_kind", "unexpected_download"),
+            http_status=item.get("http_status"),
         )
     return tuple(retries_by_url[url] for url in sorted(retries_by_url))

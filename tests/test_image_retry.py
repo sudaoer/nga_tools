@@ -9,7 +9,7 @@ from nga_tools.backup.image_retry import (
     select_image_retries,
     uses_probabilistic_backoff,
 )
-from nga_tools.backup.processing_state import PendingImageRetry
+from nga_tools.backup.processing_state import PendingMediaRetry
 from nga_tools.core.downloads import DownloadFailureKind
 
 
@@ -22,8 +22,8 @@ def _retry(
     failure_kind: DownloadFailureKind = "http_4xx",
     http_status: int | None = 404,
     last_attempt_at: datetime | None = _NOW,
-) -> PendingImageRetry:
-    return PendingImageRetry(
+) -> PendingMediaRetry:
+    return PendingMediaRetry(
         url=url,
         last_attempt_at=last_attempt_at,
         failure_kind=failure_kind if last_attempt_at is not None else None,
@@ -44,7 +44,7 @@ def _retry(
     ],
 )
 def test_persistent_http_failures_use_probabilistic_backoff(
-    retry: PendingImageRetry,
+    retry: PendingMediaRetry,
 ) -> None:
     assert uses_probabilistic_backoff(retry)
 
@@ -72,7 +72,7 @@ def test_persistent_http_failures_use_probabilistic_backoff(
     ],
 )
 def test_transient_and_legacy_failures_do_not_use_probabilistic_backoff(
-    retry: PendingImageRetry,
+    retry: PendingMediaRetry,
 ) -> None:
     assert not uses_probabilistic_backoff(retry)
 
@@ -191,7 +191,7 @@ def test_attempt_result_preserves_deferred_and_replaces_failed_metadata() -> Non
     )
 
     assert retries == (
-        PendingImageRetry(
+        PendingMediaRetry(
             url="https://example.invalid/attempted",
             last_attempt_at=_NOW + timedelta(hours=1),
             failure_kind="http_4xx",

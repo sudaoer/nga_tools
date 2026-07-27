@@ -31,7 +31,7 @@ from nga_tools.backup.processing_state import (
     ImageReferenceManifestSnapshot,
     ImageReferenceManifestState,
     ImageReferenceState,
-    PendingImageRetry,
+    PendingMediaRetry,
     PendingMissingFloorRetry,
 )
 from nga_tools.core.downloads import DownloadFailureKind
@@ -48,8 +48,8 @@ def _pending_retry(
     *,
     failure_kind: DownloadFailureKind = "http_4xx",
     http_status: int | None = 404,
-) -> PendingImageRetry:
-    return PendingImageRetry(
+) -> PendingMediaRetry:
+    return PendingMediaRetry(
         url=url,
         last_attempt_at=_PENDING_RETRY_AT,
         failure_kind=failure_kind,

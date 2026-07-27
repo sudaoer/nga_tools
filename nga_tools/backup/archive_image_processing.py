@@ -31,7 +31,7 @@ from nga_tools.backup.processing_state import (
     BackupProcessingSnapshot,
     ImageReferenceManifestPost,
     ImageReferenceState,
-    PendingImageRetry,
+    PendingMediaRetry,
 )
 from nga_tools.console import WarningCategory, report_warning
 from nga_tools.timing import record_timing_metric, time_section
@@ -41,7 +41,7 @@ from nga_tools.timing import record_timing_metric, time_section
 
 
 class ImageRecordProcessingResult:
-    pending_image_retries: tuple[PendingImageRetry, ...]
+    pending_image_retries: tuple[PendingMediaRetry, ...]
     manifest_posts: tuple[ImageReferenceManifestPost, ...]
 
 
@@ -50,7 +50,7 @@ class ImageRecordProcessingResult:
 
 
 class _ScheduledImageDownloadResult:
-    pending_image_retries: tuple[PendingImageRetry, ...]
+    pending_image_retries: tuple[PendingMediaRetry, ...]
 
 
 
@@ -62,7 +62,7 @@ def _thread_retry_target_key(tid: int, aid: Optional[int]) -> str:
 def select_pending_image_retries(
     tid: int,
     aid: Optional[int],
-    retries: tuple[PendingImageRetry, ...],
+    retries: tuple[PendingMediaRetry, ...],
     *,
     now: datetime.datetime,
     force: bool,
@@ -83,7 +83,7 @@ def download_images_with_retry_policy(
     tid: int,
     aid: Optional[int],
     tasks: list[ImageDownloadTask],
-    pending_image_retries: tuple[PendingImageRetry, ...],
+    pending_image_retries: tuple[PendingMediaRetry, ...],
     *,
     force: bool,
 ) -> _ScheduledImageDownloadResult:
@@ -139,7 +139,7 @@ def download_images_for_records(
     archive_store: ThreadArchiveStore,
     floor_labels: FloorLabels,
     records: list[PostRecord],
-    pending_image_retries: tuple[PendingImageRetry, ...],
+    pending_image_retries: tuple[PendingMediaRetry, ...],
     *,
     force_image_retries: bool,
 ) -> ImageRecordProcessingResult:
@@ -200,7 +200,7 @@ def rebuild_image_reference_state(
     *,
     post_overlays_hash: str,
     post_version_selections_hash: str,
-    pending_image_retries: tuple[PendingImageRetry, ...],
+    pending_image_retries: tuple[PendingMediaRetry, ...],
 ) -> bool:
     with time_section("图片引用集合重建"):
         records = archive_store.posts.read_effective_post_records()

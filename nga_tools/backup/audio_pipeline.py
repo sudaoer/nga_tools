@@ -20,7 +20,7 @@ from nga_tools.backup.processing_state import (
     AUDIO_REFERENCE_EXTRACTOR_VERSION,
     AudioProcessingState,
     BackupProcessingSnapshot,
-    PendingAudioRetry,
+    PendingMediaRetry,
 )
 from nga_tools.console import WarningCategory, report_info, report_progress, report_warning
 from nga_tools.core.nga_audio import extract_nga_audio_urls
@@ -67,7 +67,7 @@ def _audio_state_is_compatible(
 def _select_pending_audio_retries(
     tid: int,
     aid: int | None,
-    retries: tuple[PendingAudioRetry, ...],
+    retries: tuple[PendingMediaRetry, ...],
     *,
     now: datetime.datetime,
     force: bool,
@@ -86,7 +86,7 @@ def _select_pending_audio_retries(
 def pending_audio_retry_is_due(
     tid: int,
     aid: int | None,
-    retries: tuple[PendingAudioRetry, ...],
+    retries: tuple[PendingMediaRetry, ...],
     *,
     now: datetime.datetime,
 ) -> bool:

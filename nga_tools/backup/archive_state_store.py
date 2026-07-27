@@ -5,6 +5,7 @@ import sqlite3
 from collections import Counter
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -20,14 +21,29 @@ from nga_tools.backup.processing_state import (
     ImageReferenceManifestSnapshot,
     ImageReferenceManifestState,
     ImageReferenceState,
-    PendingAudioRetry,
-    PendingImageRetry,
+    PendingMediaRetry,
     PendingMissingFloorRetry,
 )
 from nga_tools.backup.archive_post_store import ArchivePostRepository
 from nga_tools.backup.thread_stores import ThreadArchiveStateStore
 from nga_tools.core.download_types import DOWNLOAD_FAILURE_KINDS
 from nga_tools.core.sqlite import iter_in_clause_chunks
+
+
+@dataclass(frozen=True)
+class _PendingMediaTableSpec:
+    table_name: str
+    label: str
+
+
+_PENDING_IMAGE_RETRIES = _PendingMediaTableSpec(
+    table_name="backup_pending_images",
+    label="图片",
+)
+_PENDING_AUDIO_RETRIES = _PendingMediaTableSpec(
+    table_name="backup_pending_audio",
+    label="音频",
+)
 
 
 class ArchiveStateSource(Protocol):
@@ -271,30 +287,217 @@ class ArchiveStateRepository:
                 pending_image_retries=(),
             )
         return self._read_backup_processing_snapshot_from_state(change_state)
+
+    @staticmethod
+    def _read_pending_media_retry_rows(
+        connection: sqlite3.Connection,
+        spec: _PendingMediaTableSpec,
+    ) -> list[tuple[object, object, object, object]]:
+        return cast(
+            list[tuple[object, object, object, object]],
+            connection.execute(
+                f"""
+                SELECT url, last_attempt_at, failure_kind, http_status
+                FROM {spec.table_name}
+                ORDER BY url
+                """
+            ).fetchall(),
+        )
+
+    @staticmethod
+    def _parse_pending_media_retry_rows(
+        rows: Sequence[tuple[object, object, object, object]],
+        spec: _PendingMediaTableSpec,
+    ) -> tuple[PendingMediaRetry, ...]:
+        retries: list[PendingMediaRetry] = []
+        for url, last_attempt_at, failure_kind, http_status in rows:
+            if not isinstance(url, str) or not url:
+                raise ValueError(
+                    f"backup待重试{spec.label}URL无效：{url!r}"
+                )
+            if last_attempt_at is None:
+                if failure_kind is not None or http_status is not None:
+                    raise ValueError(
+                        f"backup待重试{spec.label}旧状态无效："
+                        f"{(url, failure_kind, http_status)!r}"
+                    )
+                parsed_last_attempt_at = None
+                parsed_failure_kind = None
+            else:
+                if not isinstance(last_attempt_at, str):
+                    raise ValueError(
+                        f"backup待重试{spec.label}时间无效："
+                        f"{last_attempt_at!r}"
+                    )
+                try:
+                    parsed_last_attempt_at = datetime.datetime.fromisoformat(
+                        last_attempt_at
+                    )
+                except ValueError as error:
+                    raise ValueError(
+                        f"backup待重试{spec.label}时间无效："
+                        f"{last_attempt_at!r}"
+                    ) from error
+                if (
+                    parsed_last_attempt_at.tzinfo is None
+                    or parsed_last_attempt_at.utcoffset() is None
+                ):
+                    raise ValueError(
+                        f"backup待重试{spec.label}时间缺少时区："
+                        f"{last_attempt_at!r}"
+                    )
+                if (
+                    not isinstance(failure_kind, str)
+                    or failure_kind not in DOWNLOAD_FAILURE_KINDS
+                ):
+                    raise ValueError(
+                        f"backup待重试{spec.label}失败类别无效："
+                        f"{failure_kind!r}"
+                    )
+                parsed_failure_kind = failure_kind
+            if http_status is not None and (
+                type(http_status) is not int
+                or http_status < 100
+                or http_status > 599
+            ):
+                raise ValueError(
+                    f"backup待重试{spec.label}HTTP状态无效："
+                    f"{http_status!r}"
+                )
+            retries.append(
+                PendingMediaRetry(
+                    url=url,
+                    last_attempt_at=parsed_last_attempt_at,
+                    failure_kind=parsed_failure_kind,
+                    http_status=http_status,
+                )
+            )
+        return tuple(retries)
+
+    @staticmethod
+    def _parse_floor_processing_state_row(
+        row: Sequence[object] | None,
+    ) -> FloorProcessingState | None:
+        if row is None:
+            return None
+        if any(
+            type(value) is not int
+            for value in (*row[:4], *row[5:7])
+        ):
+            raise ValueError(f"backup楼层处理状态整数列无效：{row!r}")
+        if row[4] is not None and type(row[4]) is not int:
+            raise ValueError(f"backup楼层处理状态vrows无效：{row!r}")
+        if (
+            not isinstance(row[7], str)
+            or not row[7]
+            or not isinstance(row[8], str)
+            or not row[8]
+        ):
+            raise ValueError(f"backup楼层处理状态文本列无效：{row!r}")
+        return FloorProcessingState(
+            format_version=cast(int, row[0]),
+            processed_archive_revision=cast(int, row[1]),
+            processed_floor_map_revision=cast(int, row[2]),
+            page_count=cast(int, row[3]),
+            author_total_lou_count=row[4],
+            floor_map_format_version=cast(int, row[5]),
+            floor_map_generation_version=cast(int, row[6]),
+            floor_map_hash_algorithm=row[7],
+            completed_at=row[8],
+        )
+
+    @staticmethod
+    def _parse_image_reference_state_row(
+        row: Sequence[object] | None,
+    ) -> ImageReferenceState | None:
+        if row is None:
+            return None
+        if (
+            type(row[0]) is not int
+            or type(row[1]) is not int
+            or type(row[4]) is not int
+        ):
+            raise ValueError(f"backup图片引用状态整数列无效：{row!r}")
+        if any(
+            not isinstance(value, str) or not value
+            for value in (row[2], row[3], row[5])
+        ):
+            raise ValueError(f"backup图片引用状态文本列无效：{row!r}")
+        return ImageReferenceState(
+            format_version=row[0],
+            processed_archive_revision=row[1],
+            post_overlays_fingerprint=cast(str, row[2]),
+            post_version_selections_fingerprint=cast(str, row[3]),
+            image_reference_extractor_version=row[4],
+            completed_at=cast(str, row[5]),
+        )
+
+    @staticmethod
+    def _parse_pending_missing_floor_retry_rows(
+        rows: Sequence[tuple[object, object]],
+    ) -> tuple[PendingMissingFloorRetry, ...]:
+        retries: list[PendingMissingFloorRetry] = []
+        for author_lou, last_attempt_at in rows:
+            if type(author_lou) is not int or author_lou < 0:
+                raise ValueError(
+                    f"backup待重试缺失楼楼层无效：{author_lou!r}"
+                )
+            if not isinstance(last_attempt_at, str):
+                raise ValueError(
+                    f"backup待重试缺失楼时间无效：{last_attempt_at!r}"
+                )
+            try:
+                parsed_last_attempt_at = datetime.datetime.fromisoformat(
+                    last_attempt_at
+                )
+            except ValueError as error:
+                raise ValueError(
+                    f"backup待重试缺失楼时间无效：{last_attempt_at!r}"
+                ) from error
+            if (
+                parsed_last_attempt_at.tzinfo is None
+                or parsed_last_attempt_at.utcoffset() is None
+            ):
+                raise ValueError(
+                    "backup待重试缺失楼时间缺少时区："
+                    f"{last_attempt_at!r}"
+                )
+            retries.append(
+                PendingMissingFloorRetry(author_lou, parsed_last_attempt_at)
+            )
+        return tuple(retries)
+
+    @staticmethod
+    def _parse_audio_processing_state_row(
+        row: Sequence[object] | None,
+    ) -> AudioProcessingState | None:
+        if row is None:
+            return None
+        if any(type(value) is not int for value in row[:3]):
+            raise ValueError(f"backup音频处理状态整数列无效：{row!r}")
+        if cast(int, row[2]) < 0:
+            raise ValueError(f"backup音频处理水位无效：{row!r}")
+        if not isinstance(row[3], str) or not row[3]:
+            raise ValueError(f"backup音频处理状态时间无效：{row!r}")
+        return AudioProcessingState(
+            format_version=cast(int, row[0]),
+            extractor_version=cast(int, row[1]),
+            processed_max_post_version_id=cast(int, row[2]),
+            completed_at=row[3],
+        )
+
     def _read_backup_processing_snapshot_from_state(
         self,
         change_state: ArchiveChangeState,
     ) -> BackupProcessingSnapshot:
         with self._state_read_connection() as connection:
-            pending_rows = cast(
-                list[tuple[object, object, object, object]],
-                connection.execute(
-                    """
-                    SELECT url, last_attempt_at, failure_kind, http_status
-                    FROM backup_pending_images
-                    ORDER BY url
-                    """
-                ).fetchall(),
+            pending_rows = self._read_pending_media_retry_rows(
+                connection,
+                _PENDING_IMAGE_RETRIES,
             )
-            pending_audio_rows = cast(
-                list[tuple[object, object, object, object]],
-                connection.execute(
-                    """
-                    SELECT url, last_attempt_at, failure_kind, http_status
-                    FROM backup_pending_audio
-                    ORDER BY url
-                    """
-                ).fetchall(),
+            pending_audio_rows = self._read_pending_media_retry_rows(
+                connection,
+                _PENDING_AUDIO_RETRIES,
             )
             pending_missing_floor_rows = cast(
                 list[tuple[object, object]],
@@ -343,214 +546,55 @@ class ArchiveStateRepository:
                 FROM backup_audio_processing_state WHERE singleton = 1
                 """
             ).fetchone()
-        pending_image_retries: list[PendingImageRetry] = []
-        for url, last_attempt_at, failure_kind, http_status in pending_rows:
-            if not isinstance(url, str) or not url:
-                raise ValueError(f"backup待重试图片URL无效：{url!r}")
-            if last_attempt_at is None:
-                if failure_kind is not None or http_status is not None:
-                    raise ValueError(
-                        f"backup待重试图片旧状态无效：{(url, failure_kind, http_status)!r}"
-                    )
-                parsed_last_attempt_at = None
-                parsed_failure_kind = None
-            else:
-                if not isinstance(last_attempt_at, str):
-                    raise ValueError(
-                        f"backup待重试图片时间无效：{last_attempt_at!r}"
-                    )
-                try:
-                    parsed_last_attempt_at = datetime.datetime.fromisoformat(
-                        last_attempt_at
-                    )
-                except ValueError as error:
-                    raise ValueError(
-                        f"backup待重试图片时间无效：{last_attempt_at!r}"
-                    ) from error
-                if (
-                    parsed_last_attempt_at.tzinfo is None
-                    or parsed_last_attempt_at.utcoffset() is None
-                ):
-                    raise ValueError(
-                        f"backup待重试图片时间缺少时区：{last_attempt_at!r}"
-                    )
-                if (
-                    not isinstance(failure_kind, str)
-                    or failure_kind not in DOWNLOAD_FAILURE_KINDS
-                ):
-                    raise ValueError(
-                        f"backup待重试图片失败类别无效：{failure_kind!r}"
-                    )
-                parsed_failure_kind = failure_kind
-            if http_status is not None and (
-                type(http_status) is not int
-                or http_status < 100
-                or http_status > 599
-            ):
-                raise ValueError(
-                    f"backup待重试图片HTTP状态无效：{http_status!r}"
-                )
-            pending_image_retries.append(
-                PendingImageRetry(
-                    url=url,
-                    last_attempt_at=parsed_last_attempt_at,
-                    failure_kind=parsed_failure_kind,
-                    http_status=http_status,
-                )
+        pending_image_retries = self._parse_pending_media_retry_rows(
+            pending_rows,
+            _PENDING_IMAGE_RETRIES,
+        )
+        floor_state = self._parse_floor_processing_state_row(floor_row)
+        image_state = self._parse_image_reference_state_row(image_row)
+        pending_missing_floor_retries = (
+            self._parse_pending_missing_floor_retry_rows(
+                pending_missing_floor_rows
             )
-        floor_state: FloorProcessingState | None = None
-        if floor_row is not None:
-            if any(type(value) is not int for value in floor_row[:4] + floor_row[5:7]):
-                raise ValueError(f"backup楼层处理状态整数列无效：{floor_row!r}")
-            if floor_row[4] is not None and type(floor_row[4]) is not int:
-                raise ValueError(f"backup楼层处理状态vrows无效：{floor_row!r}")
-            if not isinstance(floor_row[7], str) or not floor_row[7] or not isinstance(floor_row[8], str) or not floor_row[8]:
-                raise ValueError(f"backup楼层处理状态文本列无效：{floor_row!r}")
-            floor_state = FloorProcessingState(*floor_row)
-
-        image_state: ImageReferenceState | None = None
-        if image_row is not None:
-            if type(image_row[0]) is not int or type(image_row[1]) is not int or type(image_row[4]) is not int:
-                raise ValueError(f"backup图片引用状态整数列无效：{image_row!r}")
-            if any(not isinstance(value, str) or not value for value in (image_row[2], image_row[3], image_row[5])):
-                raise ValueError(f"backup图片引用状态文本列无效：{image_row!r}")
-            image_state = ImageReferenceState(*image_row)
-
-        pending_missing_floor_retries: list[PendingMissingFloorRetry] = []
-        for author_lou, last_attempt_at in pending_missing_floor_rows:
-            if type(author_lou) is not int or author_lou < 0:
-                raise ValueError(
-                    f"backup待重试缺失楼楼层无效：{author_lou!r}"
-                )
-            if not isinstance(last_attempt_at, str):
-                raise ValueError(
-                    f"backup待重试缺失楼时间无效：{last_attempt_at!r}"
-                )
-            try:
-                parsed_last_attempt_at = datetime.datetime.fromisoformat(
-                    last_attempt_at
-                )
-            except ValueError as error:
-                raise ValueError(
-                    f"backup待重试缺失楼时间无效：{last_attempt_at!r}"
-                ) from error
-            if (
-                parsed_last_attempt_at.tzinfo is None
-                or parsed_last_attempt_at.utcoffset() is None
-            ):
-                raise ValueError(
-                    "backup待重试缺失楼时间缺少时区："
-                    f"{last_attempt_at!r}"
-                )
-            pending_missing_floor_retries.append(
-                PendingMissingFloorRetry(author_lou, parsed_last_attempt_at)
-            )
-
-        pending_audio_retries: list[PendingAudioRetry] = []
-        for url, last_attempt_at, failure_kind, http_status in pending_audio_rows:
-            if not isinstance(url, str) or not url:
-                raise ValueError(f"backup待重试音频URL无效：{url!r}")
-            if last_attempt_at is None:
-                if failure_kind is not None or http_status is not None:
-                    raise ValueError(
-                        "backup待重试音频旧状态无效："
-                        f"{(url, failure_kind, http_status)!r}"
-                    )
-                parsed_last_attempt_at = None
-                parsed_failure_kind = None
-            else:
-                if not isinstance(last_attempt_at, str):
-                    raise ValueError(
-                        f"backup待重试音频时间无效：{last_attempt_at!r}"
-                    )
-                try:
-                    parsed_last_attempt_at = datetime.datetime.fromisoformat(
-                        last_attempt_at
-                    )
-                except ValueError as error:
-                    raise ValueError(
-                        f"backup待重试音频时间无效：{last_attempt_at!r}"
-                    ) from error
-                if (
-                    parsed_last_attempt_at.tzinfo is None
-                    or parsed_last_attempt_at.utcoffset() is None
-                ):
-                    raise ValueError(
-                        "backup待重试音频时间缺少时区："
-                        f"{last_attempt_at!r}"
-                    )
-                if (
-                    not isinstance(failure_kind, str)
-                    or failure_kind not in DOWNLOAD_FAILURE_KINDS
-                ):
-                    raise ValueError(
-                        "backup待重试音频失败类别无效："
-                        f"{failure_kind!r}"
-                    )
-                parsed_failure_kind = failure_kind
-            if http_status is not None and (
-                type(http_status) is not int
-                or http_status < 100
-                or http_status > 599
-            ):
-                raise ValueError(
-                    f"backup待重试音频HTTP状态无效：{http_status!r}"
-                )
-            pending_audio_retries.append(
-                PendingAudioRetry(
-                    url=url,
-                    last_attempt_at=parsed_last_attempt_at,
-                    failure_kind=parsed_failure_kind,
-                    http_status=http_status,
-                )
-            )
-
-        audio_state: AudioProcessingState | None = None
-        if audio_row is not None:
-            if any(type(value) is not int for value in audio_row[:3]):
-                raise ValueError(
-                    f"backup音频处理状态整数列无效：{audio_row!r}"
-                )
-            if audio_row[2] < 0:
-                raise ValueError(
-                    f"backup音频处理水位无效：{audio_row!r}"
-                )
-            if not isinstance(audio_row[3], str) or not audio_row[3]:
-                raise ValueError(
-                    f"backup音频处理状态时间无效：{audio_row!r}"
-                )
-            audio_state = AudioProcessingState(*audio_row)
+        )
+        pending_audio_retries = self._parse_pending_media_retry_rows(
+            pending_audio_rows,
+            _PENDING_AUDIO_RETRIES,
+        )
+        audio_state = self._parse_audio_processing_state_row(audio_row)
         return BackupProcessingSnapshot(
             change_state=change_state,
-            pending_image_retries=tuple(pending_image_retries),
+            pending_image_retries=pending_image_retries,
             current_pagination_state=(
                 self._current_pagination_state_from_row(pagination_row)
             ),
             floor_state=floor_state,
             image_state=image_state,
             audio_state=audio_state,
-            pending_audio_retries=tuple(pending_audio_retries),
-            pending_missing_floor_retries=tuple(
-                pending_missing_floor_retries
-            ),
+            pending_audio_retries=pending_audio_retries,
+            pending_missing_floor_retries=pending_missing_floor_retries,
         )
+
     @staticmethod
-    def _replace_pending_images(
+    def _replace_pending_media_retries(
         connection: sqlite3.Connection,
-        pending_image_retries: tuple[PendingImageRetry, ...],
+        retries: tuple[PendingMediaRetry, ...],
+        spec: _PendingMediaTableSpec,
     ) -> None:
         rows: list[tuple[str, str | None, str | None, int | None]] = []
         seen_urls: set[str] = set()
-        for retry in sorted(pending_image_retries, key=lambda item: item.url):
+        for retry in sorted(retries, key=lambda item: item.url):
             if not retry.url:
-                raise ValueError("backup待重试图片URL不能为空。")
+                raise ValueError(f"backup待重试{spec.label}URL不能为空。")
             if retry.url in seen_urls:
-                raise ValueError(f"backup待重试图片URL重复：{retry.url}")
+                raise ValueError(
+                    f"backup待重试{spec.label}URL重复：{retry.url}"
+                )
             seen_urls.add(retry.url)
             if retry.last_attempt_at is None:
                 if retry.failure_kind is not None or retry.http_status is not None:
                     raise ValueError(
-                        f"backup待重试图片旧状态无效：{retry.url}"
+                        f"backup待重试{spec.label}旧状态无效：{retry.url}"
                     )
                 last_attempt_text = None
             else:
@@ -559,11 +603,13 @@ class ArchiveStateRepository:
                     or retry.last_attempt_at.utcoffset() is None
                 ):
                     raise ValueError(
-                        f"backup待重试图片时间缺少时区：{retry.url}"
+                        f"backup待重试{spec.label}时间缺少时区："
+                        f"{retry.url}"
                     )
                 if retry.failure_kind not in DOWNLOAD_FAILURE_KINDS:
                     raise ValueError(
-                        f"backup待重试图片失败类别无效：{retry.failure_kind!r}"
+                        f"backup待重试{spec.label}失败类别无效："
+                        f"{retry.failure_kind!r}"
                     )
                 last_attempt_text = retry.last_attempt_at.astimezone(
                     datetime.timezone.utc
@@ -574,7 +620,8 @@ class ArchiveStateRepository:
                 or retry.http_status > 599
             ):
                 raise ValueError(
-                    f"backup待重试图片HTTP状态无效：{retry.http_status!r}"
+                    f"backup待重试{spec.label}HTTP状态无效："
+                    f"{retry.http_status!r}"
                 )
             rows.append(
                 (
@@ -584,10 +631,10 @@ class ArchiveStateRepository:
                     retry.http_status,
                 )
             )
-        connection.execute("DELETE FROM backup_pending_images")
+        connection.execute(f"DELETE FROM {spec.table_name}")
         connection.executemany(
-            """
-            INSERT INTO backup_pending_images (
+            f"""
+            INSERT INTO {spec.table_name} (
                 url,
                 last_attempt_at,
                 failure_kind,
@@ -597,6 +644,19 @@ class ArchiveStateRepository:
             """,
             rows,
         )
+
+    @classmethod
+    def _replace_pending_images(
+        cls,
+        connection: sqlite3.Connection,
+        pending_image_retries: tuple[PendingMediaRetry, ...],
+    ) -> None:
+        cls._replace_pending_media_retries(
+            connection,
+            pending_image_retries,
+            _PENDING_IMAGE_RETRIES,
+        )
+
     @staticmethod
     def _replace_pending_missing_floors(
         connection: sqlite3.Connection,
@@ -639,71 +699,19 @@ class ArchiveStateRepository:
             """,
             rows,
         )
-    @staticmethod
+
+    @classmethod
     def _replace_pending_audio(
+        cls,
         connection: sqlite3.Connection,
-        pending_audio_retries: tuple[PendingAudioRetry, ...],
+        pending_audio_retries: tuple[PendingMediaRetry, ...],
     ) -> None:
-        rows: list[tuple[str, str | None, str | None, int | None]] = []
-        seen_urls: set[str] = set()
-        for retry in sorted(pending_audio_retries, key=lambda item: item.url):
-            if not retry.url:
-                raise ValueError("backup待重试音频URL不能为空。")
-            if retry.url in seen_urls:
-                raise ValueError(f"backup待重试音频URL重复：{retry.url}")
-            seen_urls.add(retry.url)
-            if retry.last_attempt_at is None:
-                if retry.failure_kind is not None or retry.http_status is not None:
-                    raise ValueError(
-                        f"backup待重试音频旧状态无效：{retry.url}"
-                    )
-                last_attempt_text = None
-            else:
-                if (
-                    retry.last_attempt_at.tzinfo is None
-                    or retry.last_attempt_at.utcoffset() is None
-                ):
-                    raise ValueError(
-                        f"backup待重试音频时间缺少时区：{retry.url}"
-                    )
-                if retry.failure_kind not in DOWNLOAD_FAILURE_KINDS:
-                    raise ValueError(
-                        "backup待重试音频失败类别无效："
-                        f"{retry.failure_kind!r}"
-                    )
-                last_attempt_text = retry.last_attempt_at.astimezone(
-                    datetime.timezone.utc
-                ).isoformat(timespec="microseconds")
-            if retry.http_status is not None and (
-                type(retry.http_status) is not int
-                or retry.http_status < 100
-                or retry.http_status > 599
-            ):
-                raise ValueError(
-                    "backup待重试音频HTTP状态无效："
-                    f"{retry.http_status!r}"
-                )
-            rows.append(
-                (
-                    retry.url,
-                    last_attempt_text,
-                    retry.failure_kind,
-                    retry.http_status,
-                )
-            )
-        connection.execute("DELETE FROM backup_pending_audio")
-        connection.executemany(
-            """
-            INSERT INTO backup_pending_audio (
-                url,
-                last_attempt_at,
-                failure_kind,
-                http_status
-            )
-            VALUES (?, ?, ?, ?)
-            """,
-            rows,
+        cls._replace_pending_media_retries(
+            connection,
+            pending_audio_retries,
+            _PENDING_AUDIO_RETRIES,
         )
+
     @staticmethod
     def _clear_image_reference_manifest(
         connection: sqlite3.Connection,
@@ -712,6 +720,7 @@ class ArchiveStateRepository:
         connection.execute("DELETE FROM backup_image_reference_manifest_posts")
         connection.execute("DELETE FROM backup_image_reference_manifest_urls")
         connection.execute("DELETE FROM backup_image_reference_manifest_state")
+
     @staticmethod
     def _validated_image_reference_manifest_posts(
         posts: tuple[ImageReferenceManifestPost, ...],
@@ -1106,7 +1115,7 @@ class ArchiveStateRepository:
                 self._clear_image_reference_manifest(connection)
     def replace_pending_image_retries(
         self,
-        pending_image_retries: tuple[PendingImageRetry, ...],
+        pending_image_retries: tuple[PendingMediaRetry, ...],
     ) -> None:
         """Replace rebuildable retry state without marking image processing current."""
         self.require_exists()
@@ -1225,7 +1234,7 @@ class ArchiveStateRepository:
     def commit_audio_processing_state(
         self,
         state: AudioProcessingState,
-        pending_audio_retries: tuple[PendingAudioRetry, ...],
+        pending_audio_retries: tuple[PendingMediaRetry, ...],
     ) -> bool:
         self.require_exists()
         if (
@@ -1320,7 +1329,7 @@ class ArchiveStateRepository:
     def commit_image_reference_state(
         self,
         state: ImageReferenceState,
-        pending_image_retries: tuple[PendingImageRetry, ...],
+        pending_image_retries: tuple[PendingMediaRetry, ...],
         *,
         manifest_posts: tuple[ImageReferenceManifestPost, ...] | None = None,
     ) -> bool:
@@ -1398,7 +1407,7 @@ class ArchiveStateRepository:
         self,
         expected_state: ImageReferenceState,
         state: ImageReferenceState,
-        pending_image_retries: tuple[PendingImageRetry, ...],
+        pending_image_retries: tuple[PendingMediaRetry, ...],
         manifest_posts: tuple[ImageReferenceManifestPost, ...],
     ) -> bool:
         self.require_exists()
@@ -1454,7 +1463,7 @@ class ArchiveStateRepository:
         self,
         expected_state: ImageReferenceState,
         state: ImageReferenceState,
-        pending_image_retries: tuple[PendingImageRetry, ...],
+        pending_image_retries: tuple[PendingMediaRetry, ...],
         changed_posts: tuple[ImageReferenceManifestPost, ...],
     ) -> bool:
         if not changed_posts:
@@ -1647,7 +1656,7 @@ class ArchiveStateRepository:
     def replace_pending_images_for_image_state(
         self,
         expected_state: ImageReferenceState,
-        pending_image_retries: tuple[PendingImageRetry, ...],
+        pending_image_retries: tuple[PendingMediaRetry, ...],
     ) -> bool:
         self.require_exists()
         if (
