@@ -5,6 +5,7 @@ import io
 import sqlite3
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from threading import Barrier, Event, Lock
 from types import SimpleNamespace
@@ -195,6 +196,62 @@ class ImageStoreTest:
 
             assert set(mappings) == {existing_url}
             assert pending_tasks == [{'url': missing_url}]
+
+    def test_batched_index_lookup_validates_each_input_url_once(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        image_path = output_dir / "images_unique/existing.png"
+        image_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+        )
+        image_url_with_comma = image_url.replace("552e", ",552e")
+        invalid_url = "https://example.com/not-nga.png"
+        store = image_index.ImageIndexStore(output_dir)
+        store.upsert_mapping(image_url, image_path)
+
+        with patch(
+            "nga_tools.backup.image_index.NGA_img_link_verify",
+            wraps=image_index.NGA_img_link_verify,
+        ) as verify:
+            mappings = store.mappings_for_urls(
+                [image_url_with_comma, image_url, invalid_url]
+            )
+
+        assert set(mappings) == {image_url}
+        assert verify.call_count == 3
+
+    def test_connection_lookup_keeps_url_validation_contract(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        image_path = output_dir / "images_unique/existing.png"
+        image_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+        )
+        image_url_with_comma = image_url.replace("552e", ",552e")
+        invalid_url = "https://example.com/not-nga.png"
+        store = image_index.ImageIndexStore(output_dir)
+        store.upsert_mapping(image_url, image_path)
+
+        with (
+            closing(store.open_readonly_connection()) as connection,
+            patch(
+                "nga_tools.backup.image_index.NGA_img_link_verify",
+                wraps=image_index.NGA_img_link_verify,
+            ) as verify,
+        ):
+            mappings = store.mappings_for_urls_in_connection(
+                connection,
+                [image_url_with_comma, invalid_url],
+            )
+
+        assert set(mappings) == {image_url}
+        assert verify.call_count == 2
 
     def test_image_index_readonly_queries_do_not_create_database(
         self,

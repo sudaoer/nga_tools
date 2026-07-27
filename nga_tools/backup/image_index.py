@@ -43,6 +43,18 @@ def normalize_nga_image_url(url: str) -> str:
     return url.replace(",", "")
 
 
+def _normalized_nga_image_urls(urls: Iterable[str]) -> list[str]:
+    return sorted(
+        {
+            normalized_url
+            for url in urls
+            if NGA_img_link_verify(
+                normalized_url := normalize_nga_image_url(url)
+            )
+        }
+    )
+
+
 @dataclass(frozen=True)
 class ImageMapping:
     output_root: Path
@@ -230,19 +242,11 @@ class ImageIndexStore:
         self,
         urls: Iterable[str],
     ) -> dict[str, ImageMapping]:
-        normalized_urls = sorted(
-            {
-                normalized_url
-                for url in urls
-                if NGA_img_link_verify(
-                    normalized_url := normalize_nga_image_url(url)
-                )
-            }
-        )
+        normalized_urls = _normalized_nga_image_urls(urls)
         if not normalized_urls or not self.db_path.is_file():
             return {}
         with closing(self.open_readonly_connection()) as connection:
-            return self.mappings_for_urls_in_connection(
+            return self._mappings_for_normalized_urls_in_connection(
                 connection,
                 normalized_urls,
             )
@@ -252,15 +256,16 @@ class ImageIndexStore:
         connection: sqlite3.Connection,
         urls: Iterable[str],
     ) -> dict[str, ImageMapping]:
-        normalized_urls = sorted(
-            {
-                normalized_url
-                for url in urls
-                if NGA_img_link_verify(
-                    normalized_url := normalize_nga_image_url(url)
-                )
-            }
+        return self._mappings_for_normalized_urls_in_connection(
+            connection,
+            _normalized_nga_image_urls(urls),
         )
+
+    def _mappings_for_normalized_urls_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        normalized_urls: list[str],
+    ) -> dict[str, ImageMapping]:
         mappings: dict[str, ImageMapping] = {}
         for chunk in iter_in_clause_chunks(normalized_urls):
             placeholders = ",".join("?" for _ in chunk)
