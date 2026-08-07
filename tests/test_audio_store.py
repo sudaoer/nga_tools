@@ -20,9 +20,14 @@ from nga_tools.core.nga_audio import (
 from nga_tools.storage import UnsupportedStorageFormatError
 
 
-def _audio_url(name: str, *, day: str = "15") -> str:
+def _audio_url(
+    name: str,
+    *,
+    day: str = "15",
+    host: str = "img.nga.178.com",
+) -> str:
     return (
-        "https://img.nga.178.com/attachments/"
+        f"https://{host}/attachments/"
         f"mon_202607/{day}/{name}.mp3"
     )
 
@@ -79,9 +84,11 @@ def test_audio_index_read_is_strict_and_ensure_repairs_missing_index(
 def test_extract_nga_audio_urls_normalizes_and_preserves_order() -> None:
     first = _audio_url("first")
     second = _audio_url("second")
+    current = _audio_url("current", host="img.nga.cn")
     content = (
         f'<audio controls src="{first}?raw=1&amp;from=post"></audio>'
         f"<AUDIO SRC='{second}'></AUDIO>"
+        f"<audio src='{current}'></audio>"
         '<audio src="https://example.com/not-nga.mp3"></audio>'
         '<audio src="javascript:alert(1)"></audio>'
     )
@@ -89,11 +96,15 @@ def test_extract_nga_audio_urls_normalizes_and_preserves_order() -> None:
     assert extract_nga_audio_urls(content) == (
         f"{first}?raw=1&from=post",
         second,
+        current,
     )
 
 
 def test_normalize_nga_audio_url_rejects_noncanonical_sources() -> None:
     assert normalize_nga_audio_url(_audio_url("valid")) == _audio_url("valid")
+    assert normalize_nga_audio_url(
+        _audio_url("current", host="img.nga.cn")
+    ) == _audio_url("current", host="img.nga.cn")
     assert normalize_nga_audio_url(_audio_url("valid") + "#fragment") is None
     assert normalize_nga_audio_url(
         "http://img.nga.178.com/attachments/mon_202607/15/insecure.mp3"
@@ -112,6 +123,7 @@ def test_download_audio_tasks_deduplicates_identical_content(
     output_root = tmp_path / "output"
     first_url = _audio_url("first")
     second_url = _audio_url("second")
+    current_url = _audio_url("first", host="img.nga.cn")
     content = _mp3_bytes()
     content_hash = hashlib.sha256(content).hexdigest()
 
@@ -120,6 +132,7 @@ def test_download_audio_tasks_deduplicates_identical_content(
         **kwargs: object,
     ) -> DownloadSummary:
         assert kwargs == {"resource_kind": "audio"}
+        assert {task["url"] for task in tasks} == {first_url, second_url}
         succeeded: list[DownloadFileResult] = []
         for task in tasks:
             path = Path(task["save_path"])
@@ -140,17 +153,17 @@ def test_download_audio_tasks_deduplicates_identical_content(
         side_effect=fake_download_files,
     ):
         summary = audio_store.download_audio_tasks(
-            [{"url": first_url}, {"url": second_url}],
+            [{"url": first_url}, {"url": second_url}, {"url": current_url}],
             output_root=output_root,
         )
 
-    assert len(summary["succeeded"]) == 2
+    assert len(summary["succeeded"]) == 3
     assert summary["failed"] == []
     mappings = audio_store.audio_mappings_for_urls(
         output_root,
-        [first_url, second_url],
+        [first_url, second_url, current_url],
     )
-    assert set(mappings) == {first_url, second_url}
+    assert set(mappings) == {first_url, second_url, current_url}
     assert {mapping.unique_rel_path for mapping in mappings.values()} == {
         f"audio_unique/{content_hash}.mp3"
     }
@@ -164,6 +177,40 @@ def test_download_audio_tasks_deduplicates_identical_content(
             "SELECT role FROM storage_metadata WHERE singleton = 1"
         ).fetchone()
     assert role == ("audio_index",)
+
+
+def test_audio_mapping_lookup_falls_back_to_other_domain_alias(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    legacy_url = _audio_url("alias")
+    current_url = _audio_url("alias", host="img.nga.cn")
+    source_path = tmp_path / "source.mp3"
+    content = _mp3_bytes()
+    source_path.write_bytes(content)
+    result: DownloadFileResult = {
+        "url": legacy_url,
+        "save_path": str(source_path),
+        "success": True,
+        "content_sha256": hashlib.sha256(content).hexdigest(),
+        "content_bytes": len(content),
+    }
+    stored = audio_store.store_downloaded_audio(
+        source_path,
+        legacy_url,
+        result,
+        output_root=output_root,
+    )
+    audio_store._upsert_audio_mappings(output_root, [stored.mapping])
+
+    mappings = audio_store.audio_mappings_for_urls(
+        output_root,
+        [current_url],
+    )
+    assert set(mappings) == {current_url}
+    assert mappings[current_url].path(output_root) == stored.mapping.path(
+        output_root
+    )
 
 
 def test_download_audio_tasks_rejects_invalid_payload(tmp_path: Path) -> None:

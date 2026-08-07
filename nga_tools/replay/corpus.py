@@ -24,6 +24,7 @@ from nga_tools.backup.image_index import (
     require_current_image_index,
 )
 from nga_tools.core.hashing import hash_text, sha256
+from nga_tools.core.nga_attachment import attachment_url_alias
 from nga_tools.core.nga_audio import normalize_nga_audio_url
 from nga_tools.core.sqlite import configure_readonly_connection
 from nga_tools.replay.file_state import (
@@ -264,7 +265,12 @@ class ReplayCorpus:
         return original_thread.page(page_number)
 
     def image(self, url: str) -> ImageReplayEntry | None:
-        entry = self.images_by_url.get(_normalize_image_url(url))
+        normalized_url = _normalize_image_url(url)
+        entry = self.images_by_url.get(normalized_url)
+        if entry is None:
+            alias_url = attachment_url_alias(normalized_url)
+            if alias_url is not None:
+                entry = self.images_by_url.get(alias_url)
         if entry is None or not entry.is_current():
             return None
         return entry
@@ -274,6 +280,10 @@ class ReplayCorpus:
         if normalized_url is None:
             return None
         entry = self.audio_by_url.get(normalized_url)
+        if entry is None:
+            alias_url = attachment_url_alias(normalized_url)
+            if alias_url is not None:
+                entry = self.audio_by_url.get(alias_url)
         if entry is None or not entry.is_current():
             return None
         return entry

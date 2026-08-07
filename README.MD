@@ -358,7 +358,7 @@ state/cache 文件如需重置，先在程序外备份并删除对应文件，�
 手动下载一张完整NGA图片URL并写入全局图片索引：
 
 ```powershell
-pixi run python main.py image add --url https://img.nga.178.com/attachments/mon_202506/06/example.png
+pixi run python main.py image add --url https://img.nga.cn/attachments/mon_202506/06/example.png
 ```
 
 已有有效映射时该命令不会重复下载；缺失或损坏时会下载到

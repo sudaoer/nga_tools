@@ -19,6 +19,7 @@ from nga_tools.backup.image_store_metrics import (
     time_image_store_phase,
 )
 from nga_tools.core.image_formats import image_file_is_valid
+from nga_tools.core.nga_attachment import attachment_url_alias
 from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.core.sqlite import (
     SQLITE_BUSY_TIMEOUT_SECONDS,
@@ -221,6 +222,16 @@ class ImageIndexStore:
                 "SELECT unique_rel_path FROM image_mappings WHERE url = ?",
                 (normalized_url,),
             ).fetchone()
+            if row is None:
+                alias_url = attachment_url_alias(normalized_url)
+                if alias_url is not None:
+                    row = connection.execute(
+                        (
+                            "SELECT unique_rel_path FROM image_mappings"
+                            " WHERE url = ?"
+                        ),
+                        (alias_url,),
+                    ).fetchone()
         if row is None or not isinstance(row[0], str):
             return None
         return self._mapping(normalized_url, row[0])
@@ -267,6 +278,7 @@ class ImageIndexStore:
         normalized_urls: list[str],
     ) -> dict[str, ImageMapping]:
         mappings: dict[str, ImageMapping] = {}
+        found_urls: set[str] = set()
         for chunk in iter_in_clause_chunks(normalized_urls):
             placeholders = ",".join("?" for _ in chunk)
             rows = connection.execute(
@@ -280,6 +292,40 @@ class ImageIndexStore:
             for url, unique_rel_path in rows:
                 if isinstance(url, str) and isinstance(unique_rel_path, str):
                     mappings[url] = self._mapping(url, unique_rel_path)
+                    found_urls.add(url)
+
+        alias_by_url: dict[str, str] = {}
+        alias_urls: set[str] = set()
+        for url in normalized_urls:
+            if url in found_urls:
+                continue
+            alias_url = attachment_url_alias(url)
+            if alias_url is not None:
+                alias_by_url[url] = alias_url
+                alias_urls.add(alias_url)
+        if alias_urls:
+            for chunk in iter_in_clause_chunks(sorted(alias_urls)):
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"""
+                    SELECT url, unique_rel_path
+                    FROM image_mappings
+                    WHERE url IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                row_by_url = {
+                    url: unique_rel_path
+                    for url, unique_rel_path in rows
+                    if isinstance(url, str) and isinstance(unique_rel_path, str)
+                }
+                for requested_url, alias_url in alias_by_url.items():
+                    unique_rel_path = row_by_url.get(alias_url)
+                    if unique_rel_path is not None:
+                        mappings[requested_url] = self._mapping(
+                            requested_url,
+                            unique_rel_path,
+                        )
         return mappings
 
     def iter_mapping_rows(

@@ -32,6 +32,7 @@ from nga_tools.core.download_types import (
     DownloadTask,
 )
 from nga_tools.core.hashing import sha256
+from nga_tools.core.nga_attachment import attachment_url_identity
 from nga_tools.core.nga_images import NGA_img_link_verify
 from nga_tools.core.image_formats import (
     image_file_is_valid,
@@ -621,9 +622,11 @@ def store_existing_image(image_path: Path, url: str) -> StoredImageResult:
 def _claim_image_url(
     url: str,
 ) -> tuple[_ImageClaimKey, _ImageURLClaim, bool]:
+    normalized_url = normalize_nga_image_url(url)
+    identity = attachment_url_identity(normalized_url) or normalized_url
     claim_key = (
         str(output_dir().resolve()),
-        normalize_nga_image_url(url),
+        identity,
     )
     with _IMAGE_URL_CLAIMS_LOCK:
         existing = _IMAGE_URL_CLAIMS.get(claim_key)

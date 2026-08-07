@@ -6,6 +6,8 @@ from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit
 
+from nga_tools.core.nga_attachment import is_nga_attachment_host
+
 _NGA_AUDIO_PATH_RE = re.compile(
     r"^/attachments/(mon_(\d{4})(\d{2}))/(\d{2})/"
     r"([A-Za-z0-9][A-Za-z0-9_-]*\.mp3)$",
@@ -18,7 +20,7 @@ def normalize_nga_audio_url(value: str) -> str | None:
     parsed = urlsplit(raw_url)
     if (
         parsed.scheme.lower() != "https"
-        or parsed.netloc.lower() != "img.nga.178.com"
+        or not is_nga_attachment_host(parsed.netloc)
         or parsed.fragment
     ):
         return None
@@ -37,7 +39,7 @@ def normalize_nga_audio_url(value: str) -> str | None:
     return urlunsplit(
         (
             "https",
-            "img.nga.178.com",
+            parsed.netloc.lower(),
             parsed.path,
             parsed.query,
             "",

@@ -503,7 +503,7 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
             "examples": [
                 (
                     f"{PROGRAM_USAGE} image add --url "
-                    "https://img.nga.178.com/attachments/mon_202506/06/example.png"
+                    "https://img.nga.cn/attachments/mon_202506/06/example.png"
                 ),
             ],
             "notes": [

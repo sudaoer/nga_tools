@@ -33,8 +33,10 @@ class NgaImageLinkVerifyTest:
         "url",
         [
             "https://img.nga.178.com/attachments/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png",
+            "https://img.nga.cn/attachments/mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png",
             "https://img.nga.178.com/attachments/mon_202506/06/lsQ2w-aygqK1nT3cSl9-sg.jpg.thumb.jpg",
             "https://img.nga.178.com/attachments/mon_202506/06/lsQ2w-8fvtK7ToS5w-5y.jpg.thumb_s.jpg",
+            "https://img.nga.cn/attachments/mon_202506/06/lsQ2w-8fvtK7ToS5w-5y.jpg.thumb_s.jpg",
             "https://img.nga.178.com/attachments/mon_202506/06/lsQ2t-bodqK8T8S3m-3m.jpg.thumb_ss.jpg",
             "https://img.nga.178.com/attachments/mon_202506/06/lsQ1a8-90mbZaT3cSsg-g0.jpg.medium.jpg",
             "https://img.nga.178.com/attachments/mon_202506/06/lsQ2w-8o79K8ToS5k-5k.webp",
@@ -157,6 +159,99 @@ class ImageStoreTest:
             assert unique_path.parent.samefile(output_dir / 'images_unique')
             assert mapping is not None
             assert mapping.unique_rel_path == f'images_unique/{unique_path.name}'
+
+    def test_store_existing_image_keeps_distinct_url_keys_across_domains(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+            source_image = Path(temp_dir_name) / "legacy.png"
+            Image.new("RGB", (1, 1), color="white").save(source_image)
+            legacy_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+            )
+            current_url = (
+                "https://img.nga.cn/attachments/"
+                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+            )
+
+            with patch(
+                "nga_tools.config.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                first = image_store.store_existing_image(
+                    source_image,
+                    legacy_url,
+                )
+                second = image_store.store_existing_image(
+                    source_image,
+                    current_url,
+                )
+                mappings = image_index.ImageIndexStore(
+                    output_dir
+                ).mappings_by_url()
+
+            assert first["unique_path"] == second["unique_path"]
+            assert set(mappings) == {legacy_url, current_url}
+            assert mappings[legacy_url].unique_rel_path == (
+                mappings[current_url].unique_rel_path
+            )
+
+    def test_mappings_for_urls_falls_back_to_other_domain_alias(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_dir = tmp_path / "output"
+        image_path = output_dir / "images_unique/existing.png"
+        legacy_url = (
+            "https://img.nga.178.com/attachments/"
+            "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+        )
+        current_url = (
+            "https://img.nga.cn/attachments/"
+            "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+        )
+        store = image_index.ImageIndexStore(output_dir)
+        store.upsert_mapping(legacy_url, image_path)
+
+        assert store.mapping_for_url(current_url).unique_path == image_path
+        mappings = store.mappings_for_urls([current_url, legacy_url])
+        assert set(mappings) == {current_url, legacy_url}
+        assert mappings[current_url].unique_path == image_path
+
+    def test_image_url_claims_share_identity_across_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            output_dir = Path(temp_dir_name) / "output"
+            legacy_url = (
+                "https://img.nga.178.com/attachments/"
+                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+            )
+            current_url = (
+                "https://img.nga.cn/attachments/"
+                "mon_202506/06/lsQkle-552eXuT3cS10p-7f7.png"
+            )
+
+            with patch(
+                "nga_tools.config.get_config",
+                return_value=SimpleNamespace(output_dir=str(output_dir)),
+            ):
+                first_key, first_claim, first_owner = (
+                    image_store._claim_image_url(legacy_url)
+                )
+                second_key, second_claim, second_owner = (
+                    image_store._claim_image_url(current_url)
+                )
+                try:
+                    assert first_key == second_key
+                    assert first_owner
+                    assert not second_owner
+                    assert second_claim is first_claim
+                finally:
+                    image_store._release_image_url_claim(
+                        first_key,
+                        first_claim,
+                    )
 
     def test_pending_image_download_tasks_uses_batched_index_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:

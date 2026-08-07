@@ -6,13 +6,17 @@ import sqlite3
 import tempfile
 import threading
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, TypedDict
 
 from tinytag import TinyTag, TinyTagException
 
 from nga_tools.core import downloads
+from nga_tools.core.nga_attachment import (
+    attachment_url_alias,
+    attachment_url_identity,
+)
 from nga_tools.core.download_types import (
     DownloadFileResult,
     DownloadProgressCallback,
@@ -279,6 +283,7 @@ def audio_mappings_for_urls(
         return {}
 
     mappings: dict[str, AudioMapping] = {}
+    found_urls: set[str] = set()
     try:
         with closing(_open_readonly_connection(db_path)) as connection:
             for chunk in iter_in_clause_chunks(normalized_urls):
@@ -306,6 +311,51 @@ def audio_mappings_for_urls(
                     ):
                         continue
                     mappings[mapping.url] = mapping
+                    found_urls.add(mapping.url)
+
+            alias_by_url: dict[str, str] = {}
+            alias_urls: set[str] = set()
+            for url in normalized_urls:
+                if url in found_urls:
+                    continue
+                alias_url = attachment_url_alias(url)
+                if alias_url is not None:
+                    alias_by_url[url] = alias_url
+                    alias_urls.add(alias_url)
+            if alias_urls:
+                for chunk in iter_in_clause_chunks(sorted(alias_urls)):
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = connection.execute(
+                        f"""
+                        SELECT
+                            url,
+                            unique_rel_path,
+                            content_sha256,
+                            content_bytes,
+                            duration_seconds
+                        FROM audio_mappings
+                        WHERE url IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                    alias_mapping_by_url: dict[str, AudioMapping] = {}
+                    for raw_row in rows:
+                        mapping = _row_to_mapping(tuple(raw_row))
+                        if mapping is None:
+                            continue
+                        if require_existing_file and not _mapping_path_is_valid(
+                            output_root,
+                            mapping,
+                        ):
+                            continue
+                        alias_mapping_by_url[mapping.url] = mapping
+                    for requested_url, alias_url in alias_by_url.items():
+                        alias_mapping = alias_mapping_by_url.get(alias_url)
+                        if alias_mapping is not None:
+                            mappings[requested_url] = replace(
+                                alias_mapping,
+                                url=requested_url,
+                            )
     except sqlite3.Error:
         return {}
     return mappings
@@ -481,7 +531,8 @@ def _claim_audio_url(
     output_root: Path,
     url: str,
 ) -> tuple[tuple[str, str], _AudioURLClaim, bool]:
-    key = (str(output_root.resolve()), url)
+    identity = attachment_url_identity(url) or url
+    key = (str(output_root.resolve()), identity)
     with _AUDIO_CLAIMS_LOCK:
         existing = _AUDIO_CLAIMS.get(key)
         if existing is not None:

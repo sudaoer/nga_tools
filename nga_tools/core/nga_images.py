@@ -4,6 +4,8 @@ import datetime
 import re
 from urllib.parse import urlsplit
 
+from nga_tools.core.nga_attachment import is_nga_attachment_host
+
 _NGA_IMAGE_FILENAME_RE = re.compile(
     r"^[A-Za-z0-9-][A-Za-z0-9_-]*"
     r"\.(?:jpg|jpeg|png|gif|webp|avif|heic|heif|jxl)"
@@ -17,7 +19,9 @@ _NGA_IMAGE_PATH_RE = re.compile(
 
 def NGA_img_link_verify(url: str) -> bool:
     parsed_url = urlsplit(url)
-    if parsed_url.scheme != "https" or parsed_url.netloc != "img.nga.178.com":
+    if parsed_url.scheme != "https" or not is_nga_attachment_host(
+        parsed_url.netloc
+    ):
         return False
     if parsed_url.fragment:
         return False
