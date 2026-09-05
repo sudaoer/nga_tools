@@ -10,9 +10,19 @@ NGA_ATTACHMENT_HOSTS: frozenset[str] = frozenset(
     }
 )
 
+NGA_LEGACY_ATTACHMENT_HOSTS: frozenset[str] = frozenset(
+    {
+        "img.nga.178.com",
+    }
+)
+
 
 def is_nga_attachment_host(netloc: str) -> bool:
     return netloc.lower() in NGA_ATTACHMENT_HOSTS
+
+
+def is_nga_legacy_attachment_host(netloc: str) -> bool:
+    return netloc.lower() in NGA_LEGACY_ATTACHMENT_HOSTS
 
 
 def attachment_url_alias(url: str) -> str | None:

@@ -12,6 +12,7 @@ from hashlib import sha256
 from pathlib import Path
 from time import perf_counter
 from typing import TypeVar
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -25,6 +26,10 @@ from nga_tools.core.download_types import (
     DownloadSummary,
     DownloadTask,
 )
+from nga_tools.core.nga_attachment import (
+    attachment_url_alias,
+    is_nga_legacy_attachment_host,
+)
 from nga_tools.replay.offline import (
     ReplayOfflineError,
     audio_request_url,
@@ -32,6 +37,42 @@ from nga_tools.replay.offline import (
     current_replay_network_policy,
     image_request_url,
 )
+
+
+_ATTACHMENT_FALLBACK_PROBE_TIMEOUT_SECONDS = 10.0
+
+
+def _download_request_urls(
+    logical_url: str,
+    *,
+    explicit_request_url: str | None,
+    resource_kind: DownloadResourceKind,
+) -> tuple[str, ...]:
+    if explicit_request_url is not None:
+        return (explicit_request_url,)
+    if current_replay_network_policy() is not None:
+        if resource_kind == "image":
+            return (image_request_url(logical_url),)
+        return (audio_request_url(logical_url),)
+    alias_url = attachment_url_alias(logical_url)
+    if alias_url is None:
+        return (logical_url,)
+    return (logical_url, alias_url)
+
+
+def _attachment_probe_timeout(
+    request_url: str,
+    *,
+    has_fallback: bool,
+) -> aiohttp.ClientTimeout | None:
+    if not has_fallback:
+        return None
+    host = urlsplit(request_url).hostname
+    if host is None or not is_nga_legacy_attachment_host(host):
+        return None
+    return aiohttp.ClientTimeout(
+        total=_ATTACHMENT_FALLBACK_PROBE_TIMEOUT_SECONDS
+    )
 
 
 @dataclass(frozen=True)
@@ -176,7 +217,7 @@ class DownloadRuntime:
         if capacity <= 0:
             raise ValueError("文件下载运行时并发数必须大于0。")
         self.capacity = capacity
-        self.resource_kind = resource_kind
+        self.resource_kind: DownloadResourceKind = resource_kind
         self.resource_label = "音频" if resource_kind == "audio" else "图片"
         self._state_lock = threading.RLock()
         self._ready = threading.Event()
@@ -626,15 +667,42 @@ class DownloadRuntime:
         retry_statuses: tuple[int, ...],
     ) -> DownloadFileResult | _AttemptFailure:
         logical_url = item["url"]
-        request_url = item.get("request_url")
-        if request_url is None:
-            if current_replay_network_policy() is None:
-                request_url = logical_url
-            elif self.resource_kind == "image":
-                request_url = image_request_url(logical_url)
-            else:
-                request_url = audio_request_url(logical_url)
+        request_urls = _download_request_urls(
+            logical_url,
+            explicit_request_url=item.get("request_url"),
+            resource_kind=self.resource_kind,
+        )
         target_path = Path(item["save_path"])
+        last_failure: _AttemptFailure | None = None
+        for request_url in request_urls:
+            attempt = await self._download_single_url(
+                session,
+                logical_url,
+                request_url,
+                target_path,
+                retry_statuses,
+                timeout=_attachment_probe_timeout(
+                    request_url,
+                    has_fallback=len(request_urls) > 1,
+                ),
+            )
+            if not isinstance(attempt, _AttemptFailure):
+                return attempt
+            last_failure = attempt
+        if last_failure is None:
+            raise RuntimeError(f"{self.resource_label}下载尝试未产生结果。")
+        return last_failure
+
+    async def _download_single_url(
+        self,
+        session: aiohttp.ClientSession,
+        logical_url: str,
+        request_url: str,
+        target_path: Path,
+        retry_statuses: tuple[int, ...],
+        *,
+        timeout: aiohttp.ClientTimeout | None,
+    ) -> DownloadFileResult | _AttemptFailure:
         temp_path: Path | None = None
         request_to_headers_seconds = 0.0
         response_body_read_seconds = 0.0
@@ -649,11 +717,18 @@ class DownloadRuntime:
         try:
             assert_replay_request_allowed(request_url)
             replay_mode = current_replay_network_policy() is not None
-            response_context = (
-                session.get(request_url, allow_redirects=False)
-                if replay_mode
-                else session.get(request_url)
-            )
+            if replay_mode:
+                response_context = session.get(
+                    request_url,
+                    allow_redirects=False,
+                )
+            elif timeout is not None:
+                response_context = session.get(
+                    request_url,
+                    timeout=timeout,
+                )
+            else:
+                response_context = session.get(request_url)
             request_started_at = perf_counter()
             request_started = True
             with self._state_lock:
