@@ -409,6 +409,23 @@ class BackupWarningLogTest:
 
         assert timing_path.read_text(encoding="utf-8") == "旧耗时\n"
 
+    def test_single_thread_backup_propagates_nga_page_error(
+        self,
+        backup_command_environment: _BackupCommandEnvironment,
+    ) -> None:
+        expected = NGAPageError(44, "此帖子被锁定")
+        with (
+            patch(
+                "nga_tools.commands.backup.backup_thread_sub",
+                side_effect=expected,
+            ),
+            backup_command_environment(),
+        ):
+            with pytest.raises(NGAPageError) as context:
+                backup_sub({})
+
+        assert context.value is expected
+
     def test_backup_sub_batch_writes_per_thread_warning_and_timing_logs(
         self,
         tmp_path: Path,
@@ -604,7 +621,7 @@ class BackupBatchHandlerTest:
 
     @pytest.mark.parametrize(
         "status_message",
-        ["帖子被设为隐藏", "帖子被删除", "帖子正等待审核"],
+        ["帖子被设为隐藏", "帖子被删除", "帖子正等待审核", "此帖子被锁定"],
     )
     def test_abnormal_thread_statuses_do_not_make_batch_exit_nonzero(
         self,
@@ -631,7 +648,14 @@ class BackupBatchHandlerTest:
         assert "状态异常1个，失败0个" in output_text
         assert status_message in output_text
 
-    def test_hidden_thread_does_not_mask_other_batch_failure(self) -> None:
+    @pytest.mark.parametrize(
+        "status_message",
+        ["帖子被设为隐藏", "此帖子被锁定"],
+    )
+    def test_status_thread_does_not_mask_other_batch_failure(
+        self,
+        status_message: str,
+    ) -> None:
         thread_configs = [
             _thread_config(name="hidden", tid=101, aid=201),
             _thread_config(name="broken", tid=102, aid=202),
@@ -645,7 +669,7 @@ class BackupBatchHandlerTest:
         ) -> None:
             del aid, write_json
             if tid == 101:
-                raise NGAPageError(None, "帖子被设为隐藏")
+                raise NGAPageError(None, status_message)
             raise RuntimeError("boom")
 
         with (

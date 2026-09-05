@@ -203,7 +203,7 @@ class NGAClientForumThreadPageTest:
 class NGAClientPageErrorTest:
     @pytest.mark.parametrize(
         "message",
-        ["帖子被设为隐藏", "帖子被删除", "帖子正等待审核"],
+        ["帖子被设为隐藏", "帖子被删除", "帖子正等待审核", "此帖子被锁定"],
     )
     def test_abnormal_thread_status_error_matches_ignored_messages(
         self,

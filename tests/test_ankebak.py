@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 from rich.console import Console
@@ -20,7 +20,7 @@ from nga_tools.forum.ankebak_state import (
     ankebak_target_key,
 )
 from nga_tools.forum.thread_configs import ThreadConfig
-from nga_tools.ngaclient.client import ForumThread
+from nga_tools.ngaclient.client import ForumThread, NGAPageError
 from nga_tools.storage import UnsupportedStorageFormatError
 
 
@@ -424,3 +424,88 @@ def test_backup_auto_isolates_planning_failure_and_omits_success_detail(
     assert "本地检查失败1个" in output_text
     assert "本地维护完成：" not in output_text
     assert "批量ankebak完成：成功1个，失败1个。" in output_text
+
+
+def test_backup_auto_keeps_locked_thread_watermark_and_completes_others(
+    tmp_path: Path,
+) -> None:
+    store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")
+    completed_at = datetime.fromisoformat(
+        (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(
+            timespec="milliseconds"
+        )
+    )
+    locked_config = _thread_config(tid=101, aid=201)
+    good_config = _thread_config(tid=102, aid=202)
+    for tid, aid in ((101, 201), (102, 202)):
+        store.record_success(
+            tid=tid,
+            aid=aid,
+            forum_thread=_forum_thread(tid=tid, aid=aid),
+            completed_at=completed_at,
+            full_backup=True,
+        )
+
+    app_config = SimpleNamespace(
+        api_concurrency=4,
+        image_concurrency=16,
+        audio_concurrency=8,
+        backup_configs_workers=1,
+        timing_log_enabled=False,
+        timing_log_retention_days=7,
+        ankebak_full_backup_interval_hours=168,
+    )
+    forum_result = DefaultForumSyncResult((), 0, 0, 0, 0, 0)
+
+    def maintain_side_effect(
+        tid: int,
+        aid: int | None,
+        *,
+        schedule_missing_floor_retries: bool,
+    ) -> None:
+        assert schedule_missing_floor_retries is True
+        if tid == 101:
+            raise NGAPageError(44, "此帖子被锁定")
+        assert (tid, aid) == (102, 202)
+
+    with (
+        patch(
+            "nga_tools.commands.ankebak.configure_network_limits_from_args",
+            return_value=app_config,
+        ),
+        patch(
+            "nga_tools.commands.ankebak.sync_default_forum_watch",
+            return_value=forum_result,
+        ),
+        patch("nga_tools.commands.ankebak.NGAThreadConfigs") as configs_cls,
+        patch(
+            "nga_tools.commands.ankebak.AnkebakStateStore",
+            return_value=store,
+        ),
+        patch(
+            "nga_tools.commands.ankebak.backup_local_work_kind",
+            return_value="maintenance",
+        ),
+        patch(
+            "nga_tools.commands.ankebak.maintain_thread_backup",
+            side_effect=maintain_side_effect,
+        ) as maintain,
+        _captured_reporter() as output,
+    ):
+        configs_cls.return_value.get_thread_configs.return_value = [
+            locked_config,
+            good_config,
+        ]
+        backup_auto({"workers": 1})
+
+    maintain.assert_has_calls(
+        [
+            call(101, 201, schedule_missing_floor_retries=True),
+            call(102, 202, schedule_missing_floor_retries=True),
+        ]
+    )
+    states = store.load_states()
+    assert states[ankebak_target_key(101, 201)].last_backup_success_at == completed_at
+    assert states[ankebak_target_key(102, 202)].last_backup_success_at > completed_at
+    output_text = output.getvalue()
+    assert "批量ankebak完成：成功1个，状态异常1个，失败0个。" in output_text

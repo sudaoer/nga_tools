@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -16,6 +17,10 @@ import pytest
 from PIL import Image
 
 from nga_tools.backup import image_index, image_store
+from nga_tools.backup.image_retry import (
+    pending_image_retries_after_attempt,
+    select_image_retries,
+)
 from nga_tools.backup.image_index_writer import (
     image_index_writer_metrics,
     use_image_index_writer,
@@ -78,10 +83,19 @@ class _FakeChunkedContent:
 class _FakeResponse:
     status = 200
 
-    def __init__(self, payload: bytes) -> None:
+    def __init__(
+        self,
+        payload: bytes,
+        *,
+        status: int = 200,
+        url: str = "https://example.com/image.png",
+    ) -> None:
+        self.status = status
         self.content_length = len(payload)
         self.headers: dict[str, str] = {}
         self.content = _FakeChunkedContent(payload)
+        self.request_info = SimpleNamespace(real_url=url)
+        self.history: tuple[object, ...] = ()
 
     async def __aenter__(self) -> "_FakeResponse":
         return self
@@ -102,6 +116,20 @@ class _RaisingContext:
 
 
 type _FakeSessionResponse = _RaisingContext | _FakeResponse
+type _FallbackOutcome = BaseException | int | str
+
+
+def _dns_failure() -> aiohttp.ClientConnectorDNSError:
+    return aiohttp.ClientConnectorDNSError(
+        SimpleNamespace(host="img.nga.cn", port=443, ssl=True),
+        OSError("DNS failure"),
+    )
+
+
+class _PayloadFailureResponse(_FakeResponse):
+    def __init__(self, *, url: str) -> None:
+        super().__init__(b"payload", url=url)
+        self.content_length += 1
 
 
 class _FallbackSession:
@@ -111,14 +139,25 @@ class _FallbackSession:
         fail_host: str | None = "img.nga.178.com",
         error: BaseException | None = None,
         fail_all: bool = False,
+        outcomes: dict[str, _FallbackOutcome] | None = None,
     ) -> None:
         self.fail_host = fail_host
         self.error = error
         self.fail_all = fail_all
+        self.outcomes = outcomes or {}
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     def get(self, url: str, **kwargs: object) -> _FakeSessionResponse:
         self.calls.append((url, kwargs))
+        outcome = self.outcomes.get(urlsplit(url).hostname or "")
+        if outcome is not None:
+            if isinstance(outcome, BaseException):
+                return _RaisingContext(outcome)
+            if outcome == "payload":
+                return _PayloadFailureResponse(url=url)
+            if isinstance(outcome, int):
+                return _FakeResponse(b"", status=outcome, url=url)
+            raise AssertionError(f"unknown fallback outcome: {outcome!r}")
         if (
             self.error is not None
             and (
@@ -130,7 +169,7 @@ class _FallbackSession:
             )
         ):
             return _RaisingContext(self.error)
-        return _FakeResponse(b"payload")
+        return _FakeResponse(b"payload", url=url)
 
 
 class ImageDownloadRuntimeTest:
@@ -257,6 +296,28 @@ class ImageDownloadRuntimeTest:
             urlsplit(call_url).hostname for call_url, _kwargs in session.calls
         ] == ["img.nga.178.com", "img.nga.cn"]
 
+    def test_primary_missing_attachment_falls_back_to_alias(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        task = _download_task("fallback-404-alias", tmp_path)
+        task["url"] = _image_url("fallback-404-alias")
+        session = _FallbackSession(
+            outcomes={"img.nga.178.com": 404},
+        )
+        runtime = DownloadRuntime(1)
+        try:
+            result = asyncio.run(runtime._download_attempt(session, task, ()))
+        finally:
+            runtime.close()
+
+        assert not isinstance(result, _AttemptFailure)
+        assert result["success"] is True
+        assert Path(task["save_path"]).read_bytes() == b"payload"
+        assert [
+            urlsplit(call_url).hostname for call_url, _kwargs in session.calls
+        ] == ["img.nga.178.com", "img.nga.cn"]
+
     def test_new_domain_failure_falls_back_to_legacy(
         self,
         tmp_path: Path,
@@ -284,15 +345,19 @@ class ImageDownloadRuntimeTest:
             urlsplit(call_url).hostname for call_url, _kwargs in session.calls
         ] == ["img.nga.cn", "img.nga.178.com"]
 
-    def test_both_hosts_failing_returns_last_failure(
+    def test_both_hosts_failing_returns_first_same_rank_failure(
         self,
         tmp_path: Path,
     ) -> None:
         task = _download_task("fallback-both", tmp_path)
         task["url"] = _image_url("fallback-both")
+        first_error = asyncio.TimeoutError("legacy first")
+        alias_error = aiohttp.ClientConnectionError("new second")
         session = _FallbackSession(
-            error=aiohttp.ServerDisconnectedError(),
-            fail_all=True,
+            outcomes={
+                "img.nga.178.com": first_error,
+                "img.nga.cn": alias_error,
+            },
         )
         runtime = DownloadRuntime(1)
         try:
@@ -303,11 +368,275 @@ class ImageDownloadRuntimeTest:
             runtime.close()
 
         assert isinstance(result, _AttemptFailure)
-        assert result.failure_kind == "connection"
+        assert result.failure_kind == "timeout"
+        assert str(result.error).startswith(
+            "All download URLs failed: "
+            "https://img.nga.178.com/attachments/mon_202607/13/fallback-both.png "
+            "(timeout): legacy first; "
+            "https://img.nga.cn/attachments/mon_202607/13/fallback-both.png "
+            "(connection): new second"
+        )
         assert [
             urlsplit(call_url).hostname for call_url, _kwargs in session.calls
         ] == ["img.nga.178.com", "img.nga.cn"]
         assert not Path(task["save_path"]).exists()
+
+    @pytest.mark.parametrize(
+        "logical_host",
+        ["img.nga.178.com", "img.nga.cn"],
+    )
+    @pytest.mark.parametrize(
+        ("primary_outcome", "alias_outcome", "expected_kind", "expected_status"),
+        [
+            (
+                404,
+                _dns_failure(),
+                "http_4xx",
+                404,
+            ),
+            (
+                _dns_failure(),
+                404,
+                "http_4xx",
+                404,
+            ),
+        ],
+    )
+    def test_missing_attachment_beats_unreachable_alias(
+        self,
+        tmp_path: Path,
+        logical_host: str,
+        primary_outcome: _FallbackOutcome,
+        alias_outcome: _FallbackOutcome,
+        expected_kind: str,
+        expected_status: int,
+    ) -> None:
+        task = _download_task("fallback-404-network", tmp_path)
+        task["url"] = (
+            f"https://{logical_host}/attachments/"
+            "mon_202607/13/fallback-404-network.png"
+        )
+        alias_host = (
+            "img.nga.cn"
+            if logical_host == "img.nga.178.com"
+            else "img.nga.178.com"
+        )
+        session = _FallbackSession(
+            outcomes={
+                logical_host: primary_outcome,
+                alias_host: alias_outcome,
+            },
+        )
+        runtime = DownloadRuntime(1)
+        try:
+            result = asyncio.run(runtime._download_attempt(session, task, (429, 503)))
+        finally:
+            runtime.close()
+
+        assert isinstance(result, _AttemptFailure)
+        assert result.failure_kind == expected_kind
+        assert result.http_status == expected_status
+        assert result.retryable is False
+        assert "img.nga.178.com" in str(result.error)
+        assert "img.nga.cn" in str(result.error)
+        assert "HTTP 404" in str(result.error)
+        assert [
+            urlsplit(call_url).hostname for call_url, _kwargs in session.calls
+        ] == [logical_host, alias_host]
+
+    def test_503_is_not_retryable_when_retry_statuses_are_empty(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        task = _download_task("fallback-503-default", tmp_path)
+        task["url"] = _image_url("fallback-503-default")
+        session = _FallbackSession(
+            outcomes={
+                "img.nga.178.com": 503,
+                "img.nga.cn": 404,
+            },
+        )
+        runtime = DownloadRuntime(1)
+        try:
+            result = asyncio.run(runtime._download_attempt(session, task, ()))
+        finally:
+            runtime.close()
+
+        assert isinstance(result, _AttemptFailure)
+        assert result.failure_kind == "http_5xx"
+        assert result.http_status == 503
+        assert result.retryable is False
+
+    @pytest.mark.parametrize("temporary_status", [429, 503])
+    @pytest.mark.parametrize("temporary_is_primary", [True, False])
+    def test_retryable_http_failure_beats_missing_attachment(
+        self,
+        tmp_path: Path,
+        temporary_status: int,
+        temporary_is_primary: bool,
+    ) -> None:
+        task = _download_task("fallback-temporary", tmp_path)
+        task["url"] = _image_url("fallback-temporary")
+        primary_outcome: _FallbackOutcome = (
+            temporary_status if temporary_is_primary else 404
+        )
+        alias_outcome: _FallbackOutcome = (
+            404 if temporary_is_primary else temporary_status
+        )
+        session = _FallbackSession(
+            outcomes={
+                "img.nga.178.com": primary_outcome,
+                "img.nga.cn": alias_outcome,
+            },
+        )
+        runtime = DownloadRuntime(1)
+        try:
+            result = asyncio.run(
+                runtime._download_attempt(session, task, (429, 503))
+            )
+        finally:
+            runtime.close()
+
+        assert isinstance(result, _AttemptFailure)
+        assert result.http_status == temporary_status
+        assert result.failure_kind == (
+            "http_4xx" if temporary_status < 500 else "http_5xx"
+        )
+        assert result.retryable is True
+        assert "HTTP 404" in str(result.error)
+        assert f"HTTP {temporary_status}" in str(result.error)
+
+    def test_payload_failure_beats_non_retryable_http_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        task = _download_task("fallback-payload", tmp_path)
+        task["url"] = _image_url("fallback-payload")
+        session = _FallbackSession(
+            outcomes={
+                "img.nga.178.com": "payload",
+                "img.nga.cn": 404,
+            },
+        )
+        runtime = DownloadRuntime(1)
+        try:
+            result = asyncio.run(runtime._download_attempt(session, task, ()))
+        finally:
+            runtime.close()
+
+        assert isinstance(result, _AttemptFailure)
+        assert result.failure_kind == "payload"
+        assert result.http_status is None
+        assert result.retryable is True
+        assert "payload" in str(result.error)
+        assert "HTTP 404" in str(result.error)
+
+    def test_retryable_http_failure_beats_payload_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        task = _download_task("fallback-http-payload", tmp_path)
+        task["url"] = _image_url("fallback-http-payload")
+        session = _FallbackSession(
+            outcomes={
+                "img.nga.178.com": "payload",
+                "img.nga.cn": 503,
+            },
+        )
+        runtime = DownloadRuntime(1)
+        try:
+            result = asyncio.run(
+                runtime._download_attempt(session, task, (503,))
+            )
+        finally:
+            runtime.close()
+
+        assert isinstance(result, _AttemptFailure)
+        assert result.failure_kind == "http_5xx"
+        assert result.http_status == 503
+        assert result.retryable is True
+        assert "payload" in str(result.error)
+        assert "HTTP 503" in str(result.error)
+
+    @pytest.mark.parametrize(
+        ("case", "expected_calls", "expected_retry_count"),
+        [("missing", 2, 0), ("network", 4, 1)],
+    )
+    def test_worker_fallback_failure_controls_retry_count(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        case: str,
+        expected_calls: int,
+        expected_retry_count: int,
+    ) -> None:
+        if case == "missing":
+            outcomes: dict[str, _FallbackOutcome] = {
+                "img.nga.178.com": 404,
+                "img.nga.cn": _dns_failure(),
+            }
+        else:
+            outcomes = {
+                "img.nga.178.com": aiohttp.ClientConnectionError("legacy"),
+                "img.nga.cn": aiohttp.ClientConnectionError("new"),
+            }
+        session = _FallbackSession(outcomes=outcomes)
+
+        class SessionContext:
+            async def __aenter__(self) -> _FallbackSession:
+                return session
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        def fake_client_session(**_kwargs: object) -> SessionContext:
+            return SessionContext()
+
+        monkeypatch.setattr(
+            "nga_tools.core.image_download_runtime.aiohttp.ClientSession",
+            fake_client_session,
+        )
+        task = _download_task(f"worker-{case}", tmp_path)
+        task["url"] = _image_url(f"worker-{case}")
+        runtime = DownloadRuntime(1)
+        try:
+            summary = runtime.download(
+                [task],
+                retries=1,
+                backoff_factor=0,
+                retry_statuses=(429, 503),
+                batch_limit=1,
+                on_progress=None,
+            )
+            metrics = runtime.snapshot()
+        finally:
+            runtime.close()
+
+        assert len(summary["failed"]) == 1
+        assert len(session.calls) == expected_calls
+        assert metrics.retry_count == expected_retry_count
+        if case == "missing":
+            attempted_at = datetime(2026, 9, 5, tzinfo=timezone.utc)
+            pending = pending_image_retries_after_attempt(
+                (),
+                summary["failed"],
+                attempted_at=attempted_at,
+            )
+            assert pending[0].failure_kind == "http_4xx"
+            assert pending[0].http_status == 404
+            with patch(
+                "nga_tools.backup.image_retry.shared_media_retry_ticket",
+                return_value=0.99,
+            ):
+                selection = select_image_retries(
+                    pending,
+                    thread_target_key="123:456",
+                    now=attempted_at + timedelta(hours=1),
+                    max_interval=timedelta(hours=168),
+                    force=False,
+                )
+            assert selection.due == ()
+            assert selection.deferred == pending
 
     def test_primary_success_skips_alias(
         self,
@@ -361,9 +690,10 @@ class ImageDownloadRuntimeTest:
         task["url"] = _image_url("fallback-explicit")
         explicit_url = "https://example.com/proxy.png"
         task["request_url"] = explicit_url
+        explicit_error = aiohttp.ServerDisconnectedError("explicit")
         session = _FallbackSession(
             fail_host="example.com",
-            error=aiohttp.ServerDisconnectedError(),
+            error=explicit_error,
         )
         runtime = DownloadRuntime(1)
         try:
@@ -375,6 +705,7 @@ class ImageDownloadRuntimeTest:
 
         assert isinstance(result, _AttemptFailure)
         assert result.failure_kind == "connection"
+        assert result.error is explicit_error
         assert [call_url for call_url, _kwargs in session.calls] == [
             explicit_url,
         ]

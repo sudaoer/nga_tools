@@ -7,7 +7,7 @@ import traceback
 from collections import deque
 from collections.abc import Coroutine, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from time import perf_counter
@@ -168,6 +168,42 @@ class _AttemptFailure:
     failure_kind: DownloadFailureKind
     http_status: int | None
     retryable: bool
+
+
+def _attempt_failure_priority(failure: _AttemptFailure) -> int:
+    # Preserve explicit transient responses before considering a missing alias.
+    if failure.http_status is not None and failure.retryable:
+        return 0
+    if failure.failure_kind == "payload":
+        return 1
+    # A responding host gives better evidence than an unreachable alias.
+    if failure.http_status is not None:
+        return 2
+    return 3
+
+
+def _combine_attempt_failures(
+    failures: list[tuple[str, _AttemptFailure]],
+) -> _AttemptFailure:
+    selected = min(
+        (failure for _, failure in failures),
+        key=_attempt_failure_priority,
+    )
+    if len(failures) == 1:
+        return selected
+
+    details: list[str] = []
+    for request_url, failure in failures:
+        status = (
+            "" if failure.http_status is None else f", HTTP {failure.http_status}"
+        )
+        details.append(
+            f"{request_url} ({failure.failure_kind}{status}): {failure.error}"
+        )
+    return replace(
+        selected,
+        error=RuntimeError("All download URLs failed: " + "; ".join(details)),
+    )
 
 
 @dataclass
@@ -673,7 +709,7 @@ class DownloadRuntime:
             resource_kind=self.resource_kind,
         )
         target_path = Path(item["save_path"])
-        last_failure: _AttemptFailure | None = None
+        failures: list[tuple[str, _AttemptFailure]] = []
         for request_url in request_urls:
             attempt = await self._download_single_url(
                 session,
@@ -688,10 +724,10 @@ class DownloadRuntime:
             )
             if not isinstance(attempt, _AttemptFailure):
                 return attempt
-            last_failure = attempt
-        if last_failure is None:
+            failures.append((request_url, attempt))
+        if not failures:
             raise RuntimeError(f"{self.resource_label}下载尝试未产生结果。")
-        return last_failure
+        return _combine_attempt_failures(failures)
 
     async def _download_single_url(
         self,
