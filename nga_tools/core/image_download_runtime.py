@@ -54,6 +54,8 @@ def _download_request_urls(
         if resource_kind == "image":
             return (image_request_url(logical_url),)
         return (audio_request_url(logical_url),)
+    if not is_nga_legacy_attachment_host(urlsplit(logical_url).netloc):
+        return (logical_url,)
     alias_url = attachment_url_alias(logical_url)
     if alias_url is None:
         return (logical_url,)
