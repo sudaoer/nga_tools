@@ -2,7 +2,7 @@ from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any, Optional, TypeAlias, TypedDict, cast
+from typing import Any, Literal, Optional, TypeAlias, TypedDict, cast, overload
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -91,12 +91,14 @@ class NGAPageError(Exception):
 HIDDEN_THREAD_MESSAGE = "帖子被设为隐藏"
 DELETED_THREAD_MESSAGE = "帖子被删除"
 PENDING_MODERATION_THREAD_MESSAGE = "帖子正等待审核"
+REJECTED_MODERATION_THREAD_MESSAGE = "帖子审核未通过"
 LOCKED_THREAD_MESSAGE = "此帖子被锁定"
 THREAD_STATUS_ABNORMAL_MESSAGES = frozenset(
     {
         HIDDEN_THREAD_MESSAGE,
         DELETED_THREAD_MESSAGE,
         PENDING_MODERATION_THREAD_MESSAGE,
+        REJECTED_MODERATION_THREAD_MESSAGE,
         LOCKED_THREAD_MESSAGE,
     }
 )
@@ -322,11 +324,29 @@ class NGAClient:
         self.page_cache[cache_key] = page_data
         return page_data
 
+    @overload
     def get_page_batch(
         self,
         page_requests: Sequence[PageRequest],
-    ) -> list[PageData]:
-        """Fetch independent page requests concurrently and preserve input order."""
+        *,
+        allow_thread_status_errors: Literal[False] = False,
+    ) -> list[PageData]: ...
+
+    @overload
+    def get_page_batch(
+        self,
+        page_requests: Sequence[PageRequest],
+        *,
+        allow_thread_status_errors: Literal[True],
+    ) -> list[PageData | NGAPageError]: ...
+
+    def get_page_batch(
+        self,
+        page_requests: Sequence[PageRequest],
+        *,
+        allow_thread_status_errors: bool = False,
+    ) -> Sequence[PageData | NGAPageError]:
+        """并发抓取并保留请求顺序；可将帖子状态异常作为对应位置的结果返回。"""
         ordered_requests = list(page_requests)
         if not ordered_requests:
             return []
@@ -344,44 +364,47 @@ class NGAClient:
                 )
 
         missing_requests = list(missing_requests_by_key.values())
-        fetched_pages: dict[str, PageData] = {}
+        fetched_pages: dict[str, PageData | NGAPageError] = {}
+
+        def fetch_page_with_session(
+            session: requests.Session,
+            page_request: PageRequest,
+        ) -> PageData | NGAPageError:
+            tid, aid, page = page_request
+            try:
+                return self._request_page_with_session(session, tid, aid, page)
+            except NGAPageError as error:
+                if (
+                    allow_thread_status_errors
+                    and is_thread_status_abnormal_error(error)
+                ):
+                    return error
+                raise
+
         worker_count = min(get_api_concurrency(), len(missing_requests))
         if worker_count <= 1 or not self._parallel_page_fetch_enabled:
             for tid, aid, page in missing_requests:
                 fetched_pages[self.page_cache_key(tid, aid, page)] = (
-                    self._request_page(tid, aid, page)
+                    fetch_page_with_session(self.session, (tid, aid, page))
                 )
         elif (runtime := current_api_runtime()) is not None:
-            def fetch_runtime_page(
-                session: requests.Session,
-                page_request: PageRequest,
-            ) -> PageData:
-                tid, aid, page = page_request
-                return self._request_page_with_session(
-                    session,
-                    tid,
-                    aid,
-                    page,
-                )
-
             for page_request, page_data in runtime.map_ordered(
                 missing_requests,
-                fetch_runtime_page,
+                fetch_page_with_session,
             ):
                 tid, aid, page = page_request
                 fetched_pages[self.page_cache_key(tid, aid, page)] = page_data
         else:
             session_pool = ThreadLocalAPISessionPool()
 
-            def fetch_page(page_request: PageRequest) -> PageData:
-                tid, aid, page = page_request
-                worker_client = NGAClient(session=session_pool.session())
-                worker_client.base_url = self.base_url
-                return worker_client._request_page(tid, aid, page)
+            def fetch_page(page_request: PageRequest) -> PageData | NGAPageError:
+                return fetch_page_with_session(session_pool.session(), page_request)
 
             with session_pool:
                 with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                    future_requests: dict[Future[PageData], PageRequest] = {
+                    future_requests: dict[
+                        Future[PageData | NGAPageError], PageRequest
+                    ] = {
                         executor.submit(fetch_page, page_request): page_request
                         for page_request in missing_requests
                     }
@@ -396,9 +419,15 @@ class NGAClient:
                             future.cancel()
                         raise
 
-        self.page_cache.update(fetched_pages)
+        self.page_cache.update(
+            (key, page_data)
+            for key, page_data in fetched_pages.items()
+            if not isinstance(page_data, NGAPageError)
+        )
         return [
-            self.page_cache[self.page_cache_key(tid, aid, page)]
+            fetched_pages[self.page_cache_key(tid, aid, page)]
+            if self.page_cache_key(tid, aid, page) in fetched_pages
+            else self.page_cache[self.page_cache_key(tid, aid, page)]
             for tid, aid, page in ordered_requests
         ]
 

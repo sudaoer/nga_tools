@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from threading import Barrier, Event, Lock
 
 import pytest
@@ -203,7 +204,13 @@ class NGAClientForumThreadPageTest:
 class NGAClientPageErrorTest:
     @pytest.mark.parametrize(
         "message",
-        ["帖子被设为隐藏", "帖子被删除", "帖子正等待审核", "此帖子被锁定"],
+        [
+            "帖子被设为隐藏",
+            "帖子被删除",
+            "帖子正等待审核",
+            "帖子审核未通过",
+            "此帖子被锁定",
+        ],
     )
     def test_abnormal_thread_status_error_matches_ignored_messages(
         self,
@@ -214,6 +221,9 @@ class NGAClientPageErrorTest:
     def test_abnormal_thread_status_error_rejects_other_errors(self) -> None:
         assert not is_thread_status_abnormal_error(
             NGAPageError(None, "找不到内容 或 没有更多页了")
+        )
+        assert not is_thread_status_abnormal_error(
+            NGAPageError(2048, "刷新过快 请等候数秒再行访问")
         )
         assert not is_thread_status_abnormal_error(RuntimeError("boom"))
 
@@ -335,6 +345,127 @@ class NGAClientPidRedirectTest:
 
 
 class NGAClientPageBatchTest:
+    @pytest.mark.parametrize("execution_mode", ["serial", "thread_pool", "runtime"])
+    def test_independent_batch_isolates_thread_status_errors_and_caches_successes(
+        self,
+        execution_mode: str,
+    ) -> None:
+        concurrency = 1 if execution_mode == "serial" else 2
+        configure_network_limits(api_concurrency=concurrency, image_concurrency=1)
+        tracker = _ConcurrentRequestTracker(expected_overlap=concurrency)
+        error = NGAPageError(2048, "帖子审核未通过")
+
+        def post(
+            _url: str,
+            *,
+            data: dict[str, str],
+            timeout: int,
+        ) -> _SuccessfulPageResponse:
+            del timeout
+            tid = int(data["tid"])
+            tracker.enter(tid)
+            try:
+                if tid == 102:
+                    raise error
+                return _SuccessfulPageResponse(int(data["page"]))
+            finally:
+                tracker.exit()
+
+        session = MagicMock(spec=requests.Session)
+        session.post.side_effect = post
+        page_requests = [(101, 456, 3), (102, 789, 1), (103, None, 2), (102, 789, 1)]
+        with (
+            patch("nga_tools.ngaclient.client.create_api_session", return_value=session),
+            patch("nga_tools.ngaclient.session.create_api_session", return_value=session),
+            patch(
+                "nga_tools.ngaclient.api_runtime.create_api_session",
+                return_value=session,
+            ),
+            use_api_runtime(concurrency)
+            if execution_mode == "runtime"
+            else nullcontext(),
+        ):
+            client = NGAClient()
+            results = client.get_page_batch(
+                page_requests,
+                allow_thread_status_errors=True,
+            )
+
+            assert len(results) == 4
+            assert results[0] == _SuccessfulPageResponse(3).json()
+            assert results[1] is error
+            assert results[2] == _SuccessfulPageResponse(2).json()
+            assert results[3] is error
+            assert tracker.max_active == concurrency
+            assert sorted(tracker.pages) == [101, 102, 103]
+            assert set(client.page_cache) == {
+                client.page_cache_key(101, 456, 3),
+                client.page_cache_key(103, None, 2),
+            }
+
+            cached_results = client.get_page_batch(
+                page_requests,
+                allow_thread_status_errors=True,
+            )
+
+        assert cached_results == results
+        assert sorted(tracker.pages) == [101, 102, 102, 103]
+
+    @pytest.mark.parametrize("execution_mode", ["serial", "thread_pool", "runtime"])
+    @pytest.mark.parametrize(
+        ("allow_thread_status_errors", "message"),
+        [
+            (False, "帖子审核未通过"),
+            (True, "刷新过快 请等候数秒再行访问"),
+        ],
+    )
+    def test_independent_batch_propagates_unhandled_page_errors_without_partial_cache(
+        self,
+        execution_mode: str,
+        allow_thread_status_errors: bool,
+        message: str,
+    ) -> None:
+        concurrency = 1 if execution_mode == "serial" else 2
+        configure_network_limits(api_concurrency=concurrency, image_concurrency=1)
+        error = NGAPageError(2048, message)
+
+        def post(
+            _url: str,
+            *,
+            data: dict[str, str],
+            timeout: int,
+        ) -> _SuccessfulPageResponse:
+            del timeout
+            if data["tid"] == "102":
+                raise error
+            return _SuccessfulPageResponse(int(data["page"]))
+
+        session = MagicMock(spec=requests.Session)
+        session.post.side_effect = post
+        with (
+            patch("nga_tools.ngaclient.client.create_api_session", return_value=session),
+            patch("nga_tools.ngaclient.session.create_api_session", return_value=session),
+            patch(
+                "nga_tools.ngaclient.api_runtime.create_api_session",
+                return_value=session,
+            ),
+            use_api_runtime(concurrency)
+            if execution_mode == "runtime"
+            else nullcontext(),
+        ):
+            client = NGAClient()
+            with pytest.raises(NGAPageError) as context:
+                if allow_thread_status_errors:
+                    client.get_page_batch(
+                        [(101, 456, 1), (102, 789, 1)],
+                        allow_thread_status_errors=True,
+                    )
+                else:
+                    client.get_page_batch([(101, 456, 1), (102, 789, 1)])
+
+        assert context.value is error
+        assert client.page_cache == {}
+
     def test_fetches_independent_requests_concurrently_and_preserves_order(
         self,
     ) -> None:

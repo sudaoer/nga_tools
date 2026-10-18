@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional, TypeAlias, TypedDict, cast
 
-from nga_tools.ngaclient import NGAClient
+from nga_tools.console import WarningCategory, report_warning
+from nga_tools.ngaclient import (
+    NGAClient,
+    NGAPageError,
+    is_thread_status_abnormal_error,
+)
 from nga_tools.ngaclient.client import ForumThread, PageData
 from nga_tools.forum.thread_configs import (
     ThreadConfig,
@@ -336,18 +341,36 @@ def collect_matching_threads_from_thread_source(
                 for position in pending_candidate_positions
             ]
             if timing_collector is None:
-                page_data_list = client.get_page_batch(page_requests)
+                page_data_list = client.get_page_batch(
+                    page_requests,
+                    allow_thread_status_errors=True,
+                )
             else:
                 for _page_request in page_requests:
                     timing_collector.record_author_page_request()
                 with timing_collector.measure("author_page_request"):
-                    page_data_list = client.get_page_batch(page_requests)
+                    page_data_list = client.get_page_batch(
+                        page_requests,
+                        allow_thread_status_errors=True,
+                    )
             for position, page_data in zip(
                 pending_candidate_positions,
                 page_data_list,
                 strict=True,
             ):
                 candidate = candidates[position]
+                if isinstance(page_data, NGAPageError):
+                    if not is_thread_status_abnormal_error(page_data):
+                        raise page_data
+                    thread = candidate.match.thread
+                    report_warning(
+                        WarningCategory.POST_CONTENT,
+                        "作者楼层筛查跳过状态异常帖子："
+                        f"tid={thread['tid']}, aid={thread['authorid']}："
+                        f"{page_data.message}",
+                    )
+                    author_check_passed[position] = False
+                    continue
                 author_check_passed[position] = (
                     _author_lou_count_from_page_data(
                         candidate.match.thread,

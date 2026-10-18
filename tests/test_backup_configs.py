@@ -621,7 +621,13 @@ class BackupBatchHandlerTest:
 
     @pytest.mark.parametrize(
         "status_message",
-        ["帖子被设为隐藏", "帖子被删除", "帖子正等待审核", "此帖子被锁定"],
+        [
+            "帖子被设为隐藏",
+            "帖子被删除",
+            "帖子正等待审核",
+            "帖子审核未通过",
+            "此帖子被锁定",
+        ],
     )
     def test_abnormal_thread_statuses_do_not_make_batch_exit_nonzero(
         self,
@@ -650,7 +656,7 @@ class BackupBatchHandlerTest:
 
     @pytest.mark.parametrize(
         "status_message",
-        ["帖子被设为隐藏", "此帖子被锁定"],
+        ["帖子被设为隐藏", "帖子审核未通过", "此帖子被锁定"],
     )
     def test_status_thread_does_not_mask_other_batch_failure(
         self,

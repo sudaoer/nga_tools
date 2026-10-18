@@ -9,7 +9,9 @@ from collections.abc import Iterable, Sequence
 from contextlib import closing
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import requests
 
 from nga_tools.cli import args_parse
 from nga_tools.commands.forum import handle_forum_sync, sync_default_forum_watch
@@ -36,7 +38,13 @@ from nga_tools.forum.watch import (
     sync_matches_to_thread_list,
     thread_matches_watch,
 )
-from nga_tools.ngaclient.client import ForumThread, ForumThreadPage, NGAForumPageError
+from nga_tools.ngaclient.client import (
+    ForumThread,
+    ForumThreadPage,
+    NGAClient,
+    NGAForumPageError,
+    NGAPageError,
+)
 from nga_tools.forum.thread_configs import ThreadConfig
 from nga_tools.forum.timing import ForumSyncTimingCollector
 
@@ -150,6 +158,8 @@ class _FakeForumClient:
     def get_page_batch(
         self,
         page_requests: Sequence[tuple[int, int | None, int]],
+        *,
+        allow_thread_status_errors: bool = False,
     ) -> list[dict[str, object]]:
         requests = list(page_requests)
         self.page_batches.append(requests)
@@ -571,6 +581,76 @@ class ForumWatchMatchTest:
 
 
 class ForumWatchCollectTest:
+    @pytest.mark.parametrize("with_timing", [False, True])
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "帖子审核未通过",
+            "帖子被设为隐藏",
+            "帖子被删除",
+            "帖子正等待审核",
+            "此帖子被锁定",
+        ],
+    )
+    def test_collect_skips_abnormal_candidates_and_keeps_existing_threads(
+        self,
+        with_timing: bool,
+        message: str,
+    ) -> None:
+        client = NGAClient(session=MagicMock(spec=requests.Session))
+        existing: list[ThreadConfig] = [
+            {"thread_name": "existing", "tid": 103, "aid": 456}
+        ]
+        timing = ForumSyncTimingCollector() if with_timing else None
+
+        with (
+            patch.object(
+                client,
+                "_request_page_with_session",
+                side_effect=[NGAPageError(2048, message), {"vrows": 20}],
+            ) as fetch,
+            patch("nga_tools.forum.watch.report_warning") as warning,
+        ):
+            scanned, matches = collect_matching_threads_from_thread_source(
+                client,
+                [_watch(keywords=["安价"])],
+                lambda _config: [_thread(tid=tid) for tid in (101, 102, 103)],
+                existing_thread_list=existing,
+                timing_collector=timing,
+            )
+
+        assert scanned == 3
+        assert [match.thread["tid"] for match in matches] == [102, 103]
+        assert fetch.call_count == 2
+        warning.assert_called_once()
+        assert "tid=101, aid=456" in warning.call_args.args[1]
+        assert message in warning.call_args.args[1]
+        assert existing == [{"thread_name": "existing", "tid": 103, "aid": 456}]
+        if timing is not None:
+            assert timing.snapshot().author_page_request_count == 2
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            NGAPageError(2048, "刷新过快 请等候数秒再行访问"),
+            NGAPageError(35, "找不到内容 或 没有更多页了"),
+            requests.ConnectionError("连接失败"),
+        ],
+    )
+    def test_collect_propagates_other_author_page_errors(
+        self,
+        error: Exception,
+    ) -> None:
+        client = NGAClient(session=MagicMock(spec=requests.Session))
+        with patch.object(client, "_request_page_with_session", side_effect=error):
+            with pytest.raises(type(error)) as caught:
+                collect_matching_threads_from_thread_source(
+                    client,
+                    [_watch(keywords=["安价"])],
+                    lambda _config: [_thread()],
+                )
+        assert caught.value is error
+
     def test_collect_reports_database_progress(self) -> None:
         watch = _watch(keywords=["安价"], pages=2)
         client = _FakeForumClient({})

@@ -1,25 +1,31 @@
 from __future__ import annotations
 
 import io
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
 import pytest
+import requests
 from rich.console import Console
 
+from nga_tools import config as config_module
+from nga_tools.backup.archive_store import ThreadArchiveStore
 from nga_tools.commands.ankebak import _jobs_for_threads, backup_auto
 from nga_tools.commands.forum import DefaultForumSyncResult
+from nga_tools.config import use_config_override
 from nga_tools.console import ConsoleReporter, use_reporter
 from nga_tools.forum.ankebak_state import (
     AnkebakStateStore,
     ankebak_target_key,
 )
-from nga_tools.forum.thread_configs import ThreadConfig
+from nga_tools.forum.thread_configs import NGAThreadConfigs, ThreadConfig
 from nga_tools.ngaclient.client import ForumThread, NGAPageError
 from nga_tools.storage import UnsupportedStorageFormatError
 
@@ -426,8 +432,138 @@ def test_backup_auto_isolates_planning_failure_and_omits_success_detail(
     assert "批量ankebak完成：成功1个，失败1个。" in output_text
 
 
-def test_backup_auto_keeps_locked_thread_watermark_and_completes_others(
+def test_backup_auto_completes_backups_after_author_screening_status_error(
     tmp_path: Path,
+) -> None:
+    app_config = replace(
+        config_module.load_config(),
+        output_dir=str(tmp_path / "output"),
+        thread_config_file=str(tmp_path / "thread_configs.json"),
+        api_concurrency=2,
+        image_concurrency=1,
+        audio_concurrency=1,
+        timing_log_enabled=False,
+    )
+    existing_config = {
+        **_thread_config(tid=103, aid=203),
+        "description": "保留已有配置",
+    }
+    Path(app_config.thread_config_file).write_text(
+        json.dumps({"ThreadList": [existing_config]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    watch_path = tmp_path / "forum_watch_configs.json"
+    watch_path.write_text(
+        json.dumps(
+            {
+                "ForumWatchList": [
+                    {
+                        "watch_name": "测试版面",
+                        "fid": 784,
+                        "pages": 1,
+                        "min_replies": 1,
+                        "min_author_lous": 1,
+                        "keywords": ["测试帖"],
+                        "name_template": "thread-{tid}",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    page_requests: list[tuple[int, int]] = []
+
+    def request(
+        _session: requests.Session,
+        method: str,
+        url: str,
+        **kwargs: object,
+    ) -> requests.Response:
+        assert method == "POST"
+        data = kwargs["data"]
+        assert isinstance(data, dict)
+        if "__lib=subject" in url:
+            payload: dict[str, object] = {
+                "code": 0,
+                "fid": 784,
+                "forumname": "测试版面",
+                "currentPage": 1,
+                "totalPage": 1,
+                "perPage": 2,
+                "total": 2,
+                "result": {
+                    "data": [
+                        _forum_thread(tid=101, aid=201),
+                        _forum_thread(tid=102, aid=202),
+                    ]
+                },
+            }
+        else:
+            assert "__lib=post" in url
+            tid, aid = int(data["tid"]), int(data["authorid"])
+            page_requests.append((tid, aid))
+            if tid == 101:
+                payload = {"code": 2048, "msg": "帖子审核未通过"}
+            else:
+                assert (tid, aid) in {(102, 202), (103, 203)}
+                payload = {
+                    "code": 0,
+                    "currentPage": 1,
+                    "totalPage": 1,
+                    "vrows": 1,
+                    "result": [
+                        {
+                            "lou": 1,
+                            "pid": tid * 10 + 1,
+                            "authorid": aid,
+                            "postdate": 1000,
+                            "content": "正常备份正文",
+                        }
+                    ],
+                }
+        response = requests.Response()
+        response.status_code = 200
+        response.encoding = "utf-8"
+        response._content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        return response
+
+    with (
+        use_config_override(app_config),
+        patch("requests.sessions.Session.request", autospec=True, side_effect=request),
+        _captured_reporter() as output,
+    ):
+        backup_auto({"watch_config": str(watch_path), "workers": 1})
+
+        configs = NGAThreadConfigs().get_thread_configs()
+        assert {config["tid"] for config in configs} == {102, 103}
+        assert next(config for config in configs if config["tid"] == 103) == existing_config
+        states = AnkebakStateStore().load_states()
+        assert set(states) == {
+            ankebak_target_key(102, 202),
+            ankebak_target_key(103, 203),
+        }
+        for tid, aid in ((102, 202), (103, 203)):
+            archive = ThreadArchiveStore(Path(app_config.output_dir) / f"{tid}_{aid}")
+            records = archive.posts.read_latest_post_records()
+            assert len(records) == 1
+            post = records[0]["post"]
+            assert post is not None
+            assert post["content"] == "正常备份正文"
+
+    assert sorted(page_requests) == [(101, 201), (102, 202), (102, 202), (103, 203)]
+    assert "帖子审核未通过" in output.getvalue()
+    assert "批量ankebak完成：成功2个，失败0个。" in output.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("error_code", "status_message"),
+    [(44, "此帖子被锁定"), (2048, "帖子审核未通过")],
+)
+def test_backup_auto_keeps_abnormal_thread_watermark_and_completes_others(
+    tmp_path: Path,
+    error_code: int,
+    status_message: str,
 ) -> None:
     store = AnkebakStateStore(tmp_path / "forum_threads.sqlite3")
     completed_at = datetime.fromisoformat(
@@ -435,7 +571,7 @@ def test_backup_auto_keeps_locked_thread_watermark_and_completes_others(
             timespec="milliseconds"
         )
     )
-    locked_config = _thread_config(tid=101, aid=201)
+    abnormal_config = _thread_config(tid=101, aid=201)
     good_config = _thread_config(tid=102, aid=202)
     for tid, aid in ((101, 201), (102, 202)):
         store.record_success(
@@ -465,7 +601,7 @@ def test_backup_auto_keeps_locked_thread_watermark_and_completes_others(
     ) -> None:
         assert schedule_missing_floor_retries is True
         if tid == 101:
-            raise NGAPageError(44, "此帖子被锁定")
+            raise NGAPageError(error_code, status_message)
         assert (tid, aid) == (102, 202)
 
     with (
@@ -493,7 +629,7 @@ def test_backup_auto_keeps_locked_thread_watermark_and_completes_others(
         _captured_reporter() as output,
     ):
         configs_cls.return_value.get_thread_configs.return_value = [
-            locked_config,
+            abnormal_config,
             good_config,
         ]
         backup_auto({"workers": 1})
