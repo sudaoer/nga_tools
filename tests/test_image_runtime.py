@@ -46,7 +46,6 @@ from nga_tools.core.download_types import (
     DownloadResourceKind,
     DownloadTask,
 )
-from nga_tools.replay.offline import use_replay_network_policy
 
 
 def _download_task(name: str, tmp_path: Path) -> DownloadTask:
@@ -719,29 +718,6 @@ class ImageDownloadRuntimeTest:
         assert [call_url for call_url, _kwargs in session.calls] == [
             explicit_url,
         ]
-
-    def test_replay_policy_never_uses_external_alias(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        task = _download_task("fallback-replay", tmp_path)
-        task["url"] = _image_url("fallback-replay")
-        session = _FallbackSession()
-        runtime = DownloadRuntime(1)
-        try:
-            with use_replay_network_policy("http://127.0.0.1:8765"):
-                result = asyncio.run(
-                    runtime._download_attempt(session, task, ())
-                )
-        finally:
-            runtime.close()
-
-        assert not isinstance(result, _AttemptFailure)
-        assert result["success"] is True
-        assert len(session.calls) == 1
-        assert session.calls[0][0].startswith(
-            "http://127.0.0.1:8765/__replay__/image?"
-        )
 
     def test_result_delivery_and_callback_metrics_return_to_zero(
         self,

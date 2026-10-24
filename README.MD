@@ -145,7 +145,7 @@ pixi run python main.py backup sub --name 帖子名
 
 正文来源实际变化后才会重建图片引用集合，并复用 `archive_cache.sqlite3` 中的帖子级图片引用派生缓存，只重新解析新增或正文、overlay、手动版本选择发生变化的楼层。下载失败的图片待重试队列保存在 `archive_state.sqlite3`：新 URL、HTTP 429、5xx、网络、payload 和本地存储失败会在下一次相关备份继续尝试；已知 HTTP 3xx 和除 429 外的 4xx 会根据距上次尝试的时间概率重试。累计触发概率为 `x^3`（`x` 是已等待时间占最大间隔的比例），同一 URL 在一个重试周期内使用稳定票据，不会因为频繁运行而反复抽签；达到 `backup_image_retry_max_interval_hours` 后必定重试。音频失败使用同样的稳定概率规则，并以 `backup_audio_retry_max_interval_hours` 为最长间隔。概率延后的 URL 不会单独触发 `backup auto` 本地维护，新 URL 始终立即尝试，不再被正文引用的图片 URL 会移出图片队列；音频队列覆盖所有历史正文版本，因此历史引用仍会保留。状态复用不会重新校验已成功的历史图片，本地文件后续被删除或损坏时请运行 `image verify` 检测。
 
-NGA 附件下载会在原 URL 失败后尝试备用域名；两者均失败时，错误详情保留各 URL 的失败原因。最终分类优先采用允许即时重试的 HTTP 错误，其次是响应内容传输失败（`payload`），再其次是其他 HTTP 错误，最后才是连接或超时错误；同级采用先请求的结果。因此旧域名的 DNS 错误不会覆盖新域名的 404，缺失图片仍会进入上述概率退避。显式指定请求 URL 或使用离线重放时不尝试备用域名。
+NGA 附件下载会在原 URL 失败后尝试备用域名；两者均失败时，错误详情保留各 URL 的失败原因。最终分类优先采用允许即时重试的 HTTP 错误，其次是响应内容传输失败（`payload`），再其次是其他 HTTP 错误，最后才是连接或超时错误；同级采用先请求的结果。因此旧域名的 DNS 错误不会覆盖新域名的 404，缺失图片仍会进入上述概率退避。显式指定请求 URL 时不尝试备用域名。
 
 只看作者备份还会重试恢复缺失楼内容；恢复出的匿名正文会提升归档修订并使图片集合按需更新。ankebak 会把连续缺失楼组成一个缺口，并用缺口后第一个有效楼的发帖时间估算缺失时间；尾部缺口没有下一个有效楼时按当前时间处理。默认 7 天内的缺口每次运行都重试；更旧的缺口使用稳定的 `x^3` 累计概率，并随缺失楼年龄把最长等待逐步增加到 30 天。同一帖的所有缺口共享一张稳定票据，不会因缺口数量或频繁运行增加抽中概率；达到当前最长间隔后必定重试。首次出现或旧状态没有重试记录的缺失楼会立即尝试一次，逐楼重试时间保存在该帖 `archive_state.sqlite3` 的 `backup_pending_missing_floors` 表中。概率延后的缺口不会额外请求原帖页面，但本轮因其他工作已经取得的页面仍可顺带恢复它们。手工 `backup all/sub` 始终立即重试全部缺失楼，不应用 ankebak 延后策略。
 
@@ -196,101 +196,6 @@ pixi run ankebak
 批量命令最终以非 0 退出。这些状态不会推进该帖成功备份水位，后续仍沿用现有调度。
 数据库筛查阶段的作者楼层检查遇到这些状态时，也会记录警告并跳过该候选，继续筛查其他主题。
 
-### 离线重放服务
-
-已有备份可以作为只读语料启动本地 NGA 重放服务，用于后续在不访问公网的
-情况下压测完整抓取路径。先复制并调整限速配置：
-
-```powershell
-Copy-Item replay_profile.example.json replay_profile.json
-pixi run python main.py replay serve --source-output output --profile replay_profile.json
-```
-
-`--thread-config` 默认使用 `config.json` 中的 `thread_config_file`，也可以显式
-指定：
-
-```powershell
-pixi run python main.py replay serve --source-output output `
-  --thread-config thread_configs.json --profile replay_profile.json --port 8765
-```
-
-服务启动时以 SQLite `immutable` 只读模式打开各帖 `archive.sqlite3` 和全局
-`image_index.sqlite3`、`audio_index.sqlite3`，从最新归一化正文、作者、时间和
-附件元数据合成 API 分页并预载入内存；不会读取归档中的 NGA 原始分页响应。
-图片和音频分别从 `images_unique/`、`audio_unique/` 流式读取。源数据库必须已经完成 WAL 检查点；如果 WAL 仍有
-内容，说明快照尚未静止，服务会拒绝启动。启动后源目录应保持不变，图片若被
-删除、替换或修改，该 URL 会按缺失处理；音频还会校验索引记录的 SHA-256，
-内容不符同样按缺失处理。服务不会访问 NGA，也不会修改源数据库或媒体内容。
-
-当 `thread_configs.json` 中的帖子只有 `tid_aid` 归档而没有 `tid_all` 归档时，
-服务会根据楼层映射生成可供完整抓取流程消费的原帖分页。已知作者楼和已恢复的
-匿名楼会按原楼层放回归一化正文及附件元数据；已知被删除或存在歧义的楼层会保留
-空洞，其余无法恢复的非作者楼使用空正文占位。因此占位部分不代表真实原帖正文或
-图片负载。如果存在 `tid_all/archive.sqlite3`，其原帖分页同样从最新归一化内容
-合成，不依赖记录的 NGA 原始响应。
-
-限速配置分为 `api`、`image` 和 `audio` 三组：`latency_ms` 是每个请求的固定首包延迟，
-`bandwidth_bytes_per_second` 是该组所有并发请求共享的全局带宽，设为 `0` 表示
-不限带宽；`max_inflight` 是该组最大在途请求数，`chunk_bytes` 是流式发送块
-大小。省略 `audio` 时会复用 `image` 配置。限速不加入随机抖动，因此同一语料
-和配置适合做稳定的 A/B 对比。
-
-重放端点如下：
-
-- `POST /app_api.php?__lib=post&__act=list`：按 `tid`、`page` 和可选
-  `authorid` 返回帖子分页。
-- `GET /__replay__/image?url=<原始图片URL>`：按全局图片索引返回图片。
-- `GET /__replay__/audio?url=<原始音频URL>`：按全局音频索引返回 MP3。
-- `GET /__replay__/health`：健康状态、语料 ID、限速配置 ID 和在途请求数。
-- `GET /__replay__/manifest`：语料范围、分页与图片/音频统计以及完整限速配置。
-- `GET /__replay__/metrics`：API/图片/音频请求数、字节数、状态码和等待耗时。
-- `POST /__replay__/reset`：无在途请求时清空指标并重置带宽时间线。
-
-`corpus_id` 标识本次冻结的归一化内容合成分页、楼层映射及图片/音频索引状态，
-`profile_id` 标识规范化后的限速配置。启动服务后可在另一个终端运行共享
-`backup all` 路径：
-
-```powershell
-pixi run python main.py replay run `
-  --server-url http://127.0.0.1:8765 `
-  --source-output output --target-output replay-output/run-a `
-  --initial-state warm --all-threads --workers 8 `
-  --api-concurrency 4 --image-concurrency 50 --audio-concurrency 8
-```
-
-也可以使用一次性测试入口自动启动重放服务进程，等待服务就绪后再启动独立的
-模拟运行进程：
-
-```powershell
-pixi run python main.py replay test `
-  --source-output output --profile replay_profile.json `
-  --target-output replay-output/run-a `
-  --initial-state warm --all-threads --workers 8 `
-  --api-concurrency 4 --image-concurrency 50 --audio-concurrency 8
-```
-
-`replay test` 默认仅在 `127.0.0.1` 上自动选择空闲端口，也可以通过
-`--port` 指定端口。语料加载与服务就绪检查合计最多等待 300 秒，健康检查通过
-后才会启动模拟运行；模拟运行成功、失败或被 Ctrl+C 中断时都会停止服务并回收
-两个子进程。该入口不接收 `--server-url`，目标准备、网络隔离、验收和
-`replay_run-*.json` 报告均复用 `replay run` 的实现。
-
-`empty` 要求目标不存在或为空，从零创建归档；`warm` 通过 SQLite Online Backup
-分别复制现有 data/state/cache 数据库，并复制或 reflink 图片与音频；正文版本选择随
-每帖 `archive.sqlite3` 一起复制。
-缓存键使用 `images_unique/...` 相对路径，不再从旧版 `image_index.sqlite3` 读取或
-改写绝对路径缓存。两者都会写入 replay 目标归属
-标记；`existing` 只接受带有同一 `source-output` 归属标记的目标，可继续一次中断的
-重放运行。源与目标相同或互相嵌套、目标使用符号链接，或目标文件与源文件共享
-inode 时会拒绝运行；`empty` 和 `warm` 不会覆盖非空目标。Windows 当前只检查
-`target-output` 是目录并校验归属标记，暂不检查符号链接、directory junction 或
-共享文件 ID；在 Windows 上使用 `existing` 时必须由用户保证目标是独立的物理目录。
-
-重放运行不会读取环境代理或发送 NGA Cookie，API、图片与音频的实际请求 origin 必须
-等于 `server-url`。准备耗时不计入备份墙钟；结束后会在目标根目录原子写入
-`replay_run-<timestamp>.json`，记录 Git commit、语料与 profile ID、并发参数、
-服务端指标、处理状态复用、失败分类、批量计时日志和数据库/内容验收结果。
-
 ### 运行日志
 
 警告详情仍写入每帖输出目录的 `warnings.log`，每次帖子任务开始时覆盖旧内容。
@@ -332,10 +237,10 @@ pixi run python main.py backup sub --all-threads --force-processing
 | 用户选择 | `thread_configs.json`；各帖正文版本选择位于 `archive.sqlite3` 的 `post_version_selections` 表 | 必须保留；正文版本选择已包含在持久数据库中 |
 | 运行状态 | `backup_state.sqlite3`、各帖 `archive_state.sqlite3` | 建议随完整工作副本保留；只读交付可省略，之后会从持久数据重建派生状态，但智能备份水位和失败图片/音频重试历史会丢失 |
 | 可重建缓存 | `image_cache.sqlite3`、各帖 `archive_cache.sqlite3` | 可以不交付或删除；程序不会把它们当作持久数据，缺失时会按当前格式重新创建 |
-| 可选产物 | `json/`、`pdf/`、日志、`replay_run-*.json` | 按用途保留；当前 SQLite 数据完整时不属于恢复 Web/PDF/replay 读取能力的必要输入 |
+| 可选产物 | `json/`、`pdf/`、日志 | 按用途保留；当前 SQLite 数据完整时不属于恢复 Web/PDF 读取能力的必要输入 |
 
 只复制持久数据和用户选择后，接收方仍可在不访问 NGA 的情况下使用 Web、生成
-PDF 或启动 `replay serve`；首次需要派生处理时会新建 state/cache 文件。若要保留
+PDF；首次需要派生处理时会新建 state/cache 文件。若要保留
 现成 PDF，也应额外复制各帖 `pdf/`。交付时可同时提供不含 Cookie 的
 `config.json` 并让接收方修改 `output_dir`；不要把 `secrets.json`、Cookie 或其他
 凭据交给不应获得 NGA 账号权限的人。
@@ -471,7 +376,7 @@ PDF 生成功能会通过当前 pixi Python 子进程调用 WeasyPrint。通过 
 - `archive.sqlite3`：每帖持久数据。保存每页最新的紧凑分页状态、正文版本、最新
   展示元数据、用户正文版本选择、楼层映射与候选原楼层、归档修订和管理页
   BBCode overlay；不保存 NGA 原始分页响应。`post_versions.content` 始终以 zstd
-  BLOB 保存，Web、PDF 和 replay 从此库读取解压后的正文
+  BLOB 保存，Web 和 PDF 从此库读取解压后的正文
 - `archive_state.sqlite3`：每帖运行状态。保存楼层/图片引用处理水位、逐楼引用
   清单、URL 引用计数、缺失楼逐楼重试时间、音频历史版本扫描水位以及失败图片/音频待重试队列；删除后可从 `archive.sqlite3`
   重建，但会丢失尚未完成工作的历史状态

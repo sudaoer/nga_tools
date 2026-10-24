@@ -10,10 +10,8 @@ from nga_tools.commands.backup import (
 from nga_tools.commands.ankebak import backup_auto
 from nga_tools.commands.forum import handle_forum_list, handle_forum_sync
 from nga_tools.commands.image import image_add, image_verify
-from nga_tools.commands.replay import replay_run, replay_serve, replay_test
 from nga_tools.commands.types import CommandHandler
 from nga_tools.commands.web import web_serve
-from nga_tools.replay.server import DEFAULT_REPLAY_HOST, DEFAULT_REPLAY_PORT
 from nga_tools.web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, DEFAULT_WEB_STATIC_DIR
 
 PROGRAM_USAGE = "python main.py"
@@ -39,7 +37,6 @@ class ActionConfig(TypedDict):
     required_any: NotRequired[list[str]]
     defaults: NotRequired[dict[str, object]]
     positive: NotRequired[list[str]]
-    child_warning_summary: NotRequired[bool]
     output_root_lock: NotRequired[bool]
 
 
@@ -182,42 +179,6 @@ ARG_DEFS: dict[str, ArgDef] = {
         "type": str,
         "metavar": "PATH",
         "help": "前端dist目录",
-    },
-    "source_output": {
-        "flags": ("--source-output",),
-        "type": str,
-        "metavar": "PATH",
-        "help": "只读重放语料所在的output目录",
-    },
-    "target_output": {
-        "flags": ("--target-output",),
-        "type": str,
-        "metavar": "PATH",
-        "help": "重放备份写入的独立output目录",
-    },
-    "server_url": {
-        "flags": ("--server-url",),
-        "type": str,
-        "metavar": "URL",
-        "help": "已启动的本地重放服务origin",
-    },
-    "initial_state": {
-        "flags": ("--initial-state",),
-        "type": str,
-        "metavar": "STATE",
-        "help": "目标初始状态：empty、warm或existing",
-    },
-    "thread_config": {
-        "flags": ("--thread-config",),
-        "type": str,
-        "metavar": "PATH",
-        "help": "重放语料对应的帖子配置JSON路径",
-    },
-    "profile": {
-        "flags": ("--profile",),
-        "type": str,
-        "metavar": "PATH",
-        "help": "重放延迟、带宽与最大并发配置JSON路径",
     },
 }
 
@@ -510,177 +471,6 @@ COMMANDS: dict[str, dict[str, ActionConfig]] = {
                 "static_dir": DEFAULT_WEB_STATIC_DIR,
             },
             "positive": ["port"],
-        },
-    },
-    "replay": {
-        "serve": {
-            "handler": replay_serve,
-            "summary": "从现有归档和图片启动只读NGA重放服务",
-            "usage": (
-                f"{PROGRAM_USAGE} replay serve --source-output PATH "
-                "--profile PATH [--thread-config PATH] "
-                "[--host HOST] [--port PORT]"
-            ),
-            "examples": [
-                (
-                    f"{PROGRAM_USAGE} replay serve --source-output output "
-                    "--profile replay_profile.json"
-                ),
-                (
-                    f"{PROGRAM_USAGE} replay serve --source-output output "
-                    "--thread-config thread_configs.json "
-                    "--profile replay_profile.json --port 8765"
-                ),
-            ],
-            "notes": [
-                "启动时从最新归一化内容合成API分页并预载入内存。",
-                "重放不读取归档中的NGA原始分页响应。",
-                "源SQLite以immutable只读方式打开，要求WAL已完成检查点。",
-                "图片文件仅流式读取，不修改源数据库或图片内容。",
-                "缺少原帖归档时会根据楼层映射合成原帖分页。",
-                "默认只监听本机地址；此命令不会访问NGA或其他公网地址。",
-            ],
-            "args": [
-                "source_output",
-                "thread_config",
-                "profile",
-                "host",
-                "port",
-            ],
-            "required": ["source_output", "profile"],
-            "defaults": {
-                "host": DEFAULT_REPLAY_HOST,
-                "port": DEFAULT_REPLAY_PORT,
-            },
-            "positive": ["port"],
-        },
-        "run": {
-            "handler": replay_run,
-            "summary": "针对本地重放服务运行共享backup all基准路径",
-            "usage": (
-                f"{PROGRAM_USAGE} replay run --server-url URL "
-                "--source-output PATH --target-output PATH "
-                "--initial-state (empty|warm|existing) "
-                "((--name NAME | --tid TID [--aid AID]) | --all-threads) "
-                "[--thread-config PATH] [--workers N] "
-                "[--api-concurrency N] [--image-concurrency N] "
-                "[--audio-concurrency N]"
-            ),
-            "examples": [
-                (
-                    f"{PROGRAM_USAGE} replay run "
-                    "--server-url http://127.0.0.1:8765 "
-                    "--source-output output --target-output replay-output/run-a "
-                    "--initial-state warm --all-threads --workers 8 "
-                    "--api-concurrency 4 --image-concurrency 50"
-                ),
-                (
-                    f"{PROGRAM_USAGE} replay run "
-                    "--server-url http://127.0.0.1:8765 "
-                    "--source-output output --target-output replay-output/sample "
-                    "--initial-state empty --name 帖子名"
-                ),
-            ],
-            "notes": [
-                "empty与warm拒绝非空目标；existing要求目标已经存在。",
-                "warm通过SQLite Online Backup复制数据库，并复制或reflink图片。",
-                "API和图片实际请求只允许访问server-url，不读取环境代理或NGA Cookie。",
-                "备份计时不含目标准备耗时，结果原子写入target-output下的replay_run JSON。",
-            ],
-            "args": [
-                "server_url",
-                "source_output",
-                "target_output",
-                "initial_state",
-                "thread_config",
-                "name",
-                "tid",
-                "aid",
-                "all_threads",
-                "workers",
-                "api_concurrency",
-                "image_concurrency",
-                "audio_concurrency",
-            ],
-            "required": [
-                "server_url",
-                "source_output",
-                "target_output",
-                "initial_state",
-            ],
-            "required_any": ["name", "tid", "all_threads"],
-            "positive": [
-                "workers",
-                "api_concurrency",
-                "image_concurrency",
-                "audio_concurrency",
-            ],
-        },
-        "test": {
-            "handler": replay_test,
-            "child_warning_summary": True,
-            "summary": "自动启动重放服务和模拟运行进程进行测试",
-            "usage": (
-                f"{PROGRAM_USAGE} replay test --source-output PATH "
-                "--profile PATH --target-output PATH "
-                "--initial-state (empty|warm|existing) "
-                "((--name NAME | --tid TID [--aid AID]) | --all-threads) "
-                "[--thread-config PATH] [--port PORT] [--workers N] "
-                "[--api-concurrency N] [--image-concurrency N] "
-                "[--audio-concurrency N]"
-            ),
-            "examples": [
-                (
-                    f"{PROGRAM_USAGE} replay test "
-                    "--source-output output --profile replay_profile.json "
-                    "--target-output replay-output/run-a "
-                    "--initial-state warm --all-threads --workers 8 "
-                    "--api-concurrency 4 --image-concurrency 50"
-                ),
-                (
-                    f"{PROGRAM_USAGE} replay test "
-                    "--source-output output --profile replay_profile.json "
-                    "--target-output replay-output/sample "
-                    "--initial-state empty --name 帖子名 --port 8765"
-                ),
-            ],
-            "notes": [
-                "默认仅在127.0.0.1上自动选择空闲端口，也可通过--port覆盖。",
-                "语料加载和服务就绪检查合计最多等待300秒。",
-                "服务就绪后才启动模拟运行；两个子进程直接继承当前终端输出。",
-                "模拟运行结束、失败或被中断时会自动停止重放服务并回收子进程。",
-                "目标准备、离线网络保护、验收和报告格式与replay run相同。",
-            ],
-            "args": [
-                "source_output",
-                "profile",
-                "target_output",
-                "initial_state",
-                "thread_config",
-                "port",
-                "name",
-                "tid",
-                "aid",
-                "all_threads",
-                "workers",
-                "api_concurrency",
-                "image_concurrency",
-                "audio_concurrency",
-            ],
-            "required": [
-                "source_output",
-                "profile",
-                "target_output",
-                "initial_state",
-            ],
-            "required_any": ["name", "tid", "all_threads"],
-            "positive": [
-                "port",
-                "workers",
-                "api_concurrency",
-                "image_concurrency",
-                "audio_concurrency",
-            ],
         },
     },
 }

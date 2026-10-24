@@ -30,13 +30,6 @@ from nga_tools.core.nga_attachment import (
     attachment_url_alias,
     is_nga_legacy_attachment_host,
 )
-from nga_tools.replay.offline import (
-    ReplayOfflineError,
-    audio_request_url,
-    assert_replay_request_allowed,
-    current_replay_network_policy,
-    image_request_url,
-)
 
 
 _ATTACHMENT_FALLBACK_PROBE_TIMEOUT_SECONDS = 10.0
@@ -46,14 +39,9 @@ def _download_request_urls(
     logical_url: str,
     *,
     explicit_request_url: str | None,
-    resource_kind: DownloadResourceKind,
 ) -> tuple[str, ...]:
     if explicit_request_url is not None:
         return (explicit_request_url,)
-    if current_replay_network_policy() is not None:
-        if resource_kind == "image":
-            return (image_request_url(logical_url),)
-        return (audio_request_url(logical_url),)
     if not is_nga_legacy_attachment_host(urlsplit(logical_url).netloc):
         return (logical_url,)
     alias_url = attachment_url_alias(logical_url)
@@ -156,12 +144,7 @@ class _ResultEvent:
     completed_at: float
 
 
-@dataclass(frozen=True)
-class _FatalEvent:
-    error: BaseException
-
-
-type _BatchEvent = _RetryEvent | _ResultEvent | _FatalEvent
+type _BatchEvent = _RetryEvent | _ResultEvent
 
 
 @dataclass(frozen=True)
@@ -225,7 +208,6 @@ class _DownloadBatch:
     consumed: int = 0
     pending_results: int = 0
     cancelled: bool = False
-    fatal_error: BaseException | None = None
 
     def __post_init__(self) -> None:
         self.retry_items: deque[int] = deque()
@@ -235,7 +217,6 @@ class _DownloadBatch:
     def can_dispatch(self) -> bool:
         return (
             not self.cancelled
-            and self.fatal_error is None
             and bool(self.retry_items or (
                 self.next_item < len(self.items)
                 and self.outstanding < self.batch_limit
@@ -353,7 +334,7 @@ class DownloadRuntime:
         return sum(
             max(0, len(batch.items) - batch.next_item) + len(batch.retry_items)
             for batch in self._batches.values()
-            if not batch.cancelled and batch.fatal_error is None
+            if not batch.cancelled
         )
 
     def _record_queue_peak(self) -> None:
@@ -533,8 +514,6 @@ class DownloadRuntime:
                         f"{event.wait_seconds:.1f}s: {event.logical_url}",
                     )
                     continue
-                if isinstance(event, _FatalEvent):
-                    raise event.error
                 result = event.result
                 self._run_in_loop(
                     self._consume_result(batch.batch_id, event.completed_at)
@@ -604,16 +583,13 @@ class DownloadRuntime:
                     0.0,
                     started_at - batch.ready_at[index],
                 )
-            fatal_error: BaseException | None = None
-            attempt_result: DownloadFileResult | _AttemptFailure | None = None
+            attempt_result: DownloadFileResult | _AttemptFailure
             try:
                 attempt_result = await self._download_attempt(
                     session,
                     batch.items[index],
                     batch.retry_statuses,
                 )
-            except ReplayOfflineError as error:
-                fatal_error = error
             except BaseException as error:
                 attempt_result = {
                     "url": batch.items[index]["url"],
@@ -632,14 +608,6 @@ class DownloadRuntime:
                 if batch.running == 0:
                     self._remove_batch(batch.batch_id)
                 continue
-            if fatal_error is not None:
-                batch.fatal_error = fatal_error
-                batch.cancelled = True
-                batch.events.put(_FatalEvent(fatal_error))
-                self._ready_batch_ids.discard(batch.batch_id)
-                continue
-            if attempt_result is None:
-                raise RuntimeError(f"{self.resource_label}下载尝试未产生结果。")
             if isinstance(attempt_result, _AttemptFailure):
                 attempt = batch.attempts[index]
                 if attempt < batch.retries and attempt_result.retryable:
@@ -692,7 +660,7 @@ class DownloadRuntime:
         if batch is None:
             return
         batch.delayed = max(0, batch.delayed - 1)
-        if batch.cancelled or batch.fatal_error is not None:
+        if batch.cancelled:
             return
         batch.ready_at[index] = perf_counter()
         batch.retry_items.append(index)
@@ -708,7 +676,6 @@ class DownloadRuntime:
         request_urls = _download_request_urls(
             logical_url,
             explicit_request_url=item.get("request_url"),
-            resource_kind=self.resource_kind,
         )
         target_path = Path(item["save_path"])
         failures: list[tuple[str, _AttemptFailure]] = []
@@ -753,14 +720,7 @@ class DownloadRuntime:
         headers_received = False
         request_started = False
         try:
-            assert_replay_request_allowed(request_url)
-            replay_mode = current_replay_network_policy() is not None
-            if replay_mode:
-                response_context = session.get(
-                    request_url,
-                    allow_redirects=False,
-                )
-            elif timeout is not None:
+            if timeout is not None:
                 response_context = session.get(
                     request_url,
                     timeout=timeout,
