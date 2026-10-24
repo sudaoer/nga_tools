@@ -73,7 +73,7 @@ describe('ImageUsageDetailPanel', () => {
     const wrapper = mount(ImageUsageDetailPanel, {
       props: {
         relativePath,
-        backLabel: '← 返回当前聚类',
+        backLabel: '← 返回图片列表',
         showRefresh: true,
       },
     })
@@ -130,7 +130,7 @@ describe('ImageUsageDetailPanel', () => {
     const wrapper = mount(ImageUsageDetailPanel, {
       props: {
         relativePath,
-        backLabel: '← 返回当前聚类',
+        backLabel: '← 返回图片列表',
       },
     })
     await flushPromises()
